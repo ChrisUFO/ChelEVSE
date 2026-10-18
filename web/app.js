@@ -13,9 +13,9 @@ import {
 import { startStore, stopStore } from './js/store.js';
 import { $, initNetwork, initTabbar, routeFor, setCached, setText } from './js/ui.js';
 import {
-  blurStatus,
   enterStatus,
   focusStatus,
+  blurStatus,
   initStatus,
   leaveStatus,
   showCommands,
@@ -32,6 +32,15 @@ import {
   resetHistory,
   showHistorySettings,
 } from './js/screens/history.js';
+import {
+  activateSchedule,
+  enterSchedule,
+  initSchedule,
+  resetSchedule,
+  showLiveStatus,
+  showSchedule,
+  showScheduleError,
+} from './js/screens/schedule.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 
@@ -65,6 +74,7 @@ function closeApp() {
   stopStore();
   leaveStatus();
   resetHistory();
+  resetSchedule();
   activeUser = null;
 }
 
@@ -96,11 +106,13 @@ function showNoAccess(user, reason) {
 }
 
 // Tab activation: start/stop the status clock and load history on first visit.
+// Screens keep their own state; only the visible work changes.
 function handleRoute(route) {
   if (!activeUser) return;
   if (route === 'status') focusStatus();
   else blurStatus();
   if (route === 'history') activateHistory();
+  if (route === 'schedule') activateSchedule();
 }
 
 function enterApp(user) {
@@ -111,10 +123,13 @@ function enterApp(user) {
     onStatus: (snap) => {
       if (!snap) {
         showStatusError();
+        showLiveStatus(null);
         return;
       }
       setCached(snap.metadata.fromCache);
+      const data = snap.data();
       showStatus(snap);
+      showLiveStatus(data);
     },
     onCommands: showCommands,
     onSettings: (settings) => {
@@ -122,13 +137,18 @@ function enterApp(user) {
       showHistorySettings(settings);
     },
     onConfig: showConfig,
-    onSchedule: showStatusSchedule,
+    onSchedule: (data) => {
+      showSchedule(data);
+      showStatusSchedule(data);
+    },
+    onScheduleError: showScheduleError,
     onAccessDenied: () => {
       if (activeUser) showNoAccess(activeUser, 'no-access');
     },
   });
   enterStatus();
   enterHistory();
+  enterSchedule();
   handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
@@ -198,6 +218,7 @@ async function main() {
 
   initStatus();
   initHistory();
+  initSchedule();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 
