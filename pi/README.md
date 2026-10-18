@@ -3,8 +3,10 @@
 A small Python service that bridges the OpenEVSE charger to Firebase: it polls
 the charger's local HTTP API, mirrors status and config into Firestore
 (`status/current`, `status/config`), derives daily energy history and completed
-sessions, and applies pending `commands/*` documents back to the charger. Runs
-under systemd with `Restart=always`.
+sessions, mirrors `schedule/current` into the charger's own scheduler, sends FCM
+push notifications on charging/offline transitions, and applies pending
+`commands/*` documents back to the charger. Runs under systemd with
+`Restart=always`.
 See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the big picture.
 
 ## Prerequisites
@@ -46,6 +48,7 @@ real environment variables take precedence.
 | `FIREBASE_SERVICE_ACCOUNT`      | —               | Path to the service-account key (**required**; relative paths resolve from the repo root) |
 | `STATUS_INTERVAL`               | `10`            | Seconds between charger status polls                                                      |
 | `CONFIG_INTERVAL`               | `60`            | Seconds between charger config polls                                                      |
+| `SCHEDULE_INTERVAL`             | `60`            | Seconds between schedule/plan polls and sync checks                                       |
 | `COMMAND_INTERVAL`              | `5`             | Seconds between command polls                                                             |
 
 ## What the bridge writes
@@ -58,7 +61,9 @@ timestamped line and the loop carries on at its next interval.
 | Status   | `status/current`   | Full `/status` snapshot, merged on every poll                                     |
 | Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                       |
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` when a charging session ends                |
+| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan           |
 | Config   | `status/config`    | Raw `/config` object plus `updated_at`, refreshed every `CONFIG_INTERVAL` seconds |
+| Schedule | firmware           | `schedule/current` upserted into the charger's event scheduler (see below)        |
 | Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)              |
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
@@ -140,6 +145,54 @@ usable seed, the first successful poll only establishes state.
 `status/current` also carries `elapsed`, per-sensor `temp1`–`temp3` in °C (or
 `null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
 mean.
+
+### Charge schedule sync
+
+The app owns `schedule/current`:
+
+```
+schedule/current   { enabled: bool, rules: [{id, days: [0-6], start, end, amps}] }
+```
+
+`days` uses **0 = Monday … 6 = Sunday**. `start`/`end` are `HH:MM` (24-hour);
+`end < start` means the window wraps past midnight. Every `SCHEDULE_INTERVAL`
+seconds the bridge normalizes the doc and mirrors it into the charger's own
+scheduler, so windows keep being enforced by the charger even while the Pi is
+down.
+
+- **Validation.** A rule is used only when it has a non-empty string `id`, a
+  non-empty `days` list of integers 0–6, `start`/`end` matching
+  `^([01]\d|2[0-3]):[0-5]\d$`, and a numeric `amps`. Malformed rules are logged
+  and skipped; at most 20 rules are synced (2 firmware events each, within the
+  firmware's 50-event limit).
+- **Missing document never clears anything.** If `schedule/current` does not
+  exist, the bridge logs once and leaves the charger's schedule untouched. Only
+  an existing document with `enabled: false` (or no valid rules) clears it.
+- **Event mapping.** Rules are sorted by `id`; rule index `i` becomes a window
+  start event `2*i+1` (`state: "active"`, `time: start + ":00"`) and a window
+  end event `2*i+2` (`state: "disabled"`, `time: end + ":00"`). Deterministic
+  ids make the upsert idempotent and stable across polls. Our weekdays map to
+  the firmware's lowercase full names (`0 → monday` … `6 → sunday`); for an
+  overnight rule the end event's days shift +1 day (Sunday → Monday), so e.g.
+  Sunday 22:00–06:00 ends Monday 06:00.
+- **Sync.** The bridge keeps a sha256 of the normalized `{enabled, rules}` and
+  only talks to the charger when it changes (or on the first tick). It then
+  `GET /schedule`, `POST`s **one event per request** (the firmware's POST body
+  buffer is 1 KB), and finally `DELETE`s every existing firmware event id not
+  in the desired set — that is how removed rules and disabled schedules are
+  cleared. Every request's HTTP status and body are logged, followed by
+  `schedule synced: N events, removed M`. The digest is recorded only after
+  every request succeeded, so a failure is retried on the next tick.
+- **Window status.** Every tick (changed or not) reads `GET /schedule/plan` and
+  merges exactly `schedule: {in_window, active_rule_id}` into `status/current`.
+  `in_window` is true when the firmware's `current_event` is an `active` event;
+  `active_rule_id` is the rule that owns that event id (or `null`). The firmware
+  enforces windows itself — the bridge never evaluates times locally.
+- **Amps are not pushed.** Firmware v5.1.5 has no per-event current: its
+  schedule events are flat `{id, state, time, days}` and the event charges at
+  the EVSE's configured limit. `amps` is validated and stored, but the bridge
+  logs `schedule: firmware v5.1.5 has no per-event current; amps not applied`
+  once per changed sync rather than pretending to apply it.
 
 ## Commands
 

@@ -4,12 +4,17 @@
 Failure-isolated loops (daemon threads; the service never crash-loops):
   status every STATUS_INTERVAL: GET /status -> merge into status/current
   config every CONFIG_INTERVAL: GET /config -> replace status/config
+  schedule every SCHEDULE_INTERVAL: schedule/current -> firmware scheduler,
+    GET /schedule/plan -> status/current.schedule
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
 Config: env vars with fallback to <repo root>/private/bridge.env.
 """
 
+import hashlib
+import json
 import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -31,6 +36,20 @@ STATE_LABELS = {
 }
 MIN_AMPS, MAX_AMPS = 6, 48
 OFFLINE = {"charger_online": False, "updated_at": firestore.SERVER_TIMESTAMP}
+# Firmware scheduler limits: 2 events per rule, 50 events total.
+MAX_SCHEDULE_RULES = 20
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# Firmware weekday names, indexed by firmware day (Sunday = 0). Our rules use
+# 0 = Monday ... 6 = Sunday, so our day d is firmware day (d + 1) % 7.
+FIRMWARE_DAYS = (
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+)
 
 _stop = threading.Event()
 
@@ -444,6 +463,230 @@ def command_loop(db, base, auth, interval):
         _stop.wait(interval)
 
 
+def _normalize_rule(raw):
+    """One schedule rule -> canonical dict, or None (logged) when malformed."""
+    if not isinstance(raw, dict):
+        log("schedule: skipped rule (not an object)")
+        return None
+    rule_id = raw.get("id")
+    if not (isinstance(rule_id, str) and rule_id):
+        log("schedule: skipped rule (missing string id)")
+        return None
+    days = raw.get("days")
+    if not isinstance(days, list) or not days:
+        log(f"schedule: skipped rule {rule_id} (missing days)")
+        return None
+    clean_days = []
+    for day in days:
+        if not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6:
+            log(f"schedule: skipped rule {rule_id} (day must be an integer 0-6)")
+            return None
+        if day not in clean_days:
+            clean_days.append(day)
+    start = raw.get("start")
+    if not (isinstance(start, str) and TIME_RE.match(start)):
+        log(f"schedule: skipped rule {rule_id} (invalid start)")
+        return None
+    end = raw.get("end")
+    if not (isinstance(end, str) and TIME_RE.match(end)):
+        log(f"schedule: skipped rule {rule_id} (invalid end)")
+        return None
+    amps = raw.get("amps")
+    if not _is_number(amps) or not math.isfinite(amps):
+        log(f"schedule: skipped rule {rule_id} (amps must be a number)")
+        return None
+    return {
+        "id": rule_id,
+        "days": sorted(clean_days),
+        "start": start,
+        "end": end,
+        "amps": amps,
+    }
+
+
+def normalize_schedule(data):
+    """schedule/current -> (enabled, canonical rules); malformed rules dropped."""
+    enabled = bool(data.get("enabled"))
+    raw_rules = data.get("rules")
+    if not isinstance(raw_rules, list):
+        raw_rules = []
+    rules = []
+    for raw in raw_rules:
+        rule = _normalize_rule(raw)
+        if rule is not None:
+            rules.append(rule)
+    # Sort before capping so event ids stay stable when rules are reordered.
+    rules.sort(key=lambda rule: rule["id"])
+    if len(rules) > MAX_SCHEDULE_RULES:
+        log(f"schedule: only the first {MAX_SCHEDULE_RULES} rules are synced")
+        rules = rules[:MAX_SCHEDULE_RULES]
+    return enabled, rules
+
+
+def schedule_hash(enabled, rules):
+    """Canonical digest of the desired schedule, used to skip unchanged syncs."""
+    payload = json.dumps({"enabled": enabled, "rules": rules}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def schedule_events(rules):
+    """Rules -> (firmware events, event id -> rule id).
+
+    Rule index i owns event 2*i+1 (window start, active) and 2*i+2 (window end,
+    disabled). Event ids are deterministic for a given rule set, so the sync is
+    an idempotent upsert. End events for overnight rules (end < start) shift to
+    the following firmware day.
+    """
+    events = []
+    event_rules = {}
+    for index, rule in enumerate(rules):
+        on_id, off_id = 2 * index + 1, 2 * index + 2
+        days = sorted(
+            (FIRMWARE_DAYS[(day + 1) % 7] for day in rule["days"]),
+            key=FIRMWARE_DAYS.index,
+        )
+        if rule["end"] < rule["start"]:
+            end_days = sorted(
+                (FIRMWARE_DAYS[(day + 2) % 7] for day in rule["days"]),
+                key=FIRMWARE_DAYS.index,
+            )
+        else:
+            end_days = days
+        events.append(
+            {
+                "id": on_id,
+                "state": "active",
+                "time": rule["start"] + ":00",
+                "days": days,
+            }
+        )
+        events.append(
+            {
+                "id": off_id,
+                "state": "disabled",
+                "time": rule["end"] + ":00",
+                "days": end_days,
+            }
+        )
+        event_rules[on_id] = rule["id"]
+        event_rules[off_id] = rule["id"]
+    return events, event_rules
+
+
+def schedule_state(plan, event_rules):
+    """Firmware /schedule/plan -> the status/current.schedule field."""
+    current = plan.get("current_event") if isinstance(plan, dict) else None
+    if not isinstance(current, dict):
+        return {"in_window": False, "active_rule_id": None}
+    return {
+        "in_window": current.get("state") == "active",
+        "active_rule_id": event_rules.get(current.get("id")),
+    }
+
+
+def _log_schedule(label, resp):
+    """Log one scheduler request: method/target, status and body snippet."""
+    body = " ".join((resp.text or "").split())[:160]
+    log(f"schedule: {label} -> HTTP {resp.status_code}" + (f" {body}" if body else ""))
+
+
+def _schedule_plan(session, base, auth):
+    """GET /schedule/plan as a dict; raises on any failure."""
+    resp = session.get(f"{base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT)
+    _log_schedule("GET /schedule/plan", resp)
+    _require_ok(resp)
+    plan = resp.json()
+    if not isinstance(plan, dict):
+        raise ValueError("schedule plan is not a JSON object")
+    return plan
+
+
+def sync_schedule(session, base, auth, events):
+    """Upsert desired firmware events and delete stale ones.
+
+    The firmware upserts by id and never deletes omitted events, so the current
+    event list is read first and every surplus id is DELETEd explicitly. Any
+    request failure raises; the caller then retries on the next tick.
+    """
+    resp = session.get(f"{base}/schedule", auth=auth, timeout=HTTP_TIMEOUT)
+    _log_schedule("GET /schedule", resp)
+    _require_ok(resp)
+    existing = resp.json()
+    if not isinstance(existing, list):
+        raise ValueError("GET /schedule response is not a JSON array")
+
+    desired = {event["id"] for event in events}
+    for event in events:
+        # One event per request: the firmware parses POST bodies into 1 KB.
+        resp = session.post(
+            f"{base}/schedule", json=event, auth=auth, timeout=HTTP_TIMEOUT
+        )
+        _log_schedule(f"POST /schedule id={event['id']}", resp)
+        _require_ok(resp)
+
+    removed = 0
+    for event in existing:
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("id")
+        if not isinstance(event_id, int) or isinstance(event_id, bool):
+            continue
+        if event_id in desired:
+            continue
+        resp = session.delete(
+            f"{base}/schedule/{event_id}", auth=auth, timeout=HTTP_TIMEOUT
+        )
+        _log_schedule(f"DELETE /schedule/{event_id}", resp)
+        _require_ok(resp)
+        removed += 1
+    log(f"schedule synced: {len(events)} events, removed {removed}")
+
+
+def schedule_loop(db, base, auth, interval):
+    """Mirror schedule/current into the firmware and publish the live window."""
+    session = requests.Session()
+    status_doc = db.collection("status").document("current")
+    last_hash = None
+    event_rules = {}
+    missing_logged = False
+    while not _stop.is_set():
+        try:
+            snapshot = db.collection("schedule").document("current").get()
+            if not snapshot.exists:
+                # Safety: a never-created schedule doc must not erase whatever
+                # the charger already has (e.g. configured from its own UI).
+                if not missing_logged:
+                    log("schedule/current missing; firmware schedule left untouched")
+                    missing_logged = True
+            else:
+                missing_logged = False
+                enabled, rules = normalize_schedule(snapshot.to_dict() or {})
+                digest = schedule_hash(enabled, rules)
+                events, event_rules = schedule_events(rules if enabled else [])
+                if digest != last_hash:
+                    if rules:
+                        log(
+                            "schedule: firmware v5.1.5 has no per-event current; "
+                            "amps not applied"
+                        )
+                    try:
+                        sync_schedule(session, base, auth, events)
+                    except (CommandError, requests.RequestException, ValueError) as exc:
+                        log(f"schedule sync failed ({exc.__class__.__name__}: {exc})")
+                    else:
+                        last_hash = digest
+
+            # Always publish the firmware's own view of the active window.
+            try:
+                plan = _schedule_plan(session, base, auth)
+                status_doc.set({"schedule": schedule_state(plan, event_rules)}, merge=True)
+            except (CommandError, requests.RequestException, ValueError) as exc:
+                log(f"schedule plan failed ({exc.__class__.__name__}: {exc})")
+        except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
+            log(f"schedule loop error ({exc.__class__.__name__}: {exc})")
+        _stop.wait(interval)
+
+
 def main():
     base = "http://" + cfg("CHARGER_HOST", "192.168.0.145")
     user = cfg("CHARGER_USER")
@@ -451,10 +694,12 @@ def main():
     try:
         status_interval = float(cfg("STATUS_INTERVAL") or 10)
         config_interval = float(cfg("CONFIG_INTERVAL") or 60)
+        schedule_interval = float(cfg("SCHEDULE_INTERVAL") or 60)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
     except ValueError:
         sys.exit(
-            "STATUS_INTERVAL, CONFIG_INTERVAL and COMMAND_INTERVAL must be numbers."
+            "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL and "
+            "COMMAND_INTERVAL must be numbers."
         )
 
     try:
@@ -471,7 +716,7 @@ def main():
 
     log(
         f"bridge started: {base}, polls {status_interval:g}s/"
-        f"{config_interval:g}s/{command_interval:g}s"
+        f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s"
     )
     tracker = StatusTracker(db)
     tracker.seed()
@@ -480,6 +725,8 @@ def main():
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
     config_args = (db, base, auth, config_interval)
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
+    schedule_args = (db, base, auth, schedule_interval)
+    threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
     command_loop(db, base, auth, command_interval)
     log("bridge stopped")
 
