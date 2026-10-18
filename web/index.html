@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c0f14">
+  <title>ChelEVSE</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon.svg">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="glow" aria-hidden="true"></div>
+
+  <!-- Shown when firebase-config.js is missing or the Firebase SDK can't load -->
+  <section id="boot-error" class="screen" hidden>
+    <div class="card" role="alert">
+      <svg class="mark" width="30" height="30" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1a212d"/><path d="M36 12 L18 38 h10 l-3 14 19 -26 h-10 z" fill="#38d996"/></svg>
+      <h1 id="boot-title"></h1>
+      <p class="sub" id="boot-body"></p>
+    </div>
+  </section>
+
+  <!-- Signed out -->
+  <section id="signin" class="screen" hidden>
+    <form class="card" id="signin-form">
+      <svg class="mark" width="30" height="30" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1a212d"/><path d="M36 12 L18 38 h10 l-3 14 19 -26 h-10 z" fill="#38d996"/></svg>
+      <h1>ChelEVSE</h1>
+      <p class="sub">Sign in to see your charger.</p>
+      <label><span>Email</span><input id="email" type="email" autocomplete="username" required></label>
+      <label><span>Password</span><input id="pass" type="password" autocomplete="current-password" required></label>
+      <p id="signin-error" aria-live="polite"></p>
+      <button id="signin-btn" type="submit">Sign in</button>
+    </form>
+  </section>
+
+  <!-- Signed in -->
+  <main id="app" class="screen" hidden>
+    <header style="--i:0">
+      <span class="wordmark">ChelEVSE</span>
+      <span class="net" id="net" data-net="live">Live</span>
+      <button id="signout" type="button">Sign out</button>
+    </header>
+
+    <p class="banner" id="banner" style="--i:1" hidden>Bridge offline — showing last known values</p>
+
+    <section class="hero" style="--i:2" aria-label="Charger status">
+      <span class="badge" id="state-badge"><span class="dot"></span><span id="state-label">Unknown</span></span>
+      <div class="power"><span id="power">—</span><em>kW</em></div>
+      <p class="updated" id="updated">waiting for data</p>
+    </section>
+
+    <section class="figures" style="--i:3" aria-label="Live figures">
+      <div class="fig">
+        <span class="fig-label">Current</span>
+        <span class="fig-value"><span id="fig-amp">—</span><em>A</em></span>
+        <span class="fig-sub" id="fig-volt"></span>
+      </div>
+      <div class="fig">
+        <span class="fig-label">Session</span>
+        <span class="fig-value"><span id="fig-session">—</span><em>kWh</em></span>
+        <span class="fig-sub">this charge</span>
+      </div>
+      <div class="fig">
+        <span class="fig-label">Lifetime</span>
+        <span class="fig-value"><span id="fig-total">—</span><em>kWh</em></span>
+        <span class="fig-sub">total</span>
+      </div>
+      <div class="fig">
+        <span class="fig-label">Temp</span>
+        <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
+        <span class="fig-sub">charger</span>
+      </div>
+    </section>
+
+    <section class="controls" id="controls" style="--i:4" aria-label="Controls">
+      <div class="btnrow">
+        <button class="btn" id="pause" type="button">Pause</button>
+        <button class="btn" id="resume" type="button">Resume</button>
+      </div>
+      <div class="set-current">
+        <div class="set-head">
+          <label for="amps">Max current</label>
+          <output id="amps-out">32 A</output>
+        </div>
+        <input type="range" id="amps" min="6" max="48" step="1" value="32">
+        <button id="apply" type="button">Apply</button>
+      </div>
+      <p class="feedback" id="feedback" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+    }
+  </script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
