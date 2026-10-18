@@ -269,17 +269,21 @@ class StatusTracker:
         if _is_number(total):
             self.total_energy = float(total)
         state = data.get("state")
-        self.state = state
-        self.charger_online = data.get("charger_online")
-        self.previous_state = state
-        self.has_state = _is_number(state)
-        self.session_energy = data.get("session_energy")
-        self.elapsed = data.get("elapsed")
-        if state == 3:
-            if _is_number(self.session_energy) and self.session_energy > 0:
-                self.last_charging_energy = self.session_energy
-            if _is_number(self.elapsed) and self.elapsed >= 0:
-                self.last_charging_elapsed = self.elapsed
+        if not self.has_state:
+            # Only the first successful seed establishes the state machine. A
+            # retry after live ticks must restore the stored baseline without
+            # rewinding previous_state and inventing a transition.
+            self.state = state
+            self.charger_online = data.get("charger_online")
+            self.previous_state = state
+            self.has_state = _is_number(state)
+            self.session_energy = data.get("session_energy")
+            self.elapsed = data.get("elapsed")
+            if state == 3:
+                if _is_number(self.session_energy) and self.session_energy > 0:
+                    self.last_charging_energy = self.session_energy
+                if _is_number(self.elapsed) and self.elapsed >= 0:
+                    self.last_charging_elapsed = self.elapsed
         self.seeded = True
         self._history_paused_logged = False
         log(f"status seeded: state={state} total_energy={self.total_energy}")

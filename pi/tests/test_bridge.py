@@ -432,6 +432,20 @@ class SeedTests(unittest.TestCase):
         self.assertTrue(tracker.seeded)
         self.assertEqual(tracker.total_energy, 50.0)
 
+    def test_retry_seed_keeps_live_state_and_only_restores_the_baseline(self):
+        db = FakeDB()
+        tracker = bridge.StatusTracker(db)
+        tracker.has_state = True
+        tracker.state = 3
+        tracker.previous_state = 3
+        tracker.charger_online = True
+        db.data["status"] = {"current": {"total_energy": 42.0, "state": 1}}
+        self.assertTrue(tracker.seed())
+        self.assertEqual(tracker.previous_state, 3)
+        self.assertEqual(tracker.state, 3)
+        self.assertTrue(tracker.charger_online)
+        self.assertEqual(tracker.total_energy, 42.0)
+
 
 class SessionTests(unittest.TestCase):
     def setUp(self):
