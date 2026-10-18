@@ -134,6 +134,13 @@ class ApplyCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError):
             bridge.apply_command(session, "http://charger", None, {"type": "resume"})
 
+    def test_resume_500_with_non_object_status_fails_cleanly(self):
+        session = FakeSession(
+            [FakeResponse(500, text="Failed to release"), FakeResponse(200, [1, 2])]
+        )
+        with self.assertRaises(bridge.CommandError):
+            bridge.apply_command(session, "http://charger", None, {"type": "resume"})
+
     def test_set_current_clamps_to_firmware_limits(self):
         session = FakeSession([FakeResponse(200), FakeResponse(200)])
         bridge.apply_command(
@@ -533,6 +540,32 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(self.sessions()), 1)
         self.assertIsNone(self.tracker.pending_session)
 
+    def test_malformed_prior_session_falls_back_to_a_fresh_record(self):
+        self.db.data["sessions"] = {
+            "old": {"started_at": "not-a-date", "ended_at": "not-a-date", "wh": "x"}
+        }
+        self.finalize(self.start + timedelta(hours=1), 6000, 3600, vehicle=1)
+        fresh = str(int(self.start.timestamp()))
+        self.assertEqual(set(self.sessions()), {"old", fresh})
+        self.assertEqual(self.sessions()[fresh]["wh"], 6000.0)
+        self.assertEqual(self.sessions()[fresh]["elapsed"], 3600)
+
+    def test_unusable_prior_timestamps_fall_back_to_a_fresh_record(self):
+        self.db.data["sessions"] = {
+            "old": {
+                "started_at": "2026-01-01 00:00:00",
+                "ended_at": "2026-01-01 00:00:00",
+                "wh": 1.0,
+                "elapsed": 0,
+            }
+        }
+        self.finalize(self.start + timedelta(hours=1), 6000, 3600, vehicle=1)
+        fresh = str(int(self.start.timestamp()))
+        self.assertEqual(set(self.sessions()), {"old", fresh})
+        self.assertEqual(self.sessions()[fresh]["started_at"], self.start)
+        self.assertEqual(self.sessions()[fresh]["wh"], 6000.0)
+        self.assertEqual(self.sessions()[fresh]["elapsed"], 3600)
+
 
 class FcmTests(unittest.TestCase):
     def test_transition_edges(self):
@@ -609,6 +642,74 @@ class CommandTests(unittest.TestCase):
         )
         docs = bridge.pending_commands(db)
         self.assertEqual([doc.id for doc in docs], ["no-ts", "later"])
+
+
+class _StopAfter:
+    """Stand-in for the module stop event: ends the loop after N polls."""
+
+    def __init__(self, polls, on_wait=None):
+        self._polls = polls
+        self._waited = 0
+        self._on_wait = on_wait
+
+    def is_set(self):
+        return self._waited >= self._polls
+
+    def wait(self, interval):
+        self._waited += 1
+        if self._on_wait is not None:
+            self._on_wait()
+        return True
+
+
+class CommandLoopTests(unittest.TestCase):
+    def run_loop(self, db, polls, on_wait=None):
+        session = FakeSession()
+        with mock.patch.object(
+            bridge.requests, "Session", return_value=session
+        ), mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
+            bridge.command_loop(db, "http://charger", None, 0)
+        return session
+
+    def test_stale_command_is_failed_without_contacting_the_charger(self):
+        db = FakeDB(
+            {
+                "commands": {
+                    "old": {
+                        "status": "pending",
+                        "type": "pause",
+                        "created_at": datetime.now(UTC)
+                        - timedelta(seconds=bridge.COMMAND_MAX_AGE + 60),
+                    }
+                }
+            }
+        )
+        session = self.run_loop(db, polls=1)
+        self.assertEqual(session.calls, [])
+        doc = db.data["commands"]["old"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertIn("stale command", doc["error"])
+
+    def test_failed_ack_write_sends_the_command_only_once(self):
+        db = FakeDB(
+            {
+                "commands": {
+                    "cmd": {
+                        "status": "pending",
+                        "type": "pause",
+                        "created_at": datetime.now(UTC),
+                    }
+                }
+            }
+        )
+        db.fail_writes = True
+
+        def recover():
+            db.fail_writes = False
+
+        session = self.run_loop(db, polls=2, on_wait=recover)
+        self.assertEqual([call[0] for call in session.calls], ["post"])
+        self.assertEqual(db.data["commands"]["cmd"]["status"], "acked")
 
 
 class SyncScheduleTests(unittest.TestCase):

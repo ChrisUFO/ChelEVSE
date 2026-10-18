@@ -313,6 +313,14 @@ if absent). Non-2xx replies and request errors are marked `failed` with a short
 reason containing the HTTP status/body snippet or the exception class. Unknown
 `type` values fail with `unsupported type`.
 
+Applying a command and writing its `acked` status are separate steps. If the
+ack write fails, the bridge remembers that command id in memory and retries the
+write on later polls without calling the charger again. That memory is
+process-local, so if the bridge restarts between the two steps the command is
+re-applied: delivery is **at-least-once across restarts**. `pause`, `resume` and
+`set_current` are idempotent; non-idempotent `rapi` commands remain gated
+client-side.
+
 ## Tests
 
 The bridge and ACL helper have stdlib `unittest` coverage under `pi/tests/`

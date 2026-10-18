@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -48,6 +49,9 @@ SEED_RETRY_INTERVAL = 30
 COMMAND_MAX_AGE = 600
 # Pending commands handled per poll.
 COMMAND_BATCH = 10
+# Applied-but-unacked command ids remembered per process, so a failed ack write
+# is retried instead of re-applying the command.
+COMMAND_ACK_MEMORY = 256
 # Two session records whose intervals touch within this window are the same
 # charger session (the firmware keeps cumulative counters while plugged in).
 SESSION_MERGE_TOLERANCE = 120
@@ -560,7 +564,8 @@ def apply_command(session, base, auth, cmd):
             try:
                 status = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
                 status.raise_for_status()
-                if (status.json() or {}).get("manual_override") == 0:
+                body = status.json()
+                if isinstance(body, dict) and body.get("manual_override") == 0:
                     log("resume: no manual override to release; treating as acked")
                     return {}
             except (requests.RequestException, ValueError):
@@ -822,34 +827,54 @@ def pending_commands(db):
 
 def command_loop(db, base, auth, interval):
     session = requests.Session()
+    # Commands applied whose ack write failed. Retry the write rather than the
+    # charger request; bounded and process-local, so an apply/ack gap that spans
+    # a restart can still re-apply (at-least-once across restarts).
+    unacked = OrderedDict()
     while not _stop.is_set():
         try:
             for doc in pending_commands(db):
                 cmd = _command_data(doc)
-                if command_is_stale(cmd):
-                    reason = f"stale command (older than {COMMAND_MAX_AGE}s)"
-                    try:
-                        doc.reference.update({"status": "failed", "error": reason})
-                    except Exception as exc:
-                        log(
-                            f"command {doc.id} stale update failed "
-                            f"({exc.__class__.__name__}: {exc})"
-                        )
-                        continue
-                    log(f"command {doc.id} failed: {reason}")
-                    continue
-                try:
-                    extra = apply_command(session, base, auth, cmd)
-                except CommandError as exc:
-                    doc.reference.update({"status": "failed", "error": str(exc)})
-                    log(f"command {doc.id} failed: {exc}")
-                except requests.RequestException as exc:
-                    reason = f"charger request failed ({exc.__class__.__name__})"
-                    doc.reference.update({"status": "failed", "error": reason})
-                    log(f"command {doc.id} failed: {reason}")
+                if doc.id in unacked:
+                    # Already applied; only its ack write still needs to land.
+                    extra = unacked[doc.id]
                 else:
+                    if command_is_stale(cmd):
+                        reason = f"stale command (older than {COMMAND_MAX_AGE}s)"
+                        try:
+                            doc.reference.update({"status": "failed", "error": reason})
+                        except Exception as exc:
+                            log(
+                                f"command {doc.id} stale update failed "
+                                f"({exc.__class__.__name__}: {exc})"
+                            )
+                            continue
+                        log(f"command {doc.id} failed: {reason}")
+                        continue
+                    try:
+                        extra = apply_command(session, base, auth, cmd)
+                    except CommandError as exc:
+                        doc.reference.update({"status": "failed", "error": str(exc)})
+                        log(f"command {doc.id} failed: {exc}")
+                        continue
+                    except requests.RequestException as exc:
+                        reason = f"charger request failed ({exc.__class__.__name__})"
+                        doc.reference.update({"status": "failed", "error": reason})
+                        log(f"command {doc.id} failed: {reason}")
+                        continue
+                    unacked[doc.id] = extra
+                    while len(unacked) > COMMAND_ACK_MEMORY:
+                        unacked.popitem(last=False)
+                try:
                     doc.reference.update({"status": "acked", **extra})
-                    log(f"command {doc.id} acked: {cmd.get('type')}")
+                except Exception as exc:
+                    log(
+                        f"command {doc.id} ack update failed "
+                        f"({exc.__class__.__name__}: {exc}); will retry without re-applying"
+                    )
+                    continue
+                unacked.pop(doc.id, None)
+                log(f"command {doc.id} acked: {cmd.get('type')}")
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"command loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)
