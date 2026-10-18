@@ -11,7 +11,7 @@ import {
   subscribeAuth,
 } from './js/auth.js';
 import { startStore, stopStore } from './js/store.js';
-import { $, initNetwork, setCached, setText } from './js/ui.js';
+import { $, initNetwork, initTabbar, setCached, setText } from './js/ui.js';
 import {
   enterStatus,
   initStatus,
@@ -149,6 +149,7 @@ async function main() {
   }
 
   initStatus();
+  initTabbar();
   wireUi();
 
   // The redirect fallback lands back here; surface a failure on the sign-in

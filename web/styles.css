@@ -81,16 +81,20 @@ button {
   padding: calc(12px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom));
 }
 #app {
-  justify-content: flex-start;
   width: 100%;
   max-width: 480px;
+  min-height: 100dvh;
   margin: 0 auto;
+  padding: calc(6px + env(safe-area-inset-top)) 20px calc(94px + env(safe-area-inset-bottom));
 }
 
-/* Entry animation: sections rise in sequence (--i set in the markup) */
-#app > * {
-  animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-  animation-delay: calc(var(--i, 0) * 70ms);
+/* Entry animation: screens rise in sequence (--i set in the markup).
+   Panels are only hidden, never removed, so state survives tab switches and
+   the animation replays when a panel is shown again. */
+.app-header,
+.panel:not([hidden]) > * {
+  animation: rise 0.4s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: calc(var(--i, 0) * 55ms);
 }
 @keyframes rise {
   from {
@@ -221,11 +225,15 @@ button {
   color: var(--warn);
 }
 .eyebrow {
-  margin: 4px 0 0;
+  margin: 0;
   font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+  color: var(--faint);
+}
+.access-card .eyebrow {
+  margin-top: 4px;
   color: var(--warn);
 }
 .access-card h1 {
@@ -267,11 +275,11 @@ button {
 }
 
 /* ---------- header ---------- */
-header {
+.app-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 0;
+  padding: 10px 0 12px;
   border-bottom: 1px solid var(--line);
 }
 .wordmark {
@@ -309,9 +317,144 @@ header {
   border-radius: 8px;
   font-size: 13px;
   color: var(--muted);
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+#signout:hover {
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--line) 60%, var(--muted));
 }
 #signout:active {
   color: var(--text);
+}
+
+/* ---------- tab panels ---------- */
+.panel {
+  padding-top: 2px;
+}
+.panel-head {
+  padding: 26px 2px 20px;
+}
+.panel-head h1 {
+  margin: 7px 0 0;
+  font-size: 25px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.panel-head .lede {
+  margin: 8px 0 0;
+  max-width: 34ch;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.placeholder {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 42px 26px 40px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  text-align: center;
+}
+.placeholder-icon {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 8px;
+  border-radius: 13px;
+  background: var(--surface-2);
+  color: var(--faint);
+}
+.placeholder-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.placeholder-line {
+  max-width: 280px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* ---------- bottom tab bar ---------- */
+.tabbar {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  width: 100%;
+  max-width: 480px;
+  padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: color-mix(in oklab, var(--bg) 92%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  transform: translateX(-50%);
+  box-shadow: 0 -10px 30px rgb(0 0 0 / 0.28);
+}
+.tab {
+  position: relative;
+  flex: 1;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 4px;
+  min-height: 58px;
+  padding: 8px 2px 5px;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+.tab:hover {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface) 55%, transparent);
+}
+.tab:active {
+  transform: translateY(1px);
+}
+.tab-icon {
+  width: 22px;
+  height: 22px;
+}
+.tab span {
+  line-height: 1;
+}
+.tab::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 22px;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 45%, transparent);
+  transform: translateX(-50%) scaleX(0);
+  transition: transform 0.18s ease;
+}
+.tab[aria-selected='true'] {
+  color: var(--text);
+}
+.tab[aria-selected='true'] .tab-icon {
+  color: var(--accent);
+}
+.tab[aria-selected='true']::before {
+  transform: translateX(-50%) scaleX(1);
 }
 
 /* ---------- banner ---------- */
