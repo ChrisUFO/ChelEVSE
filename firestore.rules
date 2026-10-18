@@ -2,24 +2,42 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Charger status: written only by the bridge (Admin SDK bypasses rules),
-    // readable by the authenticated owner.
+    // Charger status + config: written only by the bridge (Admin SDK bypasses
+    // rules), readable by the authenticated owner.
     match /status/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Energy history: bridge-written, owner-readable.
+    match /history/{day} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /sessions/{id} {
       allow read: if request.auth != null;
       allow write: if false;
     }
 
     // Commands: the app may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
+    // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.
     match /commands/{cmd} {
       allow read: if request.auth != null;
       allow create: if request.auth != null
-        && request.resource.data.type in ['pause', 'resume', 'set_current']
         && request.resource.data.status == 'pending'
-        && (request.resource.data.type != 'set_current'
-            || (request.resource.data.amps is number
-                && request.resource.data.amps >= 6
-                && request.resource.data.amps <= 48));
+        && (
+             (request.resource.data.type == 'pause')
+          || (request.resource.data.type == 'resume')
+          || (request.resource.data.type == 'set_current'
+              && request.resource.data.amps is number
+              && request.resource.data.amps >= 6
+              && request.resource.data.amps <= 48)
+          || (request.resource.data.type == 'rapi'
+              && request.resource.data.command is string
+              && request.resource.data.command.matches('^$[A-Za-z0-9]{1,2}([ ].*)?$')
+              && request.resource.data.command.size() <= 32)
+        );
       allow update, delete: if false;
     }
   }

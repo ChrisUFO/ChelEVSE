@@ -32,7 +32,8 @@ Two loops:
 
 | Loop | Interval | Action |
 |---|---|---|
-| Status | 10 s | `GET http://<charger>/status` → write `status/current` in Firestore |
+| Status | 10 s | `GET http://<charger>/status` → write `status/current`; maintain `history/daily/*` from `total_energy` deltas; finalize a `sessions/*` doc when a charging session ends |
+| Config | 60 s | `GET /config` → write `status/config` |
 | Commands | watch + 5 s poll fallback | New pending doc in `commands` → apply to charger → mark acked / delete |
 
 Config via environment file in `private/`: `CHARGER_HOST`, `FIREBASE_SERVICE_ACCOUNT` (path to key), optional intervals.
@@ -45,16 +46,26 @@ Failure handling: connection errors (charger or Firebase) retry with backoff; no
 
 | Path | Writer | Readers | Content |
 |---|---|---|---|
-| `status/current` | bridge (admin) | signed-in users | `{state, amps, session_wh`, `total_kwh`, temp_c, updated_at, bridge_online}` |
-| `commands/{id}` | app (create), bridge (ack/delete) | signed-in users | `{type: pause\|resume\|set_current, amps?, created_at, status: pending\|acked\|failed}` |
+| `status/current` | bridge (admin) | signed-in users | Full `/status` snapshot: `{state, state_label, amp, voltage, power, session_energy (Wh), total_energy (kWh), elapsed (s), temp1–temp3, temp_c, pilot, charger_online, updated_at}` |
+| `status/config` | bridge (admin) | signed-in users | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings), refreshed ~60 s |
+| `history/daily/{YYYY-MM-DD}` | bridge (admin) | signed-in users | `{kwh}` per local day, derived from `total_energy` deltas |
+| `sessions/{id}` | bridge (admin) | signed-in users | Completed sessions: `{started_at, ended_at, wh, elapsed}` |
+| `commands/{id}` | app (create), bridge (ack/delete) | signed-in users | `{type: pause\|resume\|set_current\|rapi, amps?, command?, created_at, status: pending\|acked\|failed}` |
 
-Commands are typed whitelist entries — never raw pass-through payloads to the charger. Security rules enforce: only authenticated reads; only whitelisted command types with validated `amps` on create; status writes and command mutations are admin-only. See `firestore.rules`.
+Commands are typed whitelist entries; `rapi` is the explicit advanced escape hatch (string-validated in rules) for anything the curated types don't cover. Security rules enforce: only authenticated reads; only whitelisted command types with validated `amps`/`command` on create; status/history writes and command mutations are admin-only. See `firestore.rules`.
 
 **Hosting** serves the static PWA from `web/` on a free HTTPS domain.
 
 ### 3. Android app — PWA (`web/`)
 
-Static HTML/JS using the Firebase Web SDK. Signs in with Firebase Auth (email/password — a single personal account), subscribes to `status/current` with `onSnapshot` for **realtime** updates, and creates command docs on button press. Installable to the Android home screen (manifest + service worker). The Firestore contract is the API — a native Android app or FCM push notifications ("charging complete") can be added later without touching the bridge.
+Static HTML/JS using the Firebase Web SDK, installable to the Android home screen (manifest + service worker). Signs in with Firebase Auth (email/password — a single personal account) and gets **realtime** updates via `onSnapshot`. Screens:
+
+- **Status** — everything the charger reports: state, live current/power/voltage, session energy + charging time, lifetime total, per-sensor temperatures, pilot; pause/resume (stop/start charging) and set-current controls.
+- **History** — daily kWh bar chart (last 30 days, hand-rolled SVG — no chart library) fed by `history/daily`, plus a recent-sessions list from `sessions`.
+- **Config** — every configuration item the charger exposes, read from `status/config` and presented in our own layout; changes go through the Advanced console.
+- **Advanced** — RAPI console (`$` commands via the `rapi` command type) for full configuration parity with the built-in UI, behind a confirmation gate since RAPI can alter safety-relevant settings.
+
+The Firestore contract is the API — a native Android app or FCM push notifications ("charging complete") can be added later without touching the bridge.
 
 ## OpenEVSE integration
 
@@ -98,5 +109,6 @@ Failure modes:
 
 - **Serverless over a backend service** (Firebase vs Railway/custom server): Firestore listeners give realtime updates with zero server code, the free tier is ample, and a future native Android app plugs into the same data.
 - **Why the Pi bridge exists** (vs. charger → cloud directly): the ESP32 firmware has no Firebase client; its direct-to-cloud options are telemetry-only (built-in Emoncms HTTPS posting) or MQTT via an internet-reachable broker — which adds a service to run and puts charger control on a third-party broker. A ~100-line LAN bridge is the simplest path covering both status **and** control.
-- v1 keeps only the latest snapshot — history/graphs out of scope for now (trivially added as a per-session collection later).
-- Future candidates: native Android app, FCM push notifications, energy history, MQTT transport for the LAN leg, firmware's built-in Emoncms posting as a zero-code telemetry fallback.
+- **V1 scope includes energy history**: per-day kWh (from `total_energy` deltas) and per-session records — both computed bridge-side so the PWA stays a dumb renderer.
+- **Config parity by functionality, not UI**: the app exposes all configuration the charger offers (view), with changes via whitelisted commands plus the gated RAPI console — we don't mirror the built-in UI's layout.
+- Future candidates: native Android app, FCM push notifications, MQTT transport for the LAN leg, firmware's built-in Emoncms posting as a zero-code telemetry fallback.

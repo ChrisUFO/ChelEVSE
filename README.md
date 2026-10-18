@@ -7,7 +7,9 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 ## What it does
 
 - **Monitor**: live charger status (state, current draw, session/total energy, temperature) from anywhere — not just the home LAN.
-- **Control**: pause/resume charging and set the max charge current from your phone.
+- **Control**: pause/resume charging (stop/start) and set the max charge current from your phone.
+- **History**: daily kWh graph (last 30 days) and per-session records.
+- **Parity**: everything the charger's built-in web UI shows — full status detail, config view, plus a gated RAPI console for advanced changes.
 - **Simple**: no backend server to write or run — Firebase Firestore carries the data, Firebase Hosting serves the app, free tier covers a household many times over.
 
 ## How it works
