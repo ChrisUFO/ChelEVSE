@@ -39,9 +39,9 @@ service cloud.firestore {
     // Charge schedule: the one client-writable doc — allowlisted users.
     // Firestore rules cannot iterate a list, and per-element validation of the
     // 20-rule array trips the 1000-expression evaluation limit at 4 rules, so
-    // rules validate the document container only. Per-rule shape is enforced
-    // by the app before writing and re-validated by the bridge, which skips
-    // and logs malformed rules.
+    // rules validate the document container only. Per-rule shape is
+    // re-validated by the bridge, which skips and logs malformed rules; the
+    // app-side check lands with the schedule screen.
     match /schedule/{doc} {
       allow read: if allowed();
       allow write: if allowed()

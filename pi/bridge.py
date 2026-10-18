@@ -73,7 +73,7 @@ SECRET_CONFIG_KEYS = frozenset(
     }
 )
 REDACTED = "***"
-TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 # Firmware weekday names, indexed by firmware day (Sunday = 0). Our rules use
 # 0 = Monday ... 6 = Sunday, so our day d is firmware day (d + 1) % 7.
 FIRMWARE_DAYS = (
@@ -901,11 +901,11 @@ def _normalize_rule(raw):
         if day not in clean_days:
             clean_days.append(day)
     start = raw.get("start")
-    if not (isinstance(start, str) and TIME_RE.match(start)):
+    if not (isinstance(start, str) and TIME_RE.fullmatch(start)):
         log(f"schedule: skipped rule {rule_id} (invalid start)")
         return None
     end = raw.get("end")
-    if not (isinstance(end, str) and TIME_RE.match(end)):
+    if not (isinstance(end, str) and TIME_RE.fullmatch(end)):
         log(f"schedule: skipped rule {rule_id} (invalid end)")
         return None
     if start == end:

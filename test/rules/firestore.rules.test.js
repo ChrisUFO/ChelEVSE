@@ -55,6 +55,12 @@ test('allowlisted user can create rapi command $FS 20', async () => {
   await assertSucceeds(writeCommand(allowlisted(), 'rapi-fs', rapi('$FS 20')));
 });
 
+test('rapi command of exactly 32 characters is accepted', async () => {
+  const command = '$FS ' + 'A'.repeat(28);
+  assert.equal(command.length, 32);
+  await assertSucceeds(writeCommand(allowlisted(), 'rapi-max', rapi(command)));
+});
+
 test('rapi command with $$ is rejected', async () => {
   await assertFails(writeCommand(allowlisted(), 'rapi-dollars', rapi('$$')));
 });
@@ -89,8 +95,8 @@ function writeSchedule(context, id, data) {
 // Rules validate the schedule container only (keys, types, max 20 rules).
 // Per-rule contents are not rules-tested: Firestore cannot iterate a list and
 // per-element validation exceeds its 1000-expression evaluation limit at 4
-// rules. The app validates each rule before writing and the bridge re-validates
-// (skipping and logging malformed rules).
+// rules. The bridge re-validates each rule (skipping and logging malformed
+// ones); the app-side check lands with the schedule screen.
 test('allowlisted user can write a valid schedule', async () => {
   await assertSucceeds(
     writeSchedule(allowlisted(), 'valid', { enabled: true, rules: [scheduleRule()] }),
