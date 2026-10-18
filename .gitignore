@@ -1,0 +1,25 @@
+# Private deployment config — never commit real values
+private/
+.env
+web/firebase-config.js
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Node
+node_modules/
+
+# Firebase
+.firebase/
+*-debug.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# OpenCode planning artifact (never tracked)
+PLAN.md
