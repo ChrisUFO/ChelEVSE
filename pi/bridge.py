@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """ChelEVSE bridge agent: OpenEVSE charger <-> Firebase Firestore.
 
-Two failure-isolated loops (one thread each; the service never crash-loops):
+Failure-isolated loops (daemon threads; the service never crash-loops):
   status every STATUS_INTERVAL: GET /status -> merge into status/current
-  commands every COMMAND_INTERVAL: pending commands/ docs -> POST /override
+  config every CONFIG_INTERVAL: GET /config -> replace status/config
+  commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
 Config: env vars with fallback to <repo root>/private/bridge.env.
 """
 
@@ -59,6 +60,33 @@ _FILE_ENV = load_env_file(REPO_ROOT / "private" / "bridge.env")
 def cfg(name, default=None):
     """Real environment wins over the env file."""
     return os.environ[name] if name in os.environ else _FILE_ENV.get(name, default)
+
+
+def service_account_file():
+    """Resolved path to the Firebase service-account key, or None if unset."""
+    key_path = cfg("FIREBASE_SERVICE_ACCOUNT")
+    if not key_path:
+        return None
+    key_file = Path(key_path)
+    if not key_file.is_absolute():
+        key_file = REPO_ROOT / key_file
+    return key_file
+
+
+def init_firestore():
+    """Initialize the Admin SDK (idempotent) and return a Firestore client."""
+    key_file = service_account_file()
+    if key_file is None:
+        raise RuntimeError(
+            "FIREBASE_SERVICE_ACCOUNT not set — see private.example/README.md"
+        )
+    if not key_file.is_file():
+        raise RuntimeError(f"service-account key not found: {key_file}")
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        firebase_admin.initialize_app(credentials.Certificate(str(key_file)))
+    return firestore.client()
 
 
 class CommandError(ValueError):
@@ -121,6 +149,32 @@ def status_loop(db, base, auth, interval):
         _stop.wait(interval)
 
 
+def config_loop(db, base, auth, interval):
+    session = requests.Session()
+    config_doc = db.collection("status").document("config")
+    last_synced = None
+    while not _stop.is_set():
+        try:
+            try:
+                resp = session.get(f"{base}/config", auth=auth, timeout=HTTP_TIMEOUT)
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, dict):
+                    raise ValueError("config response is not a JSON object")
+            except (requests.RequestException, ValueError) as exc:
+                log(f"config sync failed ({exc.__class__.__name__})")
+            else:
+                config_doc.set({**data, "updated_at": firestore.SERVER_TIMESTAMP})
+                # Only log when the charger config actually changed: this loop
+                # runs every minute and would otherwise spam the journal.
+                if data != last_synced:
+                    log("config synced")
+                    last_synced = data
+        except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
+            log(f"config loop error ({exc.__class__.__name__}: {exc})")
+        _stop.wait(interval)
+
+
 def command_loop(db, base, auth, interval):
     session = requests.Session()
     while not _stop.is_set():
@@ -153,21 +207,15 @@ def main():
     auth = (user, cfg("CHARGER_PASS", "")) if user is not None else None  # blank OK
     try:
         status_interval = float(cfg("STATUS_INTERVAL") or 10)
+        config_interval = float(cfg("CONFIG_INTERVAL") or 60)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
     except ValueError:
-        sys.exit("STATUS_INTERVAL and COMMAND_INTERVAL must be numbers.")
+        sys.exit("STATUS_INTERVAL, CONFIG_INTERVAL and COMMAND_INTERVAL must be numbers.")
 
-    key_path = cfg("FIREBASE_SERVICE_ACCOUNT")
-    if not key_path:
-        sys.exit("FIREBASE_SERVICE_ACCOUNT not set — see private.example/README.md")
-    key_file = Path(key_path)
-    if not key_file.is_absolute():
-        key_file = REPO_ROOT / key_file
-    if not key_file.is_file():
-        sys.exit(f"service-account key not found: {key_file}")
-
-    firebase_admin.initialize_app(credentials.Certificate(str(key_file)))
-    db = firestore.client()
+    try:
+        db = init_firestore()
+    except RuntimeError as exc:
+        sys.exit(str(exc))
 
     def stop(signum, _frame):
         log(f"received signal {signum}, stopping")
@@ -176,9 +224,14 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, stop)
 
-    log(f"bridge started: {base}, polls {status_interval:g}s/{command_interval:g}s")
+    log(
+        f"bridge started: {base}, polls {status_interval:g}s/"
+        f"{config_interval:g}s/{command_interval:g}s"
+    )
     status_args = (db, base, auth, status_interval)
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
+    config_args = (db, base, auth, config_interval)
+    threading.Thread(target=config_loop, args=config_args, daemon=True).start()
     command_loop(db, base, auth, command_interval)
     log("bridge stopped")
 
