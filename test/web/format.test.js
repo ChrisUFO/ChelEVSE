@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fmtK, relTime, stateFor } from '../../web/js/format.js';
+import {
+  fmtCost,
+  fmtK,
+  fmtMoney,
+  formatDuration,
+  formatElapsed,
+  relTime,
+  stateFor,
+} from '../../web/js/format.js';
 
 test('fmtK compacts kWh and kW figures', () => {
   assert.equal(fmtK(null), '—');
@@ -32,4 +40,51 @@ test('stateFor falls back to the unknown state', () => {
   assert.equal(stateFor('disabled').label, 'Disabled');
   assert.equal(stateFor('nonsense').label, 'Unknown');
   assert.equal(stateFor(undefined).label, 'Unknown');
+});
+
+test('formatElapsed renders a stable HH:MM:SS clock', () => {
+  assert.equal(formatElapsed(null), '—');
+  assert.equal(formatElapsed(Number.NaN), '—');
+  assert.equal(formatElapsed(Number.POSITIVE_INFINITY), '—');
+  assert.equal(formatElapsed(0), '00:00:00');
+  assert.equal(formatElapsed(59), '00:00:59');
+  assert.equal(formatElapsed(60), '00:01:00');
+  assert.equal(formatElapsed(3725), '01:02:05');
+  assert.equal(formatElapsed(360_000), '100:00:00');
+  assert.equal(formatElapsed(-5), '00:00:00');
+});
+
+test('formatDuration renders sessions in h:mm', () => {
+  assert.equal(formatDuration(null), '—');
+  assert.equal(formatDuration(Number.POSITIVE_INFINITY), '—');
+  assert.equal(formatDuration(0), '0:00');
+  assert.equal(formatDuration(59), '0:00');
+  assert.equal(formatDuration(60), '0:01');
+  assert.equal(formatDuration(3725), '1:02');
+  assert.equal(formatDuration(7265), '2:01');
+});
+
+test('fmtMoney respects symbols vs currency codes', () => {
+  assert.equal(fmtMoney(null), '—');
+  assert.equal(fmtMoney(Number.NaN), '—');
+  assert.equal(fmtMoney(Number.POSITIVE_INFINITY), '—');
+  assert.equal(fmtMoney(1.2), '1.20');
+  assert.equal(fmtMoney(1.2, ''), '1.20');
+  assert.equal(fmtMoney(1.2, '$'), '$1.20');
+  assert.equal(fmtMoney(1.2, '€'), '€1.20');
+  assert.equal(fmtMoney(1.2, 'USD'), 'USD 1.20');
+  assert.equal(fmtMoney(0, 'USD'), 'USD 0.00');
+  assert.equal(fmtMoney(1.234, 'USD'), 'USD 1.23');
+  assert.equal(fmtMoney(1.235, 'USD'), 'USD 1.24');
+  assert.equal(fmtMoney(1234.5, '$'), '$1,234.50');
+});
+
+test('fmtCost is null until both energy and rate exist', () => {
+  assert.equal(fmtCost(12.34, 0.31, 'USD'), 'USD 3.83');
+  assert.equal(fmtCost(10, 0, 'USD'), 'USD 0.00');
+  assert.equal(fmtCost(0, 0.5, '$'), '$0.00');
+  assert.equal(fmtCost(null, 0.31, 'USD'), null);
+  assert.equal(fmtCost(12.34, null, 'USD'), null);
+  assert.equal(fmtCost(Number.NaN, 0.31, 'USD'), null);
+  assert.equal(fmtCost(12.34, Number.NaN, 'USD'), null);
 });
