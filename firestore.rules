@@ -36,6 +36,22 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Charge schedule: the one client-writable doc — allowlisted users,
+    // shape-validated. The bridge reads it and enforces it on the charger.
+    match /schedule/{doc} {
+      allow read: if allowed();
+      allow write: if allowed()
+        && request.resource.data.enabled is bool
+        && request.resource.data.rules is list
+        && request.resource.data.rules.size() <= 20
+        && request.resource.data.rules.all(r => r is map
+              && r.days is list && r.days.size() >= 1
+              && r.days.all(d => d is int && d >= 0 && d <= 6)
+              && r.start is string && r.start.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+              && r.end is string && r.end.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+              && r.amps is number && r.amps >= 6 && r.amps <= 48);
+    }
+
     // Commands: allowlisted users may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
     // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.

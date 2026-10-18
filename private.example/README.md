@@ -10,6 +10,7 @@ cp web/firebase-config.example.js web/firebase-config.js
 | File | What goes in it |
 |---|---|
 | `bridge.env` | Pi bridge agent settings (charger IP, key path, intervals) |
+| `acl.txt` | Access allowlist — one Google account email per line; synced to Firestore `users/{uid}` grants by `pi/acl.py` |
 | `service-account.json` | Firebase Admin key: Console → Project settings → Service accounts → *Generate new private key* |
 | `web/firebase-config.js` | Web app config: Console → Project settings → General → Your apps → Web app → Config |
 

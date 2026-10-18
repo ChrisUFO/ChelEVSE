@@ -1,0 +1,7 @@
+# Access allowlist — one Google account email per line.
+# Copy to private/acl.txt (gitignored). Sync grants with: python3 pi/acl.py
+# Each person must have signed in once before they can be granted
+# (their Firebase auth user must exist to resolve the uid).
+#
+# you@example.com
+# someone-else@example.com
