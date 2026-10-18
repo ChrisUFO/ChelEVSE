@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
@@ -384,6 +384,43 @@ def apply_command(session, base, auth, cmd):
     raise CommandError("unsupported type")
 
 
+def notify(db, body):
+    """Push one notification to every registered FCM token; never raises.
+
+    Tokens live in fcmTokens/{docId} with an optional `token` field (the doc id
+    is the fallback). Each token is sent independently so one dead token cannot
+    block the rest; unregistered/invalid tokens are pruned.
+    """
+    try:
+        docs = list(db.collection("fcmTokens").stream())
+    except Exception as exc:
+        log(f"fcm token read failed ({exc.__class__.__name__}: {exc})")
+        return
+    for doc in docs:
+        try:
+            data = doc.to_dict() or {}
+        except Exception:
+            data = {}
+        token = data.get("token") if isinstance(data, dict) else None
+        if not (isinstance(token, str) and token):
+            token = doc.id
+        try:
+            messaging.send(
+                messaging.Message(
+                    notification=messaging.Notification(title="ChelEVSE", body=body),
+                    token=token,
+                )
+            )
+        except (messaging.UnregisteredError, messaging.InvalidArgumentError):
+            try:
+                doc.reference.delete()
+                log(f"pruned fcm token {doc.id}")
+            except Exception as exc:
+                log(f"fcm token prune failed ({exc.__class__.__name__}: {exc})")
+        except Exception as exc:
+            log(f"fcm send failed ({exc.__class__.__name__}: {exc})")
+
+
 def status_loop(db, base, auth, interval, tracker):
     session = requests.Session()
     status_doc = db.collection("status").document("current")
@@ -398,12 +435,28 @@ def status_loop(db, base, auth, interval, tracker):
                 fields = parse_status(payload)
             except (requests.RequestException, ValueError) as exc:
                 # Charger unreachable or sent garbage: flag offline, keep going.
-                log(f"charger offline ({exc.__class__.__name__})")
+                # Edge only: journal and notify once per outage, not per tick.
+                if tracker.charger_online is not False:
+                    log(f"charger offline ({exc.__class__.__name__})")
+                    tracker.charger_online = False
+                    notify(db, "Charger offline")
                 status_doc.set(OFFLINE, merge=True)
             else:
+                # Detect the charging edge against the pre-tick state; observe()
+                # updates it afterwards.
+                was_charging = tracker.has_state and tracker.previous_state == 3
+                is_charging = fields.get("state") == 3
+                had_state = tracker.has_state
                 status_doc.set(fields, merge=True)
+                if tracker.charger_online is False:
+                    tracker.charger_online = True
+                    log("charger online")
                 tracker.record_history(fields.get("total_energy"))
                 tracker.observe(fields)
+                if had_state and was_charging != is_charging:
+                    notify(
+                        db, "Charging started" if is_charging else "Charging stopped"
+                    )
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)

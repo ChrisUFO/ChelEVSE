@@ -64,6 +64,7 @@ timestamped line and the loop carries on at its next interval.
 | Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan           |
 | Config   | `status/config`    | Raw `/config` object plus `updated_at`, refreshed every `CONFIG_INTERVAL` seconds |
 | Schedule | firmware           | `schedule/current` upserted into the charger's event scheduler (see below)        |
+| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                           |
 | Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)              |
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
@@ -145,6 +146,32 @@ usable seed, the first successful poll only establishes state.
 `status/current` also carries `elapsed`, per-sensor `temp1`–`temp3` in °C (or
 `null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
 mean.
+
+### Push notifications (FCM)
+
+The status loop sends one push per state transition, via the Admin SDK:
+
+| Event                                                    | Body               |
+| -------------------------------------------------------- | ------------------ |
+| Charger enters `state: 3`                                | `Charging started` |
+| Charger leaves `state: 3`                                | `Charging stopped` |
+| Charger stops answering (first failed poll of an outage) | `Charger offline`  |
+
+The title is always `ChelEVSE`. The transition is computed from the tracker's
+pre-tick state, so each edge produces exactly one notification. The first tick
+after a start with no seeded state only establishes state and never notifies; a
+state seeded from `status/current` is a real baseline, so a change that happened
+while the bridge was down notifies once. `charger offline` / `charger online`
+are also journaled only on those edges.
+
+Tokens are read from `fcmTokens/{id}`: the token is the document's `token` field
+when it is a non-empty string, otherwise the document id itself. Every token is
+sent independently inside its own try/except — one failing push never blocks
+the others or the status writes. `UnregisteredError` / `InvalidArgumentError`
+means the token is dead, so its document is deleted and the bridge logs
+`pruned fcm token`; any other send error logs one line and leaves the token in
+place for the next event. A failed token read or send is only ever a log line,
+never a loop failure.
 
 ### Charge schedule sync
 
