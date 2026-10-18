@@ -71,6 +71,97 @@ non-finite floats) are coerced to float/`null` before the write, so a config
 sync never fails on them. Everything else is stored exactly as the charger sent
 it.
 
+### Access allowlist (`pi/acl.py`)
+
+`pi/acl.py` syncs `private/acl.txt` (one Google account email per line;
+`#` comments and blanks ignored) into Firestore `users/{uid}` grant docs
+`{allowed: true, email}` — the docs `firestore.rules` checks for access. Each
+person must have signed in once first, because the uid comes from
+`auth.get_user_by_email`.
+
+```bash
+python3 pi/acl.py            # grant every allowlisted email
+python3 pi/acl.py --prune    # also delete grants whose email is no longer listed
+```
+
+One result line per email (`ok <email> -> <uid>` or
+`failed <email>: must sign in once first (then rerun)`), then a
+`N granted, M failed[, K pruned]` summary. It uses the same
+`private/bridge.env` / service-account key as the bridge, prints
+`private.example/README.md` guidance and exits non-zero when the key or
+`acl.txt` is missing, and also exits non-zero when any listed email could not
+be granted.
+
+### Energy history
+
+Each successful status tick compares `total_energy` (kWh) with the previous
+reading and increments `history/<YYYY-MM-DD>` by the difference:
+
+```
+history/2026-10-18   { kwh: 12.34, updated_at: <server timestamp> }
+```
+
+The document id is the **local** date (`datetime.now().astimezone()`), so the
+day rolls over at the Pi's local midnight. Uses `firestore.Increment` with
+`merge=True`, so ticks and concurrent writes accumulate instead of overwriting.
+
+`history/<date>` — not `history/daily/<date>` — because Firestore document
+paths must have an even number of segments, and `firestore.rules` exposes
+exactly `/history/{day}`. The first observation after boot is a baseline and is
+never written (otherwise the all-time `total_energy` would count as today's
+usage); at startup that baseline is seeded from the existing `status/current`
+document, so restarts don't skip or double-count energy. If `total_energy` drops
+(firmware reset), the bridge logs `total_energy reset; rebaselining history` and
+starts a new baseline without writing a negative delta.
+
+### Charging sessions
+
+When the charger transitions out of `state: 3` (charging) with a positive
+session energy, the bridge writes one document:
+
+```
+sessions/1792345678   { started_at, ended_at, wh, elapsed }
+```
+
+`wh` is the charger's `session_energy` (already Wh) and `elapsed` is seconds.
+`ended_at` is the transition time; `started_at` is `ended_at - elapsed`, so it
+comes from the charger's own session timer, never from when the bridge booted.
+The document id is the Unix timestamp of `started_at` and the write is a `set()`
+— deterministic, so a restart or a repeated end-tick can never create two
+documents for the same session.
+
+The last charging tick's `session_energy` / `elapsed` are used (some firmware
+zeros them on the end tick), falling back to the transition tick's values if
+they are positive. Failed polls (charger offline) are skipped, so they never
+look like the end of a session. At startup `state`, `total_energy`,
+`session_energy` and `elapsed` are seeded from `status/current`; if there is no
+usable seed, the first successful poll only establishes state.
+
+`status/current` also carries `elapsed`, per-sensor `temp1`–`temp3` in °C (or
+`null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
+mean.
+
+## Commands
+
+The app writes pending documents to `commands/{id}`; the bridge polls them every
+`COMMAND_INTERVAL` seconds, applies each one to the charger, then updates the
+same document to `acked` or `failed`.
+
+| `type`        | Charger request                                                          | Meaning                                                        |
+| ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                  |
+| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes |
+| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps (clamped to 6–48)                             |
+| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                     |
+
+`rapi.command` must be a string starting with `$` and at most 32 characters;
+anything else is marked `failed` with `error: "invalid rapi"` without contacting
+the charger. On a 2xx reply the document becomes `acked` and gets
+`result: <ret>` (the reply's `ret` field; the raw body if it is not JSON, `null`
+if absent). Non-2xx replies and request errors are marked `failed` with a short
+reason containing the HTTP status/body snippet or the exception class. Unknown
+`type` values fail with `unsupported type`.
+
 ## Logs
 
 ```bash
