@@ -97,6 +97,25 @@ test('schedule with 21 rules is rejected', async () => {
   await assertFails(writeSchedule(allowlisted(), 'too-many', { enabled: true, rules }));
 });
 
+test('schedule with 3 valid rules is accepted', async () => {
+  const rules = Array.from({ length: 3 }, (_, i) => scheduleRule({ id: `r${i}` }));
+  await assertSucceeds(writeSchedule(allowlisted(), 'three-rules', { enabled: true, rules }));
+});
+
+test('schedule with an invalid rule at index 1 is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'second-invalid', {
+      enabled: true,
+      rules: [scheduleRule(), scheduleRule({ id: 'r2', amps: 99 })],
+    }),
+  );
+});
+
+test('schedule with an invalid rule at index 2 is rejected', async () => {
+  const rules = [scheduleRule(), scheduleRule({ id: 'r2' }), scheduleRule({ id: 'r3', days: [9] })];
+  await assertFails(writeSchedule(allowlisted(), 'last-invalid', { enabled: true, rules }));
+});
+
 test('schedule rule with start equal to end is rejected', async () => {
   await assertFails(
     writeSchedule(allowlisted(), 'same-time', {
@@ -128,6 +147,84 @@ test('schedule with an extra top-level key is rejected', async () => {
       enabled: true,
       rules: [scheduleRule()],
       extra: true,
+    }),
+  );
+});
+
+test('schedule rule with an extra key is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'rule-extra-key', {
+      enabled: true,
+      rules: [scheduleRule({ extra: true })],
+    }),
+  );
+});
+
+test('schedule rule with an empty id is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'empty-id', { enabled: true, rules: [scheduleRule({ id: '' })] }),
+  );
+});
+
+test('schedule rule with an empty days list is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'empty-days', {
+      enabled: true,
+      rules: [scheduleRule({ days: [] })],
+    }),
+  );
+});
+
+test('schedule rule with day 7 is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'day-out-of-range', {
+      enabled: true,
+      rules: [scheduleRule({ days: [7] })],
+    }),
+  );
+});
+
+test('schedule rule with a negative day is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'day-negative', {
+      enabled: true,
+      rules: [scheduleRule({ days: [-1] })],
+    }),
+  );
+});
+
+test('schedule rule with a non-integer day is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'day-non-integer', {
+      enabled: true,
+      rules: [scheduleRule({ days: [1.5] })],
+    }),
+  );
+});
+
+test('schedule rule with a single-digit hour is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'start-short-hour', {
+      enabled: true,
+      rules: [scheduleRule({ start: '7:00' })],
+    }),
+  );
+});
+
+test('schedule rule with hour 24 is rejected', async () => {
+  await assertFails(
+    writeSchedule(allowlisted(), 'start-hour-24', {
+      enabled: true,
+      rules: [scheduleRule({ start: '24:00' })],
+    }),
+  );
+});
+
+test('unauthenticated user cannot write a schedule', async () => {
+  await assertFails(
+    writeSchedule(env.unauthenticatedContext(), 'anon', {
+      enabled: true,
+      rules: [scheduleRule()],
     }),
   );
 });
