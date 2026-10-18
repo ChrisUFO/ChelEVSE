@@ -57,8 +57,8 @@ export function stopStore() {
 // Every command is created pending; the bridge owns the lifecycle after that.
 export function sendCommand(payload) {
   return addDoc(collection(db, 'commands'), {
+    ...payload,
     status: 'pending',
     created_at: serverTimestamp(),
-    ...payload,
   });
 }

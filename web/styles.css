@@ -230,7 +230,7 @@ button {
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--muted);
 }
 .access-card .eyebrow {
   margin-top: 4px;
@@ -312,6 +312,9 @@ button {
   background: var(--err);
 }
 #signout {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
   padding: 8px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -455,6 +458,16 @@ button {
 }
 .tab[aria-selected='true']::before {
   transform: translateX(-50%) scaleX(1);
+}
+
+@media (max-width: 360px) {
+  .tabbar {
+    padding-inline: 6px;
+  }
+  .tab {
+    font-size: 10px;
+    letter-spacing: 0.03em;
+  }
 }
 
 /* ---------- banner ---------- */

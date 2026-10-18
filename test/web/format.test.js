@@ -41,6 +41,7 @@ test('formatElapsed renders HH:MM:SS', () => {
   assert.equal(formatElapsed(360_000), '100:00:00');
   assert.equal(formatElapsed(-12), '00:00:00');
   assert.equal(formatElapsed(null), '00:00:00');
+  assert.equal(formatElapsed(Number.POSITIVE_INFINITY), '00:00:00');
 });
 
 test('stateFor falls back to the unknown state', () => {

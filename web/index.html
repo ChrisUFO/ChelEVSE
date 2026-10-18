@@ -191,7 +191,7 @@
     <main id="app" hidden>
       <header class="app-header">
         <span class="wordmark" id="device-name">ChelEVSE</span>
-        <span class="net" id="net" data-net="live">Live</span>
+        <span class="net" id="net" data-net="live" role="status">Live</span>
         <button id="signout" type="button">Sign out</button>
       </header>
 
@@ -422,18 +422,14 @@
 
     <script>
       if ('serviceWorker' in navigator) {
+        let reloaded = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (reloaded) return;
+          reloaded = true;
+          location.reload();
+        });
         addEventListener('load', () => {
-          navigator.serviceWorker
-            .register('./sw.js')
-            .then(() => {
-              let reloaded = false;
-              navigator.serviceWorker.addEventListener('controllerchange', () => {
-                if (reloaded) return;
-                reloaded = true;
-                location.reload();
-              });
-            })
-            .catch(() => {});
+          navigator.serviceWorker.register('./sw.js').catch(() => {});
         });
       }
     </script>
