@@ -497,7 +497,9 @@ def command_loop(db, base, auth, interval):
     session = requests.Session()
     while not _stop.is_set():
         try:
-            query = db.collection("commands").where("status", "==", "pending")
+            query = db.collection("commands").where(
+                filter=firestore.FieldFilter("status", "==", "pending")
+            )
             pending = query.order_by("created_at").limit(10).stream()
             for doc in pending:
                 cmd = doc.to_dict() or {}
