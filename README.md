@@ -55,4 +55,5 @@ gracefully where Node isn't installed (e.g. on the Pi) — run `npm run format` 
 pushing from such a machine if you touched web/docs files.
 
 Firestore rules tests run against the local emulator via `npm run test:rules` (the Firebase
-CLI is installed as a dev dependency; Java is required for the emulator).
+CLI is installed as a dev dependency and requires Node.js 20+; Java is required for the
+emulator).
