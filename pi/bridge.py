@@ -12,7 +12,7 @@ import os
 import signal
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -107,7 +107,12 @@ def parse_status(data):
         "power": data.get("power"),
         "session_energy": data.get("session_energy"),
         "total_energy": data.get("total_energy"),
+        "elapsed": data.get("elapsed"),
         "temp_c": round(sum(temps) / len(temps) / 10, 1) if temps else None,
+        "temp1": _sensor_temp(data.get("temp1")),
+        "temp2": _sensor_temp(data.get("temp2")),
+        "temp3": _sensor_temp(data.get("temp3")),
+        "pilot": _pilot(data.get("pilot")),
         "charger_online": True,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
@@ -118,6 +123,20 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _sensor_temp(value):
+    """Raw tenths-of-°C reading -> °C, or None for absent-sensor sentinels."""
+    if _is_number(value) and value > 0:
+        return round(value / 10, 1)
+    return None
+
+
+def _pilot(value):
+    """Pilot setpoint in amps, or None when the charger reports nothing."""
+    if _is_number(value) and value >= 0:
+        return value
+    return None
+
+
 class StatusTracker:
     """Status-derived state carried across ticks and bridge restarts."""
 
@@ -125,8 +144,13 @@ class StatusTracker:
         self.db = db
         self.total_energy = None
         self.state = None
+        self.charger_online = None
         self.session_energy = None
         self.elapsed = None
+        self.previous_state = None
+        self.has_state = False
+        self.last_charging_energy = None
+        self.last_charging_elapsed = None
 
     def seed(self):
         """Seed state from status/current; a failed read just starts empty."""
@@ -140,10 +164,78 @@ class StatusTracker:
         total = data.get("total_energy")
         if _is_number(total):
             self.total_energy = float(total)
-        self.state = data.get("state")
+        state = data.get("state")
+        self.state = state
+        self.charger_online = data.get("charger_online")
+        self.previous_state = state
+        self.has_state = _is_number(state)
         self.session_energy = data.get("session_energy")
         self.elapsed = data.get("elapsed")
-        log(f"status seeded: total_energy={self.total_energy}")
+        if state == 3:
+            if _is_number(self.session_energy) and self.session_energy > 0:
+                self.last_charging_energy = self.session_energy
+            if _is_number(self.elapsed) and self.elapsed >= 0:
+                self.last_charging_elapsed = self.elapsed
+        log(f"status seeded: state={state} total_energy={self.total_energy}")
+
+    def observe(self, data):
+        """Track charging state from a successful tick; finalize ended sessions."""
+        state = data.get("state")
+        if state == 3:
+            energy = data.get("session_energy")
+            if _is_number(energy) and energy >= 0:
+                self.last_charging_energy = energy
+            elapsed = data.get("elapsed")
+            if _is_number(elapsed) and elapsed >= 0:
+                self.last_charging_elapsed = elapsed
+        if self.has_state and self.previous_state == 3 and state != 3:
+            # A seeded state lets the first tick after a restart close a
+            # session that ended while the bridge was down; with no seed the
+            # first tick only establishes state.
+            self._finalize_session(data)
+        self.previous_state = state
+        self.has_state = True
+        self.state = state
+        self.session_energy = data.get("session_energy")
+        self.elapsed = data.get("elapsed")
+
+    def _finalize_session(self, data):
+        """Write sessions/<started_at epoch> for a just-ended charging session."""
+        energy = self.last_charging_energy
+        if not (_is_number(energy) and energy > 0):
+            # Firmware may zero session_energy on the end tick; use it if the
+            # last charging tick had nothing useful (or was before a restart).
+            tick_energy = data.get("session_energy")
+            energy = tick_energy if _is_number(tick_energy) and tick_energy > 0 else None
+        if energy is None:
+            self.last_charging_energy = None
+            self.last_charging_elapsed = None
+            return
+        elapsed = self.last_charging_elapsed
+        if not (_is_number(elapsed) and elapsed > 0):
+            tick_elapsed = data.get("elapsed")
+            if _is_number(tick_elapsed) and tick_elapsed > 0:
+                elapsed = tick_elapsed
+            elif not (_is_number(elapsed) and elapsed >= 0):
+                elapsed = 0
+        ended_at = datetime.now(timezone.utc)
+        started_at = ended_at - timedelta(seconds=elapsed)
+        session_id = str(int(started_at.timestamp()))
+        self.last_charging_energy = None
+        self.last_charging_elapsed = None
+        try:
+            self.db.collection("sessions").document(session_id).set(
+                {
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "wh": float(energy),
+                    "elapsed": int(elapsed),
+                }
+            )
+        except Exception as exc:
+            log(f"session write failed ({exc.__class__.__name__}: {exc})")
+        else:
+            log(f"session recorded: {session_id} ({energy:g} Wh)")
 
     def record_history(self, total):
         """Accumulate the total_energy delta into history/<local date>."""
@@ -199,7 +291,10 @@ def status_loop(db, base, auth, interval, tracker):
             try:
                 resp = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
-                fields = parse_status(resp.json())
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("status response is not a JSON object")
+                fields = parse_status(payload)
             except (requests.RequestException, ValueError) as exc:
                 # Charger unreachable or sent garbage: flag offline, keep going.
                 log(f"charger offline ({exc.__class__.__name__})")
@@ -207,6 +302,7 @@ def status_loop(db, base, auth, interval, tracker):
             else:
                 status_doc.set(fields, merge=True)
                 tracker.record_history(fields.get("total_energy"))
+                tracker.observe(fields)
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)

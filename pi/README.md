@@ -57,6 +57,7 @@ timestamped line and the loop carries on at its next interval.
 | -------- | ------------------ | --------------------------------------------------------------------------------- |
 | Status   | `status/current`   | Full `/status` snapshot, merged on every poll                                     |
 | Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                       |
+| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` when a charging session ends                |
 | Config   | `status/config`    | Raw `/config` object plus `updated_at`, refreshed every `CONFIG_INTERVAL` seconds |
 | Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)              |
 
@@ -85,6 +86,33 @@ usage); at startup that baseline is seeded from the existing `status/current`
 document, so restarts don't skip or double-count energy. If `total_energy` drops
 (firmware reset), the bridge logs `total_energy reset; rebaselining history` and
 starts a new baseline without writing a negative delta.
+
+### Charging sessions
+
+When the charger transitions out of `state: 3` (charging) with a positive
+session energy, the bridge writes one document:
+
+```
+sessions/1792345678   { started_at, ended_at, wh, elapsed }
+```
+
+`wh` is the charger's `session_energy` (already Wh) and `elapsed` is seconds.
+`ended_at` is the transition time; `started_at` is `ended_at - elapsed`, so it
+comes from the charger's own session timer, never from when the bridge booted.
+The document id is the Unix timestamp of `started_at` and the write is a `set()`
+— deterministic, so a restart or a repeated end-tick can never create two
+documents for the same session.
+
+The last charging tick's `session_energy` / `elapsed` are used (some firmware
+zeros them on the end tick), falling back to the transition tick's values if
+they are positive. Failed polls (charger offline) are skipped, so they never
+look like the end of a session. At startup `state`, `total_energy`,
+`session_energy` and `elapsed` are seeded from `status/current`; if there is no
+usable seed, the first successful poll only establishes state.
+
+`status/current` also carries `elapsed`, per-sensor `temp1`–`temp3` in °C (or
+`null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
+mean.
 
 ## Logs
 
