@@ -56,12 +56,35 @@ timestamped line and the loop carries on at its next interval.
 | Loop     | Firestore document | Content                                                                           |
 | -------- | ------------------ | --------------------------------------------------------------------------------- |
 | Status   | `status/current`   | Full `/status` snapshot, merged on every poll                                     |
+| Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                       |
 | Config   | `status/config`    | Raw `/config` object plus `updated_at`, refreshed every `CONFIG_INTERVAL` seconds |
 | Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)              |
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
 disappear from the document. The charger's config is logged only when it
 changes to keep the journal quiet.
+
+### Energy history
+
+Each successful status tick compares `total_energy` (kWh) with the previous
+reading and increments `history/<YYYY-MM-DD>` by the difference:
+
+```
+history/2026-10-18   { kwh: 12.34, updated_at: <server timestamp> }
+```
+
+The document id is the **local** date (`datetime.now().astimezone()`), so the
+day rolls over at the Pi's local midnight. Uses `firestore.Increment` with
+`merge=True`, so ticks and concurrent writes accumulate instead of overwriting.
+
+`history/<date>` — not `history/daily/<date>` — because Firestore document
+paths must have an even number of segments, and `firestore.rules` exposes
+exactly `/history/{day}`. The first observation after boot is a baseline and is
+never written (otherwise the all-time `total_energy` would count as today's
+usage); at startup that baseline is seeded from the existing `status/current`
+document, so restarts don't skip or double-count energy. If `total_energy` drops
+(firmware reset), the bridge logs `total_energy reset; rebaselining history` and
+starts a new baseline without writing a negative delta.
 
 ## Logs
 

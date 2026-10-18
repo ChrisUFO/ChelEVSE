@@ -113,6 +113,66 @@ def parse_status(data):
     }
 
 
+def _is_number(value):
+    """True for int/float but not bool (bool is a subclass of int)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+class StatusTracker:
+    """Status-derived state carried across ticks and bridge restarts."""
+
+    def __init__(self, db):
+        self.db = db
+        self.total_energy = None
+        self.state = None
+        self.session_energy = None
+        self.elapsed = None
+
+    def seed(self):
+        """Seed state from status/current; a failed read just starts empty."""
+        try:
+            data = (
+                self.db.collection("status").document("current").get().to_dict() or {}
+            )
+        except Exception as exc:
+            log(f"status seed failed ({exc.__class__.__name__}: {exc})")
+            return
+        total = data.get("total_energy")
+        if _is_number(total):
+            self.total_energy = float(total)
+        self.state = data.get("state")
+        self.session_energy = data.get("session_energy")
+        self.elapsed = data.get("elapsed")
+        log(f"status seeded: total_energy={self.total_energy}")
+
+    def record_history(self, total):
+        """Accumulate the total_energy delta into history/<local date>."""
+        if not _is_number(total):
+            return
+        total = float(total)
+        previous = self.total_energy
+        self.total_energy = total
+        if previous is None:
+            return  # first observation is a baseline only
+        delta = total - previous
+        if delta < 0:
+            log("total_energy reset; rebaselining history")
+            return
+        if delta <= 0:
+            return
+        day = datetime.now().astimezone().date().isoformat()
+        try:
+            self.db.collection("history").document(day).set(
+                {
+                    "kwh": firestore.Increment(delta),
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+        except Exception as exc:
+            log(f"history write failed ({exc.__class__.__name__}: {exc})")
+
+
 def command_body(cmd):
     """Command document -> OpenEVSE /override JSON body."""
     ctype = cmd.get("type")
@@ -131,7 +191,7 @@ def post_override(session, base, auth, body):
     return session.post(f"{base}/override", json=body, auth=auth, timeout=HTTP_TIMEOUT)
 
 
-def status_loop(db, base, auth, interval):
+def status_loop(db, base, auth, interval, tracker):
     session = requests.Session()
     status_doc = db.collection("status").document("current")
     while not _stop.is_set():
@@ -139,11 +199,14 @@ def status_loop(db, base, auth, interval):
             try:
                 resp = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
-                status_doc.set(parse_status(resp.json()), merge=True)
+                fields = parse_status(resp.json())
             except (requests.RequestException, ValueError) as exc:
                 # Charger unreachable or sent garbage: flag offline, keep going.
                 log(f"charger offline ({exc.__class__.__name__})")
                 status_doc.set(OFFLINE, merge=True)
+            else:
+                status_doc.set(fields, merge=True)
+                tracker.record_history(fields.get("total_energy"))
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)
@@ -228,7 +291,10 @@ def main():
         f"bridge started: {base}, polls {status_interval:g}s/"
         f"{config_interval:g}s/{command_interval:g}s"
     )
-    status_args = (db, base, auth, status_interval)
+    tracker = StatusTracker(db)
+    tracker.seed()
+
+    status_args = (db, base, auth, status_interval, tracker)
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
     config_args = (db, base, auth, config_interval)
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
