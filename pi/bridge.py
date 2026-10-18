@@ -646,7 +646,7 @@ def _log_schedule(label, resp):
 def _schedule_plan(session, base, auth):
     """GET /schedule/plan as a dict; raises on any failure."""
     resp = session.get(f"{base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT)
-    _log_schedule("GET /schedule/plan", resp)
+    # Logged only on failure (via the caller): this runs every SCHEDULE_INTERVAL.
     _require_ok(resp)
     plan = resp.json()
     if not isinstance(plan, dict):
