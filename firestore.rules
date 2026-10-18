@@ -52,6 +52,26 @@ service cloud.firestore {
               && r.amps is number && r.amps >= 6 && r.amps <= 48);
     }
 
+    // App settings: client-writable by allowlisted users, shape-validated.
+    match /settings/{doc} {
+      allow read: if allowed();
+      allow write: if allowed()
+        && request.resource.data.rate is number
+        && request.resource.data.rate >= 0
+        && request.resource.data.rate <= 5
+        && request.resource.data.currency is string
+        && request.resource.data.currency.size() >= 1
+        && request.resource.data.currency.size() <= 8;
+    }
+
+    // FCM push registrations: users manage only their own token docs.
+    match /fcmTokens/{token} {
+      allow read: if false;
+      allow create: if allowed() && request.resource.data.uid == request.auth.uid;
+      allow update: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
     // Commands: allowlisted users may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
     // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.
