@@ -553,6 +553,18 @@ def apply_command(session, base, auth, cmd):
     if ctype == "resume":
         # Clear the manual override; the firmware scheduler takes over again.
         resp = session.delete(f"{base}/override", auth=auth, timeout=HTTP_TIMEOUT)
+        if not 200 <= resp.status_code < 300:
+            # v5.1.5 answers 500 "Failed to release manual override" when there
+            # is nothing to release. The intended end state already holds, so
+            # confirm it rather than reporting a spurious failure.
+            try:
+                status = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+                status.raise_for_status()
+                if (status.json() or {}).get("manual_override") == 0:
+                    log("resume: no manual override to release; treating as acked")
+                    return {}
+            except (requests.RequestException, ValueError):
+                pass
         _require_ok(resp)
         return {}
     if ctype == "set_current":

@@ -117,6 +117,23 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(session.calls[0][0], "delete")
         self.assertEqual(session.calls[0][1], "http://charger/override")
 
+    def test_resume_500_with_no_override_is_treated_as_acked(self):
+        session = FakeSession(
+            [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 0})]
+        )
+        self.assertEqual(
+            bridge.apply_command(session, "http://charger", None, {"type": "resume"}),
+            {},
+        )
+        self.assertEqual([call[0] for call in session.calls], ["delete", "get"])
+
+    def test_resume_500_with_override_still_fails(self):
+        session = FakeSession(
+            [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 1})]
+        )
+        with self.assertRaises(bridge.CommandError):
+            bridge.apply_command(session, "http://charger", None, {"type": "resume"})
+
     def test_set_current_clamps_to_firmware_limits(self):
         session = FakeSession([FakeResponse(200), FakeResponse(200)])
         bridge.apply_command(
