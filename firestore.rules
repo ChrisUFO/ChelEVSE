@@ -128,9 +128,11 @@ service cloud.firestore {
               && request.resource.data.amps is number
               && request.resource.data.amps >= 6
               && request.resource.data.amps <= 48)
+          // RAPI commands start with a literal '$' (character class avoids
+          // escaping ambiguity); the 32-char cap bounds what reaches the bridge.
           || (request.resource.data.type == 'rapi'
               && request.resource.data.command is string
-              && request.resource.data.command.matches('^$[A-Za-z0-9]{1,2}([ ].*)?$')
+              && request.resource.data.command.matches('^[$][A-Za-z0-9]{1,2}([ ].*)?$')
               && request.resource.data.command.size() <= 32)
         );
       allow update, delete: if false;
