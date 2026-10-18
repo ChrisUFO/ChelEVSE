@@ -1,0 +1,18 @@
+[Unit]
+Description=ChelEVSE bridge agent (OpenEVSE -> Firebase)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/chelevse
+EnvironmentFile=/opt/chelevse/private/bridge.env
+ExecStart=/opt/chelevse/pi/.venv/bin/python /opt/chelevse/pi/bridge.py
+Restart=always
+RestartSec=5
+# User=root: simplest on a single-purpose Pi — avoids permission setup for
+# /opt/chelevse and the service-account key. Tighten if the Pi does more.
+User=root
+
+[Install]
+WantedBy=multi-user.target
