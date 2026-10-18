@@ -2,29 +2,46 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Access grant: the owner creates users/<uid> = {allowed: true} in the
+    // Firebase console to allowlist a signed-in Google account. All data
+    // access below requires this grant (plus a verified email).
+    function allowed() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.allowed == true;
+    }
+
+    // Users can read their own grant doc (so the app can show a proper
+    // "no access" state instead of a generic failure).
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false; // owner grants via console / Admin SDK only
+    }
+
     // Charger status + config: written only by the bridge (Admin SDK bypasses
-    // rules), readable by the authenticated owner.
+    // rules), readable by allowlisted users.
     match /status/{doc} {
-      allow read: if request.auth != null;
+      allow read: if allowed();
       allow write: if false;
     }
 
-    // Energy history: bridge-written, owner-readable.
+    // Energy history: bridge-written, allowlisted users read.
     match /history/{day} {
-      allow read: if request.auth != null;
+      allow read: if allowed();
       allow write: if false;
     }
     match /sessions/{id} {
-      allow read: if request.auth != null;
+      allow read: if allowed();
       allow write: if false;
     }
 
-    // Commands: the app may create whitelisted, validated commands;
+    // Commands: allowlisted users may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
     // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.
     match /commands/{cmd} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null
+      allow read: if allowed();
+      allow create: if allowed()
         && request.resource.data.status == 'pending'
         && (
              (request.resource.data.type == 'pause')

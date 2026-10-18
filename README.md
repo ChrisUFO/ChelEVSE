@@ -31,7 +31,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 ## Security model
 
 - The repo is **public**; every deployment value (service-account key, Firebase config, charger IP) lives in gitignored files. See `private.example/`.
-- Access control is Firebase Auth (a single account — you) + Firestore security rules: only authenticated clients can read status or create whitelisted commands; only the bridge's service account can write status or mutate commands.
+- Access control is Google Sign-In (Firebase Auth) plus an owner-managed allowlist: Firestore rules only serve data to users with a `users/{uid}` grant doc. Commands are whitelisted and validated; only the bridge's service account writes status/history.
 - No inbound connections to the home network — the Pi only makes outbound requests.
 
 ## Getting started
