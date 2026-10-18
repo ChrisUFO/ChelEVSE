@@ -23,7 +23,7 @@ from pathlib import Path
 
 import requests
 import firebase_admin
-from firebase_admin import credentials, firestore, messaging
+from firebase_admin import credentials, exceptions, firestore, messaging
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
@@ -38,6 +38,8 @@ MIN_AMPS, MAX_AMPS = 6, 48
 OFFLINE = {"charger_online": False, "updated_at": firestore.SERVER_TIMESTAMP}
 # Firmware scheduler limits: 2 events per rule, 50 events total.
 MAX_SCHEDULE_RULES = 20
+# Allow for the firmware's randomized window start (scheduler_start_window).
+SCHEDULE_JITTER_GRACE = 10
 TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 # Firmware weekday names, indexed by firmware day (Sunday = 0). Our rules use
 # 0 = Monday ... 6 = Sunday, so our day d is firmware day (d + 1) % 7.
@@ -411,7 +413,7 @@ def notify(db, body):
                     token=token,
                 )
             )
-        except (messaging.UnregisteredError, messaging.InvalidArgumentError):
+        except (messaging.UnregisteredError, exceptions.InvalidArgumentError):
             try:
                 doc.reference.delete()
                 log(f"pruned fcm token {doc.id}")
@@ -627,13 +629,29 @@ def schedule_events(rules):
 
 
 def schedule_state(plan, event_rules):
-    """Firmware /schedule/plan -> the status/current.schedule field."""
+    """Firmware /schedule/plan -> the status/current.schedule field.
+
+    The firmware's current_event is the event whose claim is in effect, but it
+    can lag the plan by a moment after a sync. An active event is only a real
+    open window when the next event (its end) is due within the event's own
+    duration; otherwise the plan is still describing a window whose start is
+    ahead of now (e.g. yesterday's instance). Both values come from the
+    firmware -- windows are never evaluated here.
+    """
     current = plan.get("current_event") if isinstance(plan, dict) else None
     if not isinstance(current, dict):
         return {"in_window": False, "active_rule_id": None}
+    delay = plan.get("next_event_delay")
+    duration = current.get("duration")
+    in_window = bool(
+        current.get("state") == "active"
+        and _is_number(delay)
+        and _is_number(duration)
+        and 0 <= delay <= duration + SCHEDULE_JITTER_GRACE
+    )
     return {
-        "in_window": current.get("state") == "active",
-        "active_rule_id": event_rules.get(current.get("id")),
+        "in_window": in_window,
+        "active_rule_id": event_rules.get(current.get("id")) if in_window else None,
     }
 
 

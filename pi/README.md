@@ -212,9 +212,13 @@ down.
   every request succeeded, so a failure is retried on the next tick.
 - **Window status.** Every tick (changed or not) reads `GET /schedule/plan` and
   merges exactly `schedule: {in_window, active_rule_id}` into `status/current`.
-  `in_window` is true when the firmware's `current_event` is an `active` event;
-  `active_rule_id` is the rule that owns that event id (or `null`). The firmware
-  enforces windows itself — the bridge never evaluates times locally.
+  `in_window` is true when the firmware's `current_event` is an `active` event
+  **and** the next event (its end) is due within that event's `duration`.
+  `active_rule_id` is the rule that owns the event id when in a window, else
+  `null`. The extra delay check matters because the plan can briefly still
+  describe an event whose start lies ahead of now (right after a sync, or the
+  previous week's instance); it uses only firmware-computed values, so windows
+  are still never evaluated locally — the firmware enforces them.
 - **Amps are not pushed.** Firmware v5.1.5 has no per-event current: its
   schedule events are flat `{id, state, time, days}` and the event charges at
   the EVSE's configured limit. `amps` is validated and stored, but the bridge
