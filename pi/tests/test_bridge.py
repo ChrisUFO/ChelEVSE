@@ -267,6 +267,23 @@ class NormalizeScheduleTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(bridge._normalize_rule(raw) is not None, accepted)
 
+    def test_times_must_be_exact_ascii_hh_mm(self):
+        malformed = [
+            ("22:00\n", "06:00"),
+            ("22:00", "06:00\n"),
+            ("٢٢:٠٠", "06:00"),
+            ("22:00", "٠٦:٠٠"),
+            ("1٢:30", "06:00"),
+            ("22:00", "10:3٥"),
+            ("22:00\n", "06:00\n"),
+        ]
+        for start, end in malformed:
+            with self.subTest(start=start, end=end):
+                self.assertIsNone(bridge._normalize_rule(rule("a", [0], start, end)))
+        self.assertEqual(
+            bridge._normalize_rule(rule("a", [0], "22:00", "06:00"))["start"], "22:00"
+        )
+
     def test_zero_length_rule_is_rejected(self):
         self.assertIsNone(bridge._normalize_rule(rule("a", [0], "10:00", "10:00")))
 

@@ -234,8 +234,9 @@ scheduler, so windows keep being enforced by the charger even while the Pi is
 down.
 
 - **Validation.** A rule is used only when it has a non-empty string `id`, a
-  non-empty `days` list of integers 0–6, `start`/`end` matching
-  `^([01]\d|2[0-3]):[0-5]\d$`, `start != end`, and a numeric `amps`. Malformed
+  non-empty `days` list of integers 0–6, `start`/`end` that are exactly `HH:MM`
+  as 24-hour ASCII digits matched against the whole string (no trailing
+  newline, no non-ASCII digits), `start != end`, and a numeric `amps`. Malformed
   rules are logged and skipped; at most 20 rules are synced (2 firmware events
   each, within the firmware's 50-event limit).
 - **No overlapping windows.** Per weekday (including an overnight rule's spill

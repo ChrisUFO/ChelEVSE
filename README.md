@@ -53,3 +53,7 @@ One-time: `npm install` (installs Prettier and points git at `.githooks/`). pre-
 blocks unformatted staged files; pre-push runs a full `prettier --check .`. Hooks no-op
 gracefully where Node isn't installed (e.g. on the Pi) — run `npm run format` before
 pushing from such a machine if you touched web/docs files.
+
+Firestore rules tests run against the local emulator via `npm run test:rules` (the Firebase
+CLI is installed as a dev dependency and requires Node.js 20+; Java is required for the
+emulator).
