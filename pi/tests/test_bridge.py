@@ -273,6 +273,8 @@ class NormalizeScheduleTests(unittest.TestCase):
             ("22:00", "06:00\n"),
             ("٢٢:٠٠", "06:00"),
             ("22:00", "٠٦:٠٠"),
+            ("1٢:30", "06:00"),
+            ("22:00", "10:3٥"),
             ("22:00\n", "06:00\n"),
         ]
         for start, end in malformed:
