@@ -7,6 +7,7 @@
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "test": "node --test test/web/*.test.js",
     "test:rules": "firebase emulators:exec --only firestore --project demo-chelevse \"node --test test/rules/*.test.js\"",
     "prepare": "git config core.hooksPath .githooks || true"
   },
