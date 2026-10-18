@@ -25,6 +25,13 @@ import {
   showStatusError,
   showStatusSchedule,
 } from './js/screens/status.js';
+import {
+  activateHistory,
+  enterHistory,
+  initHistory,
+  resetHistory,
+  showHistorySettings,
+} from './js/screens/history.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 
@@ -57,6 +64,7 @@ function setSignInBusy(busy) {
 function closeApp() {
   stopStore();
   leaveStatus();
+  resetHistory();
   activeUser = null;
 }
 
@@ -87,11 +95,12 @@ function showNoAccess(user, reason) {
   if (showScreen('noaccess')) $('noaccess-title').focus({ preventScroll: true });
 }
 
-// Tab activation: the status clock only runs while its panel is visible.
+// Tab activation: start/stop the status clock and load history on first visit.
 function handleRoute(route) {
   if (!activeUser) return;
   if (route === 'status') focusStatus();
   else blurStatus();
+  if (route === 'history') activateHistory();
 }
 
 function enterApp(user) {
@@ -108,7 +117,10 @@ function enterApp(user) {
       showStatus(snap);
     },
     onCommands: showCommands,
-    onSettings: showSettings,
+    onSettings: (settings) => {
+      showSettings(settings);
+      showHistorySettings(settings);
+    },
     onConfig: showConfig,
     onSchedule: showStatusSchedule,
     onAccessDenied: () => {
@@ -116,6 +128,7 @@ function enterApp(user) {
     },
   });
   enterStatus();
+  enterHistory();
   handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
@@ -184,6 +197,7 @@ async function main() {
   }
 
   initStatus();
+  initHistory();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 
