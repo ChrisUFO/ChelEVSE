@@ -3,7 +3,7 @@
   "short_name": "ChelEVSE",
   "description": "Status and basic control for a home OpenEVSE charger.",
   "id": "/",
-  "start_url": ".",
+  "start_url": "./#status",
   "scope": ".",
   "display": "standalone",
   "orientation": "portrait",

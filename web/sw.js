@@ -1,11 +1,17 @@
 // ChelEVSE service worker — cache-first for the local app shell only.
 // Never caches gstatic/firebase requests: cross-origin and non-GET are passed through.
 // Bump CACHE version when any shell file changes.
-const CACHE = 'chelevse-v1';
+const CACHE = 'chelevse-v9';
 const SHELL = [
   './',
   './index.html',
   './app.js',
+  './js/firebase.js',
+  './js/auth.js',
+  './js/store.js',
+  './js/format.js',
+  './js/ui.js',
+  './js/screens/status.js',
   './styles.css',
   './manifest.webmanifest',
   './icon.svg',
@@ -32,13 +38,16 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return; // gstatic/firebase: network only
+  // firebase-config.js is served no-cache; never serve it from, or store it in,
+  // the Cache API (which would ignore that header).
+  const uncached = url.pathname.endsWith('/firebase-config.js');
   event.respondWith(
-    caches.match(event.request).then(
+    (uncached ? Promise.resolve(null) : caches.match(event.request)).then(
       (hit) =>
         hit ||
         fetch(event.request)
           .then((res) => {
-            if (res.ok) {
+            if (res.ok && !uncached) {
               const copy = res.clone();
               caches.open(CACHE).then((cache) => cache.put(event.request, copy));
             }

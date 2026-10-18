@@ -12,14 +12,121 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <!-- Shared icon sprite: one definition, used by the tab bar and empty states. -->
+    <svg class="icon-sprite" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-mark" viewBox="0 0 64 64">
+          <rect width="64" height="64" rx="14" fill="#1a212d" />
+          <path d="M36 12 L18 38 h10 l-3 14 19 -26 h-10 z" fill="#38d996" />
+        </symbol>
+        <symbol
+          id="i-lock"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <rect x="4.5" y="10.5" width="15" height="10" rx="2.5" />
+          <path d="M8.2 10.5V8a3.8 3.8 0 0 1 7.6 0v2.5" />
+          <circle cx="12" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+        </symbol>
+        <symbol
+          id="i-retry"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M20 11a8 8 0 1 0-2.35 6.35" />
+          <path d="M20 4v7h-7" />
+        </symbol>
+        <symbol
+          id="i-status"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M4 16a8 8 0 0 1 16 0" />
+          <path d="M12 16l3.5-4.5" />
+          <circle cx="12" cy="16" r="1.3" fill="currentColor" stroke="none" />
+        </symbol>
+        <symbol
+          id="i-history"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M4 19.5h16" />
+          <path d="M7 19.5v-5M12 19.5V9M17 19.5V5" />
+        </symbol>
+        <symbol
+          id="i-schedule"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <rect x="3.5" y="5.5" width="17" height="15" rx="2.5" />
+          <path d="M3.5 10h17M8 3.5v4M16 3.5v4" />
+          <path d="M8.5 14h2M13.5 14h2M8.5 17h2" />
+        </symbol>
+        <symbol
+          id="i-config"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M4 7h8M18 7h2M4 17h3M13 17h7" />
+          <circle cx="15" cy="7" r="2" />
+          <circle cx="10" cy="17" r="2" />
+        </symbol>
+        <symbol
+          id="i-advanced"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+          <path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4" />
+        </symbol>
+      </defs>
+    </svg>
+
     <div class="glow" aria-hidden="true"></div>
+
+    <!-- First paint while the SDK loads and the session is restored -->
+    <section id="booting" class="screen booting" aria-label="Loading">
+      <div class="boot-brand">
+        <svg class="mark" width="30" height="30" aria-hidden="true">
+          <use href="#i-mark" />
+        </svg>
+        <p class="boot-line" role="status">Connecting to your charger…</p>
+      </div>
+    </section>
 
     <!-- Shown when firebase-config.js is missing or the Firebase SDK can't load -->
     <section id="boot-error" class="screen" hidden>
       <div class="card" role="alert">
-        <svg class="mark" width="30" height="30" viewBox="0 0 64 64" aria-hidden="true">
-          <rect width="64" height="64" rx="14" fill="#1a212d" />
-          <path d="M36 12 L18 38 h10 l-3 14 19 -26 h-10 z" fill="#38d996" />
+        <svg class="mark" width="30" height="30" aria-hidden="true">
+          <use href="#i-mark" />
         </svg>
         <h1 id="boot-title"></h1>
         <p class="sub" id="boot-body"></p>
@@ -28,88 +135,309 @@
 
     <!-- Signed out -->
     <section id="signin" class="screen" hidden>
-      <form class="card" id="signin-form">
-        <svg class="mark" width="30" height="30" viewBox="0 0 64 64" aria-hidden="true">
-          <rect width="64" height="64" rx="14" fill="#1a212d" />
-          <path d="M36 12 L18 38 h10 l-3 14 19 -26 h-10 z" fill="#38d996" />
+      <div class="card auth-card">
+        <svg class="mark" width="30" height="30" aria-hidden="true">
+          <use href="#i-mark" />
         </svg>
         <h1>ChelEVSE</h1>
         <p class="sub">Sign in to see your charger.</p>
-        <label
-          ><span>Email</span><input id="email" type="email" autocomplete="username" required
-        /></label>
-        <label
-          ><span>Password</span
-          ><input id="pass" type="password" autocomplete="current-password" required
-        /></label>
-        <p id="signin-error" aria-live="polite"></p>
-        <button id="signin-btn" type="submit">Sign in</button>
-      </form>
+        <button id="google-signin" class="google-btn" type="button">
+          <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+            <path
+              fill="#EA4335"
+              d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+            />
+            <path
+              fill="#4285F4"
+              d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+            />
+            <path
+              fill="#FBBC05"
+              d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+            />
+            <path
+              fill="#34A853"
+              d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+            />
+          </svg>
+          <span id="google-signin-label">Sign in with Google</span>
+        </button>
+        <p id="signin-error" class="auth-error" role="alert" aria-live="polite"></p>
+        <p class="fineprint">Access is limited to accounts the owner has approved.</p>
+      </div>
     </section>
 
-    <!-- Signed in -->
-    <main id="app" class="screen" hidden>
-      <header style="--i: 0">
-        <span class="wordmark">ChelEVSE</span>
-        <span class="net" id="net" data-net="live">Live</span>
+    <!-- Signed in, but not on the access list -->
+    <section id="noaccess" class="screen" hidden>
+      <div class="card access-card">
+        <span class="glyph" aria-hidden="true">
+          <svg width="20" height="20"><use id="noaccess-glyph" href="#i-lock" /></svg>
+        </span>
+        <p class="eyebrow" id="noaccess-eyebrow">Access restricted</p>
+        <h1 id="noaccess-title" tabindex="-1">You're not on the list</h1>
+        <p class="sub">Signed in as</p>
+        <p class="account" id="noaccess-email"></p>
+        <p class="notice" id="noaccess-reason" role="status">
+          Ask the owner to add your email to the charger, then sign in again.
+        </p>
+        <div class="access-actions">
+          <button id="noaccess-retry" class="btn solid" type="button" hidden>Try again</button>
+          <button id="noaccess-signout" class="btn" type="button">Sign out</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Signed in and granted -->
+    <main id="app" hidden>
+      <header class="app-header">
+        <span class="wordmark" id="device-name">ChelEVSE</span>
+        <span class="net" id="net" data-net="live" role="status">Live</span>
         <button id="signout" type="button">Sign out</button>
       </header>
 
-      <p class="banner" id="banner" style="--i: 1" hidden>
-        Bridge offline — showing last known values
-      </p>
-
-      <section class="hero" style="--i: 2" aria-label="Charger status">
-        <span class="badge" id="state-badge"
-          ><span class="dot"></span><span id="state-label">Unknown</span></span
+      <!-- The tablist precedes the panels in the DOM so Tab from the selected
+           tab reaches the active panel (APG); fixed positioning keeps it at
+           the visual bottom. -->
+      <nav class="tabbar" role="tablist" aria-label="Screens" aria-orientation="horizontal">
+        <button
+          class="tab"
+          id="tab-status"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="panel-status"
+          data-route="status"
         >
-        <div class="power"><span id="power">—</span><em>kW</em></div>
-        <p class="updated" id="updated">waiting for data</p>
-      </section>
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-status" /></svg>
+          <span>Status</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-history"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-history"
+          data-route="history"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-history" /></svg>
+          <span>History</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-schedule"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-schedule"
+          data-route="schedule"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-schedule" /></svg>
+          <span>Schedule</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-config"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-config"
+          data-route="config"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-config" /></svg>
+          <span>Config</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-advanced"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-advanced"
+          data-route="advanced"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-advanced" /></svg>
+          <span>Advanced</span>
+        </button>
+      </nav>
 
-      <section class="figures" style="--i: 3" aria-label="Live figures">
-        <div class="fig">
-          <span class="fig-label">Current</span>
-          <span class="fig-value"><span id="fig-amp">—</span><em>A</em></span>
-          <span class="fig-sub" id="fig-volt"></span>
-        </div>
-        <div class="fig">
-          <span class="fig-label">Session</span>
-          <span class="fig-value"><span id="fig-session">—</span><em>kWh</em></span>
-          <span class="fig-sub">this charge</span>
-        </div>
-        <div class="fig">
-          <span class="fig-label">Lifetime</span>
-          <span class="fig-value"><span id="fig-total">—</span><em>kWh</em></span>
-          <span class="fig-sub">total</span>
-        </div>
-        <div class="fig">
-          <span class="fig-label">Temp</span>
-          <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
-          <span class="fig-sub">charger</span>
-        </div>
-      </section>
+      <div class="panels">
+        <section
+          id="panel-status"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-status"
+          tabindex="0"
+        >
+          <p class="banner" id="banner" style="--i: 0" hidden>
+            Bridge offline — showing last known values
+          </p>
 
-      <section class="controls" id="controls" style="--i: 4" aria-label="Controls">
-        <div class="btnrow">
-          <button class="btn" id="pause" type="button">Pause</button>
-          <button class="btn" id="resume" type="button">Resume</button>
-        </div>
-        <div class="set-current">
-          <div class="set-head">
-            <label for="amps">Max current</label>
-            <output id="amps-out">32 A</output>
+          <section class="hero" style="--i: 1" aria-label="Charger status">
+            <span class="badge" id="state-badge"
+              ><span class="dot"></span><span id="state-label">Unknown</span></span
+            >
+            <div class="power"><span id="power">—</span><em>kW</em></div>
+            <p class="updated" id="updated">waiting for data</p>
+          </section>
+
+          <section class="figures" style="--i: 2" aria-label="Live figures">
+            <div class="fig">
+              <span class="fig-label">Current</span>
+              <span class="fig-value"><span id="fig-amp">—</span><em>A</em></span>
+              <span class="fig-sub" id="fig-volt"></span>
+            </div>
+            <div class="fig">
+              <span class="fig-label">Session</span>
+              <span class="fig-value"><span id="fig-session">—</span><em>kWh</em></span>
+              <span class="fig-sub">this charge</span>
+            </div>
+            <div class="fig">
+              <span class="fig-label">Lifetime</span>
+              <span class="fig-value"><span id="fig-total">—</span><em>kWh</em></span>
+              <span class="fig-sub">total</span>
+            </div>
+            <div class="fig">
+              <span class="fig-label">Temp</span>
+              <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
+              <span class="fig-sub">charger</span>
+            </div>
+          </section>
+
+          <section class="controls" id="controls" style="--i: 3" aria-label="Controls">
+            <div class="btnrow">
+              <button class="btn" id="pause" type="button">Pause</button>
+              <button class="btn" id="resume" type="button">Resume</button>
+            </div>
+            <div class="set-current">
+              <div class="set-head">
+                <label for="amps">Max current</label>
+                <output id="amps-out">32 A</output>
+              </div>
+              <input type="range" id="amps" min="6" max="48" step="1" value="32" />
+              <button id="apply" type="button">Apply</button>
+            </div>
+            <p class="feedback" id="feedback" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <section
+          id="panel-history"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-history"
+          tabindex="0"
+          hidden
+        >
+          <div class="panel-head" style="--i: 0">
+            <p class="eyebrow">History</p>
+            <h1>Energy history</h1>
+            <p class="lede">Daily energy and recent charging sessions.</p>
           </div>
-          <input type="range" id="amps" min="6" max="48" step="1" value="32" />
-          <button id="apply" type="button">Apply</button>
-        </div>
-        <p class="feedback" id="feedback" aria-live="polite"></p>
-      </section>
+          <div class="placeholder" style="--i: 1">
+            <span class="placeholder-icon" aria-hidden="true">
+              <svg width="24" height="24"><use href="#i-history" /></svg>
+            </span>
+            <p class="placeholder-title">No history yet</p>
+            <p class="placeholder-line">
+              Daily totals and recent sessions will appear here once the charger has logged a day.
+            </p>
+          </div>
+        </section>
+
+        <section
+          id="panel-schedule"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-schedule"
+          tabindex="0"
+          hidden
+        >
+          <div class="panel-head" style="--i: 0">
+            <p class="eyebrow">Schedule</p>
+            <h1>Charge schedule</h1>
+            <p class="lede">Weekly windows when the charger may charge.</p>
+          </div>
+          <div class="placeholder" style="--i: 1">
+            <span class="placeholder-icon" aria-hidden="true">
+              <svg width="24" height="24"><use href="#i-schedule" /></svg>
+            </span>
+            <p class="placeholder-title">No schedule shown yet</p>
+            <p class="placeholder-line">
+              Your charger's weekly charging windows will appear here, ready to edit.
+            </p>
+          </div>
+        </section>
+
+        <section
+          id="panel-config"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-config"
+          tabindex="0"
+          hidden
+        >
+          <div class="panel-head" style="--i: 0">
+            <p class="eyebrow">Config</p>
+            <h1>Configuration</h1>
+            <p class="lede">Charger settings and app preferences.</p>
+          </div>
+          <div class="placeholder" style="--i: 1">
+            <span class="placeholder-icon" aria-hidden="true">
+              <svg width="24" height="24"><use href="#i-config" /></svg>
+            </span>
+            <p class="placeholder-title">Nothing to configure yet</p>
+            <p class="placeholder-line">
+              Charger details, electricity rate, and notification settings will appear here.
+            </p>
+          </div>
+        </section>
+
+        <section
+          id="panel-advanced"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-advanced"
+          tabindex="0"
+          hidden
+        >
+          <div class="panel-head" style="--i: 0">
+            <p class="eyebrow">Advanced</p>
+            <h1>Advanced</h1>
+            <p class="lede">Direct charger commands, behind a confirmation step.</p>
+          </div>
+          <div class="placeholder" style="--i: 1">
+            <span class="placeholder-icon" aria-hidden="true">
+              <svg width="24" height="24"><use href="#i-advanced" /></svg>
+            </span>
+            <p class="placeholder-title">Console not available yet</p>
+            <p class="placeholder-line">
+              The RAPI console and recent command history will appear here.
+            </p>
+          </div>
+        </section>
+      </div>
     </main>
 
     <script>
       if ('serviceWorker' in navigator) {
-        addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+        // controllerchange also fires on the very first install (skipWaiting +
+        // clients.claim). Only an update — a controller existed beforehand —
+        // should reload the page.
+        const hadController = Boolean(navigator.serviceWorker.controller);
+        let reloaded = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (!hadController || reloaded) return;
+          reloaded = true;
+          location.reload();
+        });
+        addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(() => {});
+        });
       }
     </script>
     <script type="module" src="./app.js"></script>
