@@ -35,3 +35,6 @@ Desktop.ini
 
 # OpenCode planning artifact (never tracked)
 PLAN.md
+
+# Local review/audit artifacts
+.review/
