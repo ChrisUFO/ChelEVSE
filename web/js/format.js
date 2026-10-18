@@ -28,38 +28,3 @@ export function relTime(ms) {
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
   return `${Math.floor(s / 86400)} d ago`;
 }
-
-// Session duration as HH:MM:SS. Hours are not capped (a long session keeps
-// counting) and invalid/negative input clamps to zero.
-export function formatElapsed(totalSeconds) {
-  const value = Number(totalSeconds);
-  const total = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  return [hours, minutes, seconds].map((n) => String(n).padStart(2, '0')).join(':');
-}
-
-// Currency formatting for the rate/cost lines. Settings allow any 1–8 char
-// currency string, so an unknown code falls back to a plain "CODE 1.23".
-export function formatMoney(amount, currency = 'USD', locale = undefined) {
-  const value = Number(amount);
-  if (!Number.isFinite(value)) return '—';
-  const raw = String(currency || 'USD');
-  try {
-    return new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: raw.toUpperCase(),
-    }).format(value);
-  } catch {
-    return `${raw} ${value.toFixed(2)}`;
-  }
-}
-
-// Cost is hidden until a rate is saved (null rate); a saved rate of 0 is a
-// real value and formats as zero.
-export function formatCost(kwh, rate, currency = 'USD', locale = undefined) {
-  if (rate == null || rate === '' || !Number.isFinite(Number(rate))) return null;
-  if (kwh == null || !Number.isFinite(Number(kwh))) return null;
-  return formatMoney(Number(kwh) * Number(rate), currency, locale);
-}

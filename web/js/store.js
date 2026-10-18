@@ -15,9 +15,8 @@ import {
 
 let unsubStatus = null;
 let unsubCmds = null;
-let unsubSettings = null;
 
-export function startStore({ onStatus, onCommands, onSettings, onAccessDenied }) {
+export function startStore({ onStatus, onCommands, onAccessDenied }) {
   stopStore();
   const denied = (err) => {
     if (err && err.code === 'permission-denied' && onAccessDenied) {
@@ -38,20 +37,12 @@ export function startStore({ onStatus, onCommands, onSettings, onAccessDenied })
     (snap) => onCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
     denied,
   );
-  unsubSettings = onSnapshot(
-    doc(db, 'settings', 'current'),
-    (snap) => {
-      if (onSettings) onSettings(snap.exists() ? snap.data() : null);
-    },
-    denied,
-  );
 }
 
 export function stopStore() {
   if (unsubStatus) unsubStatus();
   if (unsubCmds) unsubCmds();
-  if (unsubSettings) unsubSettings();
-  unsubStatus = unsubCmds = unsubSettings = null;
+  unsubStatus = unsubCmds = null;
 }
 
 // Every command is created pending; the bridge owns the lifecycle after that.

@@ -39,6 +39,11 @@ function bootFail(title, body) {
   showScreen('boot-error');
 }
 
+// If the redirect fallback never navigates (installed PWAs and some in-app
+// browsers swallow it), the page stays here with a disabled button. Restore
+// the button after a bounded wait so retrying does not need a reload.
+const REDIRECT_RECOVERY_MS = 4000;
+
 function setSignInBusy(busy) {
   $('google-signin').disabled = busy;
   setText($('google-signin-label'), busy ? 'Signing in…' : 'Sign in with Google');
@@ -54,6 +59,7 @@ function showSignedOut() {
   closeApp();
   setSignInBusy(false);
   showScreen('signin');
+  $('google-signin').focus({ preventScroll: true });
 }
 
 function showNoAccess(user, reason) {
@@ -95,13 +101,26 @@ function enterApp(user) {
     },
   });
   enterStatus();
+  const activeTab = document.querySelector('.tab[aria-selected="true"]');
+  if (activeTab) activeTab.focus({ preventScroll: true });
 }
 
 async function handleGoogleSignIn() {
   setText($('signin-error'), '');
   setSignInBusy(true);
   try {
-    await signInWithGoogle();
+    const result = await signInWithGoogle();
+    if (result && result.redirected) {
+      setTimeout(() => {
+        if (currentScreen !== 'signin' || !$('google-signin').disabled) return;
+        setSignInBusy(false);
+        setText(
+          $('signin-error'),
+          'Sign-in did not finish. Try again, or open this page in your browser.',
+        );
+        $('google-signin').focus();
+      }, REDIRECT_RECOVERY_MS);
+    }
   } catch (err) {
     setSignInBusy(false);
     setText($('signin-error'), authErrorMessage(err && err.code));

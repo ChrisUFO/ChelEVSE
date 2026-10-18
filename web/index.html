@@ -177,7 +177,7 @@
         <h1 id="noaccess-title" tabindex="-1">You're not on the list</h1>
         <p class="sub">Signed in as</p>
         <p class="account" id="noaccess-email"></p>
-        <p class="notice" id="noaccess-reason">
+        <p class="notice" id="noaccess-reason" role="status">
           Ask the owner to add your email to the charger, then sign in again.
         </p>
         <div class="access-actions">
@@ -194,6 +194,76 @@
         <span class="net" id="net" data-net="live" role="status">Live</span>
         <button id="signout" type="button">Sign out</button>
       </header>
+
+      <!-- The tablist precedes the panels in the DOM so Tab from the selected
+           tab reaches the active panel (APG); fixed positioning keeps it at
+           the visual bottom. -->
+      <nav class="tabbar" role="tablist" aria-label="Screens" aria-orientation="horizontal">
+        <button
+          class="tab"
+          id="tab-status"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="panel-status"
+          data-route="status"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-status" /></svg>
+          <span>Status</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-history"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-history"
+          data-route="history"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-history" /></svg>
+          <span>History</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-schedule"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-schedule"
+          data-route="schedule"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-schedule" /></svg>
+          <span>Schedule</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-config"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-config"
+          data-route="config"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-config" /></svg>
+          <span>Config</span>
+        </button>
+        <button
+          class="tab"
+          id="tab-advanced"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-advanced"
+          data-route="advanced"
+          tabindex="-1"
+        >
+          <svg class="tab-icon" aria-hidden="true"><use href="#i-advanced" /></svg>
+          <span>Advanced</span>
+        </button>
+      </nav>
 
       <div class="panels">
         <section
@@ -351,73 +421,6 @@
           </div>
         </section>
       </div>
-
-      <nav class="tabbar" role="tablist" aria-label="Screens" aria-orientation="horizontal">
-        <button
-          class="tab"
-          id="tab-status"
-          type="button"
-          role="tab"
-          aria-selected="true"
-          aria-controls="panel-status"
-          data-route="status"
-        >
-          <svg class="tab-icon" aria-hidden="true"><use href="#i-status" /></svg>
-          <span>Status</span>
-        </button>
-        <button
-          class="tab"
-          id="tab-history"
-          type="button"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-history"
-          data-route="history"
-          tabindex="-1"
-        >
-          <svg class="tab-icon" aria-hidden="true"><use href="#i-history" /></svg>
-          <span>History</span>
-        </button>
-        <button
-          class="tab"
-          id="tab-schedule"
-          type="button"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-schedule"
-          data-route="schedule"
-          tabindex="-1"
-        >
-          <svg class="tab-icon" aria-hidden="true"><use href="#i-schedule" /></svg>
-          <span>Schedule</span>
-        </button>
-        <button
-          class="tab"
-          id="tab-config"
-          type="button"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-config"
-          data-route="config"
-          tabindex="-1"
-        >
-          <svg class="tab-icon" aria-hidden="true"><use href="#i-config" /></svg>
-          <span>Config</span>
-        </button>
-        <button
-          class="tab"
-          id="tab-advanced"
-          type="button"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-advanced"
-          data-route="advanced"
-          tabindex="-1"
-        >
-          <svg class="tab-icon" aria-hidden="true"><use href="#i-advanced" /></svg>
-          <span>Advanced</span>
-        </button>
-      </nav>
     </main>
 
     <script>

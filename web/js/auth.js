@@ -100,7 +100,9 @@ export function signInWithGoogle() {
   provider.setCustomParameters({ prompt: 'select_account' });
   return signInWithPopup(auth, provider).catch((err) => {
     const code = err && err.code;
-    if (REDIRECT_FALLBACK.has(code)) return signInWithRedirect(auth, provider);
+    if (REDIRECT_FALLBACK.has(code)) {
+      return signInWithRedirect(auth, provider).then(() => ({ redirected: true }));
+    }
     throw err;
   });
 }

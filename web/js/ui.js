@@ -6,7 +6,7 @@ export const setText = (el, text) => {
   if (el && el.textContent !== text) el.textContent = text;
 };
 
-let netOnline = navigator.onLine;
+let netOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 let netCached = false;
 
 function paintNet() {
@@ -45,19 +45,33 @@ const ROUTES = {
 };
 const ROUTE_NAMES = Object.keys(ROUTES);
 
-function routeFromHash() {
-  const raw = location.hash.replace(/^#/, '').toLowerCase();
-  return ROUTES[raw] ? raw : 'status';
+// Own-property check: inherited names (#constructor, #__proto__, #toString)
+// must not be mistaken for routes, or every panel stays hidden.
+export function routeFor(hash) {
+  const raw = String(hash == null ? '' : hash)
+    .replace(/^#/, '')
+    .toLowerCase();
+  return Object.hasOwn(ROUTES, raw) ? raw : 'status';
 }
 
 // Hash routing keeps refresh, back/forward, and the installed start_url on the
 // same screen. Panels are hidden rather than removed so each screen keeps its
-// state (the status slider, scroll position, later the schedule draft).
+// control state; the document scroll position is saved per route and restored
+// when that route is shown again (first visits start at the top).
 export function initTabbar() {
   const tabs = [...document.querySelectorAll('.tab')];
   const tabbar = document.querySelector('.tabbar');
+  const scrollByRoute = new Map();
+  let currentRoute = null;
+  // Per-route restore below owns the scroll position; browser scroll
+  // restoration would otherwise fight it on reload and back/forward.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
   function apply(route) {
+    const changed = currentRoute !== route;
+    if (currentRoute && changed) {
+      scrollByRoute.set(currentRoute, window.scrollY);
+    }
     for (const name of ROUTE_NAMES) $(`panel-${name}`).hidden = name !== route;
     for (const tab of tabs) {
       const selected = tab.dataset.route === route;
@@ -65,10 +79,13 @@ export function initTabbar() {
       tab.tabIndex = selected ? 0 : -1;
     }
     document.title = `${ROUTES[route]} — ChelEVSE`;
+    currentRoute = route;
+    // Re-clicking the selected tab must not jump back to an older offset.
+    if (changed) window.scrollTo(0, scrollByRoute.get(route) ?? 0);
   }
 
   function render() {
-    const route = routeFromHash();
+    const route = routeFor(location.hash);
     if (location.hash !== `#${route}`) history.replaceState(null, '', `#${route}`);
     apply(route);
   }
