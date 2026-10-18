@@ -114,6 +114,27 @@ usable seed, the first successful poll only establishes state.
 `null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
 mean.
 
+## Commands
+
+The app writes pending documents to `commands/{id}`; the bridge polls them every
+`COMMAND_INTERVAL` seconds, applies each one to the charger, then updates the
+same document to `acked` or `failed`.
+
+| `type`        | Charger request                                                          | Meaning                                                        |
+| ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                  |
+| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes |
+| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps (clamped to 6–48)                             |
+| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                     |
+
+`rapi.command` must be a string starting with `$` and at most 32 characters;
+anything else is marked `failed` with `error: "invalid rapi"` without contacting
+the charger. On a 2xx reply the document becomes `acked` and gets
+`result: <ret>` (the reply's `ret` field; the raw body if it is not JSON, `null`
+if absent). Non-2xx replies and request errors are marked `failed` with a short
+reason containing the HTTP status/body snippet or the exception class. Unknown
+`type` values fail with `unsupported type`.
+
 ## Logs
 
 ```bash

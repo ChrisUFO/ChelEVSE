@@ -206,7 +206,9 @@ class StatusTracker:
             # Firmware may zero session_energy on the end tick; use it if the
             # last charging tick had nothing useful (or was before a restart).
             tick_energy = data.get("session_energy")
-            energy = tick_energy if _is_number(tick_energy) and tick_energy > 0 else None
+            energy = (
+                tick_energy if _is_number(tick_energy) and tick_energy > 0 else None
+            )
         if energy is None:
             self.last_charging_energy = None
             self.last_charging_elapsed = None
@@ -265,22 +267,76 @@ class StatusTracker:
             log(f"history write failed ({exc.__class__.__name__}: {exc})")
 
 
-def command_body(cmd):
-    """Command document -> OpenEVSE /override JSON body."""
+def _http_reason(resp):
+    """Short HTTP failure reason with a bounded body snippet."""
+    body = " ".join((resp.text or "").split())[:120]
+    reason = f"HTTP {resp.status_code}"
+    return f"{reason}: {body}" if body else reason
+
+
+def _require_ok(resp):
+    if not 200 <= resp.status_code < 300:
+        raise CommandError(_http_reason(resp))
+
+
+def _rapi_result(resp):
+    """RAPI reply's ret value, or the raw text when the body is not JSON."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text.strip() or None
+    return body.get("ret") if isinstance(body, dict) else None
+
+
+def apply_command(session, base, auth, cmd):
+    """Apply one command document; return extra fields for the command doc."""
     ctype = cmd.get("type")
-    if ctype in ("pause", "resume"):
-        return {"state": "disabled" if ctype == "pause" else "active"}
+    if ctype == "pause":
+        resp = session.post(
+            f"{base}/override",
+            json={"state": "disabled"},
+            auth=auth,
+            timeout=HTTP_TIMEOUT,
+        )
+        _require_ok(resp)
+        return {}
+    if ctype == "resume":
+        # Clear the manual override; the firmware scheduler takes over again.
+        resp = session.delete(f"{base}/override", auth=auth, timeout=HTTP_TIMEOUT)
+        _require_ok(resp)
+        return {}
     if ctype == "set_current":
         try:
             amps = max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
         except (TypeError, ValueError):
             raise CommandError("missing or invalid amps")
-        return {"state": "active", "charge_current": amps, "max_current": amps}
+        resp = session.post(
+            f"{base}/override",
+            json={"state": "active", "charge_current": amps, "max_current": amps},
+            auth=auth,
+            timeout=HTTP_TIMEOUT,
+        )
+        _require_ok(resp)
+        return {}
+    if ctype == "rapi":
+        command = cmd.get("command")
+        if (
+            not isinstance(command, str)
+            or not command.startswith("$")
+            or len(command) > 32
+        ):
+            raise CommandError("invalid rapi")
+        resp = session.post(
+            f"{base}/rapi",
+            data={"rapi": command, "json": 1},
+            auth=auth,
+            timeout=HTTP_TIMEOUT,
+        )
+        _require_ok(resp)
+        result = _rapi_result(resp)
+        log(f"rapi {command}: ret={result!r}")
+        return {"result": result}
     raise CommandError("unsupported type")
-
-
-def post_override(session, base, auth, body):
-    return session.post(f"{base}/override", json=body, auth=auth, timeout=HTTP_TIMEOUT)
 
 
 def status_loop(db, base, auth, interval, tracker):
@@ -343,8 +399,7 @@ def command_loop(db, base, auth, interval):
             for doc in pending:
                 cmd = doc.to_dict() or {}
                 try:
-                    resp = post_override(session, base, auth, command_body(cmd))
-                    resp.raise_for_status()
+                    extra = apply_command(session, base, auth, cmd)
                 except CommandError as exc:
                     doc.reference.update({"status": "failed", "error": str(exc)})
                     log(f"command {doc.id} failed: {exc}")
@@ -353,7 +408,7 @@ def command_loop(db, base, auth, interval):
                     doc.reference.update({"status": "failed", "error": reason})
                     log(f"command {doc.id} failed: {reason}")
                 else:
-                    doc.reference.update({"status": "acked"})
+                    doc.reference.update({"status": "acked", **extra})
                     log(f"command {doc.id} acked: {cmd.get('type')}")
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"command loop error ({exc.__class__.__name__}: {exc})")
@@ -369,7 +424,9 @@ def main():
         config_interval = float(cfg("CONFIG_INTERVAL") or 60)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
     except ValueError:
-        sys.exit("STATUS_INTERVAL, CONFIG_INTERVAL and COMMAND_INTERVAL must be numbers.")
+        sys.exit(
+            "STATUS_INTERVAL, CONFIG_INTERVAL and COMMAND_INTERVAL must be numbers."
+        )
 
     try:
         db = init_firestore()
