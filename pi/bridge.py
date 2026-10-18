@@ -333,7 +333,11 @@ class StatusTracker:
             return None
         if not docs:
             return None
-        data = docs[0].to_dict() or {}
+        try:
+            data = docs[0].to_dict() or {}
+        except Exception as exc:
+            log(f"session lookup failed ({exc.__class__.__name__}: {exc})")
+            return None
         if not isinstance(data, dict):
             return None
         data["_id"] = docs[0].id
@@ -376,9 +380,14 @@ class StatusTracker:
             "wh": float(energy),
             "elapsed": int(elapsed),
         }
-        merged = _merge_session(
-            self._latest_session(), record, _vehicle_connected(data)
-        )
+        try:
+            merged = _merge_session(
+                self._latest_session(), record, _vehicle_connected(data)
+            )
+        except (TypeError, ValueError) as exc:
+            # A corrupt previous record must not cost us the current session.
+            log(f"session merge skipped ({exc.__class__.__name__}: {exc})")
+            merged = dict(record)
         session_id = merged.pop("_id", None)
         if session_id is None:
             session_id = str(int(merged["started_at"].timestamp()))
