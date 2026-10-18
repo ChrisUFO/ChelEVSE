@@ -12,10 +12,14 @@ export let auth = null;
 export let db = null;
 
 export let onAuthStateChanged;
-export let signInWithEmailAndPassword;
 export let signOut;
+export let getRedirectResult;
+export let GoogleAuthProvider;
+export let signInWithPopup;
+export let signInWithRedirect;
 
 export let doc;
+export let getDoc;
 export let collection;
 export let addDoc;
 export let serverTimestamp;
@@ -46,8 +50,16 @@ export async function initFirebase() {
     auth = authMod.getAuth(app);
     db = dbMod.getFirestore(app);
 
-    ({ onAuthStateChanged, signInWithEmailAndPassword, signOut } = authMod);
-    ({ doc, collection, addDoc, serverTimestamp, query, orderBy, limit, onSnapshot } = dbMod);
+    ({
+      onAuthStateChanged,
+      signOut,
+      getRedirectResult,
+      GoogleAuthProvider,
+      signInWithPopup,
+      signInWithRedirect,
+    } = authMod);
+    ({ doc, getDoc, collection, addDoc, serverTimestamp, query, orderBy, limit, onSnapshot } =
+      dbMod);
   } catch {
     throw tagged('sdk');
   }

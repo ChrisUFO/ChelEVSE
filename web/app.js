@@ -2,7 +2,14 @@
 // the auth lifecycle. Screen rendering lives in js/screens/.
 
 import { initFirebase } from './js/firebase.js';
-import { signInErrorMessage, signInWithEmail, signOutUser, subscribeAuth } from './js/auth.js';
+import {
+  authErrorMessage,
+  completeRedirect,
+  retryAccess,
+  signInWithGoogle,
+  signOutUser,
+  subscribeAuth,
+} from './js/auth.js';
 import { startStore, stopStore } from './js/store.js';
 import { $, initNetwork, setCached, setText } from './js/ui.js';
 import {
@@ -14,15 +21,65 @@ import {
   showStatusError,
 } from './js/screens/status.js';
 
+const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
+
+let activeUser = null;
+let currentScreen = 'booting';
+
+function showScreen(id) {
+  const changed = currentScreen !== id;
+  currentScreen = id;
+  for (const name of SCREENS) $(name).hidden = name !== id;
+  return changed;
+}
+
 function bootFail(title, body) {
   setText($('boot-title'), title);
   setText($('boot-body'), body);
-  $('boot-error').hidden = false;
+  showScreen('boot-error');
 }
 
-function enterApp() {
-  $('signin').hidden = true;
-  $('app').hidden = false;
+function setSignInBusy(busy) {
+  $('google-signin').disabled = busy;
+  setText($('google-signin-label'), busy ? 'Signing in…' : 'Sign in with Google');
+}
+
+function closeApp() {
+  stopStore();
+  leaveStatus();
+  activeUser = null;
+}
+
+function showSignedOut() {
+  closeApp();
+  setSignInBusy(false);
+  showScreen('signin');
+}
+
+function showNoAccess(user, reason) {
+  closeApp();
+  setSignInBusy(false);
+  const checkFailed = reason === 'error';
+  const account = user && (user.email || user.displayName);
+  setText($('noaccess-email'), account || 'Signed-in account');
+  setText($('noaccess-eyebrow'), checkFailed ? 'Connection problem' : 'Access restricted');
+  setText($('noaccess-title'), checkFailed ? "Couldn't check access" : "You're not on the list");
+  $('noaccess-glyph').setAttribute('href', checkFailed ? '#i-retry' : '#i-lock');
+  const retry = $('noaccess-retry');
+  retry.hidden = !checkFailed;
+  setText(
+    $('noaccess-reason'),
+    reason === 'error'
+      ? "We couldn't check your access. Check your connection and try again."
+      : 'Ask the owner to add your email to the charger, then sign in again.',
+  );
+  if (showScreen('noaccess')) $('noaccess-title').focus({ preventScroll: true });
+}
+
+function enterApp(user) {
+  activeUser = user;
+  setSignInBusy(false);
+  showScreen('app');
   startStore({
     onStatus: (snap) => {
       if (!snap) {
@@ -33,35 +90,43 @@ function enterApp() {
       showStatus(snap);
     },
     onCommands: showCommands,
+    onAccessDenied: () => {
+      if (activeUser) showNoAccess(activeUser, 'no-access');
+    },
   });
   enterStatus();
 }
 
-function leaveApp() {
-  $('app').hidden = true;
-  $('signin').hidden = false;
-  stopStore();
-  leaveStatus();
+async function handleGoogleSignIn() {
+  setText($('signin-error'), '');
+  setSignInBusy(true);
+  try {
+    await signInWithGoogle();
+  } catch (err) {
+    setSignInBusy(false);
+    setText($('signin-error'), authErrorMessage(err && err.code));
+    $('google-signin').focus();
+  }
+}
+
+async function handleRetryAccess() {
+  const btn = $('noaccess-retry');
+  btn.disabled = true;
+  setText($('noaccess-reason'), 'Checking access…');
+  await retryAccess();
+  btn.disabled = false;
+}
+
+function handleSignOut() {
+  setText($('signin-error'), '');
+  signOutUser();
 }
 
 function wireUi() {
-  $('signin-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const btn = $('signin-btn');
-    btn.disabled = true;
-    setText(btn, 'Signing in…');
-    setText($('signin-error'), '');
-    try {
-      await signInWithEmail($('email').value.trim(), $('pass').value);
-    } catch (err) {
-      setText($('signin-error'), signInErrorMessage(err && err.code));
-    } finally {
-      btn.disabled = false;
-      setText(btn, 'Sign in');
-    }
-  });
-
-  $('signout').addEventListener('click', signOutUser);
+  $('google-signin').addEventListener('click', handleGoogleSignIn);
+  $('noaccess-retry').addEventListener('click', handleRetryAccess);
+  $('noaccess-signout').addEventListener('click', handleSignOut);
+  $('signout').addEventListener('click', handleSignOut);
   initNetwork();
 }
 
@@ -82,9 +147,20 @@ async function main() {
     }
     return;
   }
+
   initStatus();
   wireUi();
-  subscribeAuth((user) => (user ? enterApp() : leaveApp()));
+
+  // The redirect fallback lands back here; surface a failure on the sign-in
+  // card, then let onAuthStateChanged emit the restored session.
+  const redirectError = await completeRedirect();
+  subscribeAuth({
+    onSignedOut: showSignedOut,
+    onGranted: enterApp,
+    onNoAccess: showNoAccess,
+    onAccessError: (user) => showNoAccess(user, 'error'),
+  });
+  if (redirectError) setText($('signin-error'), redirectError);
 }
 
 main();

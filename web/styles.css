@@ -52,6 +52,13 @@ button {
   outline-offset: 2px;
 }
 
+.icon-sprite {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
 /* State-reactive backdrop tint behind everything */
 .glow {
   position: fixed;
@@ -117,38 +124,146 @@ button {
   color: var(--muted);
   font-size: 14px;
 }
-.card label span {
-  display: block;
-  margin: 0 0 6px 2px;
-  font-size: 12px;
-  color: var(--muted);
+.auth-card {
+  gap: 12px;
 }
-.card input {
-  width: 100%;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 16px;
-}
-#signin-error {
+.auth-error {
   min-height: 18px;
   margin: 0;
   font-size: 13px;
   color: var(--err);
 }
-#signin-btn {
-  min-height: 48px;
-  margin-top: 2px;
+.fineprint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  text-align: center;
+}
+.google-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 50px;
+  margin-top: 4px;
+  padding: 0 16px;
+  border-radius: 12px;
+  background: var(--text);
+  color: #0b1220;
+  font-size: 15px;
+  font-weight: 650;
+  transition:
+    filter 0.15s ease,
+    transform 0.1s ease;
+}
+.google-btn:hover {
+  filter: brightness(0.94);
+}
+.google-btn:active {
+  transform: translateY(1px);
+}
+.google-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.google-btn svg {
+  flex: none;
+}
+
+/* ---------- boot ---------- */
+.booting {
+  align-items: center;
+  text-align: center;
+}
+.boot-brand {
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+}
+.boot-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.boot-line::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@keyframes breathe {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ---------- no access ---------- */
+.access-card {
+  gap: 10px;
+}
+.glyph {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--warn) 9%, transparent);
+  color: var(--warn);
+}
+.eyebrow {
+  margin: 4px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+.access-card h1 {
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+.access-card h1:focus {
+  outline: none;
+}
+.account {
+  margin: 0 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
   border-radius: 10px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.notice {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.access-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+.btn.solid {
+  border-color: transparent;
   background: var(--accent);
   color: #0b1220;
   font-weight: 700;
-  font-size: 15px;
-}
-#signin-btn:disabled {
-  opacity: 0.55;
 }
 
 /* ---------- header ---------- */
