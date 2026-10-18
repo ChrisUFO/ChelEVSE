@@ -3,12 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "description": "OpenEVSE -> Firebase bridge and PWA. Dev tooling only; the app itself has no build step.",
+  "type": "module",
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-chelevse \"node --test test/rules/*.test.js\"",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^3.0.4",
+    "firebase": "10.12.2",
     "prettier": "^3.3.3"
   }
 }
