@@ -29,31 +29,32 @@ let currentUser = null;
 let activeUid = null;
 let accessState = 'signed-out';
 
-function resolveAccess(user, gen) {
+async function resolveAccess(user, gen) {
   accessState = 'checking';
-  return getDoc(doc(db, 'users', user.uid))
-    .then((snap) => {
-      if (gen !== generation) return;
-      if (snap.exists() && snap.data().allowed === true) {
-        accessState = 'granted';
-        handlers.onGranted(user);
-      } else {
-        accessState = 'no-access';
-        handlers.onNoAccess(user, 'no-access');
-      }
-    })
-    .catch((err) => {
-      if (gen !== generation) return;
-      // The self-read is allowed, so a denial here means the account is not
-      // usable. Anything else is a network/backend problem worth retrying.
-      if (err && err.code === 'permission-denied') {
-        accessState = 'no-access';
-        handlers.onNoAccess(user, 'no-access');
-      } else {
-        accessState = 'error';
-        handlers.onAccessError(user);
-      }
-    });
+  let snap;
+  try {
+    snap = await getDoc(doc(db, 'users', user.uid));
+  } catch (err) {
+    if (gen !== generation) return;
+    // The self-read is allowed, so a denial here means the account is not
+    // usable. Anything else is a network/backend problem worth retrying.
+    if (err && err.code === 'permission-denied') {
+      accessState = 'no-access';
+      handlers.onNoAccess(user, 'no-access');
+    } else {
+      accessState = 'error';
+      handlers.onAccessError(user);
+    }
+    return;
+  }
+  if (gen !== generation) return;
+  if (snap.exists() && snap.data().allowed === true) {
+    accessState = 'granted';
+    handlers.onGranted(user);
+  } else {
+    accessState = 'no-access';
+    handlers.onNoAccess(user, 'no-access');
+  }
 }
 
 export function subscribeAuth(next) {

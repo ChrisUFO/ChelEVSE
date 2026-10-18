@@ -425,9 +425,13 @@
 
     <script>
       if ('serviceWorker' in navigator) {
+        // controllerchange also fires on the very first install (skipWaiting +
+        // clients.claim). Only an update — a controller existed beforehand —
+        // should reload the page.
+        const hadController = Boolean(navigator.serviceWorker.controller);
         let reloaded = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
-          if (reloaded) return;
+          if (!hadController || reloaded) return;
           reloaded = true;
           location.reload();
         });
