@@ -11,14 +11,19 @@ import {
   subscribeAuth,
 } from './js/auth.js';
 import { startStore, stopStore } from './js/store.js';
-import { $, initNetwork, initTabbar, setCached, setText } from './js/ui.js';
+import { $, initNetwork, initTabbar, routeFor, setCached, setText } from './js/ui.js';
 import {
+  blurStatus,
   enterStatus,
+  focusStatus,
   initStatus,
   leaveStatus,
   showCommands,
+  showConfig,
+  showSettings,
   showStatus,
   showStatusError,
+  showStatusSchedule,
 } from './js/screens/status.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
@@ -82,6 +87,13 @@ function showNoAccess(user, reason) {
   if (showScreen('noaccess')) $('noaccess-title').focus({ preventScroll: true });
 }
 
+// Tab activation: the status clock only runs while its panel is visible.
+function handleRoute(route) {
+  if (!activeUser) return;
+  if (route === 'status') focusStatus();
+  else blurStatus();
+}
+
 function enterApp(user) {
   activeUser = user;
   setSignInBusy(false);
@@ -96,11 +108,15 @@ function enterApp(user) {
       showStatus(snap);
     },
     onCommands: showCommands,
+    onSettings: showSettings,
+    onConfig: showConfig,
+    onSchedule: showStatusSchedule,
     onAccessDenied: () => {
       if (activeUser) showNoAccess(activeUser, 'no-access');
     },
   });
   enterStatus();
+  handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
 }
@@ -168,7 +184,7 @@ async function main() {
   }
 
   initStatus();
-  initTabbar();
+  initTabbar({ onRoute: handleRoute });
   wireUi();
 
   // The redirect fallback lands back here; surface a failure on the sign-in
