@@ -1,26 +1,37 @@
 # Private deployment config — never commit real values
 private/
 .env
+.env.*
 web/firebase-config.js
+# Defense-in-depth: stray Firebase service-account keys
+*service-account*.json
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
 
 # Node
 node_modules/
 
-# Firebase
+# Firebase CLI
 .firebase/
 .firebaserc
-*-debug.log
+firebase-export-*/
+*.log
 
-# OS / editor
-.DS_Store
-Thumbs.db
+# Editors / OS
 .idea/
 .vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
 
 # OpenCode planning artifact (never tracked)
 PLAN.md
