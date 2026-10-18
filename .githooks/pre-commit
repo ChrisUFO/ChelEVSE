@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Basic pre-commit: prettier --check on staged js/css/html/json/md files.
+# Gracefully skips when Node tooling isn't installed (e.g. on the Pi).
+if ! command -v npx >/dev/null 2>&1 || [ ! -d node_modules/prettier ]; then
+  echo "pre-commit: prettier not installed (run npm install once) - skipping format check"
+  exit 0
+fi
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.js' '*.css' '*.html' '*.json' '*.md')
+[ -z "$files" ] && exit 0
+if echo "$files" | xargs -r npx --no-install prettier --check; then
+  exit 0
+fi
+echo "pre-commit: formatting issues - run 'npm run format' and re-stage"
+exit 1

@@ -23,12 +23,12 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 ## Repository layout
 
-| Path | Purpose |
-|---|---|
-| `pi/` | Raspberry Pi bridge agent (Python) |
-| `web/` | PWA served by Firebase Hosting |
-| `firebase.json`, `firestore.rules` | Firebase project config + security rules |
-| `private.example/` | Committed template for deployment config |
+| Path                                 | Purpose                                                       |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `pi/`                                | Raspberry Pi bridge agent (Python)                            |
+| `web/`                               | PWA served by Firebase Hosting                                |
+| `firebase.json`, `firestore.rules`   | Firebase project config + security rules                      |
+| `private.example/`                   | Committed template for deployment config                      |
 | `private/`, `web/firebase-config.js` | Your real deployment values — **gitignored, never committed** |
 
 ## Security model
@@ -46,3 +46,10 @@ cp web/firebase-config.example.js web/firebase-config.js
 ```
 
 Setup guides for the bridge and the web app ship with their components (`pi/`, `web/`).
+
+## Development
+
+One-time: `npm install` (installs Prettier and points git at `.githooks/`). pre-commit
+blocks unformatted staged files; pre-push runs a full `prettier --check .`. Hooks no-op
+gracefully where Node isn't installed (e.g. on the Pi) — run `npm run format` before
+pushing from such a machine if you touched web/docs files.

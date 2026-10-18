@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Basic pre-push: full prettier check as a safety net for filtered/bypassed commits.
+if ! command -v npx >/dev/null 2>&1 || [ ! -d node_modules/prettier ]; then
+  echo "pre-push: prettier not installed (run npm install once) - skipping format check"
+  exit 0
+fi
+if ! npx --no-install prettier --check .; then
+  echo "pre-push: formatting issues - run 'npm run format' and commit"
+  exit 1
+fi

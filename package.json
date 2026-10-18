@@ -1,0 +1,14 @@
+{
+  "name": "chelevse",
+  "private": true,
+  "version": "0.1.0",
+  "description": "OpenEVSE -> Firebase bridge and PWA. Dev tooling only; the app itself has no build step.",
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
+  }
+}
