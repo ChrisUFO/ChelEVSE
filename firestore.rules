@@ -36,20 +36,62 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Charge schedule: the one client-writable doc — allowlisted users,
-    // shape-validated. The bridge reads it and enforces it on the charger.
+    // Charge schedule: the one client-writable doc — allowlisted users.
+    // The Rules language has no lambda/iteration, so a rule map is validated by
+    // a helper and each possible list index is checked explicitly (max 20).
+    function valid_schedule_rule(r) {
+      return r is map
+        && r.keys().hasOnly(['id', 'days', 'start', 'end', 'amps'])
+        && r.id is string
+        && r.id.size() >= 1
+        && r.id.size() <= 64
+        && r.days is list
+        && r.days.size() >= 1
+        && r.days.size() <= 7
+        && (r.days.size() < 1 || (r.days[0] is int && r.days[0] >= 0 && r.days[0] <= 6))
+        && (r.days.size() < 2 || (r.days[1] is int && r.days[1] >= 0 && r.days[1] <= 6))
+        && (r.days.size() < 3 || (r.days[2] is int && r.days[2] >= 0 && r.days[2] <= 6))
+        && (r.days.size() < 4 || (r.days[3] is int && r.days[3] >= 0 && r.days[3] <= 6))
+        && (r.days.size() < 5 || (r.days[4] is int && r.days[4] >= 0 && r.days[4] <= 6))
+        && (r.days.size() < 6 || (r.days[5] is int && r.days[5] >= 0 && r.days[5] <= 6))
+        && (r.days.size() < 7 || (r.days[6] is int && r.days[6] >= 0 && r.days[6] <= 6))
+        && r.start is string
+        && r.start.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && r.end is string
+        && r.end.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && r.start != r.end
+        && r.amps is number
+        && r.amps >= 6
+        && r.amps <= 48;
+    }
+
     match /schedule/{doc} {
       allow read: if allowed();
       allow write: if allowed()
+        && request.resource.data.keys().hasOnly(['enabled', 'rules'])
         && request.resource.data.enabled is bool
         && request.resource.data.rules is list
         && request.resource.data.rules.size() <= 20
-        && request.resource.data.rules.all(r => r is map
-              && r.days is list && r.days.size() >= 1
-              && r.days.all(d => d is int && d >= 0 && d <= 6)
-              && r.start is string && r.start.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
-              && r.end is string && r.end.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
-              && r.amps is number && r.amps >= 6 && r.amps <= 48);
+        && (request.resource.data.rules.size() < 1 || valid_schedule_rule(request.resource.data.rules[0]))
+        && (request.resource.data.rules.size() < 2 || valid_schedule_rule(request.resource.data.rules[1]))
+        && (request.resource.data.rules.size() < 3 || valid_schedule_rule(request.resource.data.rules[2]))
+        && (request.resource.data.rules.size() < 4 || valid_schedule_rule(request.resource.data.rules[3]))
+        && (request.resource.data.rules.size() < 5 || valid_schedule_rule(request.resource.data.rules[4]))
+        && (request.resource.data.rules.size() < 6 || valid_schedule_rule(request.resource.data.rules[5]))
+        && (request.resource.data.rules.size() < 7 || valid_schedule_rule(request.resource.data.rules[6]))
+        && (request.resource.data.rules.size() < 8 || valid_schedule_rule(request.resource.data.rules[7]))
+        && (request.resource.data.rules.size() < 9 || valid_schedule_rule(request.resource.data.rules[8]))
+        && (request.resource.data.rules.size() < 10 || valid_schedule_rule(request.resource.data.rules[9]))
+        && (request.resource.data.rules.size() < 11 || valid_schedule_rule(request.resource.data.rules[10]))
+        && (request.resource.data.rules.size() < 12 || valid_schedule_rule(request.resource.data.rules[11]))
+        && (request.resource.data.rules.size() < 13 || valid_schedule_rule(request.resource.data.rules[12]))
+        && (request.resource.data.rules.size() < 14 || valid_schedule_rule(request.resource.data.rules[13]))
+        && (request.resource.data.rules.size() < 15 || valid_schedule_rule(request.resource.data.rules[14]))
+        && (request.resource.data.rules.size() < 16 || valid_schedule_rule(request.resource.data.rules[15]))
+        && (request.resource.data.rules.size() < 17 || valid_schedule_rule(request.resource.data.rules[16]))
+        && (request.resource.data.rules.size() < 18 || valid_schedule_rule(request.resource.data.rules[17]))
+        && (request.resource.data.rules.size() < 19 || valid_schedule_rule(request.resource.data.rules[18]))
+        && (request.resource.data.rules.size() < 20 || valid_schedule_rule(request.resource.data.rules[19]));
     }
 
     // App settings: client-writable by allowlisted users, shape-validated.
