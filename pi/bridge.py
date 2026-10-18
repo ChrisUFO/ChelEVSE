@@ -8,6 +8,7 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
 Config: env vars with fallback to <repo root>/private/bridge.env.
 """
 
+import math
 import os
 import signal
 import sys
@@ -87,6 +88,31 @@ def init_firestore():
     except ValueError:
         firebase_admin.initialize_app(credentials.Certificate(str(key_file)))
     return firestore.client()
+
+
+FIRESTORE_INT_MIN = -(2**63)
+FIRESTORE_INT_MAX = 2**63 - 1
+
+
+def firestore_safe(value):
+    """Coerce JSON values Firestore cannot store: uint64 sentinels, NaN, inf.
+
+    The charger reports absent numeric settings as 18446744073709551615
+    (2**64 - 1), outside Firestore's signed 64-bit integer range.
+    """
+    if isinstance(value, dict):
+        return {key: firestore_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [firestore_safe(item) for item in value]
+    if isinstance(value, bool):  # bool subclasses int; keep it a bool
+        return value
+    if isinstance(value, int):
+        if FIRESTORE_INT_MIN <= value <= FIRESTORE_INT_MAX:
+            return value
+        return float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 class CommandError(ValueError):
@@ -379,10 +405,13 @@ def config_loop(db, base, auth, interval):
             except (requests.RequestException, ValueError) as exc:
                 log(f"config sync failed ({exc.__class__.__name__})")
             else:
-                config_doc.set({**data, "updated_at": firestore.SERVER_TIMESTAMP})
+                safe_data = firestore_safe(data)
+                config_doc.set({**safe_data, "updated_at": firestore.SERVER_TIMESTAMP})
                 # Only log when the charger config actually changed: this loop
                 # runs every minute and would otherwise spam the journal.
                 if data != last_synced:
+                    if safe_data != data:
+                        log("config: coerced values Firestore cannot store")
                     log("config synced")
                     last_synced = data
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
