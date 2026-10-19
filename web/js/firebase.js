@@ -10,6 +10,9 @@ const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 
 export let auth = null;
 export let db = null;
+// Public Web Push key from the local config module; undefined when the
+// deployment has not set one yet (the opt-in shows a clear state).
+export let vapidKey;
 
 export let onAuthStateChanged;
 export let signOut;
@@ -41,7 +44,8 @@ function tagged(kind) {
 export async function initFirebase() {
   let firebaseConfig;
   try {
-    ({ firebaseConfig } = await import('../firebase-config.js'));
+    // vapidKey is optional: older config files simply leave it undefined.
+    ({ firebaseConfig, vapidKey } = await import('../firebase-config.js'));
   } catch {
     throw tagged('config');
   }
@@ -82,4 +86,10 @@ export async function initFirebase() {
   } catch {
     throw tagged('sdk');
   }
+}
+
+// The messaging SDK is only needed by the notification opt-in, so it loads on
+// first use rather than on every boot. Same SDK version as the rest of the app.
+export function loadMessaging() {
+  return import(`${SDK}/firebase-messaging.js`);
 }

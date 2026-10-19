@@ -593,6 +593,30 @@
             </form>
           </section>
 
+          <section
+            class="card-block notify-card"
+            id="notify-card"
+            style="--i: 2"
+            data-state="checking"
+            aria-labelledby="notify-heading"
+          >
+            <div class="block-head">
+              <h2 id="notify-heading">Notifications</h2>
+              <p class="block-sub">Charging started, stopped, and charger-offline alerts.</p>
+            </div>
+            <div class="notify-copy" role="status" aria-live="polite">
+              <p class="notify-title" id="notify-status">Checking notifications…</p>
+              <p class="block-sub" id="notify-detail">Working out what this browser supports.</p>
+            </div>
+            <p class="field-error" id="notify-error" role="alert" hidden></p>
+            <div class="notify-actions" id="notify-actions" hidden>
+              <button id="notify-enable" class="btn solid" type="button" hidden>
+                Enable notifications
+              </button>
+              <button id="notify-retry" class="btn" type="button" hidden>Try again</button>
+            </div>
+          </section>
+
           <div class="section-title-row config-title-row" style="--i: 3">
             <h2>Charger</h2>
             <span class="section-note" id="config-updated"></span>

@@ -97,6 +97,15 @@ export function saveSettings({ rate, currency }) {
   return setDoc(doc(db, 'settings', 'current'), { rate, currency });
 }
 
+// Own-token-only, per firestore.rules: the doc id is the FCM token and the uid
+// must be the signed-in account.
+export function saveFcmToken(token, uid) {
+  return setDoc(doc(db, 'fcmTokens', token), {
+    uid,
+    created_at: serverTimestamp(),
+  });
+}
+
 // Exact schedule shape: keys are fixed so no draft-only fields ever reach rules.
 export function saveSchedule(schedule) {
   return setDoc(doc(db, 'schedule', 'current'), {

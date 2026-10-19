@@ -10,3 +10,9 @@ export const firebaseConfig = {
   messagingSenderId: '1234567890',
   appId: '1:1234567890:web:abcdef',
 };
+
+// Web Push certificate (VAPID) public key — Firebase Console → Project
+// settings → Cloud Messaging → Web Push certificates. Required for the
+// notification opt-in. This is a public key, not a secret. Leave it as the
+// placeholder to keep notifications disabled with a clear explanation.
+export const vapidKey = '<public Web Push key>';

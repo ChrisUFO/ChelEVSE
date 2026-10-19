@@ -28,6 +28,12 @@ import {
 import { initConfig, resetConfig, showConfigData, showConfigError } from './js/screens/config.js';
 import { initSettings, resetSettings, showSettingsData } from './js/screens/settings.js';
 import {
+  activateNotifications,
+  enterNotifications,
+  initNotifications,
+  resetNotifications,
+} from './js/screens/notifications.js';
+import {
   activateHistory,
   enterHistory,
   initHistory,
@@ -79,6 +85,7 @@ function closeApp() {
   resetSchedule();
   resetConfig();
   resetSettings();
+  resetNotifications();
   activeUser = null;
 }
 
@@ -117,6 +124,7 @@ function handleRoute(route) {
   else blurStatus();
   if (route === 'history') activateHistory();
   if (route === 'schedule') activateSchedule();
+  if (route === 'config') activateNotifications();
 }
 
 function enterApp(user) {
@@ -158,6 +166,7 @@ function enterApp(user) {
   enterStatus();
   enterHistory();
   enterSchedule();
+  enterNotifications();
   handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
@@ -230,6 +239,7 @@ async function main() {
   initSchedule();
   initConfig();
   initSettings();
+  initNotifications();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 
