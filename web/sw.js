@@ -9,7 +9,10 @@
 // shows the in-app toast itself; otherwise the system notification is shown.
 // (The payload reduction mirrors js/push.js, which this classic worker cannot
 // import; keep the two in step.)
-const CACHE = 'chelevse-v19';
+//
+// A rotated push subscription (`pushsubscriptionchange`) is handed to the open
+// pages: only the page can re-acquire an FCM token and re-save it.
+const CACHE = 'chelevse-v20';
 const SHELL = [
   './',
   './index.html',
@@ -180,6 +183,26 @@ self.addEventListener('push', (event) => {
         // show and nothing to retry.
       }
     })(),
+  );
+});
+
+// The browser rotated or invalidated the push subscription (long idle, storage
+// pressure, a VAPID key change). The token saved at registration no longer
+// delivers, and only the page holds the FCM SDK, so ask every open window to
+// re-acquire and re-save it. With no page open there is nothing to do here: the
+// next app load re-runs the same registration.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
+      for (const client of windows) {
+        try {
+          client.postMessage({ type: 'chelevse-resubscribe' });
+        } catch {
+          // A window discarded mid-match: the other windows, or the next load,
+          // still recover the registration.
+        }
+      }
+    }),
   );
 });
 

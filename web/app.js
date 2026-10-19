@@ -34,6 +34,7 @@ import {
   initNotifications,
   releaseNotifications,
   resetNotifications,
+  resubscribeNotifications,
 } from './js/screens/notifications.js';
 import { accessDenialRelease } from './js/notifications.js';
 import {
@@ -113,12 +114,22 @@ function showPushToast(notification) {
 }
 
 // The service worker posts one message per push when this page is visible. The
-// payload is the same shape as a raw FCM message (plus the dedupe id).
+// payload is the same shape as a raw FCM message (plus the dedupe id). It also
+// forwards `pushsubscriptionchange` (`chelevse-resubscribe`) after the browser
+// rotated the subscription, so this page re-acquires and re-saves its token
+// instead of waiting for the next app open.
 function listenForPush() {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
   navigator.serviceWorker.addEventListener('message', (event) => {
     const data = event && event.data;
-    if (!data || data.type !== 'chelevse-push') return;
+    if (!data) return;
+    if (data.type === 'chelevse-resubscribe') {
+      // Never prompts and no-ops without the grant; the failure is contained to
+      // the notification card, exactly as a manual refresh would be.
+      resubscribeNotifications();
+      return;
+    }
+    if (data.type !== 'chelevse-push') return;
     showPushToast(notificationFromPush(data));
   });
 }
