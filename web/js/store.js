@@ -109,6 +109,9 @@ export function historyBounds(ids) {
 }
 
 // History is a one-shot read: daily docs use their date as the document id.
+// The SDK resolves an offline read with cached docs (often empty) instead of
+// rejecting, so `fromCache` travels with the result: the screen must not read a
+// cached empty range as "no history".
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
     query(
@@ -117,7 +120,10 @@ export async function fetchHistory(startId, endId) {
       where(documentId(), '<=', endId),
     ),
   );
-  return snap.docs.map((d) => ({ id: d.id, kwh: d.data().kwh }));
+  return {
+    docs: snap.docs.map((d) => ({ id: d.id, kwh: d.data().kwh })),
+    fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
+  };
 }
 
 // The sessions list is the 20 most recent, newest first.
@@ -132,5 +138,8 @@ export async function fetchSessions() {
   const snap = await getDocs(
     query(collection(db, 'sessions'), orderBy(field, direction), limit(max)),
   );
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return {
+    docs: snap.docs.map((d) => ({ id: d.id, ...d.data() })),
+    fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
+  };
 }

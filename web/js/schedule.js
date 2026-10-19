@@ -33,13 +33,20 @@ function normalizeRule(raw) {
 }
 
 // Incoming documents may predate this editor; normalize to the editable shape
-// while keeping invalid values visible so validation can flag them.
+// while keeping invalid values visible so validation can flag them. The bridge
+// skips a document whose `enabled` is not a boolean or whose `rules` is not a
+// list and leaves the firmware untouched, so those containers are flagged
+// rather than silently repaired into a saveable schedule.
 export function normalizeSchedule(data) {
   if (!data || typeof data !== 'object') return defaultSchedule();
-  return {
+  const out = {
     enabled: data.enabled === true,
     rules: Array.isArray(data.rules) ? data.rules.map(normalizeRule) : [],
   };
+  if (data.malformed === true || typeof data.enabled !== 'boolean' || !Array.isArray(data.rules)) {
+    out.malformed = true;
+  }
+  return out;
 }
 
 function validateRule(rule) {
@@ -87,7 +94,10 @@ export function validateSchedule(draft) {
     };
   }
   if (typeof draft.enabled !== 'boolean') errors.enabled = 'Enabled must be true or false.';
-  if (!Array.isArray(draft.rules)) {
+  if (draft.malformed === true) {
+    errors.rules =
+      'The stored schedule has an unsupported shape — edit it to replace the stored schedule.';
+  } else if (!Array.isArray(draft.rules)) {
     errors.rules = 'Rules must be a list.';
   } else if (draft.rules.length > MAX_RULES) {
     errors.rules = `A schedule can hold at most ${MAX_RULES} windows.`;
@@ -127,7 +137,9 @@ export function reconcileAfterSave({ confirmed, payload, pendingRemote, ok }) {
 }
 
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
-// that arrive after a successful save. Day order is not meaningful.
+// that arrive after a successful save. Day order is not meaningful. The
+// malformed flag is part of the key: clearing it by editing is a real change
+// (an explicit replacement of the stored shape).
 export function scheduleKey(schedule) {
   const rules = schedule && Array.isArray(schedule.rules) ? schedule.rules : [];
   return JSON.stringify({
@@ -139,5 +151,21 @@ export function scheduleKey(schedule) {
       end: rule && rule.end,
       amps: rule && rule.amps,
     })),
+    malformed: Boolean(schedule && schedule.malformed === true),
   });
+}
+
+// A server snapshot arrived while the user has unsaved edits. The confirmed
+// baseline always tracks server truth (the live banner and rollback read it),
+// the draft is never overwritten, and the overwrite notice marks a real remote
+// change. If the remote copy happens to match the draft, nothing is unsaved.
+export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
+  const incomingKey = scheduleKey(incoming);
+  const changed = incomingKey !== scheduleKey(confirmed);
+  const dirty = scheduleKey(draft) !== incomingKey;
+  return {
+    confirmed: incoming,
+    dirty,
+    remoteNotice: changed && dirty,
+  };
 }

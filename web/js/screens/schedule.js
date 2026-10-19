@@ -13,6 +13,7 @@ import {
   defaultSchedule,
   normalizeSchedule,
   reconcileAfterSave,
+  reconcileDirtyRemote,
   scheduleKey,
   scheduleSaveValid,
   validateSchedule,
@@ -53,6 +54,9 @@ function clone(schedule) {
 
 function markDirty() {
   saveError = '';
+  // The load already showed the unsupported-shape warning; the first edit is
+  // the user explicitly replacing the stored document with a well-formed one.
+  if (draft.malformed) delete draft.malformed;
   dirty = scheduleKey(draft) !== scheduleKey(confirmed);
   if (!dirty) {
     // A remote change queued while we were editing becomes the truth once the
@@ -436,14 +440,11 @@ export function showSchedule(data) {
     return;
   }
   if (dirty) {
-    if (scheduleKey(incoming) === scheduleKey(confirmed)) {
-      // The server is still on the snapshot we based the draft on.
-      pendingRemote = null;
-      remoteNotice = false;
-    } else {
-      pendingRemote = incoming;
-      remoteNotice = true;
-    }
+    const result = reconcileDirtyRemote({ confirmed, draft, incoming });
+    confirmed = result.confirmed;
+    dirty = result.dirty;
+    remoteNotice = result.remoteNotice;
+    pendingRemote = null;
     validateAndPaint();
     return;
   }

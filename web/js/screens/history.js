@@ -10,6 +10,7 @@ import {
   chartIndexAt,
   dayId,
   dayLabel,
+  historyReadState,
   historySeries,
   lastDayIds,
   maxSeries,
@@ -37,6 +38,8 @@ let todayId = null;
 let sessions = [];
 let historyState = 'idle';
 let sessionsState = 'idle';
+let historyCached = false;
+let sessionsCached = false;
 let barEls = [];
 let generation = 0;
 let scrubbing = false;
@@ -160,7 +163,7 @@ function paintSelection(index) {
   const point = series[x];
   selectedId = point.id;
   const cost = seriesCost(point.kwh);
-  setText($('chart-day'), `${point.id === todayId ? 'Today · ' : ''}${point.label}`);
+  setText($('chart-day'), `${point.id === dayId(new Date()) ? 'Today · ' : ''}${point.label}`);
   setText($('chart-kwh'), fmtK(point.kwh));
   $('chart-cost').hidden = !cost;
   setText($('chart-cost'), cost || '');
@@ -190,6 +193,18 @@ function renderHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     showChartEmpty("Couldn't load daily energy.", 'Check your connection and refresh.');
+    return;
+  }
+  if (historyState === 'offline' && !series.length) {
+    // An offline one-shot read resolves from an empty cache: that is not
+    // evidence of zero charging, so never paint the "no energy" state here.
+    setText($('history-total'), '—');
+    $('history-cost-cell').hidden = true;
+    $('history-summary').classList.add('solo');
+    showChartEmpty(
+      "You're offline — history isn't available.",
+      'Reconnect, then tap Refresh to load the last 30 days.',
+    );
     return;
   }
   if (!series.length) {
@@ -274,6 +289,12 @@ function renderSessions() {
     setText(state, "Couldn't load recent sessions. Check your connection and refresh.");
     return;
   }
+  if (sessionsState === 'offline' && !sessions.length) {
+    state.hidden = false;
+    state.className = 'section-state err';
+    setText(state, "You're offline — sessions aren't available.");
+    return;
+  }
   if (!sessions.length) {
     state.hidden = false;
     state.className = 'section-state';
@@ -324,17 +345,44 @@ async function loadAll() {
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
 
+  historyCached = false;
+  sessionsCached = false;
   if (hist.status === 'fulfilled') {
-    series = historySeries(ids, hist.value);
-    historyState = 'ready';
-    if (!series.some((point) => point.id === selectedId)) selectedId = todayId;
+    const read = historyReadState(hist.value);
+    if (read === 'offline') {
+      if (!series.length) {
+        series = [];
+        historyState = 'offline';
+      } else {
+        // Keep the last rendered range visible; the banner marks it stale.
+        historyState = 'ready';
+        historyCached = true;
+      }
+    } else {
+      series = historySeries(ids, hist.value.docs);
+      historyState = 'ready';
+      historyCached = read === 'cached';
+      if (!series.some((point) => point.id === selectedId)) selectedId = todayId;
+    }
   } else if (!series.length) {
     historyState = 'error';
   }
 
   if (sess.status === 'fulfilled') {
-    sessions = sess.value;
-    sessionsState = 'ready';
+    const read = historyReadState(sess.value);
+    if (read === 'offline') {
+      if (!sessions.length) {
+        sessions = [];
+        sessionsState = 'offline';
+      } else {
+        sessionsState = 'ready';
+        sessionsCached = true;
+      }
+    } else {
+      sessions = sess.value.docs;
+      sessionsState = 'ready';
+      sessionsCached = read === 'cached';
+    }
   } else if (!sessions.length) {
     sessionsState = 'error';
   }
@@ -344,12 +392,20 @@ async function loadAll() {
   renderHistory();
   renderSessions();
 
+  const offline =
+    (hist.status === 'fulfilled' && historyState === 'offline') ||
+    (sess.status === 'fulfilled' && sessionsState === 'offline');
+  const cached = historyCached || sessionsCached;
   if (hist.status === 'rejected' && sess.status === 'rejected') {
     setFeedback("Couldn't refresh — check your connection.", 'err');
   } else if (hist.status === 'rejected') {
     setFeedback("Daily energy couldn't be refreshed.", 'err');
   } else if (sess.status === 'rejected') {
     setFeedback("Recent sessions couldn't be refreshed.", 'err');
+  } else if (cached) {
+    setFeedback('Showing cached data — reconnect to refresh.', 'warn');
+  } else if (offline) {
+    setFeedback("You're offline — history couldn't refresh.", 'err');
   } else {
     const stamp = new Date().toLocaleTimeString('en-GB', {
       hour: '2-digit',
@@ -417,6 +473,9 @@ export function enterHistory() {
 
 export function activateHistory() {
   if (!active) return;
+  // A tab left open across local midnight would keep yesterday's 30-day window
+  // and label it "Today"; reload once when the local date has changed.
+  if (loaded && todayId !== dayId(new Date())) loaded = false;
   if (!loaded && !loading) loadAll();
 }
 
@@ -449,6 +508,8 @@ export function resetHistory() {
   sessions = [];
   historyState = 'idle';
   sessionsState = 'idle';
+  historyCached = false;
+  sessionsCached = false;
   barEls = [];
   scrubbing = false;
   scrubPointer = null;

@@ -10,6 +10,7 @@ import {
   defaultSchedule,
   normalizeSchedule,
   reconcileAfterSave,
+  reconcileDirtyRemote,
   scheduleKey,
   scheduleSaveValid,
   validateSchedule,
@@ -128,9 +129,13 @@ test('validateSchedule rejects empty ids, non-boolean enabled, and non-list rule
 
 test('normalizeSchedule keeps malformed server values visible for validation', () => {
   assert.deepEqual(normalizeSchedule(null), { enabled: false, rules: [] });
+  // The bridge requires a boolean `enabled` and a list `rules`; anything else
+  // is a malformed document it leaves untouched, so flag it instead of
+  // presenting a silently repaired, saveable schedule.
   assert.deepEqual(normalizeSchedule({ enabled: 'true', rules: [] }), {
     enabled: false,
     rules: [],
+    malformed: true,
   });
   // The bridge drops a whole rule for these values; repairing them here would
   // let a later save silently activate a window the charger is ignoring.
@@ -159,6 +164,30 @@ test('normalizeSchedule keeps malformed server values visible for validation', (
     { id: '', days: [], start: '', end: '', amps: 0 },
     { id: '', days: [], start: '', end: '', amps: 0 },
   ]);
+});
+
+test('normalizeSchedule flags malformed containers instead of repairing them', () => {
+  for (const data of [
+    { enabled: true, rules: {} },
+    { enabled: true, rules: 'nope' },
+    { enabled: false },
+    { enabled: 'yes', rules: [] },
+    { rules: [] },
+  ]) {
+    const normalized = normalizeSchedule(data);
+    assert.equal(normalized.malformed, true, JSON.stringify(data));
+    assert.deepEqual(normalized.rules, []);
+    // Validation and save eligibility surface the unsupported shape.
+    const result = validateSchedule(normalized);
+    assert.equal(result.valid, false);
+    assert.match(result.errors.rules, /unsupported shape/);
+    assert.equal(scheduleSaveValid(normalized, result), false);
+  }
+  // The flag survives a re-normalization (clone) so the screen keeps showing it.
+  const flagged = normalizeSchedule({ enabled: true, rules: {} });
+  assert.equal(normalizeSchedule(flagged).malformed, true);
+  // A well-formed document carries no flag.
+  assert.deepEqual(normalizeSchedule(schedule()), schedule());
 });
 
 test('scheduleSaveValid lets a disable through invalid rules but not container errors', () => {
@@ -254,4 +283,28 @@ test('scheduleKey ignores day order but notices any real change', () => {
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ start: '23:00' })] })));
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ amps: 16 })] })));
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ id: 'other' })] })));
+  // Clearing a malformed-container flag is a real change: it is the user
+  // explicitly replacing the stored shape.
+  assert.notEqual(scheduleKey(schedule()), scheduleKey({ ...schedule(), malformed: true }));
+});
+
+test('reconcileDirtyRemote tracks server truth without touching the draft', () => {
+  const draft = schedule({ rules: [rule({ amps: 40 })] });
+  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const result = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: remote });
+  assert.equal(scheduleKey(result.confirmed), scheduleKey(remote));
+  assert.equal(result.dirty, true);
+  assert.equal(result.remoteNotice, true);
+  // The draft object itself is untouched (the editor owns it).
+  assert.equal(draft.rules[0].amps, 40);
+
+  // The server is still on the snapshot the draft was based on: no notice.
+  const same = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: schedule() });
+  assert.equal(same.dirty, true);
+  assert.equal(same.remoteNotice, false);
+
+  // The remote change matches the draft exactly: nothing is unsaved anymore.
+  const matches = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: draft });
+  assert.equal(matches.dirty, false);
+  assert.equal(matches.remoteNotice, false);
 });

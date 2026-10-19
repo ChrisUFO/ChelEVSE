@@ -66,3 +66,14 @@ export function sumSeries(series) {
 export function maxSeries(series) {
   return series.reduce((max, point) => Math.max(max, point.kwh || 0), 0);
 }
+
+// One-shot reads resolve from the local cache when the SDK is offline. An empty
+// cached range is not evidence that nothing was recorded, so classify the read:
+// 'fresh' / 'cached' (has data), 'empty' (server said none), or 'offline'
+// (cached and empty — the server was never reached).
+export function historyReadState(result) {
+  const count = result && Array.isArray(result.docs) ? result.docs.length : 0;
+  const cached = Boolean(result && result.fromCache);
+  if (count > 0) return cached ? 'cached' : 'fresh';
+  return cached ? 'offline' : 'empty';
+}

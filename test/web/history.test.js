@@ -8,6 +8,7 @@ import {
   chartIndexAt,
   dayId,
   dayLabel,
+  historyReadState,
   historySeries,
   lastDayIds,
   maxSeries,
@@ -134,4 +135,21 @@ test('sumSeries and maxSeries ignore malformed points', () => {
   assert.equal(sumSeries([{ kwh: 1.5 }, { kwh: Number.NaN }]), 1.5);
   assert.equal(maxSeries([]), 0);
   assert.equal(maxSeries([{ kwh: 1.5 }, { kwh: 9 }, { kwh: null }]), 9);
+});
+
+test('historyReadState separates an offline cache miss from an empty range', () => {
+  // Offline one-shot reads resolve from the cache: empty + fromCache is not
+  // "no energy recorded", it is "the server was never reached".
+  assert.equal(historyReadState({ docs: [], fromCache: true }), 'offline');
+  assert.equal(historyReadState({ docs: [], fromCache: false }), 'empty');
+  assert.equal(
+    historyReadState({ docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: true }),
+    'cached',
+  );
+  assert.equal(
+    historyReadState({ docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false }),
+    'fresh',
+  );
+  assert.equal(historyReadState(null), 'empty');
+  assert.equal(historyReadState({}), 'empty');
 });

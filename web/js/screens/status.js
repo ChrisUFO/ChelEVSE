@@ -8,6 +8,7 @@ import {
   fmtCost,
   fmtK,
   formatElapsed,
+  heldElapsed,
   numOrDash,
   relTime,
   stateFor,
@@ -35,6 +36,8 @@ let holdAmps = 32;
 let ticker = null;
 let resultTimer = null;
 let shownResultId = null;
+// Seconds frozen when a stop command is sent; cleared by the next snapshot.
+let clockHold = null;
 
 function ageMs() {
   const ts = status && status.updated_at;
@@ -54,9 +57,11 @@ function renderFreshness() {
 
 // The snapshot carries elapsed seconds. displayElapsed interpolates from the
 // document's own write time, so schedule-boundary merges that do not advance
-// elapsed cannot rewind the clock between the 10 s status writes.
+// elapsed cannot rewind the clock between the 10 s status writes. A stop
+// command freezes the displayed value until the next snapshot reports the new
+// state, so the clock cannot overshoot and then snap back.
 function renderElapsed() {
-  setText($('elapsed'), formatElapsed(displayElapsed(status, Date.now())));
+  setText($('elapsed'), formatElapsed(heldElapsed(clockHold, status, Date.now())));
 }
 
 function renderCost() {
@@ -181,6 +186,9 @@ async function send(payload) {
     await postCommand(payload);
   } catch {
     setBusy(false);
+    // The stop never left this device, so let the clock interpolate again.
+    clockHold = null;
+    renderElapsed();
     const fb = $('feedback');
     fb.className = 'feedback err';
     setText(fb, 'Could not send — check your connection and try again.');
@@ -225,7 +233,14 @@ function stopTicker() {
 // ---------- screen lifecycle ----------
 
 export function initStatus() {
-  $('pause').addEventListener('click', () => send({ type: 'pause' }));
+  $('pause').addEventListener('click', () => {
+    // Hold the clock where it is on screen: the last snapshot still says
+    // "charging" until the bridge reports the new state, and extrapolating past
+    // it would overshoot before snapping back.
+    clockHold = displayElapsed(status, Date.now());
+    renderElapsed();
+    send({ type: 'pause' });
+  });
   $('resume').addEventListener('click', () => send({ type: 'resume' }));
   $('hold').addEventListener('click', () => setHoldOpen(!holdOpen));
   $('apply').addEventListener('click', () =>
@@ -267,6 +282,7 @@ export function leaveStatus() {
   holdOpen = false;
   holdAmps = 32;
   shownResultId = null;
+  clockHold = null;
   setBusy(false);
   const fb = $('feedback');
   fb.className = 'feedback';
@@ -287,11 +303,14 @@ export function leaveStatus() {
 // ---------- data callbacks ----------
 
 export function showStatus(snap) {
+  // A new snapshot is the new truth: release any stop-time hold.
+  clockHold = null;
   status = snap && snap.exists() ? snap.data() : null;
   renderStatus();
 }
 
 export function showStatusError() {
+  clockHold = null;
   status = null;
   renderStatus();
 }

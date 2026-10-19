@@ -80,6 +80,14 @@ export function displayElapsed(data, nowMs = Date.now()) {
   return Math.max(0, raw + (live ? Math.max(0, (nowMs - anchor) / 1000) : 0));
 }
 
+// Session-clock value to render. `held` is the value frozen when a stop command
+// was sent: the last snapshot still reports charging until the bridge's next
+// write, so interpolating past it would overshoot and then snap back. The
+// caller clears the hold when a new snapshot arrives and the clock follows it.
+export function heldElapsed(held, data, nowMs = Date.now()) {
+  return held == null ? displayElapsed(data, nowMs) : held;
+}
+
 // Session duration in h:mm (the bridge stores seconds).
 export function formatDuration(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';

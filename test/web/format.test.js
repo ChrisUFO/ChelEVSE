@@ -8,6 +8,7 @@ import {
   fmtMoney,
   formatDuration,
   formatElapsed,
+  heldElapsed,
   numOrDash,
   relTime,
   stateFor,
@@ -106,6 +107,26 @@ test('displayElapsed interpolates from the document write time', () => {
   assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 61_000), 100);
   assert.equal(displayElapsed(charging(100, writtenAt, { state_label: 'ready' }), writtenAt), 100);
   assert.equal(displayElapsed(charging(100, writtenAt, { charger_online: false }), writtenAt), 100);
+});
+
+test('heldElapsed freezes the clock until a snapshot releases it', () => {
+  const writtenAt = 1_000_000;
+  const data = {
+    elapsed: 3725,
+    updated_at: { toMillis: () => writtenAt },
+    state_label: 'charging',
+    charger_online: true,
+  };
+  // Stop pressed at writtenAt + 5 s: the last snapshot still claims charging,
+  // so the frozen value must win over the growing interpolation.
+  const held = heldElapsed(null, data, writtenAt + 5000);
+  assert.equal(held, 3730);
+  assert.equal(heldElapsed(held, data, writtenAt + 9000), 3730);
+  // The next snapshot releases the hold; the clock follows its raw elapsed.
+  const paused = { ...data, elapsed: 3732, state_label: 'ready' };
+  assert.equal(heldElapsed(null, paused, writtenAt + 12_000), 3732);
+  // Nothing held and no valid status still renders the em dash.
+  assert.equal(heldElapsed(null, null, writtenAt), null);
 });
 
 test('displayElapsed rejects every non-numeric elapsed shape', () => {
