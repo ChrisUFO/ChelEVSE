@@ -8,7 +8,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 
 const PROJECT_ID = 'demo-chelevse';
 const RULES = readFileSync('firestore.rules', 'utf8');
@@ -24,6 +24,11 @@ before(async () => {
   await env.withSecurityRulesDisabled(async (context) => {
     const db = context.firestore();
     await setDoc(doc(db, 'users/u1'), { allowed: true, email: 'u1@example.com' });
+    await setDoc(doc(db, 'fcmTokens/tok-update'), { uid: 'u1' });
+    await setDoc(doc(db, 'fcmTokens/tok-foreign'), { uid: 'u2' });
+    await setDoc(doc(db, 'fcmTokens/tok-del'), { uid: 'u1' });
+    await setDoc(doc(db, 'fcmTokens/tok-del-foreign'), { uid: 'u2' });
+    await setDoc(doc(db, 'fcmTokens/tok-read'), { uid: 'u1' });
   });
 });
 
@@ -157,4 +162,34 @@ test('settings without currency are rejected', async () => {
   await assertFails(
     setDoc(doc(allowlisted().firestore(), 'settings', 'missing-currency'), { rate: 0.31 }),
   );
+});
+
+test('allowlisted user can register their own fcm token', async () => {
+  await assertSucceeds(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-own'), { uid: 'u1' }),
+  );
+});
+
+test('an fcm token cannot be registered for another uid', async () => {
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-other'), { uid: 'u2' }),
+  );
+});
+
+test('an fcm token can be updated by its owner only', async () => {
+  await assertSucceeds(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-update'), { uid: 'u1' }),
+  );
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-foreign'), { uid: 'u1' }),
+  );
+});
+
+test('an fcm token can be deleted by its owner only', async () => {
+  await assertSucceeds(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-del')));
+  await assertFails(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-del-foreign')));
+});
+
+test('fcm tokens cannot be read by clients', async () => {
+  await assertFails(getDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-read')));
 });
