@@ -1818,6 +1818,175 @@ input[aria-invalid='true'] {
   tab-size: 2;
 }
 
+/* RAPI console */
+.rapi-form .field {
+  gap: 6px;
+}
+.rapi-input-row {
+  display: flex;
+  gap: 8px;
+}
+.rapi-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.rapi-send {
+  flex: none;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border-color: transparent;
+  background: var(--accent);
+  color: #0b1220;
+  font-size: 14px;
+  font-weight: 700;
+}
+.rapi-send:disabled {
+  opacity: 0.45;
+}
+.rapi-gate {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid color-mix(in oklab, var(--warn) 48%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--warn) 8%, var(--surface));
+  animation: rise 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+.rapi-gate-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--text);
+}
+.rapi-gate-body {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.rapi-gate-cmd {
+  display: block;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.rapi-gate-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.rapi-gate-actions .btn {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.btn.danger {
+  border-color: color-mix(in oklab, var(--err) 50%, var(--line));
+  background: color-mix(in oklab, var(--err) 14%, var(--surface));
+  color: var(--err);
+  font-weight: 650;
+}
+.btn.danger:hover {
+  background: color-mix(in oklab, var(--err) 20%, var(--surface));
+}
+.rapi-feedback {
+  margin-top: 13px;
+}
+.rapi-log-section {
+  margin-top: 22px;
+}
+.rapi-log {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rapi-item {
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.rapi-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rapi-cmd {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.chip::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.chip.pending {
+  background: color-mix(in oklab, var(--warn) 13%, transparent);
+  color: var(--warn);
+}
+.chip.pending::before {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+.chip.acked {
+  background: color-mix(in oklab, var(--ok) 13%, transparent);
+  color: var(--ok);
+}
+.chip.failed {
+  background: color-mix(in oklab, var(--err) 13%, transparent);
+  color: var(--err);
+}
+.rapi-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 7px;
+  margin: 5px 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+.rapi-result {
+  min-width: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  max-height: 8.5em;
+  overflow: auto;
+}
+.rapi-result.err {
+  color: var(--err);
+}
+
 @media (max-width: 360px) {
   .fig {
     padding: 12px 13px 10px;

@@ -22,6 +22,7 @@ let unsubCmds = null;
 let unsubSettings = null;
 let unsubConfig = null;
 let unsubSchedule = null;
+let unsubRapi = null;
 
 export function startStore({
   onStatus,
@@ -31,6 +32,8 @@ export function startStore({
   onConfigError,
   onSchedule,
   onScheduleError,
+  onRapiCommands,
+  onRapiError,
   onAccessDenied,
 }) {
   stopStore();
@@ -73,13 +76,34 @@ export function startStore({
     (data) => onSchedule && onSchedule(data),
     (err) => onScheduleError && onScheduleError(err),
   );
+  // The Advanced console keeps its own 20-entry RAPI history: a where+orderBy
+  // query needs the declared (type, created_at) composite index.
+  unsubRapi = onSnapshot(
+    query(
+      collection(db, 'commands'),
+      where('type', '==', 'rapi'),
+      orderBy('created_at', 'desc'),
+      limit(RAPI_LIMIT),
+    ),
+    (snap) => onRapiCommands && onRapiCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (err) => {
+      if (!denied(err) && onRapiError) onRapiError(err);
+    },
+  );
 }
 
 export function stopStore() {
-  for (const unsub of [unsubStatus, unsubCmds, unsubSettings, unsubConfig, unsubSchedule]) {
+  for (const unsub of [
+    unsubStatus,
+    unsubCmds,
+    unsubSettings,
+    unsubConfig,
+    unsubSchedule,
+    unsubRapi,
+  ]) {
     if (unsub) unsub();
   }
-  unsubStatus = unsubCmds = unsubSettings = unsubConfig = unsubSchedule = null;
+  unsubStatus = unsubCmds = unsubSettings = unsubConfig = unsubSchedule = unsubRapi = null;
 }
 
 // Every command is created pending; the bridge owns the lifecycle after that.
@@ -90,6 +114,9 @@ export function sendCommand(payload) {
     created_at: serverTimestamp(),
   });
 }
+
+// The Advanced console's scrollback depth.
+export const RAPI_LIMIT = 20;
 
 // Both fields travel together because firestore.rules rejects a partial
 // settings document.

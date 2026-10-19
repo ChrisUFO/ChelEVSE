@@ -651,18 +651,97 @@
         >
           <div class="panel-head" style="--i: 0">
             <p class="eyebrow">Advanced</p>
-            <h1>Advanced</h1>
-            <p class="lede">Direct charger commands, behind a confirmation step.</p>
-          </div>
-          <div class="placeholder" style="--i: 1">
-            <span class="placeholder-icon" aria-hidden="true">
-              <svg width="24" height="24"><use href="#i-advanced" /></svg>
-            </span>
-            <p class="placeholder-title">Console not available yet</p>
-            <p class="placeholder-line">
-              The RAPI console and recent command history will appear here.
+            <h1>RAPI console</h1>
+            <p class="lede">
+              Send a raw command to the charger. Commands are applied through the Pi, usually within
+              a few seconds.
             </p>
           </div>
+
+          <section class="card-block rapi-card" style="--i: 1" aria-labelledby="rapi-heading">
+            <div class="block-head">
+              <h2 id="rapi-heading">Command</h2>
+              <p class="block-sub">
+                RAPI is the charger’s own command language. Use it for settings the app doesn’t
+                cover.
+              </p>
+            </div>
+            <form id="rapi-form" class="rapi-form" novalidate>
+              <div class="field">
+                <label class="field-label" for="rapi-input">RAPI command</label>
+                <div class="rapi-input-row">
+                  <input
+                    id="rapi-input"
+                    class="text-input rapi-input"
+                    type="text"
+                    placeholder="$FS 20"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    enterkeyhint="send"
+                    spellcheck="false"
+                    aria-describedby="rapi-help rapi-error"
+                  />
+                  <button
+                    id="rapi-send"
+                    class="btn solid rapi-send"
+                    type="submit"
+                    aria-expanded="false"
+                    aria-controls="rapi-gate"
+                  >
+                    Send
+                  </button>
+                </div>
+                <span class="field-hint" id="rapi-help">
+                  $ plus 1–2 letters or digits, then an optional argument. Maximum 32 characters.
+                </span>
+                <span class="field-error" id="rapi-error" role="alert" hidden></span>
+              </div>
+            </form>
+
+            <div
+              class="rapi-gate"
+              id="rapi-gate"
+              role="group"
+              aria-labelledby="rapi-gate-title"
+              aria-describedby="rapi-gate-body"
+              hidden
+            >
+              <p class="rapi-gate-title" id="rapi-gate-title">Send this command?</p>
+              <p class="rapi-gate-body" id="rapi-gate-body">
+                RAPI can change safety-relevant settings, including current limits. Only send
+                commands you understand.
+              </p>
+              <code class="rapi-gate-cmd" id="rapi-gate-cmd"></code>
+              <div class="rapi-gate-actions">
+                <button id="rapi-gate-cancel" class="btn" type="button">Cancel</button>
+                <button
+                  id="rapi-gate-confirm"
+                  class="btn danger"
+                  type="button"
+                  aria-describedby="rapi-gate-title rapi-gate-body"
+                >
+                  Send command
+                </button>
+              </div>
+            </div>
+
+            <p
+              class="feedback rapi-feedback"
+              id="rapi-feedback"
+              role="status"
+              aria-live="polite"
+            ></p>
+          </section>
+
+          <section class="rapi-log-section" style="--i: 2" aria-labelledby="rapi-log-heading">
+            <div class="section-title-row">
+              <h2 id="rapi-log-heading">Recent commands</h2>
+              <span class="section-note">Last 20</span>
+            </div>
+            <p class="section-state" id="rapi-log-state">Loading recent commands…</p>
+            <ol class="rapi-log" id="rapi-log" hidden></ol>
+          </section>
         </section>
       </div>
     </main>

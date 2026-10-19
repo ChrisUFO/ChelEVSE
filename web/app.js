@@ -34,6 +34,14 @@ import {
   resetNotifications,
 } from './js/screens/notifications.js';
 import {
+  enterAdvanced,
+  initAdvanced,
+  leaveAdvanced,
+  resetAdvanced,
+  showRapiCommands,
+  showRapiError,
+} from './js/screens/advanced.js';
+import {
   activateHistory,
   enterHistory,
   initHistory,
@@ -86,6 +94,7 @@ function closeApp() {
   resetConfig();
   resetSettings();
   resetNotifications();
+  resetAdvanced();
   activeUser = null;
 }
 
@@ -125,6 +134,10 @@ function handleRoute(route) {
   if (route === 'history') activateHistory();
   if (route === 'schedule') activateSchedule();
   if (route === 'config') activateNotifications();
+  // The RAPI gate is per visit: entering the tab re-arms it; leaving drops any
+  // pending confirmation. Re-clicking the active tab is not a new entry.
+  if (route === 'advanced') enterAdvanced();
+  else leaveAdvanced();
 }
 
 function enterApp(user) {
@@ -159,6 +172,8 @@ function enterApp(user) {
       showStatusSchedule(data);
     },
     onScheduleError: showScheduleError,
+    onRapiCommands: showRapiCommands,
+    onRapiError: showRapiError,
     onAccessDenied: () => {
       if (activeUser) showNoAccess(activeUser, 'no-access');
     },
@@ -240,6 +255,7 @@ async function main() {
   initConfig();
   initSettings();
   initNotifications();
+  initAdvanced();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 
