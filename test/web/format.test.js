@@ -226,6 +226,41 @@ test('elapsedClock keeps its anchor across an unchanged updated_at', () => {
   assert.equal(elapsedClock(advanced.clock, reset, writtenAt + 20_000).seconds, 0);
 });
 
+test('elapsedClock ignores an older write and never rewinds the clock', () => {
+  const writtenAt = 1_000_000;
+  const data = {
+    elapsed: 3725,
+    updated_at: { toMillis: () => writtenAt },
+    state_label: 'charging',
+    charger_online: true,
+  };
+  let step = elapsedClock(null, data, writtenAt + 10_000);
+  assert.equal(step.seconds, 3735);
+  // A duplicate of the write we anchored to changes nothing.
+  step = elapsedClock(step.clock, { ...data }, writtenAt + 40_000);
+  assert.equal(step.seconds, 3765);
+  // An older write observed late (a stale read or a replayed document) must not
+  // move the anchor or its elapsed value backwards.
+  const stale = {
+    ...data,
+    elapsed: 3700,
+    updated_at: { toMillis: () => writtenAt - 30_000 },
+  };
+  const afterStale = elapsedClock(step.clock, stale, writtenAt + 50_000);
+  assert.equal(afterStale.seconds, 3775);
+  assert.equal(afterStale.clock.anchorMs, writtenAt);
+  assert.equal(afterStale.clock.writeMs, writtenAt);
+  // When the bridge stops writing past the freshness window the clock freezes
+  // at the last rendered value instead of snapping back to the raw base.
+  const frozen = elapsedClock(afterStale.clock, data, writtenAt + 61_000);
+  assert.equal(frozen.seconds, 3775);
+  const later = elapsedClock(frozen.clock, data, writtenAt + 120_000);
+  assert.equal(later.seconds, 3775);
+  // A genuinely new write still re-anchors and follows its own elapsed value.
+  const next = { ...data, elapsed: 3800, updated_at: { toMillis: () => writtenAt + 121_000 } };
+  assert.equal(elapsedClock(later.clock, next, writtenAt + 121_000).seconds, 3800);
+});
+
 test('displayElapsed rejects every non-numeric elapsed shape', () => {
   const stamp = { toMillis: () => 1_000_000 };
   const data = (elapsed) => ({

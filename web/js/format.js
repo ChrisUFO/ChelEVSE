@@ -78,32 +78,61 @@ export function statusWriteKey(data) {
   return `${writeMillis(data)}|${data.elapsed}|${data.state_label ?? ''}`;
 }
 
+// Render one step of a clock. `data` is null when the snapshot must be ignored
+// (an older write), which keeps the liveness of the write we already anchored
+// to. `floor` is the largest value rendered for this write: the clock is
+// monotonic within a session, so the freshness gate closing freezes it instead
+// of snapping back to the raw base.
+function clockStep(clock, nowMs, data) {
+  const age = Math.max(0, nowMs - clock.anchorMs);
+  const live =
+    data == null
+      ? clock.live === true && age <= FRESH_MS
+      : data.state_label === 'charging' && data.charger_online !== false && age <= FRESH_MS;
+  const ticked = clock.base + (live ? age / 1000 : 0);
+  const seconds = Math.max(0, clock.floor, ticked);
+  return { clock: { ...clock, live, floor: seconds }, seconds };
+}
+
 // Advance the session clock to `nowMs` for a status document. `prev` is the
 // clock returned by the previous call (null on first use). The anchor is the
 // receipt time, clamped to the document's own write time, and it only moves
 // when the write itself changes — so schedule-only merges keep ticking instead
-// of rewinding, and a device clock behind the server still advances.
+// of rewinding, and a device clock behind the server still advances. The anchor
+// never moves backwards for the same session: an older or duplicate write
+// arriving late is ignored rather than trusted, while a genuinely new write
+// (including a session reset) still re-anchors.
 export function elapsedClock(prev, data, nowMs = Date.now()) {
   if (!data) return { clock: null, seconds: null };
   const raw = data.elapsed;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return { clock: null, seconds: null };
   const writeMs = writeMillis(data);
   let clock = prev || null;
-  if (!clock || clock.writeMs !== writeMs) {
-    clock = { writeMs, base: raw, anchorMs: Math.min(nowMs, writeMs ?? nowMs) };
+  if (!clock) {
+    clock = { writeMs, base: raw, anchorMs: Math.min(nowMs, writeMs ?? nowMs), floor: raw };
+  } else if (writeMs != null && clock.writeMs != null && writeMs < clock.writeMs) {
+    // A stale or duplicated write from before the one we anchored to says
+    // nothing new: keep that clock (and its state) and re-render it.
+    return clockStep(clock, nowMs, null);
+  } else if (clock.writeMs !== writeMs) {
+    clock = {
+      writeMs,
+      base: raw,
+      // Clamp to the previous anchor so the same session can never rewind.
+      anchorMs: Math.max(clock.anchorMs, Math.min(nowMs, writeMs ?? nowMs)),
+      floor: raw,
+    };
   } else if (raw > clock.base) {
     // The same write reported more elapsed seconds (a document refreshed in
     // place). Move the anchor by the same amount so the displayed value stays
     // continuous instead of counting those seconds twice.
     clock = {
-      writeMs,
+      ...clock,
       base: raw,
       anchorMs: Math.min(clock.anchorMs + (raw - clock.base) * 1000, nowMs),
     };
   }
-  const age = nowMs - clock.anchorMs;
-  const live = data.state_label === 'charging' && data.charger_online !== false && age <= FRESH_MS;
-  return { clock, seconds: Math.max(0, clock.base + (live ? Math.max(0, age / 1000) : 0)) };
+  return clockStep(clock, nowMs, data);
 }
 
 // One-shot form of elapsedClock for a status document at `nowMs`.

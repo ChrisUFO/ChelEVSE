@@ -46,6 +46,10 @@ let offlineBlocked = false;
 let savingUnconfirmed = false;
 // Identifies the active save so a late settle from an abandoned write is ignored.
 let saveToken = 0;
+// Counts user edits. A save captures it so its settle can tell an untouched
+// draft from one the user changed (including editing back to the pre-save
+// baseline, which scheduleKey alone cannot distinguish).
+let editGeneration = 0;
 let live = { inWindow: false, activeRuleId: null };
 let cards = [];
 let generation = 0;
@@ -62,19 +66,23 @@ function clone(schedule) {
 }
 
 function markDirty() {
+  editGeneration += 1;
   saveError = '';
   // The load already showed the unsupported-shape warning; the first edit is
   // the user explicitly replacing the stored document with a well-formed one.
   if (draft.malformed) delete draft.malformed;
   dirty = scheduleKey(draft) !== scheduleKey(confirmed);
+  const inFlight = saving || savingUnconfirmed;
   if (!dirty) {
     // A remote change queued while we were editing becomes the truth once the
-    // draft no longer differs from the last confirmed snapshot.
-    if (pendingRemote) {
+    // draft no longer differs from the last confirmed snapshot. While a save is
+    // still in flight the queued snapshot may be our own echo, so its settle
+    // decides: a user who reverted to the baseline keeps that revert on screen.
+    if (pendingRemote && !inFlight) {
       adopt(pendingRemote);
       return;
     }
-    remoteNotice = false;
+    if (!inFlight) remoteNotice = false;
   }
   feedbackMode = 'derived';
   validateAndPaint();
@@ -350,11 +358,13 @@ function online() {
   return typeof navigator === 'undefined' || navigator.onLine !== false;
 }
 
-function settleSave({ gen, token, payload, payloadKey, ok }) {
+function settleSave({ gen, token, payload, editGen, ok }) {
   if (gen !== generation || token !== saveToken) return;
-  // Edits made after the editor was unlocked (connection dropped mid-write) are
-  // the user's current intent; only adopt when the draft is still the payload.
-  const draftUnchanged = scheduleKey(draft) === payloadKey;
+  // A settle adopts the server snapshot only when the user has not touched the
+  // form since the save was issued. Comparing payloads would treat an exact
+  // revert to the pre-save baseline as "unchanged" and let the queued echo
+  // overwrite the user's explicit revert.
+  const editedSinceSave = editGen !== editGeneration;
   // A late settle always leaves the draft alone: the user has been editing, and
   // a failed write must hand their changes back rather than discard them.
   const late = savingUnconfirmed;
@@ -367,7 +377,7 @@ function settleSave({ gen, token, payload, payloadKey, ok }) {
   confirmed = result.baseline;
   pendingRemote = null;
   remoteNotice = false;
-  if (!draftUnchanged || (late && !ok)) {
+  if (editedSinceSave || (late && !ok)) {
     dirty = scheduleKey(draft) !== scheduleKey(confirmed);
     if (!ok) {
       saveError = late
@@ -420,13 +430,14 @@ async function save() {
   };
   const payloadKey = scheduleKey(payload);
   savingPayloadKey = payloadKey;
+  const editGen = editGeneration;
   let ok = true;
   try {
     await saveSchedule(payload);
   } catch {
     ok = false;
   }
-  settleSave({ gen, token, payload, payloadKey, ok });
+  settleSave({ gen, token, payload, editGen, ok });
 }
 
 // Connection lost while a write is in flight: do not hold the editor behind a
