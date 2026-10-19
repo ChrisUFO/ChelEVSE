@@ -16,9 +16,11 @@ export function stateFor(label) {
 }
 
 // Coerce a possibly-string numeric field (Firestore documents are untyped at
-// runtime). Booleans are not numbers, and neither is an empty string.
+// runtime). Booleans are not numbers, and neither is an empty or whitespace-only
+// string (Number('   ') is 0, which would display as a plausible reading).
 export function toNumber(value) {
-  if (value == null || value === '' || typeof value === 'boolean') return Number.NaN;
+  if (value == null || typeof value === 'boolean') return Number.NaN;
+  if (typeof value === 'string' && value.trim() === '') return Number.NaN;
   return Number(value);
 }
 
@@ -56,36 +58,71 @@ export function formatElapsed(seconds) {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
 }
 
-// Session-clock value for a status document at `nowMs`. Interpolation is
-// anchored to the document's own write time, not to snapshot receipt: schedule
-// merges can deliver a status snapshot whose elapsed is unchanged, and
-// re-anchoring on receipt would rewind the clock. Returns null when the field
+// Session-clock helpers. Interpolation is anchored to the local receipt of a
+// status write, never to the device's wall clock matching Firestore: the bridge
+// stamps `updated_at` with a server timestamp, so a device clock that is behind
+// would produce a negative age and freeze the clock. Returns null when elapsed
 // is absent or malformed (null, undefined, '', false).
 const FRESH_MS = 60000;
 
-export function displayElapsed(data, nowMs = Date.now()) {
-  if (!data) return null;
-  const raw = data.elapsed;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
-  const updated = data.updated_at;
-  const writtenAt = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  const age = writtenAt == null ? null : nowMs - writtenAt;
-  const live =
-    data.state_label === 'charging' &&
-    data.charger_online !== false &&
-    age != null &&
-    age >= 0 &&
-    age <= FRESH_MS;
-  const anchor = writtenAt ?? nowMs;
-  return Math.max(0, raw + (live ? Math.max(0, (nowMs - anchor) / 1000) : 0));
+function writeMillis(data) {
+  const updated = data && data.updated_at;
+  return updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
 }
 
-// Session-clock value to render. `held` is the value frozen when a stop command
-// was sent: the last snapshot still reports charging until the bridge's next
-// write, so interpolating past it would overshoot and then snap back. The
-// caller clears the hold when a new snapshot arrives and the clock follows it.
-export function heldElapsed(held, data, nowMs = Date.now()) {
-  return held == null ? displayElapsed(data, nowMs) : held;
+// Identity of the status write behind a document. The bridge merges schedule
+// state into status/current without touching these fields, so a changed key is
+// the signal that the charger reported a genuinely new status write.
+export function statusWriteKey(data) {
+  if (!data) return null;
+  return `${writeMillis(data)}|${data.elapsed}|${data.state_label ?? ''}`;
+}
+
+// Advance the session clock to `nowMs` for a status document. `prev` is the
+// clock returned by the previous call (null on first use). The anchor is the
+// receipt time, clamped to the document's own write time, and it only moves
+// when the write itself changes — so schedule-only merges keep ticking instead
+// of rewinding, and a device clock behind the server still advances.
+export function elapsedClock(prev, data, nowMs = Date.now()) {
+  if (!data) return { clock: null, seconds: null };
+  const raw = data.elapsed;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return { clock: null, seconds: null };
+  const writeMs = writeMillis(data);
+  let clock = prev || null;
+  if (!clock || clock.writeMs !== writeMs) {
+    clock = { writeMs, base: raw, anchorMs: Math.min(nowMs, writeMs ?? nowMs) };
+  } else if (raw > clock.base) {
+    // The same write reported more elapsed seconds (a document refreshed in
+    // place). Move the anchor by the same amount so the displayed value stays
+    // continuous instead of counting those seconds twice.
+    clock = {
+      writeMs,
+      base: raw,
+      anchorMs: Math.min(clock.anchorMs + (raw - clock.base) * 1000, nowMs),
+    };
+  }
+  const age = nowMs - clock.anchorMs;
+  const live = data.state_label === 'charging' && data.charger_online !== false && age <= FRESH_MS;
+  return { clock, seconds: Math.max(0, clock.base + (live ? Math.max(0, age / 1000) : 0)) };
+}
+
+// One-shot form of elapsedClock for a status document at `nowMs`.
+export function displayElapsed(data, nowMs = Date.now()) {
+  return elapsedClock(null, data, nowMs).seconds;
+}
+
+// Freeze the session clock when a stop command is sent: the last snapshot still
+// reports charging until the bridge's next write, so interpolating past it would
+// overshoot and then snap back. The hold records the status write it froze.
+export function freezeClock(seconds, data) {
+  return seconds == null ? null : { value: seconds, key: statusWriteKey(data) };
+}
+
+// A hold survives snapshots that do not report a new status write (schedule-only
+// merges) and is released by a different write or an explicit command failure.
+export function holdAfterSnapshot(hold, data) {
+  if (hold == null) return null;
+  return hold.key === statusWriteKey(data) ? hold : null;
 }
 
 // Session duration in h:mm (the bridge stores seconds).

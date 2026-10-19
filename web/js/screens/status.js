@@ -4,11 +4,12 @@
 
 import { $, setText } from '../ui.js';
 import {
-  displayElapsed,
+  elapsedClock,
   fmtCost,
   fmtK,
   formatElapsed,
-  heldElapsed,
+  freezeClock,
+  holdAfterSnapshot,
   numOrDash,
   relTime,
   stateFor,
@@ -36,7 +37,10 @@ let holdAmps = 32;
 let ticker = null;
 let resultTimer = null;
 let shownResultId = null;
-// Seconds frozen when a stop command is sent; cleared by the next snapshot.
+// Local receipt anchor for the session clock (see elapsedClock).
+let clock = null;
+// Value frozen when a stop command is sent, with the status write it belongs
+// to; released only by a new status write or an explicit command failure.
 let clockHold = null;
 
 function ageMs() {
@@ -55,13 +59,23 @@ function renderFreshness() {
   $('banner').hidden = !(status.charger_online === false || age > 60000);
 }
 
-// The snapshot carries elapsed seconds. displayElapsed interpolates from the
-// document's own write time, so schedule-boundary merges that do not advance
-// elapsed cannot rewind the clock between the 10 s status writes. A stop
-// command freezes the displayed value until the next snapshot reports the new
-// state, so the clock cannot overshoot and then snap back.
+// The snapshot carries elapsed seconds. The clock is anchored to the local
+// receipt of the status write it belongs to, so it keeps ticking when this
+// device's clock is behind Firestore and cannot rewind on schedule-only merges.
+// A stop command freezes the displayed value until the charger reports a new
+// status write, so the clock cannot overshoot and then snap back.
 function renderElapsed() {
-  setText($('elapsed'), formatElapsed(heldElapsed(clockHold, status, Date.now())));
+  const step = elapsedClock(clock, status, Date.now());
+  clock = step.clock;
+  const held = clockHold == null ? null : clockHold.value;
+  setText($('elapsed'), formatElapsed(held == null ? step.seconds : held));
+}
+
+// Freeze the clock at the value currently on screen.
+function freezeElapsed() {
+  const step = elapsedClock(clock, status, Date.now());
+  clock = step.clock;
+  clockHold = freezeClock(step.seconds, status);
 }
 
 function renderCost() {
@@ -186,7 +200,7 @@ async function send(payload) {
     await postCommand(payload);
   } catch {
     setBusy(false);
-    // The stop never left this device, so let the clock interpolate again.
+    // The stop never left this device, so let the clock follow the next write.
     clockHold = null;
     renderElapsed();
     const fb = $('feedback');
@@ -237,7 +251,7 @@ export function initStatus() {
     // Hold the clock where it is on screen: the last snapshot still says
     // "charging" until the bridge reports the new state, and extrapolating past
     // it would overshoot before snapping back.
-    clockHold = displayElapsed(status, Date.now());
+    freezeElapsed();
     renderElapsed();
     send({ type: 'pause' });
   });
@@ -282,6 +296,7 @@ export function leaveStatus() {
   holdOpen = false;
   holdAmps = 32;
   shownResultId = null;
+  clock = null;
   clockHold = null;
   setBusy(false);
   const fb = $('feedback');
@@ -303,13 +318,17 @@ export function leaveStatus() {
 // ---------- data callbacks ----------
 
 export function showStatus(snap) {
-  // A new snapshot is the new truth: release any stop-time hold.
-  clockHold = null;
-  status = snap && snap.exists() ? snap.data() : null;
+  const data = snap && snap.exists() ? snap.data() : null;
+  // Only a new status write releases a stop-time hold. The bridge merges only
+  // `schedule` into status/current, and releasing on that merge would let the
+  // clock interpolate from the old write and jump before the stop lands.
+  clockHold = holdAfterSnapshot(clockHold, data);
+  status = data;
   renderStatus();
 }
 
 export function showStatusError() {
+  clock = null;
   clockHold = null;
   status = null;
   renderStatus();

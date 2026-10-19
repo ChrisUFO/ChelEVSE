@@ -13,6 +13,7 @@ import {
   reconcileDirtyRemote,
   scheduleKey,
   scheduleSaveValid,
+  toggleNote,
   validateSchedule,
 } from '../../web/js/schedule.js';
 
@@ -307,4 +308,21 @@ test('reconcileDirtyRemote tracks server truth without touching the draft', () =
   const matches = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: draft });
   assert.equal(matches.dirty, false);
   assert.equal(matches.remoteNotice, false);
+});
+
+test('toggleNote reports an unknown state for a malformed stored schedule', () => {
+  assert.equal(toggleNote(schedule({ enabled: true })), 'Charging follows these windows.');
+  assert.equal(
+    toggleNote(schedule({ enabled: false })),
+    'Charging is not restricted by a schedule.',
+  );
+  // The bridge skips a malformed container and leaves the charger's firmware
+  // schedule alone, so the toggle must not assert "not restricted".
+  const malformed = normalizeSchedule({ enabled: 'yes', rules: [] });
+  assert.equal(malformed.malformed, true);
+  assert.match(toggleNote(malformed), /Unsupported stored schedule/);
+  assert.match(toggleNote(malformed), /firmware schedule/);
+  assert.doesNotMatch(toggleNote(malformed), /not restricted/);
+  // Empty and missing documents are well-formed "off", not unknown.
+  assert.equal(toggleNote(defaultSchedule()), 'Charging is not restricted by a schedule.');
 });

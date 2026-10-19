@@ -12,6 +12,7 @@ import {
   historySeries,
   lastDayIds,
   maxSeries,
+  sectionView,
   sumSeries,
 } from '../../web/js/history.js';
 
@@ -152,4 +153,46 @@ test('historyReadState separates an offline cache miss from an empty range', () 
   );
   assert.equal(historyReadState(null), 'empty');
   assert.equal(historyReadState({}), 'empty');
+});
+
+test('sectionView never presents an unreached read as current data', () => {
+  // Server answers are the only states allowed to be presented as current, and
+  // only 'empty' may claim that nothing was recorded.
+  assert.deepEqual(sectionView('fresh', true), {
+    showData: true,
+    stale: false,
+    claimEmpty: false,
+  });
+  assert.deepEqual(sectionView('empty', false), {
+    showData: true,
+    stale: false,
+    claimEmpty: true,
+  });
+  // A cached read with rows keeps them visible but marks them stale.
+  assert.deepEqual(sectionView('cached', false), {
+    showData: true,
+    stale: true,
+    claimEmpty: false,
+  });
+  // A cache miss after a successful empty read: 30 zero points are on screen but
+  // they are not evidence, so the section shows its offline message instead.
+  assert.equal(sectionView('offline', false).showData, false);
+  assert.equal(sectionView('offline', false).claimEmpty, false);
+  assert.equal(sectionView('error', false).showData, false);
+  // A previously loaded payload stays visible as stale rather than disappearing.
+  assert.deepEqual(sectionView('offline', true), {
+    showData: true,
+    stale: true,
+    claimEmpty: false,
+  });
+  assert.deepEqual(sectionView('error', true), {
+    showData: true,
+    stale: true,
+    claimEmpty: false,
+  });
+  // Nothing is shown for a section that has neither data nor a result yet.
+  for (const state of ['idle', 'loading', 'nonsense']) {
+    assert.equal(sectionView(state, true).showData, false, state);
+    assert.equal(sectionView(state, true).claimEmpty, false, state);
+  }
 });

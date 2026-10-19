@@ -169,3 +169,15 @@ export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
     remoteNotice: changed && dirty,
   };
 }
+
+// Copy for the schedule toggle. A malformed stored container is an unknown
+// state, not "off": the bridge skips it and leaves the charger's own firmware
+// schedule untouched, so the editor must not claim charging is unrestricted.
+export function toggleNote(schedule) {
+  if (schedule && schedule.malformed === true) {
+    return 'Unsupported stored schedule — the charger may still be running its own firmware schedule until a valid schedule is saved.';
+  }
+  return schedule && schedule.enabled === true
+    ? 'Charging follows these windows.'
+    : 'Charging is not restricted by a schedule.';
+}

@@ -77,3 +77,23 @@ export function historyReadState(result) {
   if (count > 0) return cached ? 'cached' : 'fresh';
   return cached ? 'offline' : 'empty';
 }
+
+// Presentation for one settled section read (`fresh`, `empty`, `cached`,
+// `offline`, `error`). Only a read the server answered may be presented as
+// current, and only 'empty' may claim nothing was recorded: a cache miss or a
+// failed read either shows a previously loaded payload as stale or shows the
+// section message, never zeroed data.
+export function sectionView(state, hasPreviousData) {
+  if (state === 'fresh' || state === 'empty') {
+    return { showData: true, stale: false, claimEmpty: state === 'empty' };
+  }
+  if (state === 'cached') return { showData: true, stale: true, claimEmpty: false };
+  if (state === 'offline' || state === 'error') {
+    return {
+      showData: Boolean(hasPreviousData),
+      stale: Boolean(hasPreviousData),
+      claimEmpty: false,
+    };
+  }
+  return { showData: false, stale: false, claimEmpty: false };
+}

@@ -3,15 +3,18 @@ import assert from 'node:assert/strict';
 
 import {
   displayElapsed,
+  elapsedClock,
   fmtCost,
   fmtK,
   fmtMoney,
   formatDuration,
   formatElapsed,
-  heldElapsed,
+  freezeClock,
+  holdAfterSnapshot,
   numOrDash,
   relTime,
   stateFor,
+  statusWriteKey,
   toNumber,
 } from '../../web/js/format.js';
 
@@ -38,6 +41,12 @@ test('toNumber and numOrDash reject non-numeric display fields', () => {
   assert.equal(numOrDash(16.4), '16');
   assert.equal(numOrDash('16.4'), '16');
   assert.equal(numOrDash(24.5, 1), '24.5');
+  // Whitespace-only strings are malformed, not zero: Number('   ') is 0.
+  for (const value of [' ', '   ', '\t', '\n', ' \t\n ']) {
+    assert.equal(toNumber(value), Number.NaN, JSON.stringify(value));
+    assert.equal(numOrDash(value), '—', JSON.stringify(value));
+    assert.equal(fmtK(value), '—', JSON.stringify(value));
+  }
   for (const value of [null, undefined, '', false, 'nope', Number.NaN]) {
     assert.equal(numOrDash(value), '—', String(value));
   }
@@ -109,7 +118,7 @@ test('displayElapsed interpolates from the document write time', () => {
   assert.equal(displayElapsed(charging(100, writtenAt, { charger_online: false }), writtenAt), 100);
 });
 
-test('heldElapsed freezes the clock until a snapshot releases it', () => {
+test('freezeClock holds the clock until a newer status write arrives', () => {
   const writtenAt = 1_000_000;
   const data = {
     elapsed: 3725,
@@ -119,14 +128,102 @@ test('heldElapsed freezes the clock until a snapshot releases it', () => {
   };
   // Stop pressed at writtenAt + 5 s: the last snapshot still claims charging,
   // so the frozen value must win over the growing interpolation.
-  const held = heldElapsed(null, data, writtenAt + 5000);
-  assert.equal(held, 3730);
-  assert.equal(heldElapsed(held, data, writtenAt + 9000), 3730);
-  // The next snapshot releases the hold; the clock follows its raw elapsed.
-  const paused = { ...data, elapsed: 3732, state_label: 'ready' };
-  assert.equal(heldElapsed(null, paused, writtenAt + 12_000), 3732);
+  const clock = elapsedClock(null, data, writtenAt + 5000);
+  assert.equal(clock.seconds, 3730);
+  const hold = freezeClock(clock.seconds, data);
+  assert.deepEqual(hold, { value: 3730, key: statusWriteKey(data) });
+  assert.equal(holdAfterSnapshot(hold, data).value, 3730);
   // Nothing held and no valid status still renders the em dash.
-  assert.equal(heldElapsed(null, null, writtenAt), null);
+  assert.equal(freezeClock(null, data), null);
+  assert.equal(displayElapsed(null, writtenAt), null);
+});
+
+test('holdAfterSnapshot survives schedule-only merges and follows a new write', () => {
+  const writtenAt = 1_000_000;
+  const data = {
+    elapsed: 3725,
+    updated_at: { toMillis: () => writtenAt },
+    state_label: 'charging',
+    charger_online: true,
+    schedule: { in_window: false, active_rule_id: null },
+  };
+  const hold = freezeClock(3730, data);
+  // The bridge merges only `schedule` into status/current: same elapsed, same
+  // write time, same state, so the hold must not be released.
+  const merged = { ...data, schedule: { in_window: true, active_rule_id: 'night' } };
+  assert.equal(statusWriteKey(merged), statusWriteKey(data));
+  assert.equal(holdAfterSnapshot(hold, merged), hold);
+  // A genuinely new status write releases it.
+  assert.equal(holdAfterSnapshot(hold, { ...data, elapsed: 3726 }), null);
+  assert.equal(holdAfterSnapshot(hold, { ...data, state_label: 'ready' }), null);
+  assert.equal(
+    holdAfterSnapshot(hold, { ...data, updated_at: { toMillis: () => writtenAt + 10_000 } }),
+    null,
+  );
+  assert.equal(holdAfterSnapshot(hold, null), null);
+  assert.equal(holdAfterSnapshot(null, data), null);
+});
+
+test('elapsedClock ticks when the device clock is behind Firestore', () => {
+  // Firestore stamps updated_at with a server timestamp: a device that is two
+  // minutes behind must still interpolate instead of falling back to raw.
+  const receipt = 1_000_000;
+  const serverAhead = {
+    elapsed: 100,
+    updated_at: { toMillis: () => receipt + 120_000 },
+    state_label: 'charging',
+    charger_online: true,
+  };
+  let step = elapsedClock(null, serverAhead, receipt);
+  assert.equal(step.seconds, 100);
+  step = elapsedClock(step.clock, serverAhead, receipt + 3000);
+  assert.equal(step.seconds, 103);
+  // The anchor never sits ahead of the local clock, so the age stays positive.
+  assert.ok(step.clock.anchorMs <= receipt + 3000);
+});
+
+test('elapsedClock keeps the same offset when the device clock is ahead', () => {
+  const receipt = 1_000_000;
+  const serverBehind = {
+    elapsed: 100,
+    updated_at: { toMillis: () => receipt - 5000 },
+    state_label: 'charging',
+    charger_online: true,
+  };
+  // The 5 s skew is a constant offset, and the clock still advances 1:1.
+  let step = elapsedClock(null, serverBehind, receipt);
+  assert.equal(step.seconds, 105);
+  step = elapsedClock(step.clock, serverBehind, receipt + 2000);
+  assert.equal(step.seconds, 107);
+  // Far enough behind to look stale, it stops interpolating.
+  const stale = { ...serverBehind, updated_at: { toMillis: () => receipt - 120_000 } };
+  assert.equal(elapsedClock(null, stale, receipt).seconds, 100);
+});
+
+test('elapsedClock keeps its anchor across an unchanged updated_at', () => {
+  const writtenAt = 1_000_000;
+  const data = {
+    elapsed: 100,
+    updated_at: { toMillis: () => writtenAt },
+    state_label: 'charging',
+    charger_online: true,
+  };
+  const first = elapsedClock(null, data, writtenAt + 6000);
+  assert.equal(first.seconds, 106);
+  // A schedule-only merge (identical write fields) must not rewind.
+  const merged = elapsedClock(first.clock, { ...data, schedule: {} }, writtenAt + 9000);
+  assert.equal(merged.seconds, 109);
+  assert.equal(merged.clock.anchorMs, first.clock.anchorMs);
+  // Same write time but more elapsed seconds: continuous, not double counted.
+  const advanced = elapsedClock(merged.clock, { ...data, elapsed: 108 }, writtenAt + 9000);
+  assert.equal(advanced.seconds, 109);
+  assert.equal(
+    elapsedClock(advanced.clock, { ...data, elapsed: 108 }, writtenAt + 12_000).seconds,
+    112,
+  );
+  // A genuine new session (new write, elapsed back to zero) follows the reset.
+  const reset = { ...data, elapsed: 0, updated_at: { toMillis: () => writtenAt + 20_000 } };
+  assert.equal(elapsedClock(advanced.clock, reset, writtenAt + 20_000).seconds, 0);
 });
 
 test('displayElapsed rejects every non-numeric elapsed shape', () => {

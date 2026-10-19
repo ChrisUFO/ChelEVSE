@@ -16,6 +16,7 @@ import {
   reconcileDirtyRemote,
   scheduleKey,
   scheduleSaveValid,
+  toggleNote,
   validateSchedule,
 } from '../schedule.js';
 
@@ -37,6 +38,14 @@ let feedbackMode = 'derived'; // derived | saved | load-error
 // A failed save stays visible through the SDK's revert snapshot (and any later
 // remote adoption) until the next edit or save clears it.
 let saveError = '';
+// A save blocked because the device is offline. Kept separate from saveError so
+// it clears when the connection returns instead of on the next edit.
+let offlineBlocked = false;
+// The editor was unlocked because the connection dropped mid-write: the write
+// may still settle, and its settle must not clobber edits made after unlock.
+let savingUnconfirmed = false;
+// Identifies the active save so a late settle from an abandoned write is ignored.
+let saveToken = 0;
 let live = { inWindow: false, activeRuleId: null };
 let cards = [];
 let generation = 0;
@@ -87,12 +96,18 @@ function renderFeedback() {
   } else if (saveError) {
     text = saveError;
     kind = 'err';
+  } else if (savingUnconfirmed) {
+    text = 'Save unconfirmed — connection lost. You can keep editing.';
+    kind = 'warn';
   } else if (feedbackMode === 'saved') {
     text = 'Saved.';
     kind = 'ok';
   } else if (saving) {
     text = 'Saving…';
     busy = true;
+  } else if (offlineBlocked) {
+    text = "You're offline — reconnect to save.";
+    kind = 'warn';
   } else if (!saveValid()) {
     text = 'Fix the highlighted fields before saving.';
   } else if (dirty) {
@@ -283,10 +298,7 @@ function renderLive() {
 function renderToggle() {
   const toggle = $('schedule-enabled');
   toggle.checked = draft.enabled;
-  setText(
-    $('schedule-enabled-sub'),
-    draft.enabled ? 'Charging follows these windows.' : 'Charging is not restricted by a schedule.',
-  );
+  setText($('schedule-enabled-sub'), toggleNote(draft));
 }
 
 function renderLoading() {
@@ -330,13 +342,72 @@ function adopt(schedule) {
   renderAll();
 }
 
+// Firestore queues writes made while offline and only settles `setDoc` when the
+// backend acknowledges them, so handing the write over would lock the editor for
+// the whole outage. Gate on connectivity instead: the draft stays, editing stays
+// open, and the message says what is missing.
+function online() {
+  return typeof navigator === 'undefined' || navigator.onLine !== false;
+}
+
+function settleSave({ gen, token, payload, payloadKey, ok }) {
+  if (gen !== generation || token !== saveToken) return;
+  // Edits made after the editor was unlocked (connection dropped mid-write) are
+  // the user's current intent; only adopt when the draft is still the payload.
+  const draftUnchanged = scheduleKey(draft) === payloadKey;
+  // A late settle always leaves the draft alone: the user has been editing, and
+  // a failed write must hand their changes back rather than discard them.
+  const late = savingUnconfirmed;
+  saving = false;
+  savingUnconfirmed = false;
+  savingPayloadKey = null;
+  // A snapshot that arrived while saving is at least as new as this write (the
+  // client stream is ordered); otherwise our payload is the baseline.
+  const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok });
+  confirmed = result.baseline;
+  pendingRemote = null;
+  remoteNotice = false;
+  if (!draftUnchanged || (late && !ok)) {
+    dirty = scheduleKey(draft) !== scheduleKey(confirmed);
+    if (!ok) {
+      saveError = late
+        ? "Couldn't save — your changes are still here. Try saving again."
+        : result.error;
+    }
+    feedbackMode = 'derived';
+    validateAndPaint();
+    return;
+  }
+  draft = clone(confirmed);
+  dirty = false;
+  if (ok) {
+    saveError = '';
+    feedbackMode = 'saved';
+  } else {
+    saveError = result.error;
+    feedbackMode = 'derived';
+  }
+  renderAll();
+  if (!ok) $('schedule-feedback').focus({ preventScroll: true });
+}
+
 async function save() {
   if (saving || loadError || !saveValid() || !dirty || !initialized) return;
+  if (!online()) {
+    offlineBlocked = true;
+    saveError = '';
+    feedbackMode = 'derived';
+    validateAndPaint();
+    return;
+  }
+  offlineBlocked = false;
   saving = true;
+  savingUnconfirmed = false;
   saveError = '';
   feedbackMode = 'derived';
   validateAndPaint();
   const gen = generation;
+  const token = ++saveToken;
   const payload = {
     enabled: draft.enabled,
     rules: draft.rules.map((rule) => ({
@@ -347,39 +418,33 @@ async function save() {
       amps: rule.amps,
     })),
   };
-  savingPayloadKey = scheduleKey(payload);
+  const payloadKey = scheduleKey(payload);
+  savingPayloadKey = payloadKey;
+  let ok = true;
   try {
     await saveSchedule(payload);
-    if (gen !== generation) return;
-    // A snapshot that arrived while saving is at least as new as this write
-    // (the client stream is ordered); otherwise our payload is the baseline.
-    const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok: true });
-    confirmed = result.baseline;
-    draft = clone(confirmed);
-    dirty = false;
-    pendingRemote = null;
-    remoteNotice = false;
-    saving = false;
-    savingPayloadKey = null;
-    feedbackMode = 'saved';
-    renderAll();
   } catch {
-    if (gen !== generation) return;
-    // The latency-compensated echo can be queued before the rejection; it is
-    // not remote truth. Roll back to it only when it is a genuine server change.
-    const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok: false });
-    confirmed = result.baseline;
-    draft = clone(confirmed);
-    dirty = false;
-    pendingRemote = null;
-    remoteNotice = false;
-    saving = false;
-    savingPayloadKey = null;
-    saveError = result.error;
-    feedbackMode = 'derived';
-    renderAll();
-    $('schedule-feedback').focus({ preventScroll: true });
+    ok = false;
   }
+  settleSave({ gen, token, payload, payloadKey, ok });
+}
+
+// Connection lost while a write is in flight: do not hold the editor behind a
+// promise that may not settle for the whole outage.
+function handleOffline() {
+  if (!active || !initialized) return;
+  offlineBlocked = true;
+  if (saving) {
+    saving = false;
+    savingUnconfirmed = true;
+  }
+  validateAndPaint();
+}
+
+function handleOnline() {
+  if (!active || !initialized) return;
+  offlineBlocked = false;
+  validateAndPaint();
 }
 
 // ---------- screen lifecycle ----------
@@ -388,12 +453,7 @@ export function initSchedule() {
   $('schedule-enabled').addEventListener('change', () => {
     draft.enabled = $('schedule-enabled').checked;
     markDirty();
-    setText(
-      $('schedule-enabled-sub'),
-      draft.enabled
-        ? 'Charging follows these windows.'
-        : 'Charging is not restricted by a schedule.',
-    );
+    setText($('schedule-enabled-sub'), toggleNote(draft));
   });
   $('add-rule').addEventListener('click', () => {
     if (draft.rules.length >= MAX_RULES) return;
@@ -411,6 +471,8 @@ export function initSchedule() {
     }
   });
   $('save-schedule').addEventListener('click', save);
+  addEventListener('offline', handleOffline);
+  addEventListener('online', handleOnline);
   renderAll();
 }
 
@@ -431,7 +493,7 @@ export function showSchedule(data) {
     adopt(incoming);
     return;
   }
-  if (saving) {
+  if (saving || savingUnconfirmed) {
     // Queue the latest snapshot (including the local write echo). Save settle
     // decides whether it becomes the confirmed baseline; the draft is untouched.
     pendingRemote = incoming;
@@ -500,6 +562,9 @@ export function resetSchedule() {
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
   saveError = '';
+  offlineBlocked = false;
+  savingUnconfirmed = false;
+  saveToken += 1;
   live = { inWindow: false, activeRuleId: null };
   cards = [];
   if ($('rule-list')) {
@@ -515,7 +580,7 @@ export function resetSchedule() {
     $('schedule-loading').hidden = false;
     $('schedule-load-error').hidden = true;
     renderRemoteNotice();
-    setText($('schedule-enabled-sub'), 'Charging is not restricted by a schedule.');
+    setText($('schedule-enabled-sub'), toggleNote(defaultSchedule()));
     $('schedule-enabled').checked = false;
   }
 }
