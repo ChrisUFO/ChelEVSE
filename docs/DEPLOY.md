@@ -224,8 +224,8 @@ chmod 600 private/*.json
 
 ## 8. Deploy
 
-From `main` on a clean tree, with `FIREBASE_PROJECT` and (optionally)
-`GOOGLE_APPLICATION_CREDENTIALS` exported:
+From `main` on a clean tree, with the target project selected (§6) and
+`GOOGLE_APPLICATION_CREDENTIALS` exported if you deploy with a key:
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=private/deploy-service-account.json
@@ -243,8 +243,11 @@ npm run deploy:indexes
 npm run deploy:hosting
 ```
 
-`npm run deploy` runs all three targets at once. The `deploy:*` scripts require
-`FIREBASE_PROJECT` to be exported even when `.firebaserc` exists.
+`npm run deploy` runs all three targets at once. The `deploy:*` scripts use
+`FIREBASE_PROJECT` when it is set and otherwise fall back to `.firebaserc`'s
+default project; the guard resolves the target the same way. With neither set
+the deploy fails, so exporting `FIREBASE_PROJECT` in every deploying shell
+avoids ambiguity.
 
 What gets published:
 
