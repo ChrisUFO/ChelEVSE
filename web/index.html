@@ -278,10 +278,19 @@
           </p>
 
           <section class="hero" style="--i: 1" aria-label="Charger status">
-            <span class="badge" id="state-badge"
-              ><span class="dot"></span><span id="state-label">Unknown</span></span
-            >
+            <div class="badges">
+              <span class="badge" id="state-badge"
+                ><span class="dot"></span><span id="state-label">Unknown</span></span
+              >
+              <span class="badge schedule" id="schedule-badge" hidden>
+                <span class="dot"></span><span id="schedule-badge-text">Scheduled window</span>
+              </span>
+            </div>
             <div class="power"><span id="power">—</span><em>kW</em></div>
+            <p class="elapsed-row">
+              <span class="elapsed-label">Session elapsed</span>
+              <span class="elapsed" id="elapsed">—</span>
+            </p>
             <p class="updated" id="updated">waiting for data</p>
           </section>
 
@@ -292,35 +301,65 @@
               <span class="fig-sub" id="fig-volt"></span>
             </div>
             <div class="fig">
+              <span class="fig-label">Setpoint</span>
+              <span class="fig-value"><span id="fig-setpoint">—</span><em>A</em></span>
+              <span class="fig-sub">pilot</span>
+            </div>
+            <div class="fig">
               <span class="fig-label">Session</span>
               <span class="fig-value"><span id="fig-session">—</span><em>kWh</em></span>
-              <span class="fig-sub">this charge</span>
+              <span class="fig-sub"
+                ><span id="session-cost" class="fig-cost" hidden></span
+                ><span id="session-sub">this charge</span></span
+              >
             </div>
             <div class="fig">
               <span class="fig-label">Lifetime</span>
               <span class="fig-value"><span id="fig-total">—</span><em>kWh</em></span>
               <span class="fig-sub">total</span>
             </div>
-            <div class="fig">
-              <span class="fig-label">Temp</span>
+            <div class="fig fig-wide">
+              <span class="fig-label">Temperature</span>
               <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
-              <span class="fig-sub">charger</span>
+              <span class="temp-sensors">
+                <span class="temp-sensor"
+                  ><span class="temp-idx">T1</span><span id="fig-temp1">—</span></span
+                >
+                <span class="temp-sensor"
+                  ><span class="temp-idx">T2</span><span id="fig-temp2">—</span></span
+                >
+                <span class="temp-sensor"
+                  ><span class="temp-idx">T3</span><span id="fig-temp3">—</span></span
+                >
+              </span>
             </div>
           </section>
 
           <section class="controls" id="controls" style="--i: 3" aria-label="Controls">
-            <div class="btnrow">
-              <button class="btn" id="pause" type="button">Pause</button>
-              <button class="btn" id="resume" type="button">Resume</button>
+            <div class="modes" role="group" aria-label="Charge mode commands">
+              <button class="mode-btn stop" id="pause" type="button">Stop</button>
+              <button class="mode-btn auto" id="resume" type="button">Auto</button>
+              <button
+                class="mode-btn hold"
+                id="hold"
+                type="button"
+                aria-expanded="false"
+                aria-controls="hold-panel"
+              >
+                Hold
+              </button>
             </div>
-            <div class="set-current">
+            <div class="hold-panel" id="hold-panel" hidden>
               <div class="set-head">
-                <label for="amps">Max current</label>
+                <label for="amps">Hold at</label>
                 <output id="amps-out">32 A</output>
               </div>
               <input type="range" id="amps" min="6" max="48" step="1" value="32" />
-              <button id="apply" type="button">Apply</button>
+              <button id="apply" type="button">Apply current</button>
             </div>
+            <p class="controls-note">
+              Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.
+            </p>
             <p class="feedback" id="feedback" aria-live="polite"></p>
           </section>
         </section>
@@ -333,20 +372,72 @@
           tabindex="0"
           hidden
         >
-          <div class="panel-head" style="--i: 0">
-            <p class="eyebrow">History</p>
-            <h1>Energy history</h1>
+          <div class="panel-head history-head" style="--i: 0">
+            <div class="head-row">
+              <div>
+                <p class="eyebrow">History</p>
+                <h1>Energy history</h1>
+              </div>
+              <button id="history-refresh" class="btn refresh" type="button">Refresh</button>
+            </div>
             <p class="lede">Daily energy and recent charging sessions.</p>
+            <p class="feedback" id="history-feedback" role="status" aria-live="polite"></p>
           </div>
-          <div class="placeholder" style="--i: 1">
-            <span class="placeholder-icon" aria-hidden="true">
-              <svg width="24" height="24"><use href="#i-history" /></svg>
-            </span>
-            <p class="placeholder-title">No history yet</p>
-            <p class="placeholder-line">
-              Daily totals and recent sessions will appear here once the charger has logged a day.
-            </p>
-          </div>
+
+          <section
+            class="history-summary solo"
+            id="history-summary"
+            style="--i: 1"
+            aria-label="Last 30 days summary"
+          >
+            <div class="summary-cell">
+              <span class="summary-label">Last 30 days</span>
+              <span class="summary-value"><span id="history-total">—</span><em>kWh</em></span>
+            </div>
+            <div class="summary-cell" id="history-cost-cell" hidden>
+              <span class="summary-label">Estimated cost</span>
+              <span class="summary-value" id="history-cost">—</span>
+            </div>
+          </section>
+
+          <section class="chart-card" style="--i: 2" aria-labelledby="chart-heading">
+            <h2 class="sr-only" id="chart-heading">Daily energy</h2>
+            <div class="chart-head" id="chart-head">
+              <div class="chart-readout">
+                <p class="chart-day" id="chart-day">—</p>
+                <p class="chart-value">
+                  <span id="chart-kwh">—</span><em>kWh</em
+                  ><span class="chart-cost" id="chart-cost" hidden></span>
+                </p>
+              </div>
+              <p class="chart-hint">Tap or use ← →</p>
+            </div>
+            <div class="chart-frame">
+              <svg
+                id="history-chart"
+                class="chart"
+                viewBox="0 0 300 132"
+                role="group"
+                aria-label="Daily energy for the last 30 days. Use the left and right arrow keys to move between days."
+              >
+                <g id="chart-bars"></g>
+              </svg>
+              <div class="chart-empty" id="chart-empty" hidden>
+                <p class="chart-empty-title" id="chart-empty-title"></p>
+                <p class="chart-empty-line" id="chart-empty-line"></p>
+              </div>
+            </div>
+          </section>
+          <p class="section-state" id="history-state" hidden></p>
+
+          <section class="sessions-section" style="--i: 3" aria-labelledby="sessions-heading">
+            <div class="section-title-row">
+              <h2 id="sessions-heading">Recent sessions</h2>
+              <span class="section-note" id="sessions-count"></span>
+            </div>
+            <p class="section-state" id="sessions-state" hidden></p>
+            <ul class="sessions" id="sessions-list"></ul>
+          </section>
         </section>
 
         <section
@@ -362,14 +453,73 @@
             <h1>Charge schedule</h1>
             <p class="lede">Weekly windows when the charger may charge.</p>
           </div>
-          <div class="placeholder" style="--i: 1">
-            <span class="placeholder-icon" aria-hidden="true">
-              <svg width="24" height="24"><use href="#i-schedule" /></svg>
-            </span>
-            <p class="placeholder-title">No schedule shown yet</p>
-            <p class="placeholder-line">
-              Your charger's weekly charging windows will appear here, ready to edit.
+
+          <p class="live-window" id="schedule-live" hidden role="status">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="schedule-live-text">Window active now</span>
+          </p>
+          <p class="section-state" id="schedule-loading">Loading schedule…</p>
+          <p class="section-state err" id="schedule-load-error" hidden>
+            Couldn't load the schedule. Reload the page to try again.
+          </p>
+
+          <div id="schedule-editor" hidden>
+            <section class="schedule-card" style="--i: 1" aria-label="Schedule state">
+              <label class="switch-row" for="schedule-enabled">
+                <span class="switch-copy">
+                  <span class="switch-title">Schedule enabled</span>
+                  <span class="switch-sub" id="schedule-enabled-sub"
+                    >Charging is not restricted by a schedule.</span
+                  >
+                </span>
+                <span class="switch">
+                  <input id="schedule-enabled" type="checkbox" role="switch" />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
+            </section>
+
+            <p class="schedule-note" style="--i: 2">
+              The charger enforces these windows itself, so they keep running while this app or the
+              Pi is offline. Edits reach the charger through the Pi, usually within a minute.
+              Current is stored for compatibility but not applied by this firmware — scheduled
+              windows charge at the EVSE's configured limit.
             </p>
+
+            <p
+              class="remote-notice"
+              id="schedule-remote-notice"
+              role="status"
+              aria-live="polite"
+              hidden
+            >
+              Remote schedule changed — saving will overwrite it.
+            </p>
+
+            <div class="section-title-row schedule-title-row" style="--i: 3">
+              <h2>Windows</h2>
+              <span class="section-note" id="schedule-count">0 of 20</span>
+            </div>
+            <div class="rule-list" id="rule-list"></div>
+            <p class="section-state" id="schedule-empty">
+              No windows yet. Add one to set a weekly charging window.
+            </p>
+            <p class="rule-error doc-error" id="schedule-doc-error" hidden></p>
+            <button class="btn add-rule" id="add-rule" type="button">
+              <span class="add-plus" aria-hidden="true">+</span><span>Add window</span>
+            </button>
+            <div class="schedule-savebar">
+              <p
+                class="feedback"
+                id="schedule-feedback"
+                role="status"
+                aria-live="polite"
+                tabindex="-1"
+              ></p>
+              <button id="save-schedule" class="btn solid" type="button" disabled>
+                Save schedule
+              </button>
+            </div>
           </div>
         </section>
 

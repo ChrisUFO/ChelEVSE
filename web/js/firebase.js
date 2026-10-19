@@ -20,13 +20,17 @@ export let signInWithRedirect;
 
 export let doc;
 export let getDoc;
+export let getDocs;
+export let setDoc;
 export let collection;
 export let addDoc;
 export let serverTimestamp;
 export let query;
+export let where;
 export let orderBy;
 export let limit;
 export let onSnapshot;
+export let documentId;
 
 function tagged(kind) {
   const err = new Error(kind);
@@ -60,8 +64,21 @@ export async function initFirebase() {
       signInWithPopup,
       signInWithRedirect,
     } = authMod);
-    ({ doc, getDoc, collection, addDoc, serverTimestamp, query, orderBy, limit, onSnapshot } =
-      dbMod);
+    ({
+      doc,
+      getDoc,
+      getDocs,
+      setDoc,
+      collection,
+      addDoc,
+      serverTimestamp,
+      query,
+      where,
+      orderBy,
+      limit,
+      onSnapshot,
+      documentId,
+    } = dbMod);
   } catch {
     throw tagged('sdk');
   }

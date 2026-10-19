@@ -58,7 +58,7 @@ export function routeFor(hash) {
 // same screen. Panels are hidden rather than removed so each screen keeps its
 // control state; the document scroll position is saved per route and restored
 // when that route is shown again (first visits start at the top).
-export function initTabbar() {
+export function initTabbar({ onRoute } = {}) {
   const tabs = [...document.querySelectorAll('.tab')];
   const tabbar = document.querySelector('.tabbar');
   const scrollByRoute = new Map();
@@ -82,6 +82,9 @@ export function initTabbar() {
     currentRoute = route;
     // Re-clicking the selected tab must not jump back to an older offset.
     if (changed) window.scrollTo(0, scrollByRoute.get(route) ?? 0);
+    // Route entry hook: screens use it to start/stop clocks and lazily load
+    // one-shot data. Re-clicking the active tab is not a new entry.
+    if (changed && onRoute) onRoute(route);
   }
 
   function render() {

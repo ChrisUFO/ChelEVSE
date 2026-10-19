@@ -11,15 +11,36 @@ import {
   subscribeAuth,
 } from './js/auth.js';
 import { startStore, stopStore } from './js/store.js';
-import { $, initNetwork, initTabbar, setCached, setText } from './js/ui.js';
+import { $, initNetwork, initTabbar, routeFor, setCached, setText } from './js/ui.js';
 import {
   enterStatus,
+  focusStatus,
+  blurStatus,
   initStatus,
   leaveStatus,
   showCommands,
+  showConfig,
+  showSettings,
   showStatus,
   showStatusError,
+  showStatusSchedule,
 } from './js/screens/status.js';
+import {
+  activateHistory,
+  enterHistory,
+  initHistory,
+  resetHistory,
+  showHistorySettings,
+} from './js/screens/history.js';
+import {
+  activateSchedule,
+  enterSchedule,
+  initSchedule,
+  resetSchedule,
+  showLiveStatus,
+  showSchedule,
+  showScheduleError,
+} from './js/screens/schedule.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 
@@ -52,6 +73,8 @@ function setSignInBusy(busy) {
 function closeApp() {
   stopStore();
   leaveStatus();
+  resetHistory();
+  resetSchedule();
   activeUser = null;
 }
 
@@ -82,6 +105,16 @@ function showNoAccess(user, reason) {
   if (showScreen('noaccess')) $('noaccess-title').focus({ preventScroll: true });
 }
 
+// Tab activation: start/stop the status clock and load history on first visit.
+// Screens keep their own state; only the visible work changes.
+function handleRoute(route) {
+  if (!activeUser) return;
+  if (route === 'status') focusStatus();
+  else blurStatus();
+  if (route === 'history') activateHistory();
+  if (route === 'schedule') activateSchedule();
+}
+
 function enterApp(user) {
   activeUser = user;
   setSignInBusy(false);
@@ -90,17 +123,33 @@ function enterApp(user) {
     onStatus: (snap) => {
       if (!snap) {
         showStatusError();
+        showLiveStatus(null);
         return;
       }
       setCached(snap.metadata.fromCache);
+      const data = snap.data();
       showStatus(snap);
+      showLiveStatus(data);
     },
     onCommands: showCommands,
+    onSettings: (settings) => {
+      showSettings(settings);
+      showHistorySettings(settings);
+    },
+    onConfig: showConfig,
+    onSchedule: (data) => {
+      showSchedule(data);
+      showStatusSchedule(data);
+    },
+    onScheduleError: showScheduleError,
     onAccessDenied: () => {
       if (activeUser) showNoAccess(activeUser, 'no-access');
     },
   });
   enterStatus();
+  enterHistory();
+  enterSchedule();
+  handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
 }
@@ -168,7 +217,9 @@ async function main() {
   }
 
   initStatus();
-  initTabbar();
+  initHistory();
+  initSchedule();
+  initTabbar({ onRoute: handleRoute });
   wireUi();
 
   // The redirect fallback lands back here; surface a failure on the sign-in
