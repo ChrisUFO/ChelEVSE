@@ -188,3 +188,13 @@ export function fmtCost(kwh, rate, currency) {
   if (!Number.isFinite(energy) || !Number.isFinite(price)) return null;
   return fmtMoney(energy * price, currency);
 }
+
+// Distinguish "the bridge stopped writing" from "the bridge is fine but the
+// charger is unreachable" — both used to render the same banner.
+export const STALE_AFTER_MS = 60000;
+
+export function freshnessState({ chargerOnline, ageMs: age, staleAfterMs = STALE_AFTER_MS }) {
+  if (!Number.isFinite(age) || age > staleAfterMs) return 'bridge';
+  if (chargerOnline === false) return 'charger';
+  return null;
+}

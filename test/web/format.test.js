@@ -10,6 +10,7 @@ import {
   formatDuration,
   formatElapsed,
   freezeClock,
+  freshnessState,
   holdAfterSnapshot,
   numOrDash,
   relTime,
@@ -314,4 +315,12 @@ test('fmtCost is null until both energy and rate exist', () => {
   assert.equal(fmtCost(12.34, null, 'USD'), null);
   assert.equal(fmtCost(Number.NaN, 0.31, 'USD'), null);
   assert.equal(fmtCost(12.34, Number.NaN, 'USD'), null);
+});
+
+test('freshnessState separates a stale bridge from an offline charger', () => {
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: 5000 }), null);
+  assert.equal(freshnessState({ chargerOnline: false, ageMs: 5000 }), 'charger');
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: 61000 }), 'bridge');
+  assert.equal(freshnessState({ chargerOnline: false, ageMs: 61000 }), 'bridge');
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: Infinity }), 'bridge');
 });
