@@ -8,6 +8,8 @@ import {
   commandMillis,
   gateTransition,
   rapiErrorMessage,
+  rapiLogSignature,
+  rapiTickLabels,
   validateRapi,
 } from '../../web/js/advanced.js';
 
@@ -63,6 +65,35 @@ test('commandMillis reads Firestore timestamps, numbers, and seconds', () => {
   assert.equal(commandMillis({ seconds: 12 }), 12000);
   assert.equal(commandMillis(null), null);
   assert.equal(commandMillis({}), null);
+});
+
+test('a ticker tick cannot detach the focused or expanded command row', () => {
+  const created = { toMillis: () => Date.now() - 65000 };
+  const commands = [
+    { id: 'a', command: '$FS 16', status: 'acked', created_at: created, result: 'OK' },
+    { id: 'b', command: '$FS 20', status: 'pending', created_at: created },
+  ];
+
+  // A tick is time, not data: the rendered signature is unchanged, so the screen
+  // keeps the existing nodes instead of rebuilding the list.
+  const signature = rapiLogSignature(commands);
+  assert.equal(rapiLogSignature(commands.map((command) => ({ ...command }))), signature);
+
+  // The only thing a tick produces is the elapsed labels for the rows already on
+  // screen; no row identity or content is emitted, so no node is replaced and
+  // the focused/expanded row, its selection and the scroll position survive.
+  const now = Date.now();
+  assert.deepEqual(rapiTickLabels(commands, commands.length, now), ['1 min ago', '1 min ago']);
+
+  // A changed row (status, command, result, timestamp, or a new document) needs a
+  // rebuild, whether or not the row count stays the same.
+  assert.notEqual(rapiLogSignature([{ ...commands[0], status: 'failed' }, commands[1]]), signature);
+  assert.notEqual(rapiLogSignature([{ ...commands[0], result: 'ERR' }, commands[1]]), signature);
+  assert.notEqual(rapiLogSignature([commands[0], { ...commands[1], id: 'c' }]), signature);
+  // The ticker refuses to label a list that no longer has one row per command.
+  assert.equal(rapiTickLabels(commands, commands.length + 1, now), null);
+  assert.equal(rapiTickLabels(commands, commands.length - 1, now), null);
+  assert.equal(rapiTickLabels([], 0, now), null);
 });
 
 test('the commands (type, created_at) composite index is declared', () => {

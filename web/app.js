@@ -34,6 +34,7 @@ import {
   releaseNotifications,
   resetNotifications,
 } from './js/screens/notifications.js';
+import { accessDenialRelease } from './js/notifications.js';
 import {
   enterAdvanced,
   initAdvanced,
@@ -109,6 +110,13 @@ function showSignedOut() {
 }
 
 function showNoAccess(user, reason) {
+  // A revoked grant ends this device's registration the same way sign-out does:
+  // the token delete is keyed on the account's uid, so it must start while that
+  // user is still the authenticated session, and before closeApp resets the
+  // notification state (which drops an in-flight token). The release is bounded
+  // and best-effort; the blocked screen never waits for it. A failed access
+  // *check* (reason 'error') releases nothing — the grant may still be intact.
+  if (accessDenialRelease(reason)) releaseNotifications();
   closeApp();
   setSignInBusy(false);
   const checkFailed = reason === 'error';

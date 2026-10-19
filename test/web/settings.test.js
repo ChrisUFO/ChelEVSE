@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   OFFLINE_MESSAGE,
+  SAVE_FAILED_FIRST_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
   normalizeSettings,
@@ -167,6 +168,43 @@ test('a failed save rolls an untouched form back to the confirmed values', () =>
     }).text,
     SAVE_FAILED_MESSAGE,
   );
+});
+
+test('a first-ever failed save keeps the draft and the retry available', () => {
+  const draft = { rate: '0.25', currency: 'USD' };
+  const settled = reconcileSettingsSave({
+    ok: false,
+    values: { rate: 0.25, currency: 'USD' },
+    previous: null,
+    draft,
+  });
+  // No settings/current exists yet, so there is no previous state to restore:
+  // every field the user typed stays, the form stays dirty, and Save stays on.
+  assert.equal(settled.confirmed, null);
+  assert.deepEqual(settled.fields, draft);
+  assert.equal(settled.dirty, true);
+  assert.equal(settled.saved, false);
+  assert.equal(settled.error, SAVE_FAILED_FIRST_MESSAGE);
+  assert.doesNotMatch(settled.error, /previous/);
+
+  const view = settingsSaveState({
+    draft: settled.fields,
+    confirmed: settled.confirmed,
+    error: settled.error,
+  });
+  assert.equal(view.text, SAVE_FAILED_FIRST_MESSAGE);
+  assert.equal(view.kind, 'err');
+  assert.equal(view.canSave, true);
+
+  // A draft typed during that first save still wins over the attempted values.
+  const typed = reconcileSettingsSave({
+    ok: false,
+    values: { rate: 0.25, currency: 'USD' },
+    previous: null,
+    draft: { rate: '0.4', currency: 'EUR' },
+  });
+  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR' });
+  assert.equal(typed.dirty, true);
 });
 
 test('a failed save keeps a draft typed during the save', () => {

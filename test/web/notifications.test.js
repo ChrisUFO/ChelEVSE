@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   TOKEN_TIMEOUT_MESSAGE,
+  accessDenialRelease,
   isTokenClaimDenial,
   notificationState,
   registrationDecision,
@@ -11,6 +12,32 @@ import {
   tokenReleasePlan,
   vapidConfigured,
 } from '../../web/js/notifications.js';
+import {
+  RELEASE_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+  createTokenLifecycle,
+} from '../../web/js/notification-session.js';
+
+function memoryStorage() {
+  const map = new Map();
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    removeItem: (key) => map.delete(key),
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 test('notificationState covers every permission state without asking', () => {
   assert.equal(notificationState({ supported: null }).kind, 'checking');
@@ -229,4 +256,132 @@ test('a pruned-token denial is the handover signal, not a dead end', () => {
   const plan = tokenReleasePlan({ stored: { token: staleToken, uid: 'A' }, messaging: true });
   assert.deepEqual(plan.docs, [{ token: staleToken, uid: 'A' }]);
   assert.equal(plan.docs[0].uid === 'B', false);
+});
+
+test('the registered copy says what is true before delivery ships', () => {
+  const granted = notificationState({
+    supported: true,
+    permission: 'granted',
+    tokenPhase: 'saved',
+  });
+  assert.match(granted.detail, /registered/);
+  assert.match(granted.detail, /when the charger reports an event/);
+  // The worker in this build has no push handler, so the copy must not promise
+  // an alert the app cannot yet deliver while closed.
+  assert.doesNotMatch(granted.detail, /even when the app is closed/);
+  assert.equal(granted.action, null);
+});
+
+test('only a revoked grant releases this device on the way out', () => {
+  // A store permission-denial means the grant is gone: release the token while
+  // the account can still authenticate.
+  assert.equal(accessDenialRelease('no-access'), true);
+  // A failed access check is a network/backend problem; the grant may still be
+  // intact, so nothing is unregistered.
+  assert.equal(accessDenialRelease('error'), false);
+  assert.equal(accessDenialRelease(undefined), false);
+});
+
+test('a sign-out before the token write settles deletes that exact doc and states no success', async () => {
+  const storage = memoryStorage();
+  const deleted = [];
+  const write = deferred();
+  const lifecycle = createTokenLifecycle({
+    saveTokenDoc: () => write.promise,
+    deleteTokenDoc: async (token) => {
+      deleted.push(token);
+    },
+    storage,
+  });
+  lifecycle.begin();
+  const outcomes = [];
+  const run = lifecycle.register({
+    uid: 'A',
+    acquire: async () => 'TOKEN-A',
+    onOutcome: (outcome) => outcomes.push(outcome),
+  });
+  await flush();
+
+  // The token is recorded before its document write, which is still pending.
+  assert.deepEqual(lifecycle.inFlightToken, {
+    token: 'TOKEN-A',
+    uid: 'A',
+    session: lifecycle.generation,
+  });
+  assert.equal(lifecycle.writing, true);
+
+  // Sign-out lands now: the release must use the acquired token, not an empty
+  // cache, and the session must be over before the write settles.
+  await lifecycle.release();
+  assert.equal(lifecycle.active, false);
+  write.resolve();
+  await run;
+
+  // The exact document id is deleted by the sign-out handover and again by the
+  // late write's own release, which is what keeps it from surviving the race.
+  assert.deepEqual(deleted, ['TOKEN-A', 'TOKEN-A']);
+  assert.deepEqual(outcomes, []);
+  assert.equal(storage.getItem(TOKEN_STORAGE_KEY), null);
+  assert.equal(storage.getItem(RELEASE_STORAGE_KEY), null);
+});
+
+test('a failed release keeps the cache and its retry marker for the next session', async () => {
+  const storage = memoryStorage();
+  storage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token: 'T', uid: 'A' }));
+  const deleted = [];
+  let offline = true;
+  const lifecycle = createTokenLifecycle({
+    saveTokenDoc: async () => {},
+    deleteTokenDoc: async (token) => {
+      deleted.push(token);
+      if (offline) throw new Error('unavailable');
+    },
+    storage,
+    releaseWriteMs: 50,
+  });
+  lifecycle.begin();
+  await lifecycle.release();
+
+  assert.deepEqual(deleted, ['T']);
+  // The delete was refused: the cached token and the marker stay, so the next
+  // session of that account retries exactly this document.
+  assert.deepEqual(JSON.parse(storage.getItem(TOKEN_STORAGE_KEY)), { token: 'T', uid: 'A' });
+  assert.deepEqual(JSON.parse(storage.getItem(RELEASE_STORAGE_KEY)), [{ token: 'T', uid: 'A' }]);
+
+  offline = false;
+  await lifecycle.retryPending('A');
+  assert.deepEqual(deleted, ['T', 'T']);
+  assert.equal(storage.getItem(TOKEN_STORAGE_KEY), null);
+  assert.equal(storage.getItem(RELEASE_STORAGE_KEY), null);
+  // Unknown accounts do not get another account's release attempt.
+  await lifecycle.retryPending('B');
+  assert.deepEqual(deleted, ['T', 'T']);
+});
+
+test('revoking access releases an active registered session while the user is still signed in', async () => {
+  const storage = memoryStorage();
+  const deleted = [];
+  const fcm = [];
+  const lifecycle = createTokenLifecycle({
+    saveTokenDoc: async () => {},
+    deleteTokenDoc: async (token) => {
+      deleted.push(token);
+    },
+    storage,
+  });
+  lifecycle.begin();
+  await lifecycle.register({ uid: 'A', acquire: async () => 'TOKEN-A' });
+  assert.equal(lifecycle.active, true);
+  assert.deepEqual(JSON.parse(storage.getItem(TOKEN_STORAGE_KEY)), { token: 'TOKEN-A', uid: 'A' });
+
+  // The access-denied callback runs this before closeApp/resetNotifications, so
+  // the uid-keyed delete starts while the Firebase user still authenticates.
+  assert.equal(accessDenialRelease('no-access'), true);
+  await lifecycle.release({ resetFcm: async () => fcm.push('reset') });
+
+  assert.deepEqual(deleted, ['TOKEN-A']);
+  assert.deepEqual(fcm, ['reset']);
+  assert.equal(lifecycle.active, false);
+  assert.equal(storage.getItem(TOKEN_STORAGE_KEY), null);
+  assert.equal(storage.getItem(RELEASE_STORAGE_KEY), null);
 });

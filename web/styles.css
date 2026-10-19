@@ -1811,6 +1811,12 @@ input[aria-invalid='true']:focus-visible {
 .raw-config summary:focus-visible {
   outline-offset: -3px;
 }
+/* The scrollable snapshot is its own keyboard focus target (overflowing scroll
+   containers are focusable), and the same clipped edge would hide an outset
+   ring. Inset it independently of the disclosure. */
+.raw-json:focus-visible {
+  outline-offset: -3px;
+}
 .raw-config summary::after {
   content: '▾';
   flex: none;

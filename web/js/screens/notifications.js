@@ -3,35 +3,27 @@
 // already-granted permission fetches the token and re-saves it only when it
 // changed (the last save is remembered per account in localStorage). All errors
 // stay inside this card and never break the rest of Config.
+//
+// The token lifecycle itself (session/attempt generations, the in-flight token,
+// cache and retry markers) lives in the DOM-free coordinator so the sign-out
+// race is covered by test/web; this screen only wires Firebase and paints.
 
 import { $, setText } from '../ui.js';
 import {
   OFFLINE_TOKEN_MESSAGE,
-  isTokenClaimDenial,
   notificationState,
   registrationDecision,
   registrationResult,
-  tokenReleasePlan,
   vapidConfigured,
 } from '../notifications.js';
+import { createTokenLifecycle } from '../notification-session.js';
 import { auth, loadMessaging, vapidKey } from '../firebase.js';
 import { deleteFcmToken, saveFcmToken } from '../store.js';
-import { settleWrite } from '../write.js';
 
-const TOKEN_STORAGE_KEY = 'chelevse.fcmToken';
-// A sign-out whose token-doc delete never reached the server leaves a marker
-// behind; the next session of that account retries the delete instead of
-// leaving the doc to deny the next account's save. A registration that is
-// still writing its document can add its own marker after sign-out, so this
-// is a list rather than a single pending token.
-const RELEASE_STORAGE_KEY = 'chelevse.fcmPendingRelease';
 const SW_READY_TIMEOUT_MS = 15000;
 const RELEASE_RETRY_MS = 5000;
-const RELEASE_WRITE_MS = 5000;
 
 let notificationApi = false;
-let sessionActive = false;
-let sessionGeneration = 0;
 let permission = 'default';
 let supported = null;
 let phase = 'idle';
@@ -41,16 +33,11 @@ let busy = false;
 let messaging = null;
 let supportPromise = null;
 let supportFailed = false;
-let tokenInFlight = false;
-let tokenRestoredFor = null;
-// The token this session obtained, recorded as soon as the browser returns it
-// and before its document write starts. The local cache is only written after
-// the write settles, so a sign-out that lands while the write is in flight
-// needs this to know which document to release.
-let inFlightToken = null;
-// Bumped per registration attempt so a timed-out write that settles later can
-// never overwrite the outcome of a newer retry.
-let registrationGeneration = 0;
+
+const lifecycle = createTokenLifecycle({
+  saveTokenDoc: saveFcmToken,
+  deleteTokenDoc: deleteFcmToken,
+});
 
 function readPermission() {
   if (typeof Notification === 'undefined') return 'unsupported';
@@ -69,101 +56,6 @@ function currentUid() {
   return auth && auth.currentUser && typeof auth.currentUser.uid === 'string'
     ? auth.currentUser.uid
     : '';
-}
-
-function readStoredToken() {
-  try {
-    const raw = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (typeof parsed.token !== 'string' || typeof parsed.uid !== 'string') return null;
-    return { token: parsed.token, uid: parsed.uid };
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredToken(token, uid) {
-  try {
-    localStorage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token, uid }));
-  } catch {
-    // Private-mode storage failures must not break registration.
-  }
-}
-
-function clearStoredToken() {
-  try {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  } catch {
-    // Same tolerance as writeStoredToken.
-  }
-}
-
-function readPendingReleases() {
-  try {
-    const raw = localStorage.getItem(RELEASE_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    // Older builds stored one marker object; accept both shapes.
-    const list = Array.isArray(parsed) ? parsed : [parsed];
-    return list.filter(
-      (item) => item && typeof item.token === 'string' && typeof item.uid === 'string',
-    );
-  } catch {
-    return [];
-  }
-}
-
-function writePendingReleases(list) {
-  try {
-    if (!list.length) localStorage.removeItem(RELEASE_STORAGE_KEY);
-    else localStorage.setItem(RELEASE_STORAGE_KEY, JSON.stringify(list));
-  } catch {
-    // A storage failure must never block the sign-out itself.
-  }
-}
-
-function sameRelease(a, b) {
-  return a.token === b.token && a.uid === b.uid;
-}
-
-function addPendingRelease(marker) {
-  const list = readPendingReleases();
-  if (list.some((item) => sameRelease(item, marker))) return;
-  list.push({ token: marker.token, uid: marker.uid });
-  writePendingReleases(list);
-}
-
-function clearPendingRelease(marker) {
-  const list = readPendingReleases();
-  const next = list.filter((item) => !sameRelease(item, marker));
-  if (next.length !== list.length) writePendingReleases(next);
-}
-
-function dropCachedToken(token) {
-  const cached = readStoredToken();
-  if (cached && cached.token === token) clearStoredToken();
-}
-
-// Release one token document, exactly the one this attempt owns. The retry
-// marker is written before the delete so a refusal (offline, revoked, or a
-// delete that now runs without auth after sign-out) stays recoverable by that
-// account's next session. The wait is bounded: sign-out is best-effort.
-function releaseTokenDoc(token, uid) {
-  const marker = { token, uid };
-  if (uid) addPendingRelease(marker);
-  const settle = (release) => {
-    if (uid) clearPendingRelease(marker);
-    dropCachedToken(token);
-    return release;
-  };
-  return Promise.race([
-    deleteFcmToken(token).then(
-      () => settle(true),
-      () => false,
-    ),
-    new Promise((resolve) => setTimeout(() => resolve(false), RELEASE_WRITE_MS)),
-  ]);
 }
 
 function isOffline() {
@@ -241,9 +133,9 @@ function render() {
   const retry = $('notify-retry');
   enable.hidden = state.action !== 'enable';
   retry.hidden = state.action !== 'retry';
-  enable.disabled = busy || tokenInFlight;
-  retry.disabled = busy || tokenInFlight;
-  setText(enable, busy || tokenInFlight ? 'Enabling…' : 'Enable notifications');
+  enable.disabled = busy || lifecycle.writing;
+  retry.disabled = busy || lifecycle.writing;
+  setText(enable, busy || lifecycle.writing ? 'Enabling…' : 'Enable notifications');
   $('notify-actions').hidden = enable.hidden && retry.hidden;
 }
 
@@ -253,28 +145,10 @@ function render() {
 // cached copy is not evidence the document still exists. The comparison is kept
 // for the local cache only.
 //
-// The whole attempt is bounded by settleWrite: an unreachable backend must not
-// pin the card on "Registering…" or latch the retry button off.
-function settleRegistration(generation, attemptSession, uid, outcome, savedToken) {
-  // A newer retry (or a sign-out) owns the card now; never clobber it.
-  if (generation !== registrationGeneration) return;
-  if (attemptSession !== sessionGeneration || !sessionActive) return;
-  tokenInFlight = false;
-  const result = registrationResult(outcome);
-  if (result.phase === 'saved' && savedToken) {
-    const stored = readStoredToken();
-    if (!stored || stored.token !== savedToken || stored.uid !== uid) {
-      writeStoredToken(savedToken, uid);
-    }
-    tokenRestoredFor = uid;
-  }
-  if (result.blocked) permission = 'denied';
-  phase = result.phase;
-  error = result.error;
-  render();
-}
-
-async function registerToken({ generation = sessionGeneration } = {}) {
+// The whole attempt is bounded by settleWrite inside the lifecycle: an
+// unreachable backend must not pin the card on "Registering…" or latch the
+// retry button off.
+async function registerToken() {
   const uid = currentUid();
   if (!uid) {
     phase = 'failed';
@@ -289,8 +163,8 @@ async function registerToken({ generation = sessionGeneration } = {}) {
     vapid: vapidConfigured(vapidKey),
     uid,
     online: !isOffline(),
-    inFlight: tokenInFlight,
-    restoredForUid: tokenRestoredFor,
+    inFlight: lifecycle.writing,
+    restoredForUid: lifecycle.restoredFor,
   });
   if (!decision.start) {
     if (decision.reason === 'offline') {
@@ -300,70 +174,42 @@ async function registerToken({ generation = sessionGeneration } = {}) {
     }
     return;
   }
-  const gen = ++registrationGeneration;
-  const attemptSession = generation;
-  tokenInFlight = true;
+
   phase = 'registering';
   error = '';
   message = '';
   supported = true;
-  render();
 
-  let savedToken = null;
-  const attempt = (async () => {
-    messaging = messaging || (await loadMessaging());
-    const registration = await serviceWorkerReady();
-    const tokenOptions = { vapidKey, serviceWorkerRegistration: registration };
-    let token = await messaging.getToken(messaging.getMessaging(), tokenOptions);
-    if (!token || typeof token !== 'string') {
-      const missing = new Error('no-token');
-      throw missing;
-    }
-    // Record the token before its document write: if sign-out starts while the
-    // write is pending, the release path must know which doc id to remove.
-    inFlightToken = { token, uid, session: attemptSession };
-    // Signed out while the token request was in flight: never write for a
-    // session that no longer exists.
-    if (attemptSession !== sessionGeneration || !sessionActive) return null;
-    try {
-      await saveFcmToken(token, uid);
-    } catch (err) {
-      if (!isTokenClaimDenial(err)) throw err;
-      // The doc id still belongs to the previous account (its sign-out release
-      // never reached the server). A fresh FCM registration produces a new doc
-      // id, which the create rule accepts — otherwise this card could never
-      // recover on this browser.
+  // The FCM registration handed to getToken; a claim-denial rotation reuses it
+  // instead of registering the worker again.
+  let tokenOptions = null;
+  const run = lifecycle.register({
+    uid,
+    acquire: async () => {
+      messaging = messaging || (await loadMessaging());
+      const registration = await serviceWorkerReady();
+      tokenOptions = { vapidKey, serviceWorkerRegistration: registration };
+      return messaging.getToken(messaging.getMessaging(), tokenOptions);
+    },
+    rotate: async () => {
       await messaging.deleteToken(messaging.getMessaging()).catch(() => {});
-      token = await messaging.getToken(messaging.getMessaging(), tokenOptions);
-      if (!token || typeof token !== 'string') {
-        const missing = new Error('no-token');
-        throw missing;
-      }
-      inFlightToken = { token, uid, session: attemptSession };
-      if (attemptSession !== sessionGeneration || !sessionActive) return null;
-      await saveFcmToken(token, uid);
-    }
-    if (attemptSession !== sessionGeneration || !sessionActive) {
-      // The session ended while the write was still running. The document may
-      // have landed after the sign-out release (which had no id yet), so
-      // release this exact token now; if the delete runs without auth or the
-      // backend is unreachable, the marker retries it next session.
-      if (!sessionActive) await releaseTokenDoc(token, uid);
-      return null;
-    }
-    savedToken = token;
-    return token;
-  })();
-
-  const outcome = await settleWrite(attempt, {
-    onLate: (late) => settleRegistration(gen, attemptSession, uid, late, savedToken),
+      return messaging.getToken(messaging.getMessaging(), tokenOptions);
+    },
+    onOutcome: (outcome) => {
+      const result = registrationResult(outcome);
+      if (result.blocked) permission = 'denied';
+      phase = result.phase;
+      error = result.error;
+      render();
+    },
   });
-  settleRegistration(gen, attemptSession, uid, outcome, savedToken);
+  render();
+  await run;
 }
 
 async function refresh({ probe = false, register = false } = {}) {
-  if (!sessionActive) return;
-  const generation = sessionGeneration;
+  if (!lifecycle.active) return;
+  const generation = lifecycle.generation;
   permission = readPermission();
   if (permission !== 'default') message = '';
   // A failed SDK probe is retried on the next explicit Config visit (for
@@ -389,7 +235,7 @@ async function refresh({ probe = false, register = false } = {}) {
 
   if (probe || permission === 'granted') {
     const ok = await ensureSupport();
-    if (generation !== sessionGeneration || !sessionActive) return;
+    if (generation !== lifecycle.generation || !lifecycle.active) return;
     supported = ok;
     if (!ok && supportFailed) {
       error = 'Couldn’t load notification support. Check your connection and try again.';
@@ -403,8 +249,8 @@ async function refresh({ probe = false, register = false } = {}) {
     vapid: vapidConfigured(vapidKey),
     uid,
     online: !isOffline(),
-    inFlight: tokenInFlight,
-    restoredForUid: tokenRestoredFor,
+    inFlight: lifecycle.writing,
+    restoredForUid: lifecycle.restoredFor,
   });
   // Show "Registering…" before the first await inside registerToken so the
   // retry action never flashes on the way to the token request.
@@ -419,14 +265,14 @@ async function refresh({ probe = false, register = false } = {}) {
   render();
 
   if (!decision.start) return;
-  await registerToken({ generation });
+  await registerToken();
 }
 
 async function enable() {
-  if (busy || tokenInFlight || permission !== 'default') return;
+  if (busy || lifecycle.writing || permission !== 'default') return;
   if (typeof Notification === 'undefined') return;
   const trigger = $('notify-enable');
-  const generation = sessionGeneration;
+  const generation = lifecycle.generation;
   busy = true;
   phase = 'registering';
   error = '';
@@ -440,21 +286,21 @@ async function enable() {
     try {
       result = await Notification.requestPermission();
     } catch {
-      if (generation !== sessionGeneration) return;
+      if (generation !== lifecycle.generation) return;
       busy = false;
       phase = 'idle';
       error = 'Couldn’t ask for notification permission. Try again.';
       render();
       return;
     }
-    if (generation !== sessionGeneration || !sessionActive) return;
+    if (generation !== lifecycle.generation || !lifecycle.active) return;
 
     busy = false;
     permission = typeof result === 'string' ? result : readPermission();
     if (permission === 'granted') {
       phase = 'idle';
       render();
-      await registerToken({ generation });
+      await registerToken();
       return;
     }
     phase = 'idle';
@@ -484,75 +330,38 @@ export function initNotifications() {
 // reached the server, then kicks the load-time token restore when the
 // permission is already granted, without ever asking for permission.
 export function enterNotifications() {
-  sessionActive = true;
-  sessionGeneration += 1;
+  lifecycle.begin();
   // A pending delete for this account must land before the session registers a
   // token again, so the retry cannot race the re-save. Bounded so an offline
   // retry cannot delay the card.
   Promise.race([
-    retryPendingRelease(),
+    lifecycle.retryPending(currentUid()),
     new Promise((resolve) => setTimeout(resolve, RELEASE_RETRY_MS)),
   ]).finally(() => refresh({ register: true }));
 }
 
-// A token doc whose delete failed (offline, revoked session) is retried the
-// next time its owner is signed in. The cached token survives until the delete
-// is acknowledged, so the failure stays recoverable instead of locking the
-// browser's next account out of notifications.
-async function retryPendingRelease() {
-  const uid = currentUid();
-  const markers = readPendingReleases().filter((marker) => marker.uid === uid);
-  for (const marker of markers) {
-    try {
-      await deleteFcmToken(marker.token);
-    } catch {
-      continue; // Keep this marker for the next session.
-    }
-    clearPendingRelease(marker);
-    const cached = readStoredToken();
-    if (cached && cached.token === marker.token && cached.uid === marker.uid) clearStoredToken();
-  }
-}
-
-// Sign-out hand-over. The token document belongs to the account that created it
-// (the rules deny another uid an update), and a signed-out device must stop
-// receiving that account's alerts, so the owner deletes it while the session is
-// still valid and drops the local copy once the delete is acknowledged. A
-// failed release keeps the cache and leaves a marker for the next sign-in;
-// failure must never block the sign-out.
+// Sign-out/revocation hand-over. The token document belongs to the account that
+// created it (the rules deny another uid an update), and a device that no longer
+// holds the grant must stop receiving that account's alerts, so the owner
+// deletes it while the session is still valid and drops the local copy once the
+// delete is acknowledged. A failed release keeps the cache and leaves a marker
+// for the next sign-in; failure must never block the sign-out.
 export async function releaseNotifications() {
-  sessionActive = false;
-  sessionGeneration += 1;
-  registrationGeneration += 1;
-  const stored = readStoredToken();
-  // The cache is only written after a successful save, so a registration that
-  // is still writing has to contribute its token from memory.
-  const inFlight = inFlightToken;
-  inFlightToken = null;
-  tokenRestoredFor = null;
-  const plan = tokenReleasePlan({ stored, inFlight, messaging: Boolean(messaging) });
-  const pending = plan.docs.map((item) => releaseTokenDoc(item.token, item.uid));
-  if (plan.deleteToken) {
-    pending.push(
-      Promise.resolve()
-        .then(() => messaging.deleteToken(messaging.getMessaging()))
-        .catch(() => {}),
-    );
-  }
-  await Promise.all(pending);
+  // Only reset the FCM registration when the SDK was actually loaded; there is
+  // nothing to unregister otherwise.
+  const resetFcm = messaging ? () => messaging.deleteToken(messaging.getMessaging()) : null;
+  await lifecycle.release({ resetFcm });
 }
 
 // Called on every entry to the Config tab; re-reads the permission in case it
 // changed in browser settings and probes support on first visit.
 export function activateNotifications() {
-  if (!sessionActive) return;
+  if (!lifecycle.active) return;
   refresh({ probe: true, register: true });
 }
 
 export function resetNotifications() {
-  sessionActive = false;
-  sessionGeneration += 1;
-  registrationGeneration += 1;
+  lifecycle.discard();
   // The cached token and the pending-release marker are deliberately kept: a
   // release that failed must stay retryable by the next sign-in instead of
   // being forgotten here.
@@ -562,9 +371,6 @@ export function resetNotifications() {
   error = '';
   message = '';
   busy = false;
-  tokenInFlight = false;
-  inFlightToken = null;
-  tokenRestoredFor = null;
   supportPromise = null;
   supportFailed = false;
   if (!$('notify-card')) return;

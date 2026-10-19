@@ -66,7 +66,7 @@ export function notificationState({
     }
     const detail =
       tokenPhase === 'saved'
-        ? 'This device is registered. You’ll get charging alerts even when the app is closed.'
+        ? 'This device is registered for alerts — they arrive when the charger reports an event.'
         : 'Enabled in this browser. Registering this device…';
     return {
       kind: 'granted',
@@ -89,6 +89,14 @@ export function notificationState({
 export const OFFLINE_TOKEN_MESSAGE = 'You’re offline — reconnect to register this device.';
 export const TOKEN_TIMEOUT_MESSAGE =
   'Still registering this device — check your connection, then try again.';
+
+// Ending a session through an access denial releases this device's push
+// registration only when the grant is actually gone. A failed access *check*
+// (`reason === 'error'`) releases nothing: the account may still be allowed and
+// the problem may be the network, so unregistering would be a false alarm.
+export function accessDenialRelease(reason) {
+  return reason === 'no-access';
+}
 
 // Copy for every failed registration. Pure so the classification is testable
 // without a browser.

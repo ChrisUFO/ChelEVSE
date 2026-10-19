@@ -105,6 +105,9 @@ export const OFFLINE_MESSAGE = 'You’re offline — reconnect to save.';
 export const WAITING_MESSAGE = 'Waiting for the server — this change may not be saved yet.';
 export const SAVE_FAILED_MESSAGE =
   'Couldn’t save — the previous settings are back. Check your connection and try again.';
+// A first-ever save has no previous document to restore, so the generic copy
+// would describe a rollback that never happened.
+export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
 
 // The card's whole visible state, derived from the draft and the flags the
 // screen owns. `dirty` is computed and returned so the screen never has to keep
@@ -186,6 +189,19 @@ export function reconcileSettingsSave({
   // Failure: roll back to the newest known server state — a snapshot that
   // arrived during the write outranks the baseline captured before it.
   const baseline = remoteSeen ? normalizeSettings(remote) : normalizeSettings(previous);
+  if (!baseline) {
+    // Nothing was ever confirmed (the account has no settings document): there
+    // is no previous state to restore. Keep exactly what the user typed, stay
+    // dirty, and leave Save available so the attempt can be repeated without
+    // retyping both fields.
+    return {
+      confirmed: null,
+      fields: draftFields,
+      dirty: !settingsDraftMatches(draftFields, null),
+      saved: false,
+      error: SAVE_FAILED_FIRST_MESSAGE,
+    };
+  }
   const dirty = untouched ? false : !settingsDraftMatches(draft, baseline);
   return {
     confirmed: baseline,

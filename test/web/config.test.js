@@ -119,22 +119,25 @@ test('buildConfigSections omits empty sections and tolerates missing documents',
   );
 });
 
-test('rawConfigJson keeps every field, redactions, and readable timestamps', () => {
+test('rawConfigJson keeps every content field, redactions, and readable timestamps', () => {
   const config = {
     hostname: 'chelevse-driveway',
     pass: '***',
     protocol: '-',
     wifi_serial: 'B0A732FDCF04',
     updated_at: { toDate: () => new Date('2026-10-19T12:34:56.000Z') },
-    nested: { list: [1, true] },
+    nested: { list: [1, true], at: { toDate: () => new Date('2026-10-18T00:00:00.000Z') } },
   };
   const raw = rawConfigJson(config);
   assert.match(raw, /"hostname": "chelevse-driveway"/);
   assert.match(raw, /"pass": "\*\*\*"/);
   assert.match(raw, /"protocol": "-"/);
   assert.match(raw, /"wifi_serial": "B0A732FDCF04"/);
-  assert.match(raw, /"updated_at": "2026-10-19T12:34:56.000Z"/);
-  assert.match(raw, /"list": \[/);
+  assert.match(raw, /"nested": \{/);
+  assert.match(raw, /"at": "2026-10-18T00:00:00.000Z"/);
+  // The heading already shows "Updated HH:MM"; repeating the poll timestamp in
+  // the snapshot would make the text change on a poll the screen skips.
+  assert.doesNotMatch(raw, /updated_at/);
   assert.equal(rawConfigJson(null), '{}');
   assert.equal(rawConfigJson('nope'), '{}');
 });

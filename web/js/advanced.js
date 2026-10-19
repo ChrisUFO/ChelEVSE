@@ -1,6 +1,8 @@
 // Pure helpers for the Advanced RAPI console. No DOM, no Firebase — covered by
 // test/web.
 
+import { relTime } from './format.js';
+
 // The console mirrors the rules and the bridge: a literal "$", one or two
 // letters/digits, then an optional space-separated argument list, capped at 32
 // characters. The explicit newline check closes JavaScript's "$ matches before
@@ -51,6 +53,46 @@ export function commandMillis(createdAt) {
   if (typeof createdAt === 'number' && Number.isFinite(createdAt)) return createdAt;
   if (createdAt && typeof createdAt.seconds === 'number') return createdAt.seconds * 1000;
   return null;
+}
+
+// ---------- scrollback rendering ----------
+
+// Identity of the rows the scrollback renders, excluding the elapsed time that
+// the clock changes. Two renders with the same signature can refresh labels in
+// place; replacing the list would detach the row the user focused or expanded
+// (and drop its scroll position and text selection).
+export function rapiLogSignature(commands) {
+  if (!Array.isArray(commands)) return '';
+  try {
+    return JSON.stringify(
+      commands.map((command, index) => {
+        const row = command && typeof command === 'object' ? command : {};
+        return [
+          typeof row.id === 'string' && row.id ? row.id : `#${index}`,
+          typeof row.status === 'string' ? row.status : '',
+          typeof row.command === 'string' ? row.command : '',
+          typeof row.error === 'string' ? row.error : '',
+          row.result == null ? null : row.result,
+          commandMillis(row.created_at),
+        ];
+      }),
+    );
+  } catch {
+    return '';
+  }
+}
+
+// The labels a ticker tick writes into the rows already on screen. Returns null
+// when the rendered row count no longer matches the commands, so the caller
+// rebuilds instead of mislabelling a stale list. A tick never creates or
+// replaces a node.
+export function rapiTickLabels(commands, renderedRowCount = 0, now = Date.now()) {
+  if (!Array.isArray(commands) || !commands.length) return null;
+  if (commands.length !== renderedRowCount) return null;
+  return commands.map((command) => {
+    const when = commandMillis(command && command.created_at);
+    return when == null ? '—' : relTime(now - when);
+  });
 }
 
 // ---------- confirmation gate ----------

@@ -168,7 +168,10 @@ export function buildConfigSections(config) {
   })).filter((section) => section.rows.length > 0);
 }
 
-// Raw JSON is the complete view, including keys the curated map does not know.
+// Raw JSON is the complete content view, including keys the curated map does not
+// know. The poll timestamp is deliberately absent: the heading already says
+// "Updated HH:MM", and leaving `updated_at` out keeps this snapshot stable across
+// a timestamp-only poll, so the screen's skip-unchanged check stays honest.
 // Firestore timestamps become ISO strings so the panel stays readable; redacted
 // values are the bridge's own "***" sentinel and are printed unchanged.
 function plainValue(value) {
@@ -190,8 +193,14 @@ function plainValue(value) {
 
 export function rawConfigJson(config) {
   if (!config || typeof config !== 'object') return '{}';
+  const content = {};
+  for (const [key, value] of Object.entries(config)) {
+    // The heading shows the poll time; repeating it here would make the JSON
+    // text change on a poll the screen deliberately skips rebuilding.
+    if (key !== 'updated_at') content[key] = value;
+  }
   try {
-    return JSON.stringify(plainValue(config), null, 2);
+    return JSON.stringify(plainValue(content), null, 2);
   } catch {
     return '{}';
   }

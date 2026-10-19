@@ -9,6 +9,8 @@ import {
   commandMillis,
   gateTransition,
   rapiErrorMessage,
+  rapiLogSignature,
+  rapiTickLabels,
   validateRapi,
 } from '../advanced.js';
 import { relTime } from '../format.js';
@@ -24,6 +26,7 @@ const STATUS_LABEL = {
 let commands = [];
 let logLoaded = false;
 let logError = '';
+let renderedLogSignature = null;
 let sendGeneration = 0;
 let gate = { ...GATE_INITIAL };
 let ticker = null;
@@ -55,6 +58,7 @@ function renderLog() {
     setText(state, logError);
     list.hidden = true;
     list.replaceChildren();
+    renderedLogSignature = null;
     return;
   }
   if (!logLoaded) {
@@ -63,6 +67,7 @@ function renderLog() {
     setText(state, 'Loading recent commands…');
     list.hidden = true;
     list.replaceChildren();
+    renderedLogSignature = null;
     return;
   }
   if (!commands.length) {
@@ -71,11 +76,17 @@ function renderLog() {
     setText(state, 'No commands sent yet. Recent RAPI commands will appear here.');
     list.hidden = true;
     list.replaceChildren();
+    renderedLogSignature = null;
     return;
   }
 
   state.hidden = true;
   list.hidden = false;
+  const signature = rapiLogSignature(commands);
+  // Same rows on screen: leave the DOM alone. Replacing it would detach the row
+  // the user focused/expanded and lose the list's scroll position or selection.
+  if (signature && signature === renderedLogSignature && list.children.length) return;
+  renderedLogSignature = signature;
   list.replaceChildren(
     ...commands.map((command) => {
       const status = typeof command.status === 'string' ? command.status : '';
@@ -242,10 +253,28 @@ function confirmGate() {
   sendRapi(step.command);
 }
 
+// A ticker tick only rewrites the elapsed labels of the rows already in the
+// list: nothing is created or replaced, so the focused/expanded row keeps its
+// node, focus and scroll position. A changed command set rebuilds instead.
+function tickLog() {
+  const list = $('rapi-log');
+  if (!list || list.hidden || !commands.length) return;
+  if (rapiLogSignature(commands) !== renderedLogSignature) {
+    renderLog();
+    return;
+  }
+  const labels = rapiTickLabels(commands, list.children.length);
+  if (!labels) return;
+  for (let index = 0; index < labels.length; index += 1) {
+    const node = list.children[index].querySelector('.rapi-time');
+    if (node) setText(node, labels[index]);
+  }
+}
+
 function startTicker() {
   stopTicker();
   // Relative timestamps and the pending chip age in the background.
-  ticker = setInterval(renderLog, 30000);
+  ticker = setInterval(tickLog, 30000);
 }
 
 function stopTicker() {
