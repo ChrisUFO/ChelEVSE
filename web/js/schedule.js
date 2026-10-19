@@ -19,17 +19,16 @@ export function defaultRule(id) {
 }
 
 function normalizeRule(raw) {
-  const days = Array.isArray(raw && raw.days)
-    ? [...new Set(raw.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
-    : [];
-  let amps = raw && raw.amps;
-  if (typeof amps !== 'number') amps = Number(amps);
+  const source = raw && typeof raw === 'object' ? raw : {};
+  // Keep the server's values visible instead of repairing them: the bridge
+  // skips a rule whose days/amps are malformed, so repairing it here would let
+  // a later save activate a window the charger currently ignores.
   return {
-    id: raw && typeof raw.id === 'string' ? raw.id : '',
-    days,
-    start: raw && typeof raw.start === 'string' ? raw.start : '',
-    end: raw && typeof raw.end === 'string' ? raw.end : '',
-    amps: Number.isFinite(amps) ? amps : 0,
+    id: typeof source.id === 'string' ? source.id : '',
+    days: Array.isArray(source.days) ? [...source.days] : [],
+    start: typeof source.start === 'string' ? source.start : '',
+    end: typeof source.end === 'string' ? source.end : '',
+    amps: source.amps !== undefined ? source.amps : 0,
   };
 }
 
@@ -97,6 +96,34 @@ export function validateSchedule(draft) {
   const ruleErrors = rules.map(validateRule);
   const valid = Object.keys(errors).length === 0 && ruleErrors.every((e) => !Object.keys(e).length);
   return { valid, errors, ruleErrors };
+}
+
+// Save eligibility. The bridge treats enabled:false as an explicit clear and
+// ignores unusable rules, so a disable must not be blocked by rule warnings.
+// Container errors (non-list, over the cap) still block every save.
+export function scheduleSaveValid(draft, validation = validateSchedule(draft)) {
+  if (validation.errors && Object.keys(validation.errors).length > 0) return false;
+  if (draft && draft.enabled === false) return true;
+  return validation.ruleErrors.every((errors) => !errors || Object.keys(errors).length === 0);
+}
+
+// Settle an optimistic save. `pendingRemote` is whatever snapshot arrived while
+// the write was in flight. Firestore delivers the latency-compensated local echo
+// before it rejects a failed write, so a queued snapshot that equals the payload
+// is not remote truth and must never become the rollback baseline.
+export function reconcileAfterSave({ confirmed, payload, pendingRemote, ok }) {
+  if (ok) {
+    return { baseline: normalizeSchedule(pendingRemote ?? payload), remote: false, error: '' };
+  }
+  const echoPending = pendingRemote != null && scheduleKey(pendingRemote) === scheduleKey(payload);
+  const remote = pendingRemote != null && !echoPending;
+  return {
+    baseline: normalizeSchedule(remote ? pendingRemote : confirmed),
+    remote,
+    error: remote
+      ? "Couldn't save. The latest server schedule was restored."
+      : "Couldn't save. The previous schedule was restored.",
+  };
 }
 
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots

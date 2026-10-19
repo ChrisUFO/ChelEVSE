@@ -3,7 +3,16 @@
 // state lives here so the screen survives tab switches intact.
 
 import { $, setText } from '../ui.js';
-import { fmtCost, fmtK, formatElapsed, relTime, stateFor } from '../format.js';
+import {
+  displayElapsed,
+  fmtCost,
+  fmtK,
+  formatElapsed,
+  numOrDash,
+  relTime,
+  stateFor,
+  toNumber,
+} from '../format.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -26,7 +35,6 @@ let holdAmps = 32;
 let ticker = null;
 let resultTimer = null;
 let shownResultId = null;
-let elapsedAnchor = 0;
 
 function ageMs() {
   const ts = status && status.updated_at;
@@ -39,27 +47,21 @@ function renderFreshness() {
     $('banner').hidden = true;
     return;
   }
-  setText($('updated'), `updated ${relTime(ageMs())}`);
-  $('banner').hidden = !(status.charger_online === false || ageMs() > 60000);
+  const age = ageMs();
+  setText($('updated'), Number.isFinite(age) ? `updated ${relTime(age)}` : 'updated unknown');
+  $('banner').hidden = !(status.charger_online === false || age > 60000);
 }
 
-// The snapshot carries elapsed seconds. Between snapshots we add wall-clock
-// time only while the charger reports charging and the document is fresh; a new
-// snapshot re-anchors, so time is never counted twice.
+// The snapshot carries elapsed seconds. displayElapsed interpolates from the
+// document's own write time, so schedule-boundary merges that do not advance
+// elapsed cannot rewind the clock between the 10 s status writes.
 function renderElapsed() {
-  let seconds = status ? Number(status.elapsed) : null;
-  if (seconds == null || !Number.isFinite(seconds)) {
-    setText($('elapsed'), '—');
-    return;
-  }
-  const live =
-    status.state_label === 'charging' && status.charger_online !== false && ageMs() <= 60000;
-  if (live) seconds += Math.max(0, (Date.now() - elapsedAnchor) / 1000);
-  setText($('elapsed'), formatElapsed(seconds));
+  setText($('elapsed'), formatElapsed(displayElapsed(status, Date.now())));
 }
 
 function renderCost() {
-  const kwh = status && status.session_energy != null ? Number(status.session_energy) / 1000 : null;
+  const energy = status ? toNumber(status.session_energy) : Number.NaN;
+  const kwh = Number.isFinite(energy) ? energy / 1000 : null;
   const cost = kwh == null ? null : fmtCost(kwh, rate, currency);
   const el = $('session-cost');
   el.hidden = !cost;
@@ -77,13 +79,14 @@ function renderScheduleBadge() {
   const id = typeof info.active_rule_id === 'string' ? info.active_rule_id : '';
   const rules = schedule && Array.isArray(schedule.rules) ? schedule.rules : [];
   const rule = id ? rules.find((r) => r && r.id === id) : null;
-  // Only name the window once the id resolves against the live schedule doc;
-  // otherwise report just what the charger said.
+  // Only name the window once the id resolves against the live schedule doc and
+  // the boundary values are strings; otherwise report just what the charger said.
+  const named = Boolean(rule) && typeof rule.start === 'string' && typeof rule.end === 'string';
   setText(
     $('schedule-badge-text'),
-    rule ? `Scheduled ${rule.start}–${rule.end}` : 'Scheduled window',
+    named ? `Scheduled ${rule.start}–${rule.end}` : 'Scheduled window',
   );
-  el.title = rule
+  el.title = named
     ? `Active rule ${rule.id} (${rule.start}–${rule.end})`
     : 'A schedule window is active';
 }
@@ -94,28 +97,26 @@ function renderStatus() {
   setText($('state-label'), theState.label);
   $('state-badge').classList.toggle('pulse', status && status.state_label === 'charging');
 
-  setText($('power'), status && status.power != null ? fmtK(status.power / 1000) : '—');
-  setText($('fig-amp'), status && status.amp != null ? String(Math.round(status.amp)) : '—');
-  setText($('fig-volt'), status && status.voltage ? `at ${Math.round(status.voltage)} V` : '');
+  setText($('power'), status && status.power != null ? fmtK(toNumber(status.power) / 1000) : '—');
+  setText($('fig-amp'), status ? numOrDash(status.amp) : '—');
+  const volts = status ? toNumber(status.voltage) : Number.NaN;
+  setText($('fig-volt'), Number.isFinite(volts) && volts ? `at ${Math.round(volts)} V` : '');
   setText(
     $('fig-session'),
-    status && status.session_energy != null ? fmtK(status.session_energy / 1000) : '—',
+    status && status.session_energy != null ? fmtK(toNumber(status.session_energy) / 1000) : '—',
   );
-  setText(
-    $('fig-setpoint'),
-    status && status.pilot != null ? String(Math.round(status.pilot)) : '—',
-  );
+  setText($('fig-setpoint'), status ? numOrDash(status.pilot) : '—');
   setText($('fig-total'), status && status.total_energy != null ? fmtK(status.total_energy) : '—');
-  setText($('fig-temp'), status && status.temp_c != null ? String(Math.round(status.temp_c)) : '—');
+  setText($('fig-temp'), status ? numOrDash(status.temp_c) : '—');
   for (const n of [1, 2, 3]) {
-    const v = status && status[`temp${n}`];
-    setText($(`fig-temp${n}`), v != null && Number.isFinite(Number(v)) ? `${Math.round(v)}°` : '—');
+    const t = status ? numOrDash(status[`temp${n}`]) : '—';
+    setText($(`fig-temp${n}`), t === '—' ? t : `${t}°`);
   }
 
   if (!ampsTouched) {
     // Hold sets a limit: prefill from the pilot setpoint, not the live draw.
-    const pilot = status ? Number(status.pilot) : Number.NaN;
-    const live = status ? Number(status.amp) : Number.NaN;
+    const pilot = status ? toNumber(status.pilot) : Number.NaN;
+    const live = status ? toNumber(status.amp) : Number.NaN;
     const source = pilot >= 6 && pilot <= 48 ? pilot : live;
     if (Number.isFinite(source) && source > 0) {
       setAmps(Math.min(48, Math.max(6, Math.round(source))));
@@ -287,7 +288,6 @@ export function leaveStatus() {
 
 export function showStatus(snap) {
   status = snap && snap.exists() ? snap.data() : null;
-  elapsedAnchor = Date.now();
   renderStatus();
 }
 

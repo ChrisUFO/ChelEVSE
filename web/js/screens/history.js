@@ -3,17 +3,27 @@
 // on Refresh — deliberately no realtime listener here.
 
 import { $, setText } from '../ui.js';
-import { fetchHistory, fetchSessions } from '../store.js';
-import { dayId, dayLabel, historySeries, lastDayIds, maxSeries, sumSeries } from '../history.js';
-import { fmtCost, fmtK, formatDuration } from '../format.js';
+import { fetchHistory, fetchSessions, historyBounds } from '../store.js';
+import {
+  CHART_SLOTS,
+  CHART_VIEW_W,
+  chartIndexAt,
+  dayId,
+  dayLabel,
+  historySeries,
+  lastDayIds,
+  maxSeries,
+  sumSeries,
+} from '../history.js';
+import { fmtCost, fmtK, formatDuration, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const VIEW_W = 300;
+const VIEW_W = CHART_VIEW_W;
 const VIEW_H = 132;
 const TOP = 10;
 const BASE = 118;
 const PLOT_H = BASE - TOP;
-const SLOT = VIEW_W / 30;
+const SLOT = VIEW_W / CHART_SLOTS;
 const BAR_W = 5.6;
 
 let active = false;
@@ -198,15 +208,8 @@ function renderHistory() {
   renderChart();
 }
 
-function chartIndexAt(clientX) {
-  const svg = $('history-chart');
-  const rect = svg.getBoundingClientRect();
-  if (!rect.width) return null;
-  const x = ((clientX - rect.left) / rect.width) * VIEW_W;
-  if (x < 0 || x > VIEW_W) return null;
-  // Nearest slot centre — adjacent 8–10 px bars are easier to correct by drag.
-  const index = Math.round(x / SLOT - 0.5);
-  return index >= 0 && index < series.length ? index : null;
+function indexAt(clientX) {
+  return chartIndexAt(clientX, $('history-chart').getBoundingClientRect(), series.length);
 }
 
 // ---------- sessions ----------
@@ -234,7 +237,7 @@ function renderSession(item) {
   }
 
   const what = el('div', 'session-what');
-  const wh = Number(item.wh);
+  const wh = toNumber(item.wh);
   const kwh = Number.isFinite(wh) ? wh / 1000 : null;
   what.append(el('span', 'session-kwh', kwh == null ? '— kWh' : `${fmtK(kwh)} kWh`));
   const meta = el('span', 'session-meta');
@@ -313,7 +316,11 @@ async function loadAll() {
   setFeedback('Refreshing…');
   const ids = lastDayIds(30);
   todayId = ids[ids.length - 1];
-  const [hist, sess] = await Promise.allSettled([fetchHistory(ids[0], todayId), fetchSessions()]);
+  const bounds = historyBounds(ids);
+  const [hist, sess] = await Promise.allSettled([
+    fetchHistory(bounds.startId, bounds.endId),
+    fetchSessions(),
+  ]);
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
 
@@ -370,7 +377,7 @@ export function initHistory() {
     selectIndex(next, { focus: true });
   });
   svg.addEventListener('pointerdown', (e) => {
-    const index = chartIndexAt(e.clientX);
+    const index = indexAt(e.clientX);
     if (index == null) return;
     selectIndex(index, { focus: true });
     if (e.pointerType === 'touch' || e.pointerType === 'pen') {
@@ -387,7 +394,7 @@ export function initHistory() {
     if (e.pointerType === 'touch' || e.pointerType === 'pen') {
       if (!scrubbing || e.pointerId !== scrubPointer) return;
     }
-    const index = chartIndexAt(e.clientX);
+    const index = indexAt(e.clientX);
     if (index != null && series[index].id !== selectedId) selectIndex(index);
   });
   const endScrub = (e) => {

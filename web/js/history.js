@@ -24,6 +24,21 @@ export function lastDayIds(count, today = new Date()) {
   return ids;
 }
 
+// Chart geometry shared by the screen and its hit-testing tests. The viewBox is
+// fixed and every one of its 30 slots is an equal share.
+export const CHART_VIEW_W = 300;
+export const CHART_SLOTS = 30;
+
+// Nearest slot index for a pointer x, or null outside the plot. `rect` is the
+// SVG's bounding box in CSS pixels.
+export function chartIndexAt(clientX, rect, count) {
+  if (!rect || !(rect.width > 0) || !Number.isFinite(clientX)) return null;
+  const x = ((clientX - rect.left) / rect.width) * CHART_VIEW_W;
+  if (x < 0 || x > CHART_VIEW_W) return null;
+  const index = Math.max(0, Math.round((x / CHART_VIEW_W) * CHART_SLOTS - 0.5));
+  return index < count ? index : null;
+}
+
 // Stable "Sat 18 Oct" label; parsing the id as local time keeps the same day.
 export function dayLabel(id) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(id));

@@ -9,7 +9,9 @@ import {
   defaultRule,
   defaultSchedule,
   normalizeSchedule,
+  reconcileAfterSave,
   scheduleKey,
+  scheduleSaveValid,
   validateSchedule,
 } from '../../web/js/schedule.js';
 
@@ -124,12 +126,14 @@ test('validateSchedule rejects empty ids, non-boolean enabled, and non-list rule
   assert.equal(validateSchedule(null).valid, false);
 });
 
-test('normalizeSchedule repairs the editable shape without inventing values', () => {
+test('normalizeSchedule keeps malformed server values visible for validation', () => {
   assert.deepEqual(normalizeSchedule(null), { enabled: false, rules: [] });
   assert.deepEqual(normalizeSchedule({ enabled: 'true', rules: [] }), {
     enabled: false,
     rules: [],
   });
+  // The bridge drops a whole rule for these values; repairing them here would
+  // let a later save silently activate a window the charger is ignoring.
   const normalized = normalizeSchedule({
     enabled: true,
     rules: [
@@ -144,9 +148,102 @@ test('normalizeSchedule repairs the editable shape without inventing values', ()
   });
   assert.deepEqual(normalized, {
     enabled: true,
-    rules: [{ id: 'r', days: [2, 0], start: '22:00', end: '06:00', amps: 32 }],
+    rules: [{ id: 'r', days: [2, 0, 2, 7, 1.5], start: '22:00', end: '06:00', amps: '32' }],
   });
-  assert.equal(validateSchedule(normalized).valid, true);
+  const result = validateSchedule(normalized);
+  assert.equal(result.valid, false);
+  assert.match(result.ruleErrors[0].days, /0 to 6/);
+  assert.match(result.ruleErrors[0].amps, /whole number/);
+  // Non-object rules keep the editable shape without inventing values.
+  assert.deepEqual(normalizeSchedule({ enabled: true, rules: [null, 5] }).rules, [
+    { id: '', days: [], start: '', end: '', amps: 0 },
+    { id: '', days: [], start: '', end: '', amps: 0 },
+  ]);
+});
+
+test('scheduleSaveValid lets a disable through invalid rules but not container errors', () => {
+  assert.equal(scheduleSaveValid(schedule()), true);
+  const invalidDisabled = schedule({ enabled: false, rules: [rule({ days: [] })] });
+  assert.equal(validateSchedule(invalidDisabled).valid, false);
+  assert.equal(scheduleSaveValid(invalidDisabled), true);
+  // Enabled schedules still need every rule to pass.
+  assert.equal(scheduleSaveValid(schedule({ rules: [rule({ days: [] })] })), false);
+  assert.equal(scheduleSaveValid(schedule({ rules: [rule({ amps: 10.5 })] })), false);
+  // Container errors block every save, including a disable.
+  const tooMany = {
+    enabled: false,
+    rules: Array.from({ length: MAX_RULES + 1 }, (_, i) => rule({ id: `r${i}` })),
+  };
+  assert.equal(scheduleSaveValid(tooMany), false);
+  assert.equal(scheduleSaveValid({ enabled: false, rules: 'nope' }), false);
+});
+
+const payload = schedule({ rules: [rule({ amps: 40 })] });
+
+test('reconcileAfterSave succeeds on the echo, a remote snapshot, or the payload', () => {
+  const echo = reconcileAfterSave({
+    confirmed: schedule(),
+    payload,
+    pendingRemote: payload,
+    ok: true,
+  });
+  assert.equal(scheduleKey(echo.baseline), scheduleKey(payload));
+
+  const remote = schedule({ enabled: false, rules: [] });
+  const newer = reconcileAfterSave({
+    confirmed: schedule(),
+    payload,
+    pendingRemote: remote,
+    ok: true,
+  });
+  assert.equal(scheduleKey(newer.baseline), scheduleKey(remote));
+
+  const alone = reconcileAfterSave({
+    confirmed: schedule(),
+    payload,
+    pendingRemote: null,
+    ok: true,
+  });
+  assert.equal(scheduleKey(alone.baseline), scheduleKey(payload));
+});
+
+test('reconcileAfterSave rolls a failed save back past the local echo', () => {
+  // The SDK delivers the latency-compensated echo before it rejects the write,
+  // so a queued snapshot equal to the payload is not remote truth.
+  const result = reconcileAfterSave({
+    confirmed: schedule(),
+    payload,
+    pendingRemote: payload,
+    ok: false,
+  });
+  assert.equal(scheduleKey(result.baseline), scheduleKey(schedule()));
+  assert.equal(result.remote, false);
+  assert.match(result.error, /previous schedule was restored/);
+});
+
+test('reconcileAfterSave rolls back to a genuine external snapshot', () => {
+  const remote = schedule({ enabled: false, rules: [] });
+  const result = reconcileAfterSave({
+    confirmed: schedule(),
+    payload,
+    pendingRemote: remote,
+    ok: false,
+  });
+  assert.equal(scheduleKey(result.baseline), scheduleKey(remote));
+  assert.equal(result.remote, true);
+  assert.match(result.error, /latest server schedule was restored/);
+});
+
+test('reconcileAfterSave keeps the confirmed baseline when nothing was pending', () => {
+  const baseline = schedule();
+  const result = reconcileAfterSave({
+    confirmed: baseline,
+    payload,
+    pendingRemote: null,
+    ok: false,
+  });
+  assert.equal(scheduleKey(result.baseline), scheduleKey(baseline));
+  assert.equal(result.remote, false);
 });
 
 test('scheduleKey ignores day order but notices any real change', () => {

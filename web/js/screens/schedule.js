@@ -12,7 +12,9 @@ import {
   defaultRule,
   defaultSchedule,
   normalizeSchedule,
+  reconcileAfterSave,
   scheduleKey,
+  scheduleSaveValid,
   validateSchedule,
 } from '../schedule.js';
 
@@ -30,8 +32,10 @@ let savingPayloadKey = null;
 let pendingRemote = null;
 let remoteNotice = false;
 let validation = validateSchedule(defaultSchedule());
-let feedbackMode = 'derived'; // derived | saved | save-error | load-error
-let feedbackError = '';
+let feedbackMode = 'derived'; // derived | saved | load-error
+// A failed save stays visible through the SDK's revert snapshot (and any later
+// remote adoption) until the next edit or save clears it.
+let saveError = '';
 let live = { inWindow: false, activeRuleId: null };
 let cards = [];
 let generation = 0;
@@ -48,6 +52,7 @@ function clone(schedule) {
 }
 
 function markDirty() {
+  saveError = '';
   dirty = scheduleKey(draft) !== scheduleKey(confirmed);
   if (!dirty) {
     // A remote change queued while we were editing becomes the truth once the
@@ -72,11 +77,11 @@ function renderFeedback() {
   let text = '';
   let kind = '';
   let busy = false;
-  if (feedbackMode === 'save-error') {
-    text = feedbackError;
-    kind = 'err';
-  } else if (feedbackMode === 'load-error' || loadError) {
+  if (feedbackMode === 'load-error' || loadError) {
     text = "Couldn't load the schedule. Reload the page to try again.";
+    kind = 'err';
+  } else if (saveError) {
+    text = saveError;
     kind = 'err';
   } else if (feedbackMode === 'saved') {
     text = 'Saved.';
@@ -84,7 +89,7 @@ function renderFeedback() {
   } else if (saving) {
     text = 'Saving…';
     busy = true;
-  } else if (!validation.valid) {
+  } else if (!saveValid()) {
     text = 'Fix the highlighted fields before saving.';
   } else if (dirty) {
     text = 'Unsaved changes.';
@@ -94,6 +99,12 @@ function renderFeedback() {
   setText(fb, text);
 }
 
+// Rule errors are warnings while scheduling is off: the bridge's explicit
+// disable ignores unusable rules, so they must not block turning it off.
+function saveValid() {
+  return scheduleSaveValid(draft, validation);
+}
+
 function syncControls() {
   const locked = !initialized || loadError || saving;
   const editor = $('schedule-editor');
@@ -101,7 +112,7 @@ function syncControls() {
   for (const node of editor.querySelectorAll('input, button')) node.disabled = locked;
   if (locked) return;
   $('add-rule').disabled = draft.rules.length >= MAX_RULES;
-  $('save-schedule').disabled = !dirty || !validation.valid;
+  $('save-schedule').disabled = !dirty || !saveValid();
 }
 
 function validateAndPaint() {
@@ -316,8 +327,9 @@ function adopt(schedule) {
 }
 
 async function save() {
-  if (saving || loadError || !validation.valid || !dirty || !initialized) return;
+  if (saving || loadError || !saveValid() || !dirty || !initialized) return;
   saving = true;
+  saveError = '';
   feedbackMode = 'derived';
   validateAndPaint();
   const gen = generation;
@@ -337,8 +349,8 @@ async function save() {
     if (gen !== generation) return;
     // A snapshot that arrived while saving is at least as new as this write
     // (the client stream is ordered); otherwise our payload is the baseline.
-    const next = pendingRemote ?? payload;
-    confirmed = clone(next);
+    const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok: true });
+    confirmed = result.baseline;
     draft = clone(confirmed);
     dirty = false;
     pendingRemote = null;
@@ -349,20 +361,18 @@ async function save() {
     renderAll();
   } catch {
     if (gen !== generation) return;
-    // Never present a rollback that hides a concurrent external change.
-    const rollback = pendingRemote ?? confirmed;
-    const hadRemote = Boolean(pendingRemote);
-    confirmed = clone(rollback);
+    // The latency-compensated echo can be queued before the rejection; it is
+    // not remote truth. Roll back to it only when it is a genuine server change.
+    const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok: false });
+    confirmed = result.baseline;
     draft = clone(confirmed);
     dirty = false;
     pendingRemote = null;
     remoteNotice = false;
     saving = false;
     savingPayloadKey = null;
-    feedbackMode = 'save-error';
-    feedbackError = hadRemote
-      ? "Couldn't save. The latest server schedule was restored."
-      : "Couldn't save. The previous schedule was restored.";
+    saveError = result.error;
+    feedbackMode = 'derived';
     renderAll();
     $('schedule-feedback').focus({ preventScroll: true });
   }
@@ -488,7 +498,7 @@ export function resetSchedule() {
   remoteNotice = false;
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
-  feedbackError = '';
+  saveError = '';
   live = { inWindow: false, activeRuleId: null };
   cards = [];
   if ($('rule-list')) {

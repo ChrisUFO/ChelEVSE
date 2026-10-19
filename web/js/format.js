@@ -15,13 +15,30 @@ export function stateFor(label) {
   return STATES[label] || STATES.unknown;
 }
 
+// Coerce a possibly-string numeric field (Firestore documents are untyped at
+// runtime). Booleans are not numbers, and neither is an empty string.
+export function toNumber(value) {
+  if (value == null || value === '' || typeof value === 'boolean') return Number.NaN;
+  return Number(value);
+}
+
+// Rounded display value for status/session figures, or the em dash when the
+// field is absent or malformed.
+export function numOrDash(value, digits = 0) {
+  const n = toNumber(value);
+  if (!Number.isFinite(n)) return '—';
+  return digits ? n.toFixed(digits) : String(Math.round(n));
+}
+
 // Compact kWh / kW figures: two decimals under 10, one under 100, none above.
 export function fmtK(v) {
-  if (v == null || Number.isNaN(v)) return '—';
-  return v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2);
+  const n = toNumber(v);
+  if (!Number.isFinite(n)) return '—';
+  return n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
 }
 
 export function relTime(ms) {
+  if (!Number.isFinite(ms)) return '—';
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s} s ago`;
   if (s < 3600) return `${Math.floor(s / 60)} min ago`;
@@ -37,6 +54,30 @@ export function formatElapsed(seconds) {
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
+}
+
+// Session-clock value for a status document at `nowMs`. Interpolation is
+// anchored to the document's own write time, not to snapshot receipt: schedule
+// merges can deliver a status snapshot whose elapsed is unchanged, and
+// re-anchoring on receipt would rewind the clock. Returns null when the field
+// is absent or malformed (null, undefined, '', false).
+const FRESH_MS = 60000;
+
+export function displayElapsed(data, nowMs = Date.now()) {
+  if (!data) return null;
+  const raw = data.elapsed;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+  const updated = data.updated_at;
+  const writtenAt = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
+  const age = writtenAt == null ? null : nowMs - writtenAt;
+  const live =
+    data.state_label === 'charging' &&
+    data.charger_online !== false &&
+    age != null &&
+    age >= 0 &&
+    age <= FRESH_MS;
+  const anchor = writtenAt ?? nowMs;
+  return Math.max(0, raw + (live ? Math.max(0, (nowMs - anchor) / 1000) : 0));
 }
 
 // Session duration in h:mm (the bridge stores seconds).

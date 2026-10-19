@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 import {
+  CHART_SLOTS,
+  CHART_VIEW_W,
+  chartIndexAt,
   dayId,
   dayLabel,
   historySeries,
@@ -35,7 +38,13 @@ test('lastDayIds stays contiguous across a DST change (fixed America/Denver)', (
   const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
   const script = `
     import { lastDayIds } from ${JSON.stringify(moduleUrl)};
-    const ids = lastDayIds(7, new Date(2026, 2, 9, 12));
+    // Guard against a host whose tzdata lacks America/Denver.
+    if (new Date(2026, 2, 8, 12).getTimezoneOffset() !== 360) {
+      console.error('unexpected offset', new Date(2026, 2, 8, 12).getTimezoneOffset());
+      process.exit(1);
+    }
+    // A midnight fixture also catches millisecond arithmetic across the shift.
+    const ids = lastDayIds(7, new Date(2026, 2, 9, 0, 30));
     const expected = [
       '2026-03-03', '2026-03-04', '2026-03-05', '2026-03-06',
       '2026-03-07', '2026-03-08', '2026-03-09',
@@ -48,8 +57,49 @@ test('lastDayIds stays contiguous across a DST change (fixed America/Denver)', (
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
     env: { ...process.env, TZ: 'America/Denver' },
     encoding: 'utf8',
+    timeout: 10_000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('dayId uses local calendar components under UTC+14', () => {
+  // Kiritimati's local 00:30 on 1 Jan is still 31 Dec in UTC; a getUTC*-based
+  // implementation would return the previous day.
+  const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
+  const script = `
+    import { dayId } from ${JSON.stringify(moduleUrl)};
+    if (new Date(2026, 0, 1, 0, 30).getTimezoneOffset() !== -840) {
+      console.error('unexpected offset', new Date(2026, 0, 1, 0, 30).getTimezoneOffset());
+      process.exit(1);
+    }
+    if (dayId(new Date(2026, 0, 1, 0, 30)) !== '2026-01-01') {
+      console.error(dayId(new Date(2026, 0, 1, 0, 30)));
+      process.exit(1);
+    }
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    env: { ...process.env, TZ: 'Pacific/Kiritimati' },
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('chartIndexAt maps a pointer to the nearest chart slot', () => {
+  const rect = { left: 20, width: CHART_VIEW_W };
+  assert.equal(CHART_SLOTS, 30);
+  assert.equal(chartIndexAt(20, rect, 30), 0);
+  assert.equal(chartIndexAt(25, rect, 30), 0);
+  assert.equal(chartIndexAt(35, rect, 30), 1);
+  assert.equal(chartIndexAt(319.9, rect, 30), 29);
+  // The hit test scales with the rendered width.
+  assert.equal(chartIndexAt(75, { left: 0, width: 150 }, 30), 15);
+  // Outside the plot, missing geometry, or fewer points than slots.
+  assert.equal(chartIndexAt(19, rect, 30), null);
+  assert.equal(chartIndexAt(321, rect, 30), null);
+  assert.equal(chartIndexAt(20, { left: 0, width: 0 }, 30), null);
+  assert.equal(chartIndexAt(Number.NaN, rect, 30), null);
+  assert.equal(chartIndexAt(220, rect, 10), null);
 });
 
 test('dayLabel is stable and rejects malformed ids', () => {

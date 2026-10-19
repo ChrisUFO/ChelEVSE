@@ -100,6 +100,14 @@ export function saveSchedule(schedule) {
   });
 }
 
+// The daily history range: zero-padded day ids sort lexicographically in
+// calendar order, so an inclusive documentId() range is a date range.
+export function historyBounds(ids) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return null;
+  return { startId: list[0], endId: list[list.length - 1] };
+}
+
 // History is a one-shot read: daily docs use their date as the document id.
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
@@ -112,9 +120,17 @@ export async function fetchHistory(startId, endId) {
   return snap.docs.map((d) => ({ id: d.id, kwh: d.data().kwh }));
 }
 
+// The sessions list is the 20 most recent, newest first.
+export const SESSION_LIMIT = 20;
+
+export function sessionsQueryOptions() {
+  return { field: 'started_at', direction: 'desc', limit: SESSION_LIMIT };
+}
+
 export async function fetchSessions() {
+  const { field, direction, limit: max } = sessionsQueryOptions();
   const snap = await getDocs(
-    query(collection(db, 'sessions'), orderBy('started_at', 'desc'), limit(20)),
+    query(collection(db, 'sessions'), orderBy(field, direction), limit(max)),
   );
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
