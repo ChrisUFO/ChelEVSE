@@ -1479,9 +1479,13 @@ input[aria-invalid='true'] {
   line-height: 1;
   color: var(--accent);
 }
+/* The queued/unconfirmed copy is longer than a save label, so it owns a full
+   line above the actions; with nothing to say, the line collapses away. */
 .schedule-savebar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
   margin-top: 14px;
   padding: 10px 12px;
@@ -1490,9 +1494,25 @@ input[aria-invalid='true'] {
   background: var(--surface);
 }
 .schedule-savebar .feedback {
-  flex: 1;
+  flex: 1 0 100%;
   min-width: 0;
   font-size: 12.5px;
+}
+.schedule-savebar .feedback:empty {
+  display: none;
+}
+#discard-schedule {
+  flex: none;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border-color: transparent;
+  background: transparent;
+  font-size: 13.5px;
+}
+#discard-schedule:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--text) 6%, transparent);
+  color: var(--text);
 }
 #save-schedule {
   flex: none;

@@ -136,6 +136,65 @@ export function reconcileAfterSave({ confirmed, payload, pendingRemote, ok }) {
   };
 }
 
+// The save bar is driven from one pure description of the write's state.
+//   queued      – the SDK holds the write in its persistent queue (offline, or
+//                 the connection dropped mid-write); it is durable, not lost.
+//   unconfirmed – the UI stopped waiting while the browser still says online.
+//   dirty       – the draft differs from the last locally accepted payload (the
+//                 queued payload while queued, otherwise the confirmed snapshot),
+//                 so a queued save is not "unsaved" but a later edit is.
+// `saved` only means the last write was acknowledged: with a newer draft the
+// bar reports the previous change instead of a misleading "Saved.".
+export function queuedSaveState({
+  online = true,
+  saving = false,
+  queued = false,
+  unconfirmed = false,
+  dirty = false,
+  saved = false,
+  error = '',
+} = {}) {
+  const idle = { label: '', kind: '', busy: false, canSave: false, canDiscard: false };
+  if (error) return { ...idle, label: error, kind: 'err', canSave: dirty, canDiscard: dirty };
+  if (saving && online) return { ...idle, label: 'Saving…', busy: true };
+  if (queued) {
+    return {
+      ...idle,
+      label: dirty
+        ? 'Queued — will save when online. Newer edits are not saved yet.'
+        : 'Queued — will save when online.',
+      kind: 'warn',
+      canSave: dirty,
+      canDiscard: true,
+    };
+  }
+  if (saving || unconfirmed) {
+    return {
+      ...idle,
+      label: 'Save unconfirmed — connection lost. You can keep editing.',
+      kind: 'warn',
+      canSave: dirty,
+      canDiscard: true,
+    };
+  }
+  if (saved) {
+    if (dirty) {
+      return {
+        ...idle,
+        label: 'Previous change saved — save your latest edits.',
+        kind: 'warn',
+        canSave: true,
+        canDiscard: true,
+      };
+    }
+    return { ...idle, label: 'Saved.', kind: 'ok' };
+  }
+  if (dirty) {
+    return { ...idle, label: 'Unsaved changes.', kind: 'warn', canSave: true, canDiscard: true };
+  }
+  return idle;
+}
+
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
 // that arrive after a successful save. Day order is not meaningful. The
 // malformed flag is part of the key: clearing it by editing is a real change

@@ -1,6 +1,8 @@
 // Schedule editor: a draft separate from the last confirmed snapshot, a pure
 // validator, and an optimistic save that rolls back on failure. Incoming
-// snapshots never replace unsaved edits.
+// snapshots never replace unsaved edits. Offline, the save is handed to
+// Firestore's persistent queue and labelled "Queued" instead of being refused
+// or held on an unbounded "Saving…".
 
 import { $, setText } from '../ui.js';
 import { saveSchedule } from '../store.js';
@@ -12,6 +14,7 @@ import {
   defaultRule,
   defaultSchedule,
   normalizeSchedule,
+  queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
   scheduleKey,
@@ -19,6 +22,7 @@ import {
   toggleNote,
   validateSchedule,
 } from '../schedule.js';
+import { settleWrite } from '../write.js';
 
 // Keep focus/scroll from jumping when a snapshot arrives for an untouched form.
 let active = false;
@@ -28,22 +32,24 @@ let confirmed = defaultSchedule();
 let draft = defaultSchedule();
 let dirty = false;
 let saving = false;
+// The write is durable in Firestore's local queue but not acknowledged. The
+// editor stays unlocked; a later save queues a newer payload behind it.
+let queued = false;
+// The UI stopped waiting at the deadline while the browser still reports
+// online: the write may or may not reach the backend, and its settle is late.
+let savingUnconfirmed = false;
+// Key of the payload the outstanding write carries. While queued it is also the
+// draft's comparison baseline: a draft equal to it has nothing new to save.
 let savingPayloadKey = null;
 // Latest snapshot received while the form is dirty or a save is in flight.
 // It never clobbers the draft; save settle decides whether to adopt it.
 let pendingRemote = null;
 let remoteNotice = false;
 let validation = validateSchedule(defaultSchedule());
-let feedbackMode = 'derived'; // derived | saved | load-error
+let feedbackMode = 'derived'; // derived | saved | discarded | load-error
 // A failed save stays visible through the SDK's revert snapshot (and any later
 // remote adoption) until the next edit or save clears it.
 let saveError = '';
-// A save blocked because the device is offline. Kept separate from saveError so
-// it clears when the connection returns instead of on the next edit.
-let offlineBlocked = false;
-// The editor was unlocked because the connection dropped mid-write: the write
-// may still settle, and its settle must not clobber edits made after unlock.
-let savingUnconfirmed = false;
 // Identifies the active save so a late settle from an abandoned write is ignored.
 let saveToken = 0;
 // Counts user edits. A save captures it so its settle can tell an untouched
@@ -65,14 +71,26 @@ function clone(schedule) {
   return normalizeSchedule(schedule);
 }
 
+const DISCARDED = 'Changes discarded — the original schedule will be saved.';
+
+// The draft is measured against the last locally accepted payload: while a
+// write is queued that is the payload, not the older confirmed snapshot, so an
+// untouched draft is not offered as an "unsaved" save again. The confirmed
+// snapshot remains the rollback and discard baseline.
+function acceptedKey() {
+  return (queued || savingUnconfirmed) && savingPayloadKey
+    ? savingPayloadKey
+    : scheduleKey(confirmed);
+}
+
 function markDirty() {
   editGeneration += 1;
   saveError = '';
   // The load already showed the unsupported-shape warning; the first edit is
   // the user explicitly replacing the stored document with a well-formed one.
   if (draft.malformed) delete draft.malformed;
-  dirty = scheduleKey(draft) !== scheduleKey(confirmed);
-  const inFlight = saving || savingUnconfirmed;
+  dirty = scheduleKey(draft) !== acceptedKey();
+  const inFlight = saving || savingUnconfirmed || queued;
   if (!dirty) {
     // A remote change queued while we were editing becomes the truth once the
     // draft no longer differs from the last confirmed snapshot. While a save is
@@ -93,6 +111,18 @@ function renderRemoteNotice() {
   if (notice) notice.hidden = !remoteNotice;
 }
 
+function saveState() {
+  return queuedSaveState({
+    online: online(),
+    saving,
+    queued,
+    unconfirmed: savingUnconfirmed,
+    dirty,
+    saved: feedbackMode === 'saved',
+    error: saveError,
+  });
+}
+
 function renderFeedback() {
   const fb = $('schedule-feedback');
   let text = '';
@@ -101,26 +131,28 @@ function renderFeedback() {
   if (feedbackMode === 'load-error' || loadError) {
     text = "Couldn't load the schedule. Reload the page to try again.";
     kind = 'err';
-  } else if (saveError) {
-    text = saveError;
-    kind = 'err';
-  } else if (savingUnconfirmed) {
-    text = 'Save unconfirmed — connection lost. You can keep editing.';
-    kind = 'warn';
-  } else if (feedbackMode === 'saved') {
-    text = 'Saved.';
-    kind = 'ok';
-  } else if (saving) {
-    text = 'Saving…';
-    busy = true;
-  } else if (offlineBlocked) {
-    text = "You're offline — reconnect to save.";
-    kind = 'warn';
-  } else if (!saveValid()) {
-    text = 'Fix the highlighted fields before saving.';
-  } else if (dirty) {
-    text = 'Unsaved changes.';
-    kind = 'warn';
+  } else {
+    const state = saveState();
+    text = state.label;
+    kind = state.kind;
+    busy = state.busy;
+    // The discard is only offered with a write outstanding; the compensating
+    // write explains itself until it settles or the user edits again.
+    if (feedbackMode === 'discarded' && !saveError) {
+      text = DISCARDED;
+      kind = 'warn';
+    } else if (
+      !saveValid() &&
+      !saveError &&
+      !saving &&
+      !savingUnconfirmed &&
+      !queued &&
+      feedbackMode !== 'saved'
+    ) {
+      // An invalid draft is the actionable state; every write state above wins.
+      text = 'Fix the highlighted fields before saving.';
+      kind = '';
+    }
   }
   fb.className = `feedback${busy ? ' busy' : ''}${kind ? ` ${kind}` : ''}`;
   setText(fb, text);
@@ -138,8 +170,10 @@ function syncControls() {
   $('panel-schedule').setAttribute('aria-busy', String(saving));
   for (const node of editor.querySelectorAll('input, button')) node.disabled = locked;
   if (locked) return;
+  const state = saveState();
   $('add-rule').disabled = draft.rules.length >= MAX_RULES;
-  $('save-schedule').disabled = !dirty || !saveValid();
+  $('save-schedule').disabled = !state.canSave || !saveValid();
+  $('discard-schedule').disabled = !state.canDiscard;
 }
 
 function validateAndPaint() {
@@ -350,12 +384,26 @@ function adopt(schedule) {
   renderAll();
 }
 
-// Firestore queues writes made while offline and only settles `setDoc` when the
-// backend acknowledges them, so handing the write over would lock the editor for
-// the whole outage. Gate on connectivity instead: the draft stays, editing stays
-// open, and the message says what is missing.
+// The browser's view of connectivity. Offline is no longer a reason to refuse a
+// save: Firestore's persistent queue holds the write, and the UI says so.
 function online() {
   return typeof navigator === 'undefined' || navigator.onLine !== false;
+}
+
+// Snapshot the editable fields. A later edit must not change what an outstanding
+// write compares against, so the payload is copied at issue time; store's
+// saveSchedule still owns the exact document shape that reaches the rules.
+function payloadFrom(schedule) {
+  return {
+    enabled: schedule.enabled,
+    rules: schedule.rules.map((rule) => ({
+      id: rule.id,
+      days: rule.days,
+      start: rule.start,
+      end: rule.end,
+      amps: rule.amps,
+    })),
+  };
 }
 
 function settleSave({ gen, token, payload, editGen, ok }) {
@@ -365,11 +413,12 @@ function settleSave({ gen, token, payload, editGen, ok }) {
   // revert to the pre-save baseline as "unchanged" and let the queued echo
   // overwrite the user's explicit revert.
   const editedSinceSave = editGen !== editGeneration;
-  // A late settle always leaves the draft alone: the user has been editing, and
-  // a failed write must hand their changes back rather than discard them.
-  const late = savingUnconfirmed;
+  // A queued or unconfirmed write was released to the user; a failure must hand
+  // their edits back rather than discard them, and its copy says so.
+  const late = queued || savingUnconfirmed;
   saving = false;
   savingUnconfirmed = false;
+  queued = false;
   savingPayloadKey = null;
   // A snapshot that arrived while saving is at least as new as this write (the
   // client stream is ordered); otherwise our payload is the baseline.
@@ -377,6 +426,8 @@ function settleSave({ gen, token, payload, editGen, ok }) {
   confirmed = result.baseline;
   pendingRemote = null;
   remoteNotice = false;
+  // A late failure always keeps the draft, even untouched: the user was handed
+  // the editor back, and a write that failed must not dismiss what they typed.
   if (editedSinceSave || (late && !ok)) {
     dirty = scheduleKey(draft) !== scheduleKey(confirmed);
     if (!ok) {
@@ -384,7 +435,9 @@ function settleSave({ gen, token, payload, editGen, ok }) {
         ? "Couldn't save — your changes are still here. Try saving again."
         : result.error;
     }
-    feedbackMode = 'derived';
+    // A successful settle with a newer draft must not claim "Saved." for edits
+    // this write never carried; the helper reports the previous change instead.
+    feedbackMode = ok ? 'saved' : 'derived';
     validateAndPaint();
     return;
   }
@@ -401,60 +454,92 @@ function settleSave({ gen, token, payload, editGen, ok }) {
   if (!ok) $('schedule-feedback').focus({ preventScroll: true });
 }
 
-async function save() {
-  if (saving || loadError || !saveValid() || !dirty || !initialized) return;
+// Hand one payload to Firestore. While offline the SDK keeps it in its durable
+// local queue, so the editor is released at once with the queued state instead
+// of being held on a promise that only settles when the backend acknowledges.
+// settleWrite bounds the online wait and still reports a late settle by calling
+// settleSave, which reconciles against the latest server snapshot.
+async function issueWrite(payload, { discarded = false } = {}) {
+  const gen = generation;
+  const token = ++saveToken;
+  const editGen = editGeneration;
+  const payloadKey = scheduleKey(payload);
+  saving = true;
+  savingUnconfirmed = false;
+  queued = false;
+  savingPayloadKey = payloadKey;
+  saveError = '';
+  feedbackMode = discarded ? 'discarded' : 'derived';
   if (!online()) {
-    offlineBlocked = true;
-    saveError = '';
-    feedbackMode = 'derived';
+    saving = false;
+    queued = true;
+  }
+  dirty = scheduleKey(draft) !== acceptedKey();
+  validateAndPaint();
+  const outcome = await settleWrite(saveSchedule(payload), {
+    onLate: (late) => settleSave({ gen, token, payload, editGen, ok: late.status === 'ok' }),
+  });
+  if (gen !== generation || token !== saveToken) return;
+  if (outcome.status === 'timeout') {
+    // The settle can land on the same tick the deadline fires; settleSave has
+    // already cleared the payload key in that case.
+    if (savingPayloadKey !== payloadKey) return;
+    // Past the deadline the write is still unacknowledged: keep a write that was
+    // already known to be queued labelled that way (the connection returning
+    // does not mean it landed), and give a browser that claims to have been
+    // online all along the explicit unconfirmed state. The onLate handler still
+    // reconciles the real outcome.
+    saving = false;
+    queued = queued || !online();
+    savingUnconfirmed = !queued;
     validateAndPaint();
     return;
   }
-  offlineBlocked = false;
-  saving = true;
-  savingUnconfirmed = false;
-  saveError = '';
-  feedbackMode = 'derived';
-  validateAndPaint();
-  const gen = generation;
-  const token = ++saveToken;
-  const payload = {
-    enabled: draft.enabled,
-    rules: draft.rules.map((rule) => ({
-      id: rule.id,
-      days: rule.days,
-      start: rule.start,
-      end: rule.end,
-      amps: rule.amps,
-    })),
-  };
-  const payloadKey = scheduleKey(payload);
-  savingPayloadKey = payloadKey;
-  const editGen = editGeneration;
-  let ok = true;
-  try {
-    await saveSchedule(payload);
-  } catch {
-    ok = false;
-  }
-  settleSave({ gen, token, payload, editGen, ok });
+  settleSave({ gen, token, payload, editGen, ok: outcome.status === 'ok' });
 }
 
-// Connection lost while a write is in flight: do not hold the editor behind a
-// promise that may not settle for the whole outage.
+function save() {
+  if (saving || loadError || !saveValid() || !dirty || !initialized) return;
+  return issueWrite(payloadFrom(draft));
+}
+
+// Discard reverts the draft to the confirmed schedule. With a write still
+// queued, dropping the draft alone would let that change commit behind the UI,
+// so the revert is queued too; Firestore replays it after the earlier write.
+function discard() {
+  if (saving || loadError || !initialized) return;
+  if (!saveState().canDiscard) return;
+  const outstanding = queued || savingUnconfirmed;
+  draft = clone(confirmed);
+  dirty = false;
+  saveError = '';
+  feedbackMode = 'derived';
+  // The draft was replaced wholesale: rebuild the fields so they show the
+  // reverted schedule (an edit-only repaint would leave the old values there).
+  renderRules();
+  if (!outstanding) return;
+  return issueWrite(payloadFrom(confirmed), { discarded: true });
+}
+
+// Connection lost while a write is in flight: the SDK has moved it to its
+// queue, so release the editor and say it is queued.
 function handleOffline() {
   if (!active || !initialized) return;
-  offlineBlocked = true;
-  if (saving) {
+  if (saving || savingUnconfirmed) {
     saving = false;
-    savingUnconfirmed = true;
+    savingUnconfirmed = false;
+    queued = true;
+    // The released write is now the draft's baseline: it is no longer "unsaved"
+    // unless the user typed something newer after the editor unlocked.
+    dirty = scheduleKey(draft) !== acceptedKey();
   }
   validateAndPaint();
 }
 
 function handleOnline() {
   if (!active || !initialized) return;
-  offlineBlocked = false;
+  // Stay queued until the write actually settles; this only refreshes copy that
+  // depends on connectivity.
   validateAndPaint();
 }
 
@@ -482,6 +567,7 @@ export function initSchedule() {
     }
   });
   $('save-schedule').addEventListener('click', save);
+  $('discard-schedule').addEventListener('click', discard);
   addEventListener('offline', handleOffline);
   addEventListener('online', handleOnline);
   renderAll();
@@ -504,9 +590,10 @@ export function showSchedule(data) {
     adopt(incoming);
     return;
   }
-  if (saving || savingUnconfirmed) {
+  if (saving || savingUnconfirmed || queued) {
     // Queue the latest snapshot (including the local write echo). Save settle
-    // decides whether it becomes the confirmed baseline; the draft is untouched.
+    // decides whether it becomes the confirmed baseline; the draft is untouched,
+    // and a queued echo must not replace the confirmed rollback baseline.
     pendingRemote = incoming;
     remoteNotice = savingPayloadKey ? scheduleKey(incoming) !== savingPayloadKey : false;
     validateAndPaint();
@@ -567,13 +654,13 @@ export function resetSchedule() {
   draft = defaultSchedule();
   dirty = false;
   saving = false;
+  queued = false;
   savingPayloadKey = null;
   pendingRemote = null;
   remoteNotice = false;
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
   saveError = '';
-  offlineBlocked = false;
   savingUnconfirmed = false;
   saveToken += 1;
   live = { inWindow: false, activeRuleId: null };
@@ -593,5 +680,7 @@ export function resetSchedule() {
     renderRemoteNotice();
     setText($('schedule-enabled-sub'), toggleNote(defaultSchedule()));
     $('schedule-enabled').checked = false;
+    $('discard-schedule').disabled = true;
+    $('save-schedule').disabled = true;
   }
 }
