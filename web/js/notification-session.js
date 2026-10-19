@@ -256,10 +256,15 @@ export function createTokenLifecycle({
 
       const attemptWrite = (async () => {
         let token = requireToken(await acquire());
+        // A sign-out that landed while acquire() was pending already captured and
+        // cleared the in-flight token. Recording this one now would attach a
+        // token to no session: a later account's release would read it and try a
+        // doomed cross-uid delete, potentially leaving its retry marker behind
+        // forever. No document was written for it, so nothing needs releasing.
+        if (!active || attemptSession !== session) return null;
         // Record the token before its document write: a sign-out that lands
         // while the write is pending must know which doc id to remove.
         inFlight = { token, uid, session: attemptSession };
-        if (!active || attemptSession !== session) return null;
         try {
           await saveTokenDoc(token, uid);
         } catch (err) {
@@ -269,8 +274,10 @@ export function createTokenLifecycle({
           // a new doc id, which the create rule accepts — otherwise this card
           // could never recover on this browser.
           token = requireToken(await rotate());
-          inFlight = { token, uid, session: attemptSession };
+          // Same ordering as above: a session that ended while rotate() was
+          // running gets only the token it already recorded.
           if (!active || attemptSession !== session) return null;
+          inFlight = { token, uid, session: attemptSession };
           await saveTokenDoc(token, uid);
         }
         if (!active) {

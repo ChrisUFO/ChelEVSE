@@ -325,6 +325,50 @@ test('a sign-out before the token write settles deletes that exact doc and state
   assert.equal(storage.getItem(RELEASE_STORAGE_KEY), null);
 });
 
+test('a token acquired after the session ended is never tracked or released', async () => {
+  const storage = memoryStorage();
+  const saved = [];
+  const deleted = [];
+  const inAcquire = deferred();
+  const lifecycle = createTokenLifecycle({
+    saveTokenDoc: async (token) => {
+      saved.push(token);
+    },
+    deleteTokenDoc: async (token) => {
+      deleted.push(token);
+    },
+    storage,
+  });
+  lifecycle.begin();
+  const outcomes = [];
+  const run = lifecycle.register({
+    uid: 'A',
+    acquire: () => inAcquire.promise,
+    onOutcome: (outcome) => outcomes.push(outcome),
+  });
+  await flush();
+
+  // Sign-out lands while acquire() is still pending: the session captured no
+  // token, so its release has nothing to hand over.
+  await lifecycle.release();
+  inAcquire.resolve('TOKEN-LATE');
+  await run;
+
+  // The late token belongs to no session. It is not tracked, not cached, and no
+  // document write started for it.
+  assert.equal(lifecycle.inFlightToken, null);
+  assert.deepEqual(saved, []);
+  assert.deepEqual(outcomes, []);
+  assert.equal(storage.getItem(TOKEN_STORAGE_KEY), null);
+
+  // A later account's release therefore has no stale id to chase: no doomed
+  // cross-uid delete and no permanent retry marker.
+  lifecycle.begin();
+  await lifecycle.release();
+  assert.deepEqual(deleted, []);
+  assert.equal(storage.getItem(RELEASE_STORAGE_KEY), null);
+});
+
 test('a failed release keeps the cache and its retry marker for the next session', async () => {
   const storage = memoryStorage();
   storage.setItem(TOKEN_STORAGE_KEY, JSON.stringify({ token: 'T', uid: 'A' }));
