@@ -2103,3 +2103,45 @@ input[aria-invalid='true']:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- foreground push toast ---------- */
+/* Sits clear of the fixed tab bar and the home indicator; the fixed max width
+   keeps the line length readable at 390 and 320. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(80px + env(safe-area-inset-bottom));
+  z-index: 30;
+  display: grid;
+  gap: 3px;
+  width: min(420px, calc(100vw - 24px));
+  padding: 11px 14px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--surface-2) 96%, transparent);
+  box-shadow: 0 16px 38px rgb(0 0 0 / 0.5);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  transform: translateX(-50%);
+  animation: toast-in 0.24s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+.toast-title {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.toast-body {
+  color: var(--text);
+  font-size: 14.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}

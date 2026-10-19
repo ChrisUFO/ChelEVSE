@@ -148,7 +148,7 @@ function render() {
 // The whole attempt is bounded by settleWrite inside the lifecycle: an
 // unreachable backend must not pin the card on "Registering…" or latch the
 // retry button off.
-async function registerToken() {
+async function registerToken({ force = false } = {}) {
   const uid = currentUid();
   if (!uid) {
     phase = 'failed';
@@ -164,7 +164,7 @@ async function registerToken() {
     uid,
     online: !isOffline(),
     inFlight: lifecycle.writing,
-    restoredForUid: lifecycle.restoredFor,
+    restoredForUid: force ? null : lifecycle.restoredFor,
   });
   if (!decision.start) {
     if (decision.reason === 'offline') {
@@ -207,7 +207,7 @@ async function registerToken() {
   await run;
 }
 
-async function refresh({ probe = false, register = false } = {}) {
+async function refresh({ probe = false, register = false, force = false } = {}) {
   if (!lifecycle.active) return;
   const generation = lifecycle.generation;
   permission = readPermission();
@@ -250,7 +250,7 @@ async function refresh({ probe = false, register = false } = {}) {
     uid,
     online: !isOffline(),
     inFlight: lifecycle.writing,
-    restoredForUid: lifecycle.restoredFor,
+    restoredForUid: force ? null : lifecycle.restoredFor,
   });
   // Show "Registering…" before the first await inside registerToken so the
   // retry action never flashes on the way to the token request.
@@ -265,7 +265,7 @@ async function refresh({ probe = false, register = false } = {}) {
   render();
 
   if (!decision.start) return;
-  await registerToken();
+  await registerToken({ force });
 }
 
 async function enable() {
@@ -358,6 +358,17 @@ export async function releaseNotifications() {
 export function activateNotifications() {
   if (!lifecycle.active) return;
   refresh({ probe: true, register: true });
+}
+
+// The browser rotated or invalidated this device's push subscription: the
+// service worker forwards `pushsubscriptionchange` here because only the page
+// holds the FCM SDK. Re-acquire and re-save the token now instead of waiting
+// for the next app open, through the same path the card uses (`force` skips
+// the once-per-session restore that saved the invalidated token). This path
+// never asks for permission: a page without the grant is left alone.
+export async function resubscribeNotifications() {
+  if (readPermission() !== 'granted') return;
+  await refresh({ register: true, force: true });
 }
 
 export function resetNotifications() {
