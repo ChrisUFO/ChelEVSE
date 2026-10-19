@@ -196,3 +196,33 @@ export function rawConfigJson(config) {
     return '{}';
   }
 }
+
+// Key-order-independent clone so two snapshots with the same data and different
+// property order serialise identically.
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = sortKeys(value[key]);
+    return out;
+  }
+  return value;
+}
+
+// Identity of what the Config screen renders. The bridge rewrites `updated_at`
+// on every poll without changing anything else, and that timestamp is the only
+// field that reaches the screen outside the snapshot itself — so excluding it
+// lets the screen skip a rebuild that would collapse an in-progress selection.
+// Returns '' when no stable signature can be produced; callers must render.
+export function configSignature(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return '';
+  const rest = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (key !== 'updated_at') rest[key] = value;
+  }
+  try {
+    return JSON.stringify(sortKeys(plainValue(rest)));
+  } catch {
+    return '';
+  }
+}

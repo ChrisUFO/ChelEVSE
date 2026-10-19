@@ -3,11 +3,15 @@
 // console; the data layer keeps this screen a pure renderer.
 
 import { $, setText } from '../ui.js';
-import { buildConfigSections, rawConfigJson } from '../config.js';
+import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
 
 let config = null;
 let configLoaded = false;
 let configFailed = false;
+// Signature of the snapshot currently on screen, so a poll that only bumps
+// `updated_at` refreshes the timestamp instead of rebuilding the panel (which
+// would collapse a text selection the user is copying).
+let renderedSignature = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -42,6 +46,7 @@ function render() {
   setText($('config-updated'), config ? updatedLabel(config) : '');
 
   if (configFailed || !configLoaded) {
+    renderedSignature = null;
     sections.replaceChildren();
     empty.hidden = true;
     rawDetails.hidden = true;
@@ -50,6 +55,7 @@ function render() {
   }
 
   if (!config) {
+    renderedSignature = null;
     sections.replaceChildren();
     empty.hidden = false;
     setText(empty, 'No configuration reported yet. The bridge refreshes it about once a minute.');
@@ -57,6 +63,10 @@ function render() {
     setText($('config-raw'), '');
     return;
   }
+
+  const signature = configSignature(config);
+  if (signature && signature === renderedSignature) return;
+  renderedSignature = signature;
 
   const curated = buildConfigSections(config);
   sections.replaceChildren(

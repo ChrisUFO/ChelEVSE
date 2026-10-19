@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildConfigSections, formatConfigValue, rawConfigJson } from '../../web/js/config.js';
+import {
+  buildConfigSections,
+  configSignature,
+  formatConfigValue,
+  rawConfigJson,
+} from '../../web/js/config.js';
 
 test('formatConfigValue turns charger values into human text', () => {
   assert.equal(formatConfigValue('gfci_check', true), 'On');
@@ -132,4 +137,47 @@ test('rawConfigJson keeps every field, redactions, and readable timestamps', () 
   assert.match(raw, /"list": \[/);
   assert.equal(rawConfigJson(null), '{}');
   assert.equal(rawConfigJson('nope'), '{}');
+});
+
+test('configSignature ignores the poll timestamp and key order', () => {
+  const first = {
+    hostname: 'chelevse-driveway',
+    max_current_soft: 32,
+    updated_at: { toDate: () => new Date('2026-10-19T12:00:00.000Z') },
+    nested: { list: [1, true], flag: false },
+  };
+  const polled = {
+    nested: { flag: false, list: [1, true] },
+    updated_at: { toDate: () => new Date('2026-10-19T12:01:00.000Z') },
+    max_current_soft: 32,
+    hostname: 'chelevse-driveway',
+  };
+  // Same charger data, new poll timestamp and property order: one signature, so
+  // the screen can leave the panel and any text selection alone.
+  assert.equal(configSignature(first), configSignature(polled));
+  assert.notEqual(configSignature(first), '');
+  assert.ok(!configSignature(first).includes('updated_at'));
+});
+
+test('configSignature changes with any rendered value', () => {
+  const base = { hostname: 'garage', max_current_soft: 32, wifi_serial: 'B0A732FDCF04' };
+  const signature = configSignature(base);
+  // A curated field.
+  assert.notEqual(configSignature({ ...base, max_current_soft: 16 }), signature);
+  // A field only the Raw JSON shows.
+  assert.notEqual(configSignature({ ...base, wifi_serial: 'FFFF' }), signature);
+  // A key the screen has never seen before.
+  assert.notEqual(configSignature({ ...base, espflash: 16777216 }), signature);
+  // A timestamp change on its own is still not a change.
+  assert.equal(configSignature({ ...base, updated_at: { toDate: () => new Date(0) } }), signature);
+});
+
+test('configSignature reports no signature for unusable documents', () => {
+  assert.equal(configSignature(null), '');
+  assert.equal(configSignature(undefined), '');
+  assert.equal(configSignature('nope'), '');
+  assert.equal(configSignature([]), '');
+  // An empty document is a valid signature; the screen renders its empty state.
+  assert.equal(configSignature({}), '{}');
+  assert.equal(configSignature({ updated_at: 1 }), '{}');
 });

@@ -1805,6 +1805,12 @@ input[aria-invalid='true']:focus-visible {
 .raw-config summary::-webkit-details-marker {
   display: none;
 }
+/* The global 2 px ring is drawn outside the summary, and `overflow: hidden` on
+   the details clips it entirely while closed; inset it so keyboard focus on the
+   disclosure is visible. */
+.raw-config summary:focus-visible {
+  outline-offset: -3px;
+}
 .raw-config summary::after {
   content: '▾';
   flex: none;
