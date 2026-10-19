@@ -91,6 +91,12 @@ export function sendCommand(payload) {
   });
 }
 
+// Both fields travel together because firestore.rules rejects a partial
+// settings document.
+export function saveSettings({ rate, currency }) {
+  return setDoc(doc(db, 'settings', 'current'), { rate, currency });
+}
+
 // Exact schedule shape: keys are fixed so no draft-only fields ever reach rules.
 export function saveSchedule(schedule) {
   return setDoc(doc(db, 'schedule', 'current'), {

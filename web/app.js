@@ -26,6 +26,7 @@ import {
   showStatusSchedule,
 } from './js/screens/status.js';
 import { initConfig, resetConfig, showConfigData, showConfigError } from './js/screens/config.js';
+import { initSettings, resetSettings, showSettingsData } from './js/screens/settings.js';
 import {
   activateHistory,
   enterHistory,
@@ -77,6 +78,7 @@ function closeApp() {
   resetHistory();
   resetSchedule();
   resetConfig();
+  resetSettings();
   activeUser = null;
 }
 
@@ -137,6 +139,7 @@ function enterApp(user) {
     onSettings: (settings) => {
       showSettings(settings);
       showHistorySettings(settings);
+      showSettingsData(settings);
     },
     onConfig: (data) => {
       showStatusConfig(data);
@@ -226,6 +229,7 @@ async function main() {
   initHistory();
   initSchedule();
   initConfig();
+  initSettings();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 

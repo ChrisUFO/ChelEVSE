@@ -537,6 +537,62 @@
             <p class="lede">Charger details, cost estimates, and charging alerts.</p>
           </div>
 
+          <section
+            class="card-block settings-card"
+            style="--i: 1"
+            aria-labelledby="settings-heading"
+          >
+            <div class="block-head">
+              <h2 id="settings-heading">App settings</h2>
+              <p class="block-sub">Used for the cost estimates on Status and History.</p>
+            </div>
+            <form id="settings-form" class="settings-form" novalidate>
+              <div class="settings-grid">
+                <div class="field">
+                  <label class="field-label" for="setting-rate">Electricity rate</label>
+                  <div class="input-wrap">
+                    <input
+                      id="setting-rate"
+                      class="text-input"
+                      type="number"
+                      min="0"
+                      max="5"
+                      step="0.001"
+                      inputmode="decimal"
+                      placeholder="0.000"
+                      autocomplete="off"
+                      aria-describedby="rate-hint rate-error"
+                    />
+                    <span class="input-suffix" aria-hidden="true">/ kWh</span>
+                  </div>
+                  <span class="field-hint" id="rate-hint">0 to 5</span>
+                  <span class="field-error" id="rate-error" hidden></span>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="setting-currency">Currency</label>
+                  <input
+                    id="setting-currency"
+                    class="text-input"
+                    type="text"
+                    placeholder="USD"
+                    autocomplete="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    aria-describedby="currency-hint currency-error"
+                  />
+                  <span class="field-hint" id="currency-hint">1–8 characters</span>
+                  <span class="field-error" id="currency-error" hidden></span>
+                </div>
+              </div>
+              <div class="settings-actions">
+                <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+                <button id="save-settings" class="btn solid" type="submit" disabled>
+                  Save settings
+                </button>
+              </div>
+            </form>
+          </section>
+
           <div class="section-title-row config-title-row" style="--i: 3">
             <h2>Charger</h2>
             <span class="section-note" id="config-updated"></span>
