@@ -59,9 +59,11 @@ Failure handling: connection errors (charger or Firebase) are logged and retried
 | `users/{uid}`       | acl sync (admin)                        | that user (own doc)   | Access grant: `{allowed: bool, email}` — synced from `private/acl.txt` by `pi/acl.py`                                                                                                                                               |
 | `commands/{id}`     | app (create), bridge (ack/fail)         | verified, allowlisted | `{type: pause\|resume\|set_current\|rapi, amps?, command?, created_at, status: pending\|acked\|failed}`; pending older than 10 min is failed                                                                                        |
 
-Commands are typed whitelist entries; `rapi` is the explicit advanced escape hatch (string-validated in rules) for anything the curated types don't cover. Security rules enforce: only verified, allowlisted users can read (each user may read their own grant doc); only whitelisted command types with validated `amps`/`command` on create; status/history writes and command mutations are admin-only. `settings/current` is shape-validated in rules. `schedule/current` is container-validated in rules (exact keys, types, max 20 rules) because per-element validation exceeds Firestore's 1000-expression limit; each rule's shape is re-validated by the bridge, which skips and logs malformed rules (the app validates every rule before writing). See `firestore.rules`.
+Commands are typed whitelist entries; `rapi` is the explicit advanced escape hatch (string-validated in rules) for anything the curated types don't cover. Security rules enforce: only verified, allowlisted users can read (each user may read their own grant doc); only whitelisted command types with validated `amps`/`command` on create; status/history writes and command mutations are admin-only. `settings/current` is shape-validated in rules. `schedule/current` is container-validated in rules (exact keys, types, max 20 rules) because per-element validation exceeds Firestore's 1000-expression limit; each rule's shape is re-validated by the bridge, which skips and logs malformed rules (the app validates every rule before writing). Overlapping or touching windows are also skipped by the bridge, because the firmware resolves equal-time events by list order. See `firestore.rules`.
 
-**Hosting** serves the static PWA from `web/` on a free HTTPS domain.
+**Hosting** serves the static PWA from `web/` on a free HTTPS domain, with an SPA rewrite to `index.html`, `no-cache` headers (`index.html`, `sw.js` and `firebase-config.js` must never be served stale) and `Cross-Origin-Opener-Policy: same-origin-allow-popups` for the popup sign-in.
+
+**Deployed pieces:** `firestore.rules`, `firestore.indexes.json` and `web/`. The single composite index (`commands` by `type` then `created_at` desc) backs the Advanced console's scrollback; the command poll and the status screen's recent-command window use single-field queries and need no index. An index that is still building fails the console query with `failed-precondition` until Firestore reports it ready.
 
 ### 3. Android app — PWA (`web/`)
 
@@ -71,9 +73,11 @@ Static HTML/JS using the Firebase Web SDK, installable to the Android home scree
 - **History** — daily kWh bar chart (last 30 days, hand-rolled SVG — no chart library) fed by `history/{date}`, plus a recent-sessions list from `sessions`; both show costs at the current rate.
 - **Schedule** — edit the charge schedule (enable toggle; rules with days, start/end, amps), with a live indicator when a window is currently active (from `status/current.schedule`).
 - **Config** — every configuration item the charger exposes (credential fields show `"***"` because the bridge redacts them), read from `status/config` and presented in our own layout; changes go through the Advanced console. Also **App settings**: electricity rate ($/kWh + currency, stored in `settings/current`) and an enable-notifications control (registers the device for FCM push).
-- **Advanced** — RAPI console (`$` commands via the `rapi` command type) for full configuration parity with the built-in UI, behind a confirmation gate since RAPI can alter safety-relevant settings.
+- **Advanced** — RAPI console (`$` commands via the `rapi` command type) for full configuration parity with the built-in UI, behind a per-visit confirmation gate since RAPI can alter safety-relevant settings, with a 20-entry scrollback showing each command's acked/failed result.
 
-The Firestore contract is the API — a native Android app or FCM push notifications ("charging complete") can be added later without touching the bridge.
+**Push delivery** uses a plain service worker (`web/sw.js`) with no Firebase SDK: FCM sends a notification-only message, the worker receives a raw `push` event, and it either shows the system notification (title `ChelEVSE`, tag `chelevse-state`) or, when a page is visible, posts a `chelevse-push` message so the app shows exactly one in-app toast. The page dedupes that message against the SDK's defensive `onMessage` inside a 5 s window (with no Firebase-managed worker, `onMessage` never fires in practice). A notification click focuses an existing app window or opens the app URL — same-origin targets only. When the browser rotates the push subscription (`pushsubscriptionchange`), the worker asks open pages to re-acquire and re-save their token; the next app load does the same, so a rotated token recovers without user action. The bridge prunes tokens FCM reports as unregistered/invalid; sign-out and a revoked grant release this device's token document.
+
+The Firestore contract is the API — a native Android app can be added later without touching the bridge, and the push payloads already carry everything a notification needs.
 
 ## OpenEVSE integration
 
@@ -103,18 +107,26 @@ Plain HTTP on the trusted home LAN (HTTP Basic auth if an admin password is set 
 
 ## Deployment
 
-- **Firebase**: create a project (Spark/free plan is plenty), enable Firestore + Auth (**Google provider**), register a web app, download a service-account key into `private/`, then `firebase deploy` (Hosting + rules) from this repo.
-- **Allowlist**: list emails in `private/acl.txt`, then run `/opt/chelevse/pi/.venv/bin/python /opt/chelevse/pi/acl.py` on the Pi (the venv the installer builds; needs the service account present). Each person must have signed in once first.
-- **Pi**: clone repo, `cp -r private.example private`, fill in values, install the provided systemd unit.
+Full runbook: [docs/DEPLOY.md](docs/DEPLOY.md). End-to-end checklist: [docs/VALIDATION.md](docs/VALIDATION.md).
+
+- **Firebase**: create a project, a **Native mode** Firestore database (region is permanent; some projects need Blaze billing to create it), and enable Auth with the **Google provider**. Register a web app and copy its config into `web/firebase-config.js`; generate a Web Push certificate and add the public key as `vapidKey` (missing key disables opt-in with a clear message). Add every serving hostname — `<project-id>.web.app`, `<project-id>.firebaseapp.com`, the custom domain — to Auth's authorized domains.
+- **Service accounts**: the bridge key holds Cloud Datastore User, Firebase Authentication Viewer and Firebase Cloud Messaging API Admin; deploy credentials (a separate key or `firebase login`) hold Firebase Admin and Cloud Datastore Index Admin. Keys live in gitignored `private/`.
+- **Deploy**: rules, indexes and Hosting, from `main`, via `npm run deploy:rules`, `npm run deploy:indexes` and `npm run deploy:hosting` (or `npm run deploy`). Each script runs `scripts/check-firebase-project.mjs` first, which blocks a release whose target project (`FIREBASE_PROJECT`, else `.firebaserc`) differs from the service-account key's project. `npm run deploy:dry-run` compiles and validates without publishing. Let the command index finish building before relying on the Advanced scrollback.
+- **Allowlist**: each person signs in once; list emails in `private/acl.txt`, then run `/opt/chelevse/pi/.venv/bin/python /opt/chelevse/pi/acl.py` on the Pi (the venv the installer builds; needs the service account present). `--prune` removes grants no longer listed and their FCM tokens.
+- **Pi**: clone repo, copy the templates from `private.example/` to `private/`, fill in values, `sudo bash pi/install.sh` (idempotent; syncs `pi/` + `private/` to `/opt/chelevse`, builds the venv, installs and enables the systemd unit).
 
 Failure modes:
 
-| Failure             | Behavior                                                                             |
-| ------------------- | ------------------------------------------------------------------------------------ |
-| Pi offline          | PWA shows stale `updated_at` / "bridge offline"                                      |
-| Charger unreachable | Bridge retries at the fixed poll interval; command marked `failed` if it can't apply |
-| Firebase blip       | SDKs auto-reconnect; the bridge retries failed writes on the next tick               |
-| PWA offline         | Firestore cache shows last known values                                              |
+| Failure              | Behavior                                                                                                                                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi offline           | PWA shows stale `updated_at` / **"Bridge offline"** (no status write for 60 s)                                                                                                                             |
+| Charger unreachable  | Bridge retries at the fixed poll interval, writes `charger_online: false`, and the PWA banner distinguishes **"Charger offline"** from the bridge case; a command it cannot apply is marked `failed`       |
+| Firebase blip        | SDKs auto-reconnect; the bridge retries failed writes on the next tick; history baselines only advance after a successful write                                                                            |
+| PWA offline          | An already-loaded app keeps working from the Firestore cache and the service-worker shell; a cold reload needs the network because the Firebase SDK and `firebase-config.js` are deliberately network-only |
+| Stale deployed shell | Shell files are cache-first: `index.html`, `sw.js` and `firebase-config.js` are served `no-cache`, and a shell change must bump `CACHE` in `web/sw.js`; an open tab keeps old modules until reopened       |
+| Index still building | The Advanced console reports the in-progress index (`failed-precondition`) instead of a generic error; reload once Firestore shows it ready                                                                |
+
+Each row is triggered and checked in [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Decisions & future work
 

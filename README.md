@@ -1,59 +1,99 @@
 # ChelEVSE
 
-Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridges an OpenEVSE charger to Firebase, and an installable PWA gives you realtime status and basic control from anywhere.
+Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridges an OpenEVSE charger to Firebase, and an installable PWA gives you realtime status and control from anywhere.
 
-**Status: scaffolding** — this repo currently contains the design; components land as separate commits. See [ARCHITECTURE.md](ARCHITECTURE.md).
+**Status: v1 shipped** — the bridge, the five-tab PWA and the Firebase deployment are implemented. Stand up your own with [docs/DEPLOY.md](docs/DEPLOY.md); validate it with [docs/VALIDATION.md](docs/VALIDATION.md). Design notes live in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What it does
 
-- **Monitor**: live charger status (state, current draw, session/total energy, temperature) from anywhere — not just the home LAN.
-- **Control**: pause/resume charging (stop/start) and set the max charge current from your phone.
-- **History**: daily kWh graph (last 30 days) and per-session records.
-- **Schedule**: time-of-use charging windows, enforced by the charger itself.
-- **Alerts**: push notifications when charging starts/stops or the bridge goes offline.
-- **Costs**: session and daily energy cost at your electricity rate.
-- **Parity**: everything the charger's built-in web UI shows — full status detail, config view, plus a gated RAPI console for advanced changes.
-- **Simple**: no backend server to write or run — Firebase Firestore carries the data, Firebase Hosting serves the app, free tier covers a household many times over.
+- **Monitor**: live charger status (state, current draw, power, session/total energy, temperatures, setpoint) from anywhere — not just the home LAN.
+- **Control**: stop, return to auto, or hold at a chosen current (6–48 A) from your phone.
+- **History**: daily kWh chart for the last 30 days and the 20 most recent charging sessions, with cost at your electricity rate.
+- **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
+- **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.
+- **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for rate/currency, notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
+- **Simple**: no backend server to write or run — Firestore carries the data, Hosting serves the app, the free tier covers a household many times over.
+
+## Screens
+
+| Tab          | What it shows                                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------------------------- |
+| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls. |
+| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.  |
+| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.  |
+| **Config**   | Charger configuration with secrets redacted, App settings (rate + currency), and the notification opt-in card.    |
+| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.           |
 
 ## How it works
 
-1. **Bridge agent** (`pi/`) — a small Python service on the Raspberry Pi. Polls the charger's local HTTP API and writes status to Firestore; watches Firestore for commands and applies them to the charger.
-2. **Firebase** — Firestore holds the latest status snapshot and the command queue; security rules + Firebase Auth gate access. Hosting serves the web app.
+1. **Bridge agent** (`pi/`) — a small Python service on the Raspberry Pi. Polls the charger's local HTTP API and writes status, config, history and sessions to Firestore; mirrors the schedule into the charger's scheduler; watches Firestore for commands and applies them; sends FCM notifications on state transitions.
+2. **Firebase** — Firestore holds the status snapshot, history, sessions, schedule, settings, push tokens and the command queue; security rules + Firebase Auth gate access. Hosting serves the web app.
 3. **Android app (PWA)** — a static web app you install to your home screen. Signs in with Firebase Auth, gets **realtime updates** via Firestore listeners (no polling), and writes commands. A native Android app can later use the exact same Firestore.
 
 ## Repository layout
 
-| Path                                 | Purpose                                                       |
-| ------------------------------------ | ------------------------------------------------------------- |
-| `pi/`                                | Raspberry Pi bridge agent (Python)                            |
-| `web/`                               | PWA served by Firebase Hosting                                |
-| `firebase.json`, `firestore.rules`   | Firebase project config + security rules                      |
-| `private.example/`                   | Committed template for deployment config                      |
-| `private/`, `web/firebase-config.js` | Your real deployment values — **gitignored, never committed** |
+| Path                                                         | Purpose                                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| `pi/`                                                        | Raspberry Pi bridge agent (Python) + installer + ACL helper                     |
+| `web/`                                                       | PWA served by Firebase Hosting (no build step)                                  |
+| `docs/`                                                      | [Deploy runbook](docs/DEPLOY.md) and [validation checklist](docs/VALIDATION.md) |
+| `firebase.json`, `firestore.rules`, `firestore.indexes.json` | Firebase project config, security rules and indexes                             |
+| `scripts/`                                                   | Deploy guard (`check-firebase-project.mjs`)                                     |
+| `test/`                                                      | Web unit tests and Firestore rules tests                                        |
+| `private.example/`                                           | Committed template for deployment config                                        |
+| `private/`, `web/firebase-config.js`                         | Your real deployment values — **gitignored, never committed**                   |
 
 ## Security model
 
 - The repo is **public**; every deployment value (service-account key, Firebase config, charger IP) lives in gitignored files. See `private.example/`.
-- Access control is Google Sign-In (Firebase Auth) plus an owner-managed allowlist: `private/acl.txt` (gitignored) is synced to Firestore grant docs by a script on the Pi, and rules only serve data to granted users. Commands are whitelisted and validated; only the bridge's service account writes status/history.
+- Access control is Google Sign-In (Firebase Auth) plus an owner-managed allowlist: `private/acl.txt` (gitignored) is synced to Firestore grant docs by `pi/acl.py`, and rules only serve data to granted users. Commands are whitelisted and validated; only the bridge's service account writes status/history.
+- Deploys are guarded: `scripts/check-firebase-project.mjs` refuses a release whose target project and service-account key disagree.
 - No inbound connections to the home network — the Pi only makes outbound requests.
 
 ## Getting started
 
+The full runbook is [docs/DEPLOY.md](docs/DEPLOY.md). In short:
+
 ```bash
-cp -r private.example private
+npm install                                  # Node 20+; installs the Firebase CLI
+cp -r private.example private                # then fill in the real values
+cp private/bridge.env.example private/bridge.env
+cp private/acl.txt.example private/acl.txt
 cp web/firebase-config.example.js web/firebase-config.js
-# fill in real values — see private.example/README.md
+export FIREBASE_PROJECT=<project-id>
+export GOOGLE_APPLICATION_CREDENTIALS=private/deploy-service-account.json
+npm run deploy:dry-run && npm run deploy
+sudo bash pi/install.sh                      # on the Pi
 ```
 
-Setup guides for the bridge and the web app ship with their components (`pi/`, `web/`).
+Then sign in once, add that address to `private/acl.txt`, and run `pi/.venv/bin/python pi/acl.py` (or the installer's venv on the Pi). [docs/DEPLOY.md](docs/DEPLOY.md) covers the console setup, service-account roles, VAPID key, indexes, the custom domain and troubleshooting.
 
 ## Development
 
-One-time: `npm install` (installs Prettier and points git at `.githooks/`). pre-commit
-blocks unformatted staged files; pre-push runs a full `prettier --check .`. Hooks no-op
-gracefully where Node isn't installed (e.g. on the Pi) — run `npm run format` before
-pushing from such a machine if you touched web/docs files.
+One-time: `npm install` (installs Prettier and the Firebase CLI, and points git at
+`.githooks/`). pre-commit blocks unformatted staged files; pre-push runs a full
+`prettier --check .`. Hooks no-op gracefully where Node isn't installed (e.g. on
+the Pi) — run `npm run format` before pushing from such a machine if you touched
+web/docs files.
 
-Firestore rules tests run against the local emulator via `npm run test:rules` (the Firebase
-CLI is installed as a dev dependency and requires Node.js 20+; Java is required for the
-emulator).
+```bash
+npm test           # web unit tests (node:test, no browser or Firebase needed)
+npm run test:rules # Firestore rules tests in the emulator (needs Java 11+)
+npm run format      # write Prettier formatting
+npm run format:check
+```
+
+Deployment is part of the development flow:
+
+```bash
+npm run deploy:dry-run   # compile rules, validate the release, publish nothing
+npm run deploy:rules     # firestore.rules
+npm run deploy:indexes   # firestore.indexes.json (one composite index)
+npm run deploy:hosting   # web/
+npm run deploy           # all three
+```
+
+Each `deploy*` script first runs the guard, which blocks when
+`FIREBASE_PROJECT` (or `.firebaserc`) and the key in
+`GOOGLE_APPLICATION_CREDENTIALS` / `private/service-account.json` belong to
+different projects. Never bypass it with raw `firebase deploy --force`.
