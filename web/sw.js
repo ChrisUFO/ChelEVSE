@@ -1,7 +1,7 @@
 // ChelEVSE service worker — cache-first for the local app shell only.
 // Never caches gstatic/firebase requests: cross-origin and non-GET are passed through.
 // Bump CACHE version when any shell file changes.
-const CACHE = 'chelevse-v12';
+const CACHE = 'chelevse-v13';
 const SHELL = [
   './',
   './index.html',
@@ -16,6 +16,7 @@ const SHELL = [
   './js/settings.js',
   './js/notifications.js',
   './js/advanced.js',
+  './js/write.js',
   './js/ui.js',
   './js/screens/status.js',
   './js/screens/history.js',

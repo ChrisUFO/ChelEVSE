@@ -100,9 +100,17 @@ function formatLimitType(value) {
   return formatNumber(value);
 }
 
+// The charger's own "no value" marker: "-" for fields it does not report. The
+// curated view omits those rows instead of printing a dead value.
+function isUnsetSentinel(value) {
+  return value === '-';
+}
+
 // Unknown keys are deliberately not here: the Raw JSON is the complete view.
+// A redacted value keeps the sentinel itself so the curated view and the Raw
+// JSON show the same marker; the screen adds the word for assistive tech.
 export function formatConfigValue(key, value) {
-  if (isRedacted(value)) return 'Redacted';
+  if (isRedacted(value)) return REDACTED;
   if (value == null) return 'Not reported';
   if (typeof value === 'boolean') return value ? 'On' : 'Off';
   if (Array.isArray(value)) {
@@ -138,7 +146,7 @@ export function buildConfigSections(config) {
     id: section.id,
     title: section.title,
     rows: section.rows
-      .filter((row) => Object.hasOwn(config, row.key))
+      .filter((row) => Object.hasOwn(config, row.key) && !isUnsetSentinel(config[row.key]))
       .map((row) => ({
         key: row.key,
         label: row.label,

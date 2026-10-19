@@ -1546,7 +1546,7 @@ input[aria-invalid='true'] {
 }
 .field-hint {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 .field-error {
   font-size: 12px;
@@ -1569,7 +1569,7 @@ input[aria-invalid='true'] {
   color-scheme: dark;
 }
 .text-input::placeholder {
-  color: var(--faint);
+  color: var(--muted);
 }
 .input-wrap .text-input {
   padding-right: 64px;
@@ -1588,6 +1588,12 @@ input[aria-invalid='true'] {
   border-color: transparent;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+/* An invalid field keeps its error border and ring while focused: the copy says
+   fields are highlighted, and the user is usually looking at the one they fix. */
+input[aria-invalid='true']:focus-visible {
+  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
+  outline-color: var(--err);
 }
 .settings-actions {
   display: flex;
@@ -1641,6 +1647,14 @@ input[aria-invalid='true'] {
 }
 .notify-card[data-state='granted'] .notify-title::before {
   background: var(--ok);
+}
+/* Granted permission whose token save failed: the headline must not read as
+   success while the error line below says the device is not registered. */
+.notify-card[data-state='attention'] .notify-title {
+  color: var(--warn);
+}
+.notify-card[data-state='attention'] .notify-title::before {
+  background: var(--warn);
 }
 .notify-card[data-state='denied'] .notify-title,
 .notify-card[data-state='no-vapid'] .notify-title,
@@ -1747,20 +1761,20 @@ input[aria-invalid='true'] {
   color: var(--text);
   overflow-wrap: anywhere;
 }
-.cfg-on {
+/* Scoped to the row value: `.config-row dd` also sets a colour, so a bare
+   `.cfg-*` class loses the cascade and the tone never renders. */
+.config-row dd.cfg-on {
   color: var(--ok);
 }
-.cfg-off {
-  color: var(--faint);
+.config-row dd.cfg-off {
+  color: var(--muted);
 }
-.cfg-redacted {
+.config-row dd.cfg-redacted {
   color: var(--warn);
-  font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
+  letter-spacing: 0.08em;
 }
-.cfg-muted {
-  color: var(--faint);
+.config-row dd.cfg-muted {
+  color: var(--muted);
 }
 
 /* raw JSON */
@@ -1800,7 +1814,7 @@ input[aria-invalid='true'] {
   font-family: var(--mono);
   font-size: 10.5px;
   font-weight: 400;
-  color: var(--faint);
+  color: var(--muted);
 }
 .raw-config[open] summary {
   border-bottom: 1px solid var(--line);
@@ -1911,6 +1925,7 @@ input[aria-invalid='true'] {
   list-style: none;
 }
 .rapi-item {
+  min-width: 0;
   padding: 11px 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -1923,11 +1938,14 @@ input[aria-invalid='true'] {
   gap: 10px;
 }
 .rapi-cmd {
+  flex: 1 1 auto;
   min-width: 0;
   font-family: var(--mono);
   font-size: 13.5px;
   color: var(--text);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip {
   flex: none;
@@ -1973,7 +1991,7 @@ input[aria-invalid='true'] {
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--faint);
+  color: var(--muted);
 }
 .rapi-result {
   min-width: 0;
@@ -1982,6 +2000,11 @@ input[aria-invalid='true'] {
   white-space: pre-wrap;
   max-height: 8.5em;
   overflow: auto;
+}
+/* The separator rides with the first word of the result, so it cannot dangle on
+   a line of its own when the entry wraps. */
+.rapi-result::before {
+  content: '· ';
 }
 .rapi-result.err {
   color: var(--err);

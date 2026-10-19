@@ -54,12 +54,20 @@ export function notificationState({
     };
   }
   if (permission === 'granted') {
+    // The headline follows the actual registration outcome: a failed token save
+    // is not "on", however granted the permission is.
+    if (tokenPhase === 'failed') {
+      return {
+        kind: 'attention',
+        title: 'Notifications need attention',
+        detail: 'Enabled in this browser, but this device isn’t registered yet.',
+        action: 'retry',
+      };
+    }
     const detail =
       tokenPhase === 'saved'
         ? 'This device is registered. You’ll get charging alerts even when the app is closed.'
-        : tokenPhase === 'failed'
-          ? 'Enabled in this browser, but this device isn’t registered yet.'
-          : 'Enabled in this browser. Registering this device…';
+        : 'Enabled in this browser. Registering this device…';
     return {
       kind: 'granted',
       title: 'Notifications are on',

@@ -20,11 +20,17 @@ test('notificationState covers every permission state without asking', () => {
   assert.equal(granted.kind, 'granted');
   assert.match(granted.detail, /registered/);
   assert.equal(granted.action, null);
-  // A granted permission whose token save failed offers a retry.
-  assert.equal(
-    notificationState({ supported: true, permission: 'granted', tokenPhase: 'failed' }).action,
-    'retry',
-  );
+  // A granted permission whose token save failed offers a retry, and the card
+  // must not claim success above the failure.
+  const failed = notificationState({
+    supported: true,
+    permission: 'granted',
+    tokenPhase: 'failed',
+  });
+  assert.equal(failed.action, 'retry');
+  assert.equal(failed.kind, 'attention');
+  assert.match(failed.title, /attention/);
+  assert.doesNotMatch(failed.title, /are on/);
   const initial = notificationState({ supported: true, permission: 'default' });
   assert.equal(initial.kind, 'default');
   assert.equal(initial.action, 'enable');

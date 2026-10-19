@@ -31,6 +31,7 @@ import {
   activateNotifications,
   enterNotifications,
   initNotifications,
+  releaseNotifications,
   resetNotifications,
 } from './js/screens/notifications.js';
 import {
@@ -80,6 +81,8 @@ function bootFail(title, body) {
 // browsers swallow it), the page stays here with a disabled button. Restore
 // the button after a bounded wait so retrying does not need a reload.
 const REDIRECT_RECOVERY_MS = 4000;
+// Sign-out waits for the token release, but never indefinitely.
+const SIGN_OUT_RELEASE_MS = 3000;
 
 function setSignInBusy(busy) {
   $('google-signin').disabled = busy;
@@ -218,8 +221,16 @@ async function handleRetryAccess() {
   btn.disabled = false;
 }
 
-function handleSignOut() {
+async function handleSignOut() {
   setText($('signin-error'), '');
+  // Release this device's push registration while the old account is still
+  // signed in (the rules key the delete on its uid), then end the session. A
+  // stalled backend must not trap the user in a session they asked to leave, so
+  // the release is best-effort and bounded.
+  await Promise.race([
+    releaseNotifications(),
+    new Promise((resolve) => setTimeout(resolve, SIGN_OUT_RELEASE_MS)),
+  ]);
   signOutUser();
 }
 

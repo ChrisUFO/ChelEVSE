@@ -7,6 +7,7 @@ import { $, setText } from '../ui.js';
 import { commandMillis, rapiErrorMessage, validateRapi } from '../advanced.js';
 import { relTime } from '../format.js';
 import { sendCommand } from '../store.js';
+import { settleWrite } from '../write.js';
 
 const STATUS_LABEL = {
   pending: 'Pending',
@@ -18,6 +19,7 @@ let commands = [];
 let logLoaded = false;
 let logError = '';
 let sending = false;
+let sendGeneration = 0;
 let gateSatisfied = false;
 let gateOpen = false;
 let gateCommand = '';
@@ -82,6 +84,9 @@ function renderLog() {
         'rapi-cmd',
         typeof command.command === 'string' ? command.command : '(missing command)',
       );
+      // The row keeps the command and the chip on one line; a long command is
+      // truncated, so expose the whole one as the tooltip.
+      if (typeof command.command === 'string') code.title = command.command;
       const chip = el(
         'span',
         `chip${Object.hasOwn(STATUS_LABEL, status) ? ` ${status}` : ''}`,
@@ -98,12 +103,11 @@ function renderLog() {
           typeof command.error === 'string' && command.error
             ? command.error
             : 'The charger did not apply this command.';
-        meta.append(el('span', 'rapi-sep', ' · '), el('span', 'rapi-result err', reason));
+        meta.append(el('span', 'rapi-result err', reason));
       } else if (command.result != null) {
-        meta.append(
-          el('span', 'rapi-sep', ' · '),
-          el('span', 'rapi-result', formatResult(command.result)),
-        );
+        // The separator is part of the result text (CSS ::before) so it can
+        // never be left dangling at the end of a wrapped line on its own.
+        meta.append(el('span', 'rapi-result', formatResult(command.result)));
       }
 
       item.append(top, meta);
@@ -158,18 +162,39 @@ function openGate(command) {
   $('rapi-gate-confirm').focus({ preventScroll: true });
 }
 
+// A settled or late write paints the same outcome the normal path does; the
+// generation guard drops the report when a newer send has taken over.
+function reconcileSend(generation, command, late) {
+  if (generation !== sendGeneration) return;
+  if (late.status === 'ok') {
+    paintFeedback('Command queued for the charger.', 'ok');
+    return;
+  }
+  paintFeedback('Couldn’t send — check your connection and try again.', 'err');
+  // The queued command never reached the server; keep it for a retry unless the
+  // user has already typed something else.
+  const input = $('rapi-input');
+  if (!$('rapi-input').disabled && !input.value) input.value = command;
+}
+
 async function sendRapi(command) {
   if (sending) return;
+  const generation = ++sendGeneration;
   setBusy(true);
   paintFeedback('Sending…', 'busy');
-  let ok = true;
-  try {
-    await sendCommand({ type: 'rapi', command });
-  } catch {
-    ok = false;
-  }
+  const outcome = await settleWrite(sendCommand({ type: 'rapi', command }), {
+    onLate: (late) => reconcileSend(generation, command, late),
+  });
+  if (generation !== sendGeneration) return;
   setBusy(false);
-  if (ok) {
+  if (outcome.status === 'timeout') {
+    // Online as far as the browser knows, but the backend has not answered. Tell
+    // the operator the command is queued and may not be saved yet; if it settles
+    // later it appears in the scrollback (or reports the failure) on its own.
+    $('rapi-input').value = '';
+    paintValidation({ valid: true });
+    paintFeedback('Waiting for the server — the command is queued but may not arrive yet.', 'warn');
+  } else if (outcome.status === 'ok') {
     $('rapi-input').value = '';
     paintValidation({ valid: true });
     paintFeedback('Command queued for the charger.', 'ok');
@@ -277,6 +302,7 @@ export function resetAdvanced() {
   logLoaded = false;
   logError = '';
   sending = false;
+  sendGeneration += 1;
   gateSatisfied = false;
   gateOpen = false;
   gateCommand = '';

@@ -7,7 +7,7 @@
 import { $, setText } from '../ui.js';
 import { notificationState, vapidConfigured } from '../notifications.js';
 import { auth, loadMessaging, vapidKey } from '../firebase.js';
-import { saveFcmToken } from '../store.js';
+import { deleteFcmToken, saveFcmToken } from '../store.js';
 
 const TOKEN_STORAGE_KEY = 'chelevse.fcmToken';
 const SW_READY_TIMEOUT_MS = 15000;
@@ -64,6 +64,23 @@ function writeStoredToken(token, uid) {
   } catch {
     // Private-mode storage failures must not break registration.
   }
+}
+
+function clearStoredToken() {
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Same tolerance as writeStoredToken.
+  }
+}
+
+// A button that disappears on the next render drops focus to <body>. Move it to
+// the status line the user needs to hear instead of the top of the page.
+function focusAfterAction(trigger) {
+  if (!trigger || !trigger.hidden) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) return;
+  $('notify-status').focus({ preventScroll: true });
 }
 
 function tokenErrorMessage(err) {
@@ -154,10 +171,12 @@ function render() {
   $('notify-actions').hidden = enable.hidden && retry.hidden;
 }
 
-// Save the current device token only when it changed since the last successful
-// save (or when the signed-in account changed). `force` is used after an
-// explicit enable/retry, where re-registering is the point.
-async function registerToken({ force = false, generation = sessionGeneration } = {}) {
+// Every signed-in load writes the token document once, even when the token is
+// unchanged: the bridge prunes dead tokens server-side (`UnregisteredError`) and
+// `acl.py --prune` deletes revoked ones, while the rules deny reads — so a
+// cached copy is not evidence the document still exists. The comparison is kept
+// for the local cache only.
+async function registerToken({ generation = sessionGeneration } = {}) {
   if (tokenInFlight || permission !== 'granted' || !supported || !vapidConfigured(vapidKey)) return;
   const uid = currentUid();
   if (!uid) {
@@ -189,10 +208,8 @@ async function registerToken({ force = false, generation = sessionGeneration } =
     // session that no longer exists.
     if (gen !== sessionGeneration || !sessionActive) return;
     const stored = readStoredToken();
-    if (force || !stored || stored.token !== token || stored.uid !== uid) {
-      await saveFcmToken(token, uid);
-      writeStoredToken(token, uid);
-    }
+    await saveFcmToken(token, uid);
+    if (!stored || stored.token !== token || stored.uid !== uid) writeStoredToken(token, uid);
     if (gen !== sessionGeneration || !sessionActive) return;
     tokenRestoredFor = uid;
     phase = 'saved';
@@ -261,12 +278,13 @@ async function refresh({ probe = false, register = false } = {}) {
     render();
     return;
   }
-  await registerToken({ force: false, generation });
+  await registerToken({ generation });
 }
 
 async function enable() {
   if (busy || tokenInFlight || permission !== 'default') return;
   if (typeof Notification === 'undefined') return;
+  const trigger = $('notify-enable');
   const generation = sessionGeneration;
   busy = true;
   phase = 'registering';
@@ -274,39 +292,47 @@ async function enable() {
   message = '';
   render();
 
-  // Must run inside this click handler, before any other await, so the browser
-  // still treats the permission request as user-initiated.
-  let result;
   try {
-    result = await Notification.requestPermission();
-  } catch {
-    if (generation !== sessionGeneration) return;
-    busy = false;
-    phase = 'idle';
-    error = 'Couldn’t ask for notification permission. Try again.';
-    render();
-    return;
-  }
-  if (generation !== sessionGeneration || !sessionActive) return;
+    // Must run inside this click handler, before any other await, so the browser
+    // still treats the permission request as user-initiated.
+    let result;
+    try {
+      result = await Notification.requestPermission();
+    } catch {
+      if (generation !== sessionGeneration) return;
+      busy = false;
+      phase = 'idle';
+      error = 'Couldn’t ask for notification permission. Try again.';
+      render();
+      return;
+    }
+    if (generation !== sessionGeneration || !sessionActive) return;
 
-  busy = false;
-  permission = typeof result === 'string' ? result : readPermission();
-  if (permission === 'granted') {
+    busy = false;
+    permission = typeof result === 'string' ? result : readPermission();
+    if (permission === 'granted') {
+      phase = 'idle';
+      render();
+      await registerToken({ generation });
+      return;
+    }
     phase = 'idle';
+    message = permission === 'default' ? 'Permission wasn’t granted. You can try again.' : '';
     render();
-    await registerToken({ force: true, generation });
-    return;
+  } finally {
+    focusAfterAction(trigger);
   }
-  phase = 'idle';
-  message = permission === 'default' ? 'Permission wasn’t granted. You can try again.' : '';
-  render();
 }
 
 // ---------- screen lifecycle ----------
 
 export function initNotifications() {
   $('notify-enable').addEventListener('click', enable);
-  $('notify-retry').addEventListener('click', () => registerToken({ force: true }));
+  $('notify-retry').addEventListener('click', async () => {
+    const trigger = $('notify-retry');
+    await registerToken();
+    focusAfterAction(trigger);
+  });
   notificationApi = hasNotificationApi();
   permission = readPermission();
   supported = notificationApi ? null : false;
@@ -321,6 +347,30 @@ export function enterNotifications() {
   refresh({ register: true });
 }
 
+// Sign-out hand-over. The token document belongs to the account that created it
+// (the rules deny another uid an update), and a signed-out device must stop
+// receiving that account's alerts, so the owner deletes it while the session is
+// still valid and drops the local copy so the next account creates a fresh one.
+// Every failure (already pruned, denied, messaging never loaded) is expected and
+// must never block the sign-out.
+export async function releaseNotifications() {
+  sessionActive = false;
+  sessionGeneration += 1;
+  const stored = readStoredToken();
+  clearStoredToken();
+  tokenRestoredFor = null;
+  const pending = [];
+  if (stored && stored.token) pending.push(deleteFcmToken(stored.token).catch(() => {}));
+  if (messaging) {
+    pending.push(
+      Promise.resolve()
+        .then(() => messaging.deleteToken(messaging.getMessaging()))
+        .catch(() => {}),
+    );
+  }
+  await Promise.all(pending);
+}
+
 // Called on every entry to the Config tab; re-reads the permission in case it
 // changed in browser settings and probes support on first visit.
 export function activateNotifications() {
@@ -331,6 +381,7 @@ export function activateNotifications() {
 export function resetNotifications() {
   sessionActive = false;
   sessionGeneration += 1;
+  clearStoredToken();
   supported = notificationApi ? null : false;
   permission = readPermission();
   phase = 'idle';

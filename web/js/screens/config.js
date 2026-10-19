@@ -69,10 +69,11 @@ function render() {
       for (const row of section.rows) {
         const line = el('div', 'config-row');
         line.dataset.key = row.key;
-        line.append(
-          el('dt', null, row.label),
-          el('dd', row.tone ? `cfg-${row.tone}` : null, row.value),
-        );
+        const value = el('dd', row.tone ? `cfg-${row.tone}` : null, row.value);
+        // The value is the literal "***" marker; the word only exists for
+        // assistive tech so the marker is not read as punctuation.
+        if (row.tone === 'redacted') value.append(el('span', 'sr-only', ' (redacted)'));
+        line.append(el('dt', null, row.label), value);
         list.append(line);
       }
       card.append(heading, list);

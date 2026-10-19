@@ -8,6 +8,7 @@ import {
   addDoc,
   getDocs,
   setDoc,
+  deleteDoc,
   query,
   where,
   orderBy,
@@ -131,6 +132,13 @@ export function saveFcmToken(token, uid) {
     uid,
     created_at: serverTimestamp(),
   });
+}
+
+// The owner removes its own token document before signing out: FCM hands the
+// same browser token to the next account, whose setDoc would otherwise be a
+// cross-uid update the rules deny.
+export function deleteFcmToken(token) {
+  return deleteDoc(doc(db, 'fcmTokens', token));
 }
 
 // Exact schedule shape: keys are fixed so no draft-only fields ever reach rules.

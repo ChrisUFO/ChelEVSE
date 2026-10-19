@@ -7,6 +7,7 @@
 import { $, setText } from '../ui.js';
 import { normalizeSettings, settingsFields, validateSettings } from '../settings.js';
 import { saveSettings as persistSettings } from '../store.js';
+import { settleWrite } from '../write.js';
 
 // Last server-confirmed settings and the form state built from them. The draft
 // lives in the inputs; saving disables editing so there is no mid-write drift.
@@ -14,11 +15,13 @@ let confirmedSettings = null;
 let pendingSettings = null;
 let settingsDirty = false;
 let settingsSaving = false;
+let settingsWaiting = false;
 let settingsSaved = false;
 let settingsError = '';
 let settingsGeneration = 0;
 
 const OFFLINE_MESSAGE = 'You’re offline — reconnect to save.';
+const WAITING_MESSAGE = 'Waiting for the server — this change may not be saved yet.';
 
 function readFields() {
   return { rate: $('setting-rate').value, currency: $('setting-currency').value };
@@ -47,6 +50,10 @@ function paintFeedback() {
   let busy = false;
   if (settingsSaving) {
     text = 'Saving…';
+    busy = true;
+  } else if (settingsWaiting) {
+    text = WAITING_MESSAGE;
+    kind = 'warn';
     busy = true;
   } else if (settingsError) {
     text = settingsError;
@@ -99,7 +106,7 @@ function handleInput(field) {
 // snapshot never overwrites a draft; it only becomes the new confirmed baseline.
 export function showSettingsData(data) {
   const next = normalizeSettings(data);
-  if (settingsSaving) {
+  if (settingsSaving || settingsWaiting) {
     pendingSettings = next;
     return;
   }
@@ -125,6 +132,59 @@ export function showSettingsData(data) {
   paintFeedback();
 }
 
+// Reconcile a save that has actually settled: adopt on success, roll back to the
+// last confirmed snapshot on failure. Runs from the normal path and again from
+// the timeout's late callback; the generation guard makes the first one win.
+function finishSave(generation, ok, values, previous) {
+  if (generation !== settingsGeneration) return;
+  settingsSaving = false;
+  settingsWaiting = false;
+  const remote = pendingSettings;
+  pendingSettings = null;
+  // A late settlement can land after the user typed again; that draft must not
+  // be overwritten by canonicalisation or a rollback.
+  const untouched = sameFields(
+    readFields(),
+    settingsFields({ rate: values.rate, currency: values.currency }),
+  );
+  if (ok) {
+    const saved = { rate: values.rate, currency: values.currency };
+    confirmedSettings = saved;
+    if (untouched) {
+      // Canonicalise the fields so the server echo is data-identical and the
+      // "Saved." message is not replaced by a hydration pass.
+      setFields(saved);
+      settingsDirty = false;
+      settingsSaved = true;
+    } else {
+      settingsDirty = true;
+      settingsSaved = false;
+    }
+    settingsError = '';
+    // A genuinely different snapshot arrived while the write was in flight;
+    // adopt it rather than leave the form on our optimistic values.
+    if (remote && !sameFields(settingsFields(remote), settingsFields(confirmedSettings))) {
+      confirmedSettings = remote;
+      if (!settingsDirty) setFields(remote);
+      settingsSaved = false;
+    }
+  } else {
+    // Optimistic UI reconciles back to the last confirmed server state.
+    confirmedSettings = previous;
+    if (untouched) {
+      setFields(previous);
+      settingsDirty = false;
+    } else {
+      settingsDirty = true;
+    }
+    settingsSaved = false;
+    settingsError =
+      'Couldn’t save — the previous settings are back. Check your connection and try again.';
+  }
+  renderErrors({});
+  paintFeedback();
+}
+
 async function submit(event) {
   event.preventDefault();
   if (settingsSaving) return;
@@ -141,6 +201,7 @@ async function submit(event) {
 
   const generation = ++settingsGeneration;
   const previous = confirmedSettings;
+  const values = result.values;
   // Do not hand a write to Firestore while offline: it would queue until the
   // connection returns, leaving the form locked on "Saving…". Keep the draft
   // and ask the user to retry once they are back.
@@ -151,49 +212,32 @@ async function submit(event) {
     return;
   }
   settingsSaving = true;
+  settingsWaiting = false;
   settingsSaved = false;
   settingsError = '';
   pendingSettings = null;
   renderErrors({});
   paintFeedback();
 
-  let ok = true;
-  try {
-    await persistSettings(result.values);
-  } catch {
-    ok = false;
-  }
+  const outcome = await settleWrite(persistSettings(values), {
+    onLate: (late) => finishSave(generation, late.status === 'ok', values, previous),
+  });
   if (generation !== settingsGeneration) return;
-
-  settingsSaving = false;
-  const remote = pendingSettings;
-  pendingSettings = null;
-  if (ok) {
-    confirmedSettings = { rate: result.values.rate, currency: result.values.currency };
-    // Canonicalise the fields so the server echo is data-identical and the
-    // "Saved." message is not replaced by a hydration pass.
-    setFields(confirmedSettings);
-    settingsDirty = false;
-    settingsSaved = true;
-    settingsError = '';
-    // A genuinely different snapshot arrived while the write was in flight;
-    // adopt it rather than leave the form on our optimistic values.
-    if (remote && !sameFields(settingsFields(remote), settingsFields(confirmedSettings))) {
-      confirmedSettings = remote;
-      setFields(remote);
-      settingsSaved = false;
-    }
-  } else {
-    // Optimistic UI reconciles back to the last confirmed server state.
-    confirmedSettings = previous;
-    setFields(previous);
-    settingsDirty = false;
+  if (outcome.status === 'timeout') {
+    // The browser says online but the backend has not answered. Re-enable the
+    // form with an explicit "may not be saved yet" state; the write keeps
+    // running and its real outcome reconciles above.
+    settingsSaving = false;
+    settingsWaiting = true;
     settingsSaved = false;
-    settingsError =
-      'Couldn’t save — the previous settings are back. Check your connection and try again.';
+    settingsError = '';
+    // The value is still unconfirmed, so the form stays dirty and Save remains
+    // available as a retry.
+    settingsDirty = !sameFields(readFields(), settingsFields(previous));
+    paintFeedback();
+    return;
   }
-  renderErrors({});
-  paintFeedback();
+  finishSave(generation, outcome.status === 'ok', values, previous);
 }
 
 // ---------- screen lifecycle ----------
@@ -218,6 +262,7 @@ export function resetSettings() {
   pendingSettings = null;
   settingsDirty = false;
   settingsSaving = false;
+  settingsWaiting = false;
   settingsSaved = false;
   settingsError = '';
   if (!$('settings-form')) return;

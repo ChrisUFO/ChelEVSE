@@ -25,6 +25,7 @@ export let doc;
 export let getDoc;
 export let getDocs;
 export let setDoc;
+export let deleteDoc;
 export let collection;
 export let addDoc;
 export let serverTimestamp;
@@ -73,6 +74,7 @@ export async function initFirebase() {
       getDoc,
       getDocs,
       setDoc,
+      deleteDoc,
       collection,
       addDoc,
       serverTimestamp,

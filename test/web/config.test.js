@@ -6,7 +6,7 @@ import { buildConfigSections, formatConfigValue, rawConfigJson } from '../../web
 test('formatConfigValue turns charger values into human text', () => {
   assert.equal(formatConfigValue('gfci_check', true), 'On');
   assert.equal(formatConfigValue('gfci_check', false), 'Off');
-  assert.equal(formatConfigValue('pass', '***'), 'Redacted');
+  assert.equal(formatConfigValue('pass', '***'), '***');
   assert.equal(formatConfigValue('sntp_hostname', null), 'Not reported');
   assert.equal(formatConfigValue('ssid', ''), 'Not set');
   assert.equal(formatConfigValue('http_supported_protocols', ['http', 'https']), 'http · https');
@@ -77,8 +77,10 @@ test('buildConfigSections curates known fields and omits unknown keys', () => {
   assert.equal(byKey.gfci_check.tone, 'on');
   assert.equal(byKey.temp_check.value, 'Off');
   assert.equal(byKey.temp_check.tone, 'off');
-  assert.equal(byKey.pass.value, 'Redacted');
+  assert.equal(byKey.pass.value, '***');
   assert.equal(byKey.pass.tone, 'redacted');
+  // The charger's "-" sentinel is a dead row: omitted here, kept in Raw JSON.
+  assert.equal(byKey.protocol, undefined);
   assert.equal(byKey.http_supported_protocols.value, 'http · https');
   assert.equal(byKey.mqtt_enabled.value, 'On');
   assert.equal(byKey.divert_enabled.tone, 'off');
@@ -101,6 +103,7 @@ test('rawConfigJson keeps every field, redactions, and readable timestamps', () 
   const config = {
     hostname: 'chelevse-driveway',
     pass: '***',
+    protocol: '-',
     wifi_serial: 'B0A732FDCF04',
     updated_at: { toDate: () => new Date('2026-10-19T12:34:56.000Z') },
     nested: { list: [1, true] },
@@ -108,6 +111,7 @@ test('rawConfigJson keeps every field, redactions, and readable timestamps', () 
   const raw = rawConfigJson(config);
   assert.match(raw, /"hostname": "chelevse-driveway"/);
   assert.match(raw, /"pass": "\*\*\*"/);
+  assert.match(raw, /"protocol": "-"/);
   assert.match(raw, /"wifi_serial": "B0A732FDCF04"/);
   assert.match(raw, /"updated_at": "2026-10-19T12:34:56.000Z"/);
   assert.match(raw, /"list": \[/);
