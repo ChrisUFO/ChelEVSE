@@ -12,7 +12,7 @@
 //
 // A rotated push subscription (`pushsubscriptionchange`) is handed to the open
 // pages: only the page can re-acquire an FCM token and re-save it.
-const CACHE = 'chelevse-v20';
+const CACHE = 'chelevse-v21';
 const SHELL = [
   './',
   './index.html',
@@ -122,7 +122,9 @@ function pushMessage(payload) {
   return {
     title: textValue(notification.title) ?? textValue(data.title) ?? 'ChelEVSE',
     body: textValue(notification.body) ?? textValue(data.body) ?? '',
-    url: textValue(options.link) ?? textValue(data.url) ?? './',
+    // Mirrors notificationFromPush() in js/push.js (covered by test/web/push.test.js):
+    // fcmOptions.link, then the notification block's url, then data.url.
+    url: textValue(options.link) ?? textValue(notification.url) ?? textValue(data.url) ?? './',
     id: textValue(root.fcmMessageId) ?? textValue(root.messageId) ?? textValue(root.id) ?? null,
   };
 }
