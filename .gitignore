@@ -38,3 +38,6 @@ PLAN.md
 
 # Local review/audit artifacts
 .review/
+
+# Local-only agent rules (deployment procedures for this Pi); never commit
+/AGENTS.md
