@@ -88,7 +88,10 @@ function renderLog() {
         typeof command.command === 'string' ? command.command : '(missing command)',
       );
       // The row keeps the command and the chip on one line; a long command is
-      // truncated, so expose the whole one as the tooltip.
+      // truncated. Expose the whole one as the tooltip, and make the code
+      // focusable so keyboard and touch users can expand it by Tab/tap
+      // instead of needing a mouse hover (see .rapi-cmd:focus).
+      code.tabIndex = 0;
       if (typeof command.command === 'string') code.title = command.command;
       const chip = el(
         'span',
@@ -231,7 +234,12 @@ function handleInput() {
 
 function confirmGate() {
   const step = applyGate({ type: 'confirm' });
-  if (step.action === 'send') sendRapi(step.command);
+  if (step.action !== 'send') return;
+  // Confirming hides the gate that contained the focused button. Hand focus to
+  // the live status before the form goes busy, so it never falls to <body>
+  // while the command is pending; sendRapi restores the input on settlement.
+  $('rapi-feedback').focus({ preventScroll: true });
+  sendRapi(step.command);
 }
 
 function startTicker() {
@@ -265,7 +273,11 @@ export function initAdvanced() {
 // already confirmed. Re-clicking the active tab does not count as an entry.
 export function enterAdvanced() {
   applyGate({ type: 'enter' });
-  paintFeedback('');
+  // A command that is still being written owns the feedback line: re-entering
+  // the tab during the send must keep explaining why the form is disabled,
+  // instead of showing an inert form until the write settles.
+  if (gate.sending) paintFeedback('Sending…', 'busy');
+  else paintFeedback('');
   renderLog();
   startTicker();
 }

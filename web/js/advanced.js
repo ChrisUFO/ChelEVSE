@@ -72,7 +72,10 @@ export function gateTransition(state, event) {
   const base = { ...GATE_INITIAL, ...(state || {}) };
   const type = event && event.type;
   if (type === 'enter' || type === 'leave') {
-    return { state: { ...GATE_INITIAL }, action: 'idle' };
+    // Entering and leaving both reset the per-visit confirmation. A write that
+    // is already in flight keeps the form busy, though: re-entry must not
+    // pretend the send is over or accept another command until it settles.
+    return { state: { ...GATE_INITIAL, sending: Boolean(base.sending) }, action: 'idle' };
   }
   if (type === 'edit' || type === 'cancel') {
     return { state: { ...base, open: false, command: '' }, action: 'idle' };

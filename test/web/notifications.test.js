@@ -166,30 +166,48 @@ test('tokenErrorMessage is the single copy source', () => {
   assert.match(tokenErrorMessage(null), /Try again/);
 });
 
-test('tokenReleasePlan decides the deletes and the retry marker', () => {
+test('tokenReleasePlan releases the cached and the in-flight token exactly once', () => {
   assert.deepEqual(tokenReleasePlan({ stored: { token: 'T', uid: 'A' }, messaging: true }), {
-    deleteDoc: true,
+    docs: [{ token: 'T', uid: 'A' }],
     deleteToken: true,
-    marker: { token: 'T', uid: 'A' },
   });
   // No messaging module loaded yet (permission never granted): only the doc.
   assert.deepEqual(tokenReleasePlan({ stored: { token: 'T', uid: 'A' }, messaging: false }), {
-    deleteDoc: true,
+    docs: [{ token: 'T', uid: 'A' }],
     deleteToken: false,
-    marker: { token: 'T', uid: 'A' },
   });
-  // A cached token without a uid cannot be attributed, so it is not retried.
+  // A cached token without a uid cannot be attributed, so it is released but
+  // not retried by a later session.
   assert.deepEqual(tokenReleasePlan({ stored: { token: 'T' } }), {
-    deleteDoc: true,
+    docs: [{ token: 'T', uid: '' }],
     deleteToken: false,
-    marker: null,
   });
   assert.deepEqual(tokenReleasePlan({ stored: null, messaging: true }), {
-    deleteDoc: false,
+    docs: [],
     deleteToken: true,
-    marker: null,
   });
-  assert.deepEqual(tokenReleasePlan(), { deleteDoc: false, deleteToken: false, marker: null });
+  assert.deepEqual(tokenReleasePlan(), { docs: [], deleteToken: false });
+
+  // A sign-out while a registration is writing: the token exists only in the
+  // attempt record, never in the cache.
+  assert.deepEqual(tokenReleasePlan({ inFlight: { token: 'T', uid: 'A' } }), {
+    docs: [{ token: 'T', uid: 'A' }],
+    deleteToken: false,
+  });
+  // The usual case: the cache and the attempt carry the same token.
+  assert.deepEqual(
+    tokenReleasePlan({ stored: { token: 'T', uid: 'A' }, inFlight: { token: 'T', uid: 'A' } }).docs,
+    [{ token: 'T', uid: 'A' }],
+  );
+  // A rotated token has two documents to remove.
+  assert.deepEqual(
+    tokenReleasePlan({ stored: { token: 'OLD', uid: 'A' }, inFlight: { token: 'NEW', uid: 'A' } })
+      .docs,
+    [
+      { token: 'OLD', uid: 'A' },
+      { token: 'NEW', uid: 'A' },
+    ],
+  );
 });
 
 test('a pruned-token denial is the handover signal, not a dead end', () => {
@@ -209,6 +227,6 @@ test('a pruned-token denial is the handover signal, not a dead end', () => {
 
   // The retry marker belongs to A, so only A's next session retries the delete.
   const plan = tokenReleasePlan({ stored: { token: staleToken, uid: 'A' }, messaging: true });
-  assert.deepEqual(plan.marker, { token: staleToken, uid: 'A' });
-  assert.equal(plan.marker.uid === 'B', false);
+  assert.deepEqual(plan.docs, [{ token: staleToken, uid: 'A' }]);
+  assert.equal(plan.docs[0].uid === 'B', false);
 });

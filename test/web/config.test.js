@@ -25,6 +25,19 @@ test('formatConfigValue turns charger values into human text', () => {
   assert.equal(formatConfigValue('updated_at', { nested: true }), 'See Raw JSON');
 });
 
+test('the charger numeric unset sentinels read as absent', () => {
+  // OpenEVSE reports absent uint32/uint64 settings as 2^32 − 1 and 2^64 − 1;
+  // the bridge stores the latter as a float, which rounds to 2^64.
+  assert.equal(formatConfigValue('max_current_soft', 2 ** 32 - 1), '—');
+  assert.equal(formatConfigValue('min_current_hard', 2 ** 32 - 1), '—');
+  assert.equal(formatConfigValue('max_current_soft', 18446744073709551615), '—');
+  assert.equal(formatConfigValue('limit_default_value', 2 ** 64), '—');
+  // Real values still format normally.
+  assert.equal(formatConfigValue('max_current_soft', 32), '32 A');
+  assert.equal(formatConfigValue('max_current_soft', 4294967294), '4294967294 A');
+  assert.equal(formatConfigValue('max_current_soft', 0), '0 A');
+});
+
 test('buildConfigSections curates known fields and omits unknown keys', () => {
   const config = {
     hostname: 'chelevse-driveway',
@@ -36,7 +49,7 @@ test('buildConfigSections curates known fields and omits unknown keys', () => {
     evse_serial: 'M06SBEFF0B787B',
     min_current_hard: 6,
     max_current_hard: 48,
-    max_current_soft: 32,
+    max_current_soft: 2 ** 64,
     limit_default_type: 'time',
     limit_default_value: 0,
     gfci_check: true,
@@ -72,6 +85,8 @@ test('buildConfigSections curates known fields and omits unknown keys', () => {
   assert.equal(byKey.hostname.value, 'chelevse-driveway');
   assert.equal(byKey.service.value, 'Level 2');
   assert.equal(byKey.min_current_hard.value, '6 A');
+  // An unset numeric limit stays visible as absent rather than "1.8e+19 A".
+  assert.equal(byKey.max_current_soft.value, '—');
   assert.equal(byKey.limit_default_value.value, 'No limit');
   assert.equal(byKey.gfci_check.value, 'On');
   assert.equal(byKey.gfci_check.tone, 'on');

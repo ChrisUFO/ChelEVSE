@@ -24,6 +24,7 @@ let unsubSettings = null;
 let unsubConfig = null;
 let unsubSchedule = null;
 let unsubRapi = null;
+let unsubPending = null;
 
 export function startStore({
   onStatus,
@@ -61,12 +62,30 @@ export function startStore({
       if (!denied(err)) onStatus(null);
     },
   );
+  // The status feedback needs the newest settled commands (newest first) and
+  // every pending command. Pending state cannot rely on a finite mixed window:
+  // a burst of RAPI sends would evict a still-pending stop/auto/set-current and
+  // re-enable the controls before the charger applied it. The pending query is
+  // a single-field equality, so it needs no composite index.
+  let recentCommands = [];
+  let pendingCommands = [];
+  const emitCommands = () => {
+    if (onCommands) onCommands(mergeCommandWindows(recentCommands, pendingCommands));
+  };
   unsubCmds = onSnapshot(
-    // Wider than the three control types: the CONTROL_TYPES filter runs after
-    // the limit, so a 3-doc window let newer RAPI entries evict a still-pending
-    // stop/auto/set-current command and re-enable the controls early.
     query(collection(db, 'commands'), orderBy('created_at', 'desc'), limit(COMMAND_LIMIT)),
-    (snap) => onCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (snap) => {
+      recentCommands = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      emitCommands();
+    },
+    denied,
+  );
+  unsubPending = onSnapshot(
+    query(collection(db, 'commands'), where('status', '==', 'pending')),
+    (snap) => {
+      pendingCommands = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      emitCommands();
+    },
     denied,
   );
   unsubSettings = watch('settings/current', (data) => onSettings && onSettings(data));
@@ -104,10 +123,18 @@ export function stopStore() {
     unsubConfig,
     unsubSchedule,
     unsubRapi,
+    unsubPending,
   ]) {
     if (unsub) unsub();
   }
-  unsubStatus = unsubCmds = unsubSettings = unsubConfig = unsubSchedule = unsubRapi = null;
+  unsubStatus =
+    unsubCmds =
+    unsubSettings =
+    unsubConfig =
+    unsubSchedule =
+    unsubRapi =
+    unsubPending =
+      null;
 }
 
 // Every command is created pending; the bridge owns the lifecycle after that.
@@ -122,11 +149,25 @@ export function sendCommand(payload) {
 // The Advanced console's scrollback depth.
 export const RAPI_LIMIT = 20;
 
-// The status screen's command window. The CONTROL_TYPES filter runs
-// client-side after the limit, so this must be wide enough that a burst of RAPI
-// entries cannot hide a pending control command (which would re-enable Stop/
-// Auto/Hold while the charger has not applied it yet).
+// The status screen's settled-command window. Pending commands are subscribed
+// separately (`where('status', '==', 'pending')`), so this only bounds the
+// "latest command" feedback history; CONTROL_TYPES still filters it client-side.
 export const COMMAND_LIMIT = 20;
+
+// Combine the newest mixed-type window with the independent pending set. A
+// pending command the window already carries is not duplicated, and pending
+// entries the window lost are appended: the status renderer gives pending
+// precedence, while the settled history keeps its newest-first order.
+export function mergeCommandWindows(recent = [], pending = []) {
+  const merged = Array.isArray(recent) ? [...recent] : [];
+  const seen = new Set(merged.map((doc) => doc && doc.id));
+  for (const doc of Array.isArray(pending) ? pending : []) {
+    if (!doc || seen.has(doc.id)) continue;
+    seen.add(doc.id);
+    merged.push(doc);
+  }
+  return merged;
+}
 
 // Both fields travel together because firestore.rules rejects a partial
 // settings document.

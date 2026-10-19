@@ -106,6 +106,16 @@ function isUnsetSentinel(value) {
   return value === '-';
 }
 
+// OpenEVSE's numeric "not set" markers: an absent uint32 is 2^32 − 1 and an
+// absent uint64 is 2^64 − 1. The bridge writes the latter as a float, where it
+// rounds to 2^64, so compare against that exact double.
+const UNSET_UINT32 = 2 ** 32 - 1;
+const UNSET_UINT64 = 2 ** 64;
+
+function isUnsetNumber(value) {
+  return value === UNSET_UINT32 || value === UNSET_UINT64;
+}
+
 // Unknown keys are deliberately not here: the Raw JSON is the complete view.
 // A redacted value keeps the sentinel itself so the curated view and the Raw
 // JSON show the same marker; the screen adds the word for assistive tech.
@@ -121,6 +131,8 @@ export function formatConfigValue(key, value) {
     return value.trim() ? value : 'Not set';
   }
   if (typeof value === 'number') {
+    // An unset limit must read as absent, not as 4294967295 A.
+    if (isUnsetNumber(value)) return '—';
     if (AMP_KEYS.has(key)) return `${formatNumber(value)} A`;
     if (key === 'service') return formatService(value);
     if (key === 'limit_default_type') return formatLimitType(value);

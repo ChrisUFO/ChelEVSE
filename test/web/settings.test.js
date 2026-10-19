@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  OFFLINE_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
   normalizeSettings,
@@ -266,5 +267,39 @@ test('settingsSaveState orders feedback states and gates the save button', () =>
   assert.equal(
     settingsSaveState({ draft: { rate: '0.3', currency: 'USD' }, confirmed, saved: true }).text,
     'Unsaved changes.',
+  );
+});
+
+test('an offline retry says so while an earlier timed-out write is still pending', () => {
+  const confirmed = { rate: 0.25, currency: 'USD' };
+  const draft = { rate: '0.3', currency: 'USD' };
+  // A save timed out ("waiting"), then the user retried offline: the retry
+  // starts no write, so the earlier one still owns its late settlement. The
+  // offline copy must outrank "Waiting for the server…" instead of being
+  // masked by it, and Save stays available for the next retry.
+  const view = settingsSaveState({
+    draft,
+    confirmed,
+    waiting: true,
+    error: OFFLINE_MESSAGE,
+  });
+  assert.equal(view.text, OFFLINE_MESSAGE);
+  assert.equal(view.kind, 'err');
+  assert.equal(view.busy, false);
+  assert.equal(view.dirty, true);
+  assert.equal(view.canSave, true);
+
+  // Once the retry succeeds and clears the error, an unresolved earlier write
+  // still reports the wait rather than pretending the form settled.
+  const reconnected = settingsSaveState({ draft, confirmed, waiting: true, error: '' });
+  assert.equal(reconnected.text, WAITING_MESSAGE);
+  assert.equal(reconnected.kind, 'warn');
+  assert.equal(reconnected.busy, true);
+
+  // A late settlement clears waiting and reconciles to the normal outcomes.
+  assert.equal(settingsSaveState({ draft: settingsFields(confirmed), confirmed }).text, '');
+  assert.equal(
+    settingsSaveState({ draft: settingsFields(confirmed), confirmed, saved: true }).text,
+    'Saved.',
   );
 });

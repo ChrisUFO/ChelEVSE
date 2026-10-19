@@ -125,9 +125,13 @@ export function settingsSaveState({
     text = 'Saving…';
     busy = true;
   } else if (waiting) {
-    text = WAITING_MESSAGE;
-    kind = 'warn';
-    busy = true;
+    // A refusal raised while an earlier write is still in flight explains more
+    // than "waiting" and must stay visible: the offline copy says why this
+    // retry did not start. The write itself is still running, so the retry
+    // stays available and its late settlement still reconciles the form.
+    text = error || WAITING_MESSAGE;
+    kind = error ? 'err' : 'warn';
+    busy = !error;
   } else if (error) {
     text = error;
     kind = 'err';

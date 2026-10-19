@@ -158,18 +158,23 @@ async function submit(event) {
     return;
   }
 
-  const generation = ++settingsGeneration;
   const previous = confirmedSettings;
   const values = result.values;
   // Do not hand a write to Firestore while offline: it would queue until the
   // connection returns, leaving the form locked on "Saving…". Keep the draft
   // and ask the user to retry once they are back.
+  //
+  // This refusal happens before the generation bump on purpose: a write that
+  // already timed out is still running, and a retry that starts no replacement
+  // write must not revoke that write's ownership of its late settlement. The
+  // form keeps saying why the retry did not start until the real outcome lands.
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     settingsSaved = false;
     settingsError = OFFLINE_MESSAGE;
     paintFeedback();
     return;
   }
+  const generation = ++settingsGeneration;
   settingsSaving = true;
   settingsWaiting = false;
   settingsSaved = false;

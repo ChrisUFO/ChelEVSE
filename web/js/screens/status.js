@@ -26,10 +26,9 @@ const CMD_TEXT = {
     done: (a) => `Current set to ${a} A.`,
   },
 };
-// The commands listener is shared with the Advanced console. RAPI entries must
-// not disable these controls or replace their feedback with a generic "Done."
-// (The window is 20 docs so a burst of RAPI sends cannot evict a pending
-// control command from it.)
+// RAPI entries in the shared command feed must not disable these controls or
+// replace their feedback with a generic "Done." Pending commands arrive from
+// their own subscription, so RAPI volume cannot evict them from this view.
 const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;

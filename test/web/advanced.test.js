@@ -139,6 +139,18 @@ test('the gate re-arms on every visit and cancel/edit dismiss it', () => {
   const sending = gateTransition(opened.state, { type: 'sending', value: true });
   assert.equal(gateTransition(sending.state, { type: 'submit', command: '$OK' }).action, 'idle');
   assert.equal(gateTransition(sending.state, { type: 'confirm' }).action, 'idle');
+  // A visit reset keeps the in-flight write busy: re-entering during a send
+  // must not clear "Sending…" or accept another command.
+  for (const type of ['enter', 'leave']) {
+    const step = gateTransition(sending.state, { type });
+    assert.equal(step.state.sending, true, type);
+    assert.equal(step.state.open, false, type);
+    assert.equal(
+      gateTransition(step.state, { type: 'submit', command: '$OK' }).action,
+      'idle',
+      type,
+    );
+  }
   // Confirm without an open gate never sends.
   assert.equal(gateTransition(GATE_INITIAL, { type: 'confirm' }).action, 'idle');
 });

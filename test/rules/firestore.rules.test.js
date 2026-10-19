@@ -27,7 +27,9 @@ before(async () => {
     await setDoc(doc(db, 'fcmTokens/tok-update'), { uid: 'u1', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-shape'), { uid: 'u1', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-ungranted'), { uid: 'u2', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-ungranted-update'), { uid: 'u2', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-foreign'), { uid: 'u2', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-u1-owned'), { uid: 'u1', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-del'), { uid: 'u1', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-del-foreign'), { uid: 'u2', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-read'), { uid: 'u1', created_at: new Date() });
@@ -248,14 +250,29 @@ test('deleting an already-removed token is a harmless no-op', async () => {
   await assertSucceeds(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-gone')));
 });
 
-test('an authenticated user without a grant cannot update or delete their own fcm token', async () => {
+test('an ungranted owner can delete its own fcm token after access is revoked', async () => {
+  // Revocation must not trap the device's registration: the no-access screen's
+  // sign-out still runs the release while this account is authenticated.
+  await assertSucceeds(deleteDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted')));
+});
+
+test('an ungranted user cannot delete another uid fcm token', async () => {
+  await assertFails(deleteDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-u1-owned')));
+});
+
+test('an ungranted user still cannot create or update a token', async () => {
   await assertFails(
-    setDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted'), {
+    setDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted-new'), {
       uid: 'u2',
       created_at: new Date(),
     }),
   );
-  await assertFails(deleteDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted')));
+  await assertFails(
+    setDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted-update'), {
+      uid: 'u2',
+      created_at: new Date(),
+    }),
+  );
 });
 
 test('fcm tokens cannot be read by clients', async () => {

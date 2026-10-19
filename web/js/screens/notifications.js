@@ -19,12 +19,15 @@ import { deleteFcmToken, saveFcmToken } from '../store.js';
 import { settleWrite } from '../write.js';
 
 const TOKEN_STORAGE_KEY = 'chelevse.fcmToken';
-// A sign-out whose token-doc delete never reached the server leaves this
-// marker behind; the next session of that account retries the delete instead of
-// leaving the doc to deny the next account's save.
+// A sign-out whose token-doc delete never reached the server leaves a marker
+// behind; the next session of that account retries the delete instead of
+// leaving the doc to deny the next account's save. A registration that is
+// still writing its document can add its own marker after sign-out, so this
+// is a list rather than a single pending token.
 const RELEASE_STORAGE_KEY = 'chelevse.fcmPendingRelease';
 const SW_READY_TIMEOUT_MS = 15000;
 const RELEASE_RETRY_MS = 5000;
+const RELEASE_WRITE_MS = 5000;
 
 let notificationApi = false;
 let sessionActive = false;
@@ -40,6 +43,11 @@ let supportPromise = null;
 let supportFailed = false;
 let tokenInFlight = false;
 let tokenRestoredFor = null;
+// The token this session obtained, recorded as soon as the browser returns it
+// and before its document write starts. The local cache is only written after
+// the write settles, so a sign-out that lands while the write is in flight
+// needs this to know which document to release.
+let inFlightToken = null;
 // Bumped per registration attempt so a timed-out write that settles later can
 // never overwrite the outcome of a newer retry.
 let registrationGeneration = 0;
@@ -91,35 +99,71 @@ function clearStoredToken() {
   }
 }
 
-function readPendingRelease() {
+function readPendingReleases() {
   try {
     const raw = localStorage.getItem(RELEASE_STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (typeof parsed.token !== 'string' || typeof parsed.uid !== 'string') return null;
-    return { token: parsed.token, uid: parsed.uid };
+    // Older builds stored one marker object; accept both shapes.
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    return list.filter(
+      (item) => item && typeof item.token === 'string' && typeof item.uid === 'string',
+    );
   } catch {
-    return null;
+    return [];
   }
 }
 
-function writePendingRelease(marker) {
+function writePendingReleases(list) {
   try {
-    localStorage.setItem(RELEASE_STORAGE_KEY, JSON.stringify(marker));
+    if (!list.length) localStorage.removeItem(RELEASE_STORAGE_KEY);
+    else localStorage.setItem(RELEASE_STORAGE_KEY, JSON.stringify(list));
   } catch {
     // A storage failure must never block the sign-out itself.
   }
 }
 
+function sameRelease(a, b) {
+  return a.token === b.token && a.uid === b.uid;
+}
+
+function addPendingRelease(marker) {
+  const list = readPendingReleases();
+  if (list.some((item) => sameRelease(item, marker))) return;
+  list.push({ token: marker.token, uid: marker.uid });
+  writePendingReleases(list);
+}
+
 function clearPendingRelease(marker) {
-  const current = readPendingRelease();
-  if (!current || (marker && (current.token !== marker.token || current.uid !== marker.uid)))
-    return;
-  try {
-    localStorage.removeItem(RELEASE_STORAGE_KEY);
-  } catch {
-    // Same tolerance as writePendingRelease.
-  }
+  const list = readPendingReleases();
+  const next = list.filter((item) => !sameRelease(item, marker));
+  if (next.length !== list.length) writePendingReleases(next);
+}
+
+function dropCachedToken(token) {
+  const cached = readStoredToken();
+  if (cached && cached.token === token) clearStoredToken();
+}
+
+// Release one token document, exactly the one this attempt owns. The retry
+// marker is written before the delete so a refusal (offline, revoked, or a
+// delete that now runs without auth after sign-out) stays recoverable by that
+// account's next session. The wait is bounded: sign-out is best-effort.
+function releaseTokenDoc(token, uid) {
+  const marker = { token, uid };
+  if (uid) addPendingRelease(marker);
+  const settle = (release) => {
+    if (uid) clearPendingRelease(marker);
+    dropCachedToken(token);
+    return release;
+  };
+  return Promise.race([
+    deleteFcmToken(token).then(
+      () => settle(true),
+      () => false,
+    ),
+    new Promise((resolve) => setTimeout(() => resolve(false), RELEASE_WRITE_MS)),
+  ]);
 }
 
 function isOffline() {
@@ -275,6 +319,9 @@ async function registerToken({ generation = sessionGeneration } = {}) {
       const missing = new Error('no-token');
       throw missing;
     }
+    // Record the token before its document write: if sign-out starts while the
+    // write is pending, the release path must know which doc id to remove.
+    inFlightToken = { token, uid, session: attemptSession };
     // Signed out while the token request was in flight: never write for a
     // session that no longer exists.
     if (attemptSession !== sessionGeneration || !sessionActive) return null;
@@ -292,7 +339,17 @@ async function registerToken({ generation = sessionGeneration } = {}) {
         const missing = new Error('no-token');
         throw missing;
       }
+      inFlightToken = { token, uid, session: attemptSession };
+      if (attemptSession !== sessionGeneration || !sessionActive) return null;
       await saveFcmToken(token, uid);
+    }
+    if (attemptSession !== sessionGeneration || !sessionActive) {
+      // The session ended while the write was still running. The document may
+      // have landed after the sign-out release (which had no id yet), so
+      // release this exact token now; if the delete runs without auth or the
+      // backend is unreachable, the marker retries it next session.
+      if (!sessionActive) await releaseTokenDoc(token, uid);
+      return null;
     }
     savedToken = token;
     return token;
@@ -443,16 +500,18 @@ export function enterNotifications() {
 // is acknowledged, so the failure stays recoverable instead of locking the
 // browser's next account out of notifications.
 async function retryPendingRelease() {
-  const marker = readPendingRelease();
-  if (!marker || marker.uid !== currentUid()) return;
-  try {
-    await deleteFcmToken(marker.token);
-  } catch {
-    return; // Keep the marker for the next session.
+  const uid = currentUid();
+  const markers = readPendingReleases().filter((marker) => marker.uid === uid);
+  for (const marker of markers) {
+    try {
+      await deleteFcmToken(marker.token);
+    } catch {
+      continue; // Keep this marker for the next session.
+    }
+    clearPendingRelease(marker);
+    const cached = readStoredToken();
+    if (cached && cached.token === marker.token && cached.uid === marker.uid) clearStoredToken();
   }
-  clearPendingRelease(marker);
-  const cached = readStoredToken();
-  if (cached && cached.token === marker.token && cached.uid === marker.uid) clearStoredToken();
 }
 
 // Sign-out hand-over. The token document belongs to the account that created it
@@ -466,25 +525,13 @@ export async function releaseNotifications() {
   sessionGeneration += 1;
   registrationGeneration += 1;
   const stored = readStoredToken();
+  // The cache is only written after a successful save, so a registration that
+  // is still writing has to contribute its token from memory.
+  const inFlight = inFlightToken;
+  inFlightToken = null;
   tokenRestoredFor = null;
-  const plan = tokenReleasePlan({ stored, messaging: Boolean(messaging) });
-  if (plan.marker) writePendingRelease(plan.marker);
-  const pending = [];
-  if (plan.deleteDoc) {
-    pending.push(
-      deleteFcmToken(stored.token).then(
-        () => {
-          clearPendingRelease(plan.marker);
-          const cached = readStoredToken();
-          if (cached && cached.token === stored.token) clearStoredToken();
-        },
-        () => {
-          // Offline or denied: the marker and the cached token stay so the next
-          // sign-in of this account can retry the delete.
-        },
-      ),
-    );
-  }
+  const plan = tokenReleasePlan({ stored, inFlight, messaging: Boolean(messaging) });
+  const pending = plan.docs.map((item) => releaseTokenDoc(item.token, item.uid));
   if (plan.deleteToken) {
     pending.push(
       Promise.resolve()
@@ -516,6 +563,7 @@ export function resetNotifications() {
   message = '';
   busy = false;
   tokenInFlight = false;
+  inFlightToken = null;
   tokenRestoredFor = null;
   supportPromise = null;
   supportFailed = false;

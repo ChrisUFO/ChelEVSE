@@ -162,15 +162,18 @@ export function registrationResult(outcome) {
   };
 }
 
-// What a sign-out must do to this device's push registration. The cached token
-// (and a retry marker) may only be dropped after the document delete is
-// acknowledged, so a release that fails offline is retried by the next session.
-export function tokenReleasePlan({ stored = null, messaging = false } = {}) {
-  const token = stored && typeof stored.token === 'string' ? stored.token : '';
-  const uid = stored && typeof stored.uid === 'string' ? stored.uid : '';
-  return {
-    deleteDoc: Boolean(token),
-    deleteToken: Boolean(messaging),
-    marker: token && uid ? { token, uid } : null,
-  };
+// What a sign-out must do to this device's push registration. `stored` is the
+// cached token from an earlier settlement; `inFlight` is a token this session
+// already obtained while its document write may still be running. Every doc id
+// is released exactly once (a cache and an attempt usually carry the same
+// token), and the cached token plus retry markers may only be dropped after the
+// document delete is acknowledged, so a failed release is retried next session.
+export function tokenReleasePlan({ stored = null, inFlight = null, messaging = false } = {}) {
+  const docs = [];
+  for (const item of [stored, inFlight]) {
+    if (!item || typeof item.token !== 'string' || !item.token) continue;
+    if (docs.some((doc) => doc.token === item.token)) continue;
+    docs.push({ token: item.token, uid: typeof item.uid === 'string' ? item.uid : '' });
+  }
+  return { docs, deleteToken: Boolean(messaging) };
 }

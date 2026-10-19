@@ -1953,6 +1953,14 @@ input[aria-invalid='true']:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The one-line row truncates long commands; a focused (Tab) or tapped row
+   reveals the whole command, so the full text is never hover-only. */
+.rapi-cmd:focus {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
 .chip {
   flex: none;
   display: inline-flex;
