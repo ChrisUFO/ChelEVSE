@@ -9,6 +9,7 @@ import {
   defaultRule,
   defaultSchedule,
   normalizeSchedule,
+  queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
   scheduleKey,
@@ -274,6 +275,80 @@ test('reconcileAfterSave keeps the confirmed baseline when nothing was pending',
   });
   assert.equal(scheduleKey(result.baseline), scheduleKey(baseline));
   assert.equal(result.remote, false);
+});
+
+test('queuedSaveState labels an offline save as queued and keeps editing open', () => {
+  const state = queuedSaveState({ online: false, queued: true });
+  assert.equal(state.label, 'Queued — will save when online.');
+  assert.equal(state.kind, 'warn');
+  assert.equal(state.busy, false);
+  // Nothing newer than the queued payload, so a second save is not offered; the
+  // discard is, because it queues the compensating revert.
+  assert.equal(state.canSave, false);
+  assert.equal(state.canDiscard, true);
+});
+
+test('queuedSaveState keeps newer edits distinct from the queued payload', () => {
+  const state = queuedSaveState({ online: false, queued: true, dirty: true });
+  assert.match(state.label, /^Queued — will save when online\./);
+  assert.match(state.label, /newer edits are not saved/i);
+  assert.equal(state.canSave, true);
+  assert.equal(state.canDiscard, true);
+});
+
+test('queuedSaveState reports a reconnect settle without claiming newer edits', () => {
+  const saved = queuedSaveState({ online: true, saved: true });
+  assert.equal(saved.label, 'Saved.');
+  assert.equal(saved.kind, 'ok');
+  assert.equal(saved.canSave, false);
+  assert.equal(saved.canDiscard, false);
+
+  const stale = queuedSaveState({ online: true, saved: true, dirty: true });
+  assert.equal(stale.label, 'Previous change saved — save your latest edits.');
+  assert.equal(stale.kind, 'warn');
+  assert.equal(stale.canSave, true);
+});
+
+test('queuedSaveState surfaces a failed settle as an error with a retry', () => {
+  const error = "Couldn't save — your changes are still here. Try saving again.";
+  const state = queuedSaveState({ online: true, dirty: true, error });
+  assert.deepEqual(state, {
+    label: error,
+    kind: 'err',
+    busy: false,
+    canSave: true,
+    canDiscard: true,
+  });
+  // A rollback that also cleared the draft leaves nothing to retry or discard.
+  const rolledBack = queuedSaveState({
+    online: true,
+    error: "Couldn't save. The previous schedule was restored.",
+  });
+  assert.equal(rolledBack.kind, 'err');
+  assert.equal(rolledBack.canSave, false);
+  assert.equal(rolledBack.canDiscard, false);
+});
+
+test('queuedSaveState leaves the online save path unchanged', () => {
+  const savingState = queuedSaveState({ online: true, saving: true });
+  assert.equal(savingState.label, 'Saving…');
+  assert.equal(savingState.busy, true);
+  assert.equal(savingState.canSave, false);
+  assert.equal(savingState.canDiscard, false);
+
+  assert.deepEqual(queuedSaveState({ online: true }), {
+    label: '',
+    kind: '',
+    busy: false,
+    canSave: false,
+    canDiscard: false,
+  });
+  assert.equal(queuedSaveState({ online: true, dirty: true }).label, 'Unsaved changes.');
+  // The connection dropped mid-write: the editor is released with the same
+  // unconfirmed copy, whether or not navigator has caught up.
+  const unconfirmed = 'Save unconfirmed — connection lost. You can keep editing.';
+  assert.equal(queuedSaveState({ saving: true, online: false }).label, unconfirmed);
+  assert.equal(queuedSaveState({ unconfirmed: true }).label, unconfirmed);
 });
 
 test('scheduleKey ignores day order but notices any real change', () => {
