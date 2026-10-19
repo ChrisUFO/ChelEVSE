@@ -8,6 +8,7 @@ import {
   addDoc,
   getDocs,
   setDoc,
+  deleteDoc,
   query,
   where,
   orderBy,
@@ -22,14 +23,19 @@ let unsubCmds = null;
 let unsubSettings = null;
 let unsubConfig = null;
 let unsubSchedule = null;
+let unsubRapi = null;
+let unsubPending = null;
 
 export function startStore({
   onStatus,
   onCommands,
   onSettings,
   onConfig,
+  onConfigError,
   onSchedule,
   onScheduleError,
+  onRapiCommands,
+  onRapiError,
   onAccessDenied,
 }) {
   stopStore();
@@ -56,25 +62,79 @@ export function startStore({
       if (!denied(err)) onStatus(null);
     },
   );
+  // The status feedback needs the newest settled commands (newest first) and
+  // every pending command. Pending state cannot rely on a finite mixed window:
+  // a burst of RAPI sends would evict a still-pending stop/auto/set-current and
+  // re-enable the controls before the charger applied it. The pending query is
+  // a single-field equality, so it needs no composite index.
+  let recentCommands = [];
+  let pendingCommands = [];
+  const emitCommands = () => {
+    if (onCommands) onCommands(mergeCommandWindows(recentCommands, pendingCommands));
+  };
   unsubCmds = onSnapshot(
-    query(collection(db, 'commands'), orderBy('created_at', 'desc'), limit(3)),
-    (snap) => onCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    query(collection(db, 'commands'), orderBy('created_at', 'desc'), limit(COMMAND_LIMIT)),
+    (snap) => {
+      recentCommands = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      emitCommands();
+    },
+    denied,
+  );
+  unsubPending = onSnapshot(
+    query(collection(db, 'commands'), where('status', '==', 'pending')),
+    (snap) => {
+      pendingCommands = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      emitCommands();
+    },
     denied,
   );
   unsubSettings = watch('settings/current', (data) => onSettings && onSettings(data));
-  unsubConfig = watch('status/config', (data) => onConfig && onConfig(data));
+  unsubConfig = watch(
+    'status/config',
+    (data) => onConfig && onConfig(data),
+    (err) => onConfigError && onConfigError(err),
+  );
   unsubSchedule = watch(
     'schedule/current',
     (data) => onSchedule && onSchedule(data),
     (err) => onScheduleError && onScheduleError(err),
   );
+  // The Advanced console keeps its own 20-entry RAPI history: a where+orderBy
+  // query needs the declared (type, created_at) composite index.
+  unsubRapi = onSnapshot(
+    query(
+      collection(db, 'commands'),
+      where('type', '==', 'rapi'),
+      orderBy('created_at', 'desc'),
+      limit(RAPI_LIMIT),
+    ),
+    (snap) => onRapiCommands && onRapiCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (err) => {
+      if (!denied(err) && onRapiError) onRapiError(err);
+    },
+  );
 }
 
 export function stopStore() {
-  for (const unsub of [unsubStatus, unsubCmds, unsubSettings, unsubConfig, unsubSchedule]) {
+  for (const unsub of [
+    unsubStatus,
+    unsubCmds,
+    unsubSettings,
+    unsubConfig,
+    unsubSchedule,
+    unsubRapi,
+    unsubPending,
+  ]) {
     if (unsub) unsub();
   }
-  unsubStatus = unsubCmds = unsubSettings = unsubConfig = unsubSchedule = null;
+  unsubStatus =
+    unsubCmds =
+    unsubSettings =
+    unsubConfig =
+    unsubSchedule =
+    unsubRapi =
+    unsubPending =
+      null;
 }
 
 // Every command is created pending; the bridge owns the lifecycle after that.
@@ -84,6 +144,51 @@ export function sendCommand(payload) {
     status: 'pending',
     created_at: serverTimestamp(),
   });
+}
+
+// The Advanced console's scrollback depth.
+export const RAPI_LIMIT = 20;
+
+// The status screen's settled-command window. Pending commands are subscribed
+// separately (`where('status', '==', 'pending')`), so this only bounds the
+// "latest command" feedback history; CONTROL_TYPES still filters it client-side.
+export const COMMAND_LIMIT = 20;
+
+// Combine the newest mixed-type window with the independent pending set. A
+// pending command the window already carries is not duplicated, and pending
+// entries the window lost are appended: the status renderer gives pending
+// precedence, while the settled history keeps its newest-first order.
+export function mergeCommandWindows(recent = [], pending = []) {
+  const merged = Array.isArray(recent) ? [...recent] : [];
+  const seen = new Set(merged.map((doc) => doc && doc.id));
+  for (const doc of Array.isArray(pending) ? pending : []) {
+    if (!doc || seen.has(doc.id)) continue;
+    seen.add(doc.id);
+    merged.push(doc);
+  }
+  return merged;
+}
+
+// Both fields travel together because firestore.rules rejects a partial
+// settings document.
+export function saveSettings({ rate, currency }) {
+  return setDoc(doc(db, 'settings', 'current'), { rate, currency });
+}
+
+// Own-token-only, per firestore.rules: the doc id is the FCM token and the uid
+// must be the signed-in account.
+export function saveFcmToken(token, uid) {
+  return setDoc(doc(db, 'fcmTokens', token), {
+    uid,
+    created_at: serverTimestamp(),
+  });
+}
+
+// The owner removes its own token document before signing out: FCM hands the
+// same browser token to the next account, whose setDoc would otherwise be a
+// cross-uid update the rules deny.
+export function deleteFcmToken(token) {
+  return deleteDoc(doc(db, 'fcmTokens', token));
 }
 
 // Exact schedule shape: keys are fixed so no draft-only fields ever reach rules.

@@ -19,12 +19,30 @@ import {
   initStatus,
   leaveStatus,
   showCommands,
-  showConfig,
+  showConfig as showStatusConfig,
   showSettings,
   showStatus,
   showStatusError,
   showStatusSchedule,
 } from './js/screens/status.js';
+import { initConfig, resetConfig, showConfigData, showConfigError } from './js/screens/config.js';
+import { initSettings, resetSettings, showSettingsData } from './js/screens/settings.js';
+import {
+  activateNotifications,
+  enterNotifications,
+  initNotifications,
+  releaseNotifications,
+  resetNotifications,
+} from './js/screens/notifications.js';
+import { accessDenialRelease } from './js/notifications.js';
+import {
+  enterAdvanced,
+  initAdvanced,
+  leaveAdvanced,
+  resetAdvanced,
+  showRapiCommands,
+  showRapiError,
+} from './js/screens/advanced.js';
 import {
   activateHistory,
   enterHistory,
@@ -64,6 +82,8 @@ function bootFail(title, body) {
 // browsers swallow it), the page stays here with a disabled button. Restore
 // the button after a bounded wait so retrying does not need a reload.
 const REDIRECT_RECOVERY_MS = 4000;
+// Sign-out waits for the token release, but never indefinitely.
+const SIGN_OUT_RELEASE_MS = 3000;
 
 function setSignInBusy(busy) {
   $('google-signin').disabled = busy;
@@ -75,6 +95,10 @@ function closeApp() {
   leaveStatus();
   resetHistory();
   resetSchedule();
+  resetConfig();
+  resetSettings();
+  resetNotifications();
+  resetAdvanced();
   activeUser = null;
 }
 
@@ -86,6 +110,13 @@ function showSignedOut() {
 }
 
 function showNoAccess(user, reason) {
+  // A revoked grant ends this device's registration the same way sign-out does:
+  // the token delete is keyed on the account's uid, so it must start while that
+  // user is still the authenticated session, and before closeApp resets the
+  // notification state (which drops an in-flight token). The release is bounded
+  // and best-effort; the blocked screen never waits for it. A failed access
+  // *check* (reason 'error') releases nothing — the grant may still be intact.
+  if (accessDenialRelease(reason)) releaseNotifications();
   closeApp();
   setSignInBusy(false);
   const checkFailed = reason === 'error';
@@ -113,6 +144,11 @@ function handleRoute(route) {
   else blurStatus();
   if (route === 'history') activateHistory();
   if (route === 'schedule') activateSchedule();
+  if (route === 'config') activateNotifications();
+  // The RAPI gate is per visit: entering the tab re-arms it; leaving drops any
+  // pending confirmation. Re-clicking the active tab is not a new entry.
+  if (route === 'advanced') enterAdvanced();
+  else leaveAdvanced();
 }
 
 function enterApp(user) {
@@ -135,13 +171,20 @@ function enterApp(user) {
     onSettings: (settings) => {
       showSettings(settings);
       showHistorySettings(settings);
+      showSettingsData(settings);
     },
-    onConfig: showConfig,
+    onConfig: (data) => {
+      showStatusConfig(data);
+      showConfigData(data);
+    },
+    onConfigError: showConfigError,
     onSchedule: (data) => {
       showSchedule(data);
       showStatusSchedule(data);
     },
     onScheduleError: showScheduleError,
+    onRapiCommands: showRapiCommands,
+    onRapiError: showRapiError,
     onAccessDenied: () => {
       if (activeUser) showNoAccess(activeUser, 'no-access');
     },
@@ -149,6 +192,7 @@ function enterApp(user) {
   enterStatus();
   enterHistory();
   enterSchedule();
+  enterNotifications();
   handleRoute(routeFor(location.hash));
   const activeTab = document.querySelector('.tab[aria-selected="true"]');
   if (activeTab) activeTab.focus({ preventScroll: true });
@@ -185,8 +229,16 @@ async function handleRetryAccess() {
   btn.disabled = false;
 }
 
-function handleSignOut() {
+async function handleSignOut() {
   setText($('signin-error'), '');
+  // Release this device's push registration while the old account is still
+  // signed in (the rules key the delete on its uid), then end the session. A
+  // stalled backend must not trap the user in a session they asked to leave, so
+  // the release is best-effort and bounded.
+  await Promise.race([
+    releaseNotifications(),
+    new Promise((resolve) => setTimeout(resolve, SIGN_OUT_RELEASE_MS)),
+  ]);
   signOutUser();
 }
 
@@ -219,6 +271,10 @@ async function main() {
   initStatus();
   initHistory();
   initSchedule();
+  initConfig();
+  initSettings();
+  initNotifications();
+  initAdvanced();
   initTabbar({ onRoute: handleRoute });
   wireUi();
 

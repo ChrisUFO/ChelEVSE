@@ -26,6 +26,10 @@ const CMD_TEXT = {
     done: (a) => `Current set to ${a} A.`,
   },
 };
+// RAPI entries in the shared command feed must not disable these controls or
+// replace their feedback with a generic "Done." Pending commands arrive from
+// their own subscription, so RAPI volume cannot evict them from this view.
+const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;
 let schedule = null;
@@ -162,7 +166,10 @@ function setBusy(busy) {
 
 function renderCommands(cmds) {
   const fb = $('feedback');
-  const pending = cmds.find((c) => c.status === 'pending');
+  const controls = (Array.isArray(cmds) ? cmds : []).filter(
+    (command) => command && CONTROL_TYPES.has(command.type),
+  );
+  const pending = controls.find((c) => c.status === 'pending');
   setBusy(Boolean(pending));
   if (pending) {
     const t = CMD_TEXT[pending.type] || CMD_TEXT.resume;
@@ -170,7 +177,7 @@ function renderCommands(cmds) {
     setText(fb, t.busy(pending.amps));
     return;
   }
-  const latest = cmds[0];
+  const latest = controls[0];
   const created =
     latest && latest.created_at && typeof latest.created_at.toMillis === 'function'
       ? latest.created_at.toMillis()
