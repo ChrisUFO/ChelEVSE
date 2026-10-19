@@ -24,7 +24,11 @@ let confirmed = defaultSchedule();
 let draft = defaultSchedule();
 let dirty = false;
 let saving = false;
-let savedKey = null;
+let savingPayloadKey = null;
+// Latest snapshot received while the form is dirty or a save is in flight.
+// It never clobbers the draft; save settle decides whether to adopt it.
+let pendingRemote = null;
+let remoteNotice = false;
 let validation = validateSchedule(defaultSchedule());
 let feedbackMode = 'derived'; // derived | saved | save-error | load-error
 let feedbackError = '';
@@ -44,10 +48,23 @@ function clone(schedule) {
 }
 
 function markDirty() {
-  dirty = true;
-  savedKey = null;
+  dirty = scheduleKey(draft) !== scheduleKey(confirmed);
+  if (!dirty) {
+    // A remote change queued while we were editing becomes the truth once the
+    // draft no longer differs from the last confirmed snapshot.
+    if (pendingRemote) {
+      adopt(pendingRemote);
+      return;
+    }
+    remoteNotice = false;
+  }
   feedbackMode = 'derived';
   validateAndPaint();
+}
+
+function renderRemoteNotice() {
+  const notice = $('schedule-remote-notice');
+  if (notice) notice.hidden = !remoteNotice;
 }
 
 function renderFeedback() {
@@ -97,6 +114,7 @@ function validateAndPaint() {
     card.startInput.setAttribute('aria-invalid', String(Boolean(errors.start)));
     card.endInput.setAttribute('aria-invalid', String(Boolean(errors.end)));
     card.ampsInput.setAttribute('aria-invalid', String(Boolean(errors.amps)));
+    card.stepper.classList.toggle('invalid', Boolean(errors.amps));
     card.daysEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
     card.daysEl.classList.toggle('invalid', Boolean(errors.days));
     card.node.classList.toggle('invalid', messages.length > 0);
@@ -108,6 +126,7 @@ function validateAndPaint() {
   setText($('save-schedule'), saving ? 'Saving…' : 'Save schedule');
   syncControls();
   renderFeedback();
+  renderRemoteNotice();
   renderLive();
 }
 
@@ -210,7 +229,7 @@ function createCard(rule, index) {
   errorEl.hidden = true;
 
   node.append(head, days, times, ampsRow, errorEl);
-  return { rule, node, daysEl: days, startInput, endInput, ampsInput, errorEl };
+  return { rule, node, daysEl: days, startInput, endInput, ampsInput, stepper, errorEl };
 }
 
 function renderRules() {
@@ -230,7 +249,11 @@ function renderLive() {
   const wrap = $('schedule-live');
   if (!wrap) return;
   wrap.hidden = !live.inWindow || !initialized;
-  const rule = live.activeRuleId ? draft.rules.find((r) => r && r.id === live.activeRuleId) : null;
+  // Resolve the banner from the last server snapshot, never the draft: a
+  // changed start time is not the charger's active window until Save lands.
+  const rule = live.activeRuleId
+    ? confirmed.rules.find((r) => r && r.id === live.activeRuleId)
+    : null;
   setText(
     $('schedule-live-text'),
     rule ? `Window active now · ${rule.start}–${rule.end}` : 'Window active now',
@@ -256,6 +279,7 @@ function renderLoading() {
   $('schedule-load-error').hidden = !loadError;
   $('schedule-editor').hidden = !initialized;
   $('schedule-live').hidden = true;
+  renderRemoteNotice();
   if (loadError) {
     setText($('schedule-feedback'), "Couldn't load the schedule. Reload the page to try again.");
     $('schedule-feedback').className = 'feedback err';
@@ -269,6 +293,7 @@ function renderAll() {
   if (!initialized) {
     setText($('schedule-feedback'), '');
     $('schedule-feedback').className = 'feedback';
+    renderRemoteNotice();
     return;
   }
   renderToggle();
@@ -277,15 +302,16 @@ function renderAll() {
 }
 
 function adopt(schedule) {
+  // clone() normalizes the editable shape and drops server metadata such as
+  // timestamps, so snapshots and local payloads share one representation.
   confirmed = clone(schedule);
   draft = clone(confirmed);
   dirty = false;
-  savedKey = null;
+  pendingRemote = null;
+  remoteNotice = false;
   initialized = true;
   loadError = false;
-  // Keep a save error visible through the snapshot that reverts the failed
-  // write; the next edit or successful save replaces it.
-  if (feedbackMode !== 'saved' && feedbackMode !== 'save-error') feedbackMode = 'derived';
+  feedbackMode = 'derived';
   renderAll();
 }
 
@@ -305,23 +331,38 @@ async function save() {
       amps: rule.amps,
     })),
   };
+  savingPayloadKey = scheduleKey(payload);
   try {
     await saveSchedule(payload);
     if (gen !== generation) return;
-    confirmed = clone(payload);
-    savedKey = scheduleKey(payload);
-    dirty = false;
-    saving = false;
-    feedbackMode = 'saved';
-    validateAndPaint();
-  } catch {
-    if (gen !== generation) return;
-    saving = false;
+    // A snapshot that arrived while saving is at least as new as this write
+    // (the client stream is ordered); otherwise our payload is the baseline.
+    const next = pendingRemote ?? payload;
+    confirmed = clone(next);
     draft = clone(confirmed);
     dirty = false;
-    savedKey = null;
+    pendingRemote = null;
+    remoteNotice = false;
+    saving = false;
+    savingPayloadKey = null;
+    feedbackMode = 'saved';
+    renderAll();
+  } catch {
+    if (gen !== generation) return;
+    // Never present a rollback that hides a concurrent external change.
+    const rollback = pendingRemote ?? confirmed;
+    const hadRemote = Boolean(pendingRemote);
+    confirmed = clone(rollback);
+    draft = clone(confirmed);
+    dirty = false;
+    pendingRemote = null;
+    remoteNotice = false;
+    saving = false;
+    savingPayloadKey = null;
     feedbackMode = 'save-error';
-    feedbackError = "Couldn't save. The previous schedule was restored.";
+    feedbackError = hadRemote
+      ? "Couldn't save. The latest server schedule was restored."
+      : "Couldn't save. The previous schedule was restored.";
     renderAll();
     $('schedule-feedback').focus({ preventScroll: true });
   }
@@ -373,32 +414,42 @@ export function showSchedule(data) {
   if (!active) return;
   const incoming = clone(data);
   if (!initialized) {
-    confirmed = incoming;
     adopt(incoming);
     return;
   }
   if (saving) {
-    // Include a local pending-write echo? Never let it replace the rollback
-    // baseline; setDoc resolving/rejecting owns confirmed while in flight.
-    renderLive();
+    // Queue the latest snapshot (including the local write echo). Save settle
+    // decides whether it becomes the confirmed baseline; the draft is untouched.
+    pendingRemote = incoming;
+    remoteNotice = savingPayloadKey ? scheduleKey(incoming) !== savingPayloadKey : false;
+    validateAndPaint();
     return;
   }
-  if (savedKey) {
-    // A snapshot that predates our write can arrive before its echo. Keep the
-    // just-saved draft (and its confirmed baseline) until the matching one lands.
-    if (scheduleKey(incoming) === savedKey) {
-      savedKey = null;
-      adopt(incoming);
+  if (dirty) {
+    if (scheduleKey(incoming) === scheduleKey(confirmed)) {
+      // The server is still on the snapshot we based the draft on.
+      pendingRemote = null;
+      remoteNotice = false;
+    } else {
+      pendingRemote = incoming;
+      remoteNotice = true;
+    }
+    validateAndPaint();
+    return;
+  }
+  if (scheduleKey(incoming) === scheduleKey(confirmed)) {
+    // Data-identical echo: refresh the normalized baseline without rebuilding
+    // the form, and keep "Saved." in place.
+    confirmed = incoming;
+    if (pendingRemote || remoteNotice) {
+      pendingRemote = null;
+      remoteNotice = false;
+      renderRemoteNotice();
     }
     return;
   }
-  confirmed = incoming;
-  if (!dirty) {
-    adopt(incoming);
-    return;
-  }
-  // Unsaved edits win until save or rollback.
-  renderLive();
+  // Clean form and a genuinely new server state: adopt it (and clear "Saved.").
+  adopt(incoming);
 }
 
 export function showScheduleError() {
@@ -432,7 +483,9 @@ export function resetSchedule() {
   draft = defaultSchedule();
   dirty = false;
   saving = false;
-  savedKey = null;
+  savingPayloadKey = null;
+  pendingRemote = null;
+  remoteNotice = false;
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
   feedbackError = '';
@@ -450,6 +503,7 @@ export function resetSchedule() {
     $('schedule-editor').hidden = true;
     $('schedule-loading').hidden = false;
     $('schedule-load-error').hidden = true;
+    renderRemoteNotice();
     setText($('schedule-enabled-sub'), 'Charging is not restricted by a schedule.');
     $('schedule-enabled').checked = false;
   }

@@ -486,6 +486,18 @@
             <p class="schedule-note" style="--i: 2">
               The charger enforces these windows itself, so they keep running while this app or the
               Pi is offline. Edits reach the charger through the Pi, usually within a minute.
+              Current is stored for compatibility but not applied by this firmware — scheduled
+              windows charge at the EVSE's configured limit.
+            </p>
+
+            <p
+              class="remote-notice"
+              id="schedule-remote-notice"
+              role="status"
+              aria-live="polite"
+              hidden
+            >
+              Remote schedule changed — saving will overwrite it.
             </p>
 
             <div class="section-title-row schedule-title-row" style="--i: 3">

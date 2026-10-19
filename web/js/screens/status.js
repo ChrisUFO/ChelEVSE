@@ -20,7 +20,7 @@ let schedule = null;
 let rate = null;
 let currency = '';
 let active = false;
-let ampsPrefilled = false;
+let ampsTouched = false;
 let holdOpen = false;
 let holdAmps = 32;
 let ticker = null;
@@ -112,9 +112,14 @@ function renderStatus() {
     setText($(`fig-temp${n}`), v != null && Number.isFinite(Number(v)) ? `${Math.round(v)}°` : '—');
   }
 
-  if (!ampsPrefilled && status && status.amp > 0) {
-    setAmps(Math.min(48, Math.max(6, Math.round(status.amp))));
-    ampsPrefilled = true;
+  if (!ampsTouched) {
+    // Hold sets a limit: prefill from the pilot setpoint, not the live draw.
+    const pilot = status ? Number(status.pilot) : Number.NaN;
+    const live = status ? Number(status.amp) : Number.NaN;
+    const source = pilot >= 6 && pilot <= 48 ? pilot : live;
+    if (Number.isFinite(source) && source > 0) {
+      setAmps(Math.min(48, Math.max(6, Math.round(source))));
+    }
   }
   renderElapsed();
   renderCost();
@@ -226,6 +231,7 @@ export function initStatus() {
     send({ type: 'set_current', amps: Number($('amps').value) }),
   );
   $('amps').addEventListener('input', () => {
+    ampsTouched = true;
     holdAmps = Number($('amps').value);
     paintSlider();
   });
@@ -256,7 +262,7 @@ export function leaveStatus() {
   schedule = null;
   rate = null;
   currency = '';
-  ampsPrefilled = false;
+  ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;
   shownResultId = null;

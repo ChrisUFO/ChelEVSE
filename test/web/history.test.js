@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import {
   dayId,
@@ -28,17 +29,27 @@ test('lastDayIds returns the last 30 local days oldest first', () => {
   assert.equal(new Set(ids).size, 30);
 });
 
-test('lastDayIds stays contiguous across a DST change', () => {
-  const ids = lastDayIds(7, new Date(2026, 2, 9, 12));
-  assert.deepEqual(ids, [
-    '2026-03-03',
-    '2026-03-04',
-    '2026-03-05',
-    '2026-03-06',
-    '2026-03-07',
-    '2026-03-08',
-    '2026-03-09',
-  ]);
+test('lastDayIds stays contiguous across a DST change (fixed America/Denver)', () => {
+  // Run in a child with a fixed TZ so the spring-forward boundary is exercised
+  // on every host (a UTC runner would otherwise pass without a DST transition).
+  const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
+  const script = `
+    import { lastDayIds } from ${JSON.stringify(moduleUrl)};
+    const ids = lastDayIds(7, new Date(2026, 2, 9, 12));
+    const expected = [
+      '2026-03-03', '2026-03-04', '2026-03-05', '2026-03-06',
+      '2026-03-07', '2026-03-08', '2026-03-09',
+    ];
+    if (JSON.stringify(ids) !== JSON.stringify(expected)) {
+      console.error(JSON.stringify(ids));
+      process.exit(1);
+    }
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    env: { ...process.env, TZ: 'America/Denver' },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test('dayLabel is stable and rejects malformed ids', () => {

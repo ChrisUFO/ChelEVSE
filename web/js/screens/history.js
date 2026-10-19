@@ -29,6 +29,8 @@ let historyState = 'idle';
 let sessionsState = 'idle';
 let barEls = [];
 let generation = 0;
+let scrubbing = false;
+let scrubPointer = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -201,7 +203,9 @@ function chartIndexAt(clientX) {
   const rect = svg.getBoundingClientRect();
   if (!rect.width) return null;
   const x = ((clientX - rect.left) / rect.width) * VIEW_W;
-  const index = Math.floor(x / SLOT);
+  if (x < 0 || x > VIEW_W) return null;
+  // Nearest slot centre — adjacent 8–10 px bars are easier to correct by drag.
+  const index = Math.round(x / SLOT - 0.5);
   return index >= 0 && index < series.length ? index : null;
 }
 
@@ -369,12 +373,35 @@ export function initHistory() {
     const index = chartIndexAt(e.clientX);
     if (index == null) return;
     selectIndex(index, { focus: true });
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+      scrubbing = true;
+      scrubPointer = e.pointerId;
+      try {
+        svg.setPointerCapture(e.pointerId);
+      } catch {
+        // Synthetic pointers have no capture target; scrubbing still works.
+      }
+    }
   });
   svg.addEventListener('pointermove', (e) => {
-    if (e.pointerType === 'touch') return;
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+      if (!scrubbing || e.pointerId !== scrubPointer) return;
+    }
     const index = chartIndexAt(e.clientX);
     if (index != null && series[index].id !== selectedId) selectIndex(index);
   });
+  const endScrub = (e) => {
+    if (!scrubbing || e.pointerId !== scrubPointer) return;
+    scrubbing = false;
+    scrubPointer = null;
+    try {
+      svg.releasePointerCapture(e.pointerId);
+    } catch {
+      // Nothing captured (synthetic pointer or the browser already released it).
+    }
+  };
+  svg.addEventListener('pointerup', endScrub);
+  svg.addEventListener('pointercancel', endScrub);
 }
 
 export function enterHistory() {
@@ -416,6 +443,8 @@ export function resetHistory() {
   historyState = 'idle';
   sessionsState = 'idle';
   barEls = [];
+  scrubbing = false;
+  scrubPointer = null;
   if ($('sessions-list')) $('sessions-list').replaceChildren();
   if ($('chart-bars')) $('chart-bars').replaceChildren();
   if ($('history-total')) {
