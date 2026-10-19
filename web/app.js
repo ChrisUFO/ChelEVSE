@@ -1,7 +1,7 @@
 // Boot only: load Firebase, wire the sign-in/out shell, then hand control to
 // the auth lifecycle. Screen rendering lives in js/screens/.
 
-import { initFirebase } from './js/firebase.js';
+import { initFirebase, loadMessaging } from './js/firebase.js';
 import {
   authErrorMessage,
   completeRedirect,
@@ -12,6 +12,7 @@ import {
 } from './js/auth.js';
 import { startStore, stopStore } from './js/store.js';
 import { $, initNetwork, initTabbar, routeFor, setCached, setText } from './js/ui.js';
+import { createPushDeduper, notificationFromPush } from './js/push.js';
 import {
   enterStatus,
   focusStatus,
@@ -84,6 +85,62 @@ function bootFail(title, body) {
 const REDIRECT_RECOVERY_MS = 4000;
 // Sign-out waits for the token release, but never indefinitely.
 const SIGN_OUT_RELEASE_MS = 3000;
+// How long an in-app push toast stays on screen (a later one replaces it).
+const PUSH_TOAST_MS = 6000;
+
+// One deduper for both foreground paths: the SW's `chelevse-push` message (the
+// only path a plain service worker can use) and the SDK's defensive onMessage.
+const acceptPush = createPushDeduper();
+let pushToastTimer = null;
+
+// A push is in-app feedback, so it only paints while the page is visible; when
+// it is hidden the service worker shows the OS notification instead.
+function showPushToast(notification) {
+  if (!acceptPush(notification)) return;
+  if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+  const toast = $('push-toast');
+  if (!toast) return;
+  // Unhide before the text lands so the live region announces the update.
+  toast.hidden = false;
+  setText($('push-toast-title'), notification.title);
+  const body = $('push-toast-body');
+  setText(body, notification.body);
+  if (body) body.hidden = !notification.body;
+  clearTimeout(pushToastTimer);
+  pushToastTimer = setTimeout(() => {
+    toast.hidden = true;
+  }, PUSH_TOAST_MS);
+}
+
+// The service worker posts one message per push when this page is visible. The
+// payload is the same shape as a raw FCM message (plus the dedupe id).
+function listenForPush() {
+  if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event && event.data;
+    if (!data || data.type !== 'chelevse-push') return;
+    showPushToast(notificationFromPush(data));
+  });
+}
+
+// Defensive only: the SDK's onMessage needs its own Firebase-managed service
+// worker, which this app does not use, so it never fires here (the SW message
+// above is the real foreground path). It is still registered when notifications
+// are granted so a second path could never double-toast — both share
+// `acceptPush`. Registering only for a granted page keeps the "messaging loads
+// on first use" rule for everyone else.
+function listenForSdkPush() {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  loadMessaging()
+    .then((messaging) =>
+      messaging.onMessage(messaging.getMessaging(), (payload) => {
+        showPushToast(notificationFromPush(payload));
+      }),
+    )
+    .catch(() => {
+      // Unsupported browser or no registration: the SW path still delivers.
+    });
+}
 
 function setSignInBusy(busy) {
   $('google-signin').disabled = busy;
@@ -248,6 +305,8 @@ function wireUi() {
   $('noaccess-signout').addEventListener('click', handleSignOut);
   $('signout').addEventListener('click', handleSignOut);
   initNetwork();
+  listenForPush();
+  listenForSdkPush();
 }
 
 async function main() {

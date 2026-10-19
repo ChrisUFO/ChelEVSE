@@ -745,6 +745,13 @@
           </section>
         </section>
       </div>
+
+      <!-- Foreground push feedback: the service worker posts a message while
+           this page is visible instead of showing an OS notification. -->
+      <div class="toast" id="push-toast" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <strong class="toast-title" id="push-toast-title"></strong>
+        <span class="toast-body" id="push-toast-body"></span>
+      </div>
     </main>
 
     <script>
