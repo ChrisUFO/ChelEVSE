@@ -14,7 +14,12 @@
     "deploy:dry-run": "firebase deploy --dry-run --project \"$FIREBASE_PROJECT\"",
     "deploy:rules": "firebase deploy --only firestore:rules --project \"$FIREBASE_PROJECT\"",
     "deploy:indexes": "firebase deploy --only firestore:indexes --project \"$FIREBASE_PROJECT\"",
-    "deploy:hosting": "firebase deploy --only hosting --project \"$FIREBASE_PROJECT\""
+    "deploy:hosting": "firebase deploy --only hosting --project \"$FIREBASE_PROJECT\"",
+    "predeploy": "node scripts/check-firebase-project.mjs",
+    "predeploy:dry-run": "node scripts/check-firebase-project.mjs",
+    "predeploy:rules": "node scripts/check-firebase-project.mjs",
+    "predeploy:indexes": "node scripts/check-firebase-project.mjs",
+    "predeploy:hosting": "node scripts/check-firebase-project.mjs"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^3.0.4",
