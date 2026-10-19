@@ -534,17 +534,31 @@
           <div class="panel-head" style="--i: 0">
             <p class="eyebrow">Config</p>
             <h1>Configuration</h1>
-            <p class="lede">Charger settings and app preferences.</p>
+            <p class="lede">Charger details, cost estimates, and charging alerts.</p>
           </div>
-          <div class="placeholder" style="--i: 1">
-            <span class="placeholder-icon" aria-hidden="true">
-              <svg width="24" height="24"><use href="#i-config" /></svg>
-            </span>
-            <p class="placeholder-title">Nothing to configure yet</p>
-            <p class="placeholder-line">
-              Charger details, electricity rate, and notification settings will appear here.
-            </p>
+
+          <div class="section-title-row config-title-row" style="--i: 3">
+            <h2>Charger</h2>
+            <span class="section-note" id="config-updated"></span>
           </div>
+          <p class="config-note" style="--i: 3">
+            A read-only snapshot from the charger. To change a setting, use the
+            <button id="config-goto-advanced" class="link-btn" type="button">
+              Advanced console</button
+            >.
+          </p>
+
+          <p class="section-state" id="config-loading">Loading configuration…</p>
+          <p class="section-state err" id="config-error" hidden>
+            Couldn’t load the charger configuration. Reload the page to try again.
+          </p>
+          <div class="config-sections" id="config-sections"></div>
+          <p class="section-state" id="config-empty" hidden></p>
+
+          <details class="raw-config" id="config-raw-details" style="--i: 4" hidden>
+            <summary><span>Raw JSON</span><span class="raw-hint">all fields</span></summary>
+            <pre class="raw-json" id="config-raw"></pre>
+          </details>
         </section>
 
         <section

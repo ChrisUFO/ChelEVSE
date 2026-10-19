@@ -28,6 +28,7 @@ export function startStore({
   onCommands,
   onSettings,
   onConfig,
+  onConfigError,
   onSchedule,
   onScheduleError,
   onAccessDenied,
@@ -62,7 +63,11 @@ export function startStore({
     denied,
   );
   unsubSettings = watch('settings/current', (data) => onSettings && onSettings(data));
-  unsubConfig = watch('status/config', (data) => onConfig && onConfig(data));
+  unsubConfig = watch(
+    'status/config',
+    (data) => onConfig && onConfig(data),
+    (err) => onConfigError && onConfigError(err),
+  );
   unsubSchedule = watch(
     'schedule/current',
     (data) => onSchedule && onSchedule(data),
