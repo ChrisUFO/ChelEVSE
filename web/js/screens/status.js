@@ -56,7 +56,15 @@ function renderFreshness() {
   }
   const age = ageMs();
   setText($('updated'), Number.isFinite(age) ? `updated ${relTime(age)}` : 'updated unknown');
-  $('banner').hidden = !(status.charger_online === false || age > 60000);
+  const state = freshnessState({ chargerOnline: status.charger_online, ageMs: age });
+  const banner = $('banner');
+  banner.hidden = !state;
+  setText(
+    banner,
+    state === 'charger'
+      ? 'Charger offline — showing last known values'
+      : 'Bridge offline — showing last known values',
+  );
 }
 
 // The snapshot carries elapsed seconds. The clock is anchored to the local
