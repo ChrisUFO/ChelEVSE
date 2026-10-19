@@ -62,7 +62,10 @@ export function startStore({
     },
   );
   unsubCmds = onSnapshot(
-    query(collection(db, 'commands'), orderBy('created_at', 'desc'), limit(3)),
+    // Wider than the three control types: the CONTROL_TYPES filter runs after
+    // the limit, so a 3-doc window let newer RAPI entries evict a still-pending
+    // stop/auto/set-current command and re-enable the controls early.
+    query(collection(db, 'commands'), orderBy('created_at', 'desc'), limit(COMMAND_LIMIT)),
     (snap) => onCommands(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
     denied,
   );
@@ -118,6 +121,12 @@ export function sendCommand(payload) {
 
 // The Advanced console's scrollback depth.
 export const RAPI_LIMIT = 20;
+
+// The status screen's command window. The CONTROL_TYPES filter runs
+// client-side after the limit, so this must be wide enough that a burst of RAPI
+// entries cannot hide a pending control command (which would re-enable Stop/
+// Auto/Hold while the charger has not applied it yet).
+export const COMMAND_LIMIT = 20;
 
 // Both fields travel together because firestore.rules rejects a partial
 // settings document.

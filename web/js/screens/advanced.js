@@ -4,7 +4,13 @@
 // store subscribes to (type == 'rapi', newest first, 20 entries).
 
 import { $, setText } from '../ui.js';
-import { commandMillis, rapiErrorMessage, validateRapi } from '../advanced.js';
+import {
+  GATE_INITIAL,
+  commandMillis,
+  gateTransition,
+  rapiErrorMessage,
+  validateRapi,
+} from '../advanced.js';
 import { relTime } from '../format.js';
 import { sendCommand } from '../store.js';
 import { settleWrite } from '../write.js';
@@ -18,11 +24,8 @@ const STATUS_LABEL = {
 let commands = [];
 let logLoaded = false;
 let logError = '';
-let sending = false;
 let sendGeneration = 0;
-let gateSatisfied = false;
-let gateOpen = false;
-let gateCommand = '';
+let gate = { ...GATE_INITIAL };
 let ticker = null;
 
 function el(tag, className, text) {
@@ -116,20 +119,26 @@ function renderLog() {
   );
 }
 
+function applyGate(event) {
+  const step = gateTransition(gate, event);
+  gate = step.state;
+  renderGate();
+  return step;
+}
+
 function renderGate() {
-  const gate = $('rapi-gate');
-  gate.hidden = !gateOpen;
-  $('rapi-send').setAttribute('aria-expanded', String(gateOpen));
-  setText($('rapi-gate-cmd'), gateCommand);
-  $('rapi-gate-confirm').disabled = sending;
-  $('rapi-gate-cancel').disabled = sending;
+  const node = $('rapi-gate');
+  node.hidden = !gate.open;
+  $('rapi-send').setAttribute('aria-expanded', String(gate.open));
+  setText($('rapi-gate-cmd'), gate.command);
+  $('rapi-gate-confirm').disabled = gate.sending;
+  $('rapi-gate-cancel').disabled = gate.sending;
 }
 
 function setBusy(busy) {
-  sending = busy;
   $('rapi-input').disabled = busy;
   $('rapi-send').disabled = busy;
-  renderGate();
+  applyGate({ type: 'sending', value: busy });
 }
 
 function paintFeedback(text, kind = '') {
@@ -146,20 +155,9 @@ function paintValidation(result) {
   setText(error, result.valid ? '' : result.error);
 }
 
-function closeGate({ focusInput = false } = {}) {
-  gateOpen = false;
-  gateCommand = '';
-  renderGate();
+function cancelGate({ focusInput = false } = {}) {
+  applyGate({ type: 'cancel' });
   if (focusInput) $('rapi-input').focus({ preventScroll: true });
-}
-
-function openGate(command) {
-  gateOpen = true;
-  gateCommand = command;
-  gateSatisfied = false;
-  paintFeedback('');
-  renderGate();
-  $('rapi-gate-confirm').focus({ preventScroll: true });
 }
 
 // A settled or late write paints the same outcome the normal path does; the
@@ -178,7 +176,7 @@ function reconcileSend(generation, command, late) {
 }
 
 async function sendRapi(command) {
-  if (sending) return;
+  if (gate.sending) return;
   const generation = ++sendGeneration;
   setBusy(true);
   paintFeedback('Sending…', 'busy');
@@ -206,37 +204,34 @@ async function sendRapi(command) {
 
 function handleSubmit(event) {
   event.preventDefault();
-  if (sending) return;
+  if (gate.sending) return;
   const result = validateRapi($('rapi-input').value);
   paintValidation(result);
   if (!result.valid) {
     $('rapi-input').focus();
     return;
   }
-  if (gateOpen) {
+  const step = applyGate({ type: 'submit', command: result.command });
+  if (step.action === 'gate') {
+    paintFeedback('');
+  }
+  if (step.action === 'gate' || step.action === 'confirm') {
     $('rapi-gate-confirm').focus({ preventScroll: true });
     return;
   }
-  if (!gateSatisfied) {
-    openGate(result.command);
-    return;
-  }
-  sendRapi(result.command);
+  if (step.action === 'send') sendRapi(step.command);
 }
 
 function handleInput() {
   // Editing the command invalidates a preview the user was about to confirm.
-  if (gateOpen) closeGate();
+  if (gate.open) applyGate({ type: 'edit' });
   const result = validateRapi($('rapi-input').value);
   if ($('rapi-error').hidden === false) paintValidation(result);
 }
 
 function confirmGate() {
-  if (!gateOpen || sending) return;
-  const command = gateCommand;
-  closeGate();
-  gateSatisfied = true;
-  sendRapi(command);
+  const step = applyGate({ type: 'confirm' });
+  if (step.action === 'send') sendRapi(step.command);
 }
 
 function startTicker() {
@@ -256,11 +251,11 @@ export function initAdvanced() {
   $('rapi-form').addEventListener('submit', handleSubmit);
   $('rapi-input').addEventListener('input', handleInput);
   $('rapi-gate-confirm').addEventListener('click', confirmGate);
-  $('rapi-gate-cancel').addEventListener('click', () => closeGate({ focusInput: true }));
+  $('rapi-gate-cancel').addEventListener('click', () => cancelGate({ focusInput: true }));
   $('panel-advanced').addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || !gateOpen || sending) return;
+    if (event.key !== 'Escape' || !gate.open || gate.sending) return;
     event.preventDefault();
-    closeGate({ focusInput: true });
+    cancelGate({ focusInput: true });
   });
   renderGate();
   renderLog();
@@ -269,18 +264,15 @@ export function initAdvanced() {
 // A new visit always starts unconfirmed, even if the previous visit’s send was
 // already confirmed. Re-clicking the active tab does not count as an entry.
 export function enterAdvanced() {
-  gateSatisfied = false;
-  if (gateOpen) closeGate();
+  applyGate({ type: 'enter' });
   paintFeedback('');
-  renderGate();
   renderLog();
   startTicker();
 }
 
 // Leaving the tab re-arms the gate and drops any pending confirmation.
 export function leaveAdvanced() {
-  gateSatisfied = false;
-  if (gateOpen) closeGate();
+  applyGate({ type: 'leave' });
   stopTicker();
 }
 
@@ -301,11 +293,8 @@ export function resetAdvanced() {
   commands = [];
   logLoaded = false;
   logError = '';
-  sending = false;
   sendGeneration += 1;
-  gateSatisfied = false;
-  gateOpen = false;
-  gateCommand = '';
+  gate = { ...GATE_INITIAL };
   stopTicker();
   if (!$('rapi-input')) return;
   $('rapi-input').value = '';

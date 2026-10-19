@@ -24,11 +24,13 @@ before(async () => {
   await env.withSecurityRulesDisabled(async (context) => {
     const db = context.firestore();
     await setDoc(doc(db, 'users/u1'), { allowed: true, email: 'u1@example.com' });
-    await setDoc(doc(db, 'fcmTokens/tok-update'), { uid: 'u1' });
-    await setDoc(doc(db, 'fcmTokens/tok-foreign'), { uid: 'u2' });
-    await setDoc(doc(db, 'fcmTokens/tok-del'), { uid: 'u1' });
-    await setDoc(doc(db, 'fcmTokens/tok-del-foreign'), { uid: 'u2' });
-    await setDoc(doc(db, 'fcmTokens/tok-read'), { uid: 'u1' });
+    await setDoc(doc(db, 'fcmTokens/tok-update'), { uid: 'u1', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-shape'), { uid: 'u1', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-ungranted'), { uid: 'u2', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-foreign'), { uid: 'u2', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-del'), { uid: 'u1', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-del-foreign'), { uid: 'u2', created_at: new Date() });
+    await setDoc(doc(db, 'fcmTokens/tok-read'), { uid: 'u1', created_at: new Date() });
   });
 });
 
@@ -166,28 +168,94 @@ test('settings without currency are rejected', async () => {
 
 test('allowlisted user can register their own fcm token', async () => {
   await assertSucceeds(
-    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-own'), { uid: 'u1' }),
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-own'), {
+      uid: 'u1',
+      created_at: new Date(),
+    }),
+  );
+});
+
+test('an fcm token create must carry exactly uid and a timestamp', async () => {
+  // No created_at.
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-no-date'), { uid: 'u1' }),
+  );
+  // Wrong type.
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-bad-date'), {
+      uid: 'u1',
+      created_at: 'yesterday',
+    }),
+  );
+  // The rules pin the shape: the bridge honours `token`, so a client must not be
+  // able to inject or override it.
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-extra'), {
+      uid: 'u1',
+      created_at: new Date(),
+      token: 'rewritten',
+    }),
   );
 });
 
 test('an fcm token cannot be registered for another uid', async () => {
   await assertFails(
-    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-other'), { uid: 'u2' }),
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-other'), {
+      uid: 'u2',
+      created_at: new Date(),
+    }),
   );
 });
 
 test('an fcm token can be updated by its owner only', async () => {
   await assertSucceeds(
-    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-update'), { uid: 'u1' }),
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-update'), {
+      uid: 'u1',
+      created_at: new Date(),
+    }),
   );
   await assertFails(
-    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-foreign'), { uid: 'u1' }),
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-foreign'), {
+      uid: 'u1',
+      created_at: new Date(),
+    }),
   );
 });
 
-test('an fcm token can be deleted by its owner only', async () => {
+test('an fcm token update is shape-pinned and may not add fields', async () => {
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-shape'), {
+      uid: 'u1',
+      created_at: new Date(),
+      extra: true,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-shape'), {
+      uid: 'u1',
+      created_at: 'yesterday',
+    }),
+  );
+});
+
+test('an allowlisted user can delete their own fcm token, but not another uid doc', async () => {
   await assertSucceeds(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-del')));
   await assertFails(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-del-foreign')));
+});
+
+test('deleting an already-removed token is a harmless no-op', async () => {
+  // A release retry may run after the first delete's acknowledgement was lost.
+  await assertSucceeds(deleteDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-gone')));
+});
+
+test('an authenticated user without a grant cannot update or delete their own fcm token', async () => {
+  await assertFails(
+    setDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted'), {
+      uid: 'u2',
+      created_at: new Date(),
+    }),
+  );
+  await assertFails(deleteDoc(doc(ungranted().firestore(), 'fcmTokens', 'tok-ungranted')));
 });
 
 test('fcm tokens cannot be read by clients', async () => {

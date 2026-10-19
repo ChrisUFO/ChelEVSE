@@ -5,13 +5,23 @@
 // updates the Status/History cost lines as soon as the write echoes back.
 
 import { $, setText } from '../ui.js';
-import { normalizeSettings, settingsFields, validateSettings } from '../settings.js';
+import {
+  OFFLINE_MESSAGE,
+  normalizeSettings,
+  reconcileSettingsSave,
+  settingsDraftMatches,
+  settingsFields,
+  settingsSaveState,
+  validateSettings,
+} from '../settings.js';
 import { saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 
 // Last server-confirmed settings and the form state built from them. The draft
 // lives in the inputs; saving disables editing so there is no mid-write drift.
 let confirmedSettings = null;
+// A snapshot that arrived while a write was in flight. The wrapper keeps "no
+// snapshot arrived" distinct from "the document is missing".
 let pendingSettings = null;
 let settingsDirty = false;
 let settingsSaving = false;
@@ -20,15 +30,8 @@ let settingsSaved = false;
 let settingsError = '';
 let settingsGeneration = 0;
 
-const OFFLINE_MESSAGE = 'You’re offline — reconnect to save.';
-const WAITING_MESSAGE = 'Waiting for the server — this change may not be saved yet.';
-
 function readFields() {
   return { rate: $('setting-rate').value, currency: $('setting-currency').value };
-}
-
-function sameFields(a, b) {
-  return a.rate === b.rate && a.currency === b.currency;
 }
 
 function paintFieldError(field, message) {
@@ -45,46 +48,38 @@ function renderErrors(errors = {}) {
 
 function paintFeedback() {
   const feedback = $('settings-feedback');
-  let text = '';
-  let kind = '';
-  let busy = false;
-  if (settingsSaving) {
-    text = 'Saving…';
-    busy = true;
-  } else if (settingsWaiting) {
-    text = WAITING_MESSAGE;
-    kind = 'warn';
-    busy = true;
-  } else if (settingsError) {
-    text = settingsError;
-    kind = 'err';
-  } else if (settingsSaved) {
-    text = 'Saved.';
-    kind = 'ok';
-  } else if (settingsDirty) {
-    text = 'Unsaved changes.';
-    kind = 'warn';
-  }
-  feedback.className = `feedback${busy ? ' busy' : ''}${kind ? ` ${kind}` : ''}`;
-  setText(feedback, text);
+  const view = settingsSaveState({
+    draft: readFields(),
+    confirmed: confirmedSettings,
+    saving: settingsSaving,
+    waiting: settingsWaiting,
+    saved: settingsSaved,
+    error: settingsError,
+  });
+  // The value comparison is the only dirty rule; keep the flag in step.
+  settingsDirty = view.dirty;
+  feedback.className = `feedback${view.busy ? ' busy' : ''}${view.kind ? ` ${view.kind}` : ''}`;
+  setText(feedback, view.text);
 
   const save = $('save-settings');
-  save.disabled = settingsSaving || !settingsDirty;
+  save.disabled = !view.canSave;
   setText(save, settingsSaving ? 'Saving…' : 'Save settings');
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;
 }
 
-function setFields(settings) {
-  const fields = settingsFields(settings);
+function writeFields(fields) {
   $('setting-rate').value = fields.rate;
   $('setting-currency').value = fields.currency;
 }
 
+function setFields(settings) {
+  writeFields(settingsFields(settings));
+}
+
 function recomputeDirty() {
-  const fields = readFields();
-  settingsDirty = !sameFields(fields, settingsFields(confirmedSettings));
+  settingsDirty = !settingsDraftMatches(readFields(), confirmedSettings);
   if (settingsDirty) {
     settingsSaved = false;
     settingsError = '';
@@ -107,28 +102,19 @@ function handleInput(field) {
 export function showSettingsData(data) {
   const next = normalizeSettings(data);
   if (settingsSaving || settingsWaiting) {
-    pendingSettings = next;
+    pendingSettings = { settings: next };
     return;
   }
-  if (settingsDirty) {
-    confirmedSettings = next;
-    if (sameFields(readFields(), settingsFields(next))) {
-      settingsDirty = false;
-      settingsSaved = false;
-    }
-    paintFeedback();
-    return;
-  }
-  // Data-identical echo of our own save: keep "Saved." in place.
-  const same = sameFields(readFields(), settingsFields(next));
+  // "Typed" is the value comparison against the baseline we are replacing.
+  const typed = !settingsDraftMatches(readFields(), confirmedSettings);
   confirmedSettings = next;
-  if (!same) {
+  if (!typed && !settingsDraftMatches(readFields(), next)) {
     setFields(next);
+    // A failed-save message stays until the user acts: a snapshot echoing the
+    // server truth does not undo the attempt the message describes.
     settingsSaved = false;
-    settingsError = '';
     renderErrors({});
   }
-  settingsDirty = false;
   paintFeedback();
 }
 
@@ -139,48 +125,21 @@ function finishSave(generation, ok, values, previous) {
   if (generation !== settingsGeneration) return;
   settingsSaving = false;
   settingsWaiting = false;
-  const remote = pendingSettings;
+  const pending = pendingSettings;
   pendingSettings = null;
-  // A late settlement can land after the user typed again; that draft must not
-  // be overwritten by canonicalisation or a rollback.
-  const untouched = sameFields(
-    readFields(),
-    settingsFields({ rate: values.rate, currency: values.currency }),
-  );
-  if (ok) {
-    const saved = { rate: values.rate, currency: values.currency };
-    confirmedSettings = saved;
-    if (untouched) {
-      // Canonicalise the fields so the server echo is data-identical and the
-      // "Saved." message is not replaced by a hydration pass.
-      setFields(saved);
-      settingsDirty = false;
-      settingsSaved = true;
-    } else {
-      settingsDirty = true;
-      settingsSaved = false;
-    }
-    settingsError = '';
-    // A genuinely different snapshot arrived while the write was in flight;
-    // adopt it rather than leave the form on our optimistic values.
-    if (remote && !sameFields(settingsFields(remote), settingsFields(confirmedSettings))) {
-      confirmedSettings = remote;
-      if (!settingsDirty) setFields(remote);
-      settingsSaved = false;
-    }
-  } else {
-    // Optimistic UI reconciles back to the last confirmed server state.
-    confirmedSettings = previous;
-    if (untouched) {
-      setFields(previous);
-      settingsDirty = false;
-    } else {
-      settingsDirty = true;
-    }
-    settingsSaved = false;
-    settingsError =
-      'Couldn’t save — the previous settings are back. Check your connection and try again.';
-  }
+  const next = reconcileSettingsSave({
+    ok,
+    values,
+    previous,
+    draft: readFields(),
+    remote: pending ? pending.settings : null,
+    remoteSeen: pending !== null,
+  });
+  confirmedSettings = next.confirmed;
+  writeFields(next.fields);
+  settingsDirty = next.dirty;
+  settingsSaved = next.saved;
+  settingsError = next.error;
   renderErrors({});
   paintFeedback();
 }
@@ -233,7 +192,7 @@ async function submit(event) {
     settingsError = '';
     // The value is still unconfirmed, so the form stays dirty and Save remains
     // available as a retry.
-    settingsDirty = !sameFields(readFields(), settingsFields(previous));
+    settingsDirty = !settingsDraftMatches(readFields(), previous);
     paintFeedback();
     return;
   }

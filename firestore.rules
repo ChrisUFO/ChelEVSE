@@ -63,12 +63,27 @@ service cloud.firestore {
         && request.resource.data.currency.size() <= 8;
     }
 
-    // FCM push registrations: users manage only their own token docs.
+    // FCM push registrations: users manage only their own token docs. The doc
+    // shape is pinned (uid + created_at only — the bridge honours `token`, so an
+    // update must not be able to rewrite it) and every mutation requires the
+    // access grant, so a de-allowlisted account cannot keep touching its doc.
     match /fcmTokens/{token} {
       allow read: if false;
-      allow create: if allowed() && request.resource.data.uid == request.auth.uid;
-      allow update: if request.auth != null && resource.data.uid == request.auth.uid;
-      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow create: if allowed()
+        && request.resource.data.keys().hasOnly(['uid', 'created_at'])
+        && request.resource.data.uid is string
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.created_at is timestamp;
+      allow update: if allowed()
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['uid', 'created_at'])
+        && request.resource.data.uid is string
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.created_at is timestamp;
+      // A release retry may find the doc already gone (the first delete
+      // succeeded but its acknowledgement was lost); deleting a missing doc is
+      // a no-op and must not fail the retry.
+      allow delete: if allowed() && (resource == null || resource.data.uid == request.auth.uid);
     }
 
     // Commands: allowlisted users may create whitelisted, validated commands;

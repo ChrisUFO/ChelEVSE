@@ -83,3 +83,94 @@ export function notificationState({
     action: 'enable',
   };
 }
+
+// ---------- token lifecycle ----------
+
+export const OFFLINE_TOKEN_MESSAGE = 'You’re offline — reconnect to register this device.';
+export const TOKEN_TIMEOUT_MESSAGE =
+  'Still registering this device — check your connection, then try again.';
+
+// Copy for every failed registration. Pure so the classification is testable
+// without a browser.
+export function tokenErrorMessage(err) {
+  const code = err && err.code;
+  if (code === 'messaging/permission-blocked') {
+    return 'The browser blocked notifications for this site. Allow them in the browser settings, then reload.';
+  }
+  if (code === 'permission-denied') {
+    return 'Couldn’t save this device’s notification token. Check that your account still has access.';
+  }
+  if (code === 'unavailable') {
+    return 'Couldn’t reach the network. Check your connection and try again.';
+  }
+  if (code === 'sw-timeout') {
+    return 'The app isn’t ready to register for notifications yet. Reload the page and try again.';
+  }
+  if (err && err.message === 'no-token') {
+    return 'The browser did not return a notification token. Try again.';
+  }
+  return 'Couldn’t register this device for notifications. Try again.';
+}
+
+// Whether this load may start a token registration, and why not when it must
+// not. `online` guards against handing a write to Firestore while the browser
+// knows it is offline; `inFlight` is the retry latch; `restoredForUid` records
+// the once-per-session re-save.
+export function registrationDecision({
+  requested = false,
+  supported = null,
+  permission = 'default',
+  vapid = true,
+  uid = '',
+  online = true,
+  inFlight = false,
+  restoredForUid = null,
+} = {}) {
+  if (!requested) return { start: false, reason: 'not-requested' };
+  if (!supported) return { start: false, reason: 'unsupported' };
+  if (permission !== 'granted') return { start: false, reason: 'permission' };
+  if (!vapid) return { start: false, reason: 'no-vapid' };
+  if (!uid) return { start: false, reason: 'signed-out' };
+  if (!online) return { start: false, reason: 'offline' };
+  if (inFlight) return { start: false, reason: 'in-flight' };
+  if (restoredForUid === uid) return { start: false, reason: 'restored' };
+  return { start: true, reason: '' };
+}
+
+// A denied token save means the document id already belongs to another account:
+// the previous sign-out's delete never reached the server. Deleting the FCM
+// registration (not the doc — the rules deny that) gives the next attempt a new
+// document id, which the create rule accepts.
+export function isTokenClaimDenial(err) {
+  return Boolean(err) && err.code === 'permission-denied';
+}
+
+// Settled registration outcome → card state.
+export function registrationResult(outcome) {
+  if (!outcome || !outcome.status || outcome.status === 'ok') {
+    return { phase: 'saved', error: '', blocked: false, denied: false };
+  }
+  if (outcome.status === 'timeout') {
+    return { phase: 'failed', error: TOKEN_TIMEOUT_MESSAGE, blocked: false, denied: false };
+  }
+  const error = outcome.error;
+  return {
+    phase: 'failed',
+    error: tokenErrorMessage(error),
+    blocked: Boolean(error && error.code === 'messaging/permission-blocked'),
+    denied: isTokenClaimDenial(error),
+  };
+}
+
+// What a sign-out must do to this device's push registration. The cached token
+// (and a retry marker) may only be dropped after the document delete is
+// acknowledged, so a release that fails offline is retried by the next session.
+export function tokenReleasePlan({ stored = null, messaging = false } = {}) {
+  const token = stored && typeof stored.token === 'string' ? stored.token : '';
+  const uid = stored && typeof stored.uid === 'string' ? stored.uid : '';
+  return {
+    deleteDoc: Boolean(token),
+    deleteToken: Boolean(messaging),
+    marker: token && uid ? { token, uid } : null,
+  };
+}

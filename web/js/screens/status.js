@@ -28,6 +28,8 @@ const CMD_TEXT = {
 };
 // The commands listener is shared with the Advanced console. RAPI entries must
 // not disable these controls or replace their feedback with a generic "Done."
+// (The window is 20 docs so a burst of RAPI sends cannot evict a pending
+// control command from it.)
 const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;
