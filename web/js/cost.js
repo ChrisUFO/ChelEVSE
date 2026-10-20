@@ -22,12 +22,13 @@
 // history screen shows kWh only; per-session costs are still shown.
 //
 // The live interval ends at the snapshot's own `updated_at`, never at the render
-// instant, and only while the charger reports charging (state 3). `elapsed` is
-// cumulative for the whole plug-in, so pricing a paused or cached snapshot
-// against a later clock would slide the window over idle hours that drew no
-// energy. Anchoring to the write freezes the figure until a new write arrives.
+// instant, and only while the snapshot is a live charging one (`liveCharging`:
+// `state_label` charging and not marked offline). `elapsed` is cumulative for the
+// whole plug-in, so pricing a paused, cached or charger-offline snapshot against a
+// later clock would slide the window over idle hours that drew no energy.
+// Anchoring to the write freezes the figure until a new write arrives.
 
-import { fmtCost, fmtMoney, toNumber } from './format.js';
+import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
 import { costForInterval, costForSession, normalizeRateSchedule } from './rates.js';
 
 // Stored settings as a usable schedule: {rate, currency, rates}. Invalid rows are
@@ -75,9 +76,12 @@ export function liveCostLabel(wh, elapsed, now, settings, charging = false) {
 }
 
 // Live cost straight from a status document. The interval ends at the write's
-// own `updated_at` (a missing or malformed timestamp hides it) and is priced
-// only while `state` is 3 — charging. The flat path ignores both, so its output
-// stays byte-identical.
+// own `updated_at` (a missing or malformed timestamp hides it) and is priced only
+// for a live charging write — the gate the session clock uses. The bridge keeps
+// the last good state and elapsed while the charger is unreachable and stamps a
+// fresh `updated_at` on every failed poll, so without the offline check those
+// markers would re-price the frozen interval at whatever windows apply now. The
+// flat path ignores all of it, so its output stays byte-identical.
 export function statusCostLabel(status, settings) {
   if (!status) return null;
   const updated = status.updated_at;
@@ -87,7 +91,7 @@ export function statusCostLabel(status, settings) {
     status.elapsed,
     endMs,
     settings,
-    toNumber(status.state) === 3,
+    liveCharging(status),
   );
 }
 

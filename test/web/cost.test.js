@@ -118,14 +118,17 @@ test('a schedule hides the live cost when the interval cannot be priced', () => 
 // ---------- live status snapshot ----------
 
 // A status document as Firestore delivers it: `state` is the numeric charge
-// state (3 = charging), `updated_at` a Timestamp-like object.
-function liveStatus(state, updated, elapsed, wh = 1000) {
+// state (3 = charging), `state_label` the bridge's derived label and
+// `charger_online: false` the bridge's offline marker over a frozen snapshot.
+function liveStatus(state, updated, elapsed, wh = 1000, overrides = {}) {
   return {
     state,
     state_label: state === 3 ? 'charging' : 'ready',
+    charger_online: true,
     updated_at: updated == null ? undefined : { toMillis: () => updated },
     elapsed,
     session_energy: wh,
+    ...overrides,
   };
 }
 
@@ -145,12 +148,47 @@ test('a paused or ready snapshot hides the scheduled live cost', () => {
   for (const state of [0, 1, 2, 4, 254, null, undefined, '3.5']) {
     assert.equal(statusCostLabel(liveStatus(state, at, 3600), nightly()), null);
   }
-  // Numeric text survives a hand-edited document.
-  assert.equal(statusCostLabel(liveStatus('3', at, 3600), nightly()), 'GBP 0.10');
+  // The bridge's label is the single source of truth, shared with the session
+  // clock and the badge pulse: a charging write prices even when a hand-edited
+  // state code disagrees, and a non-charging label hides even with state 3.
+  assert.equal(statusCostLabel(liveStatus(3, at, 3600, 1000, { state: 1 }), nightly()), 'GBP 0.10');
+  assert.equal(
+    statusCostLabel(liveStatus(3, at, 3600, 1000, { state_label: 'ready' }), nightly()),
+    null,
+  );
   // The flat path ignores the state, exactly as before schedules existed.
   assert.equal(statusCostLabel(liveStatus(1, at, 3600), FLAT), 'GBP 0.25');
 });
 
+test('an offline snapshot hides the scheduled live cost', () => {
+  // Charging since 05:15, 1 kWh, elapsed frozen at 1800 s when the charger went
+  // unreachable. The bridge keeps writing offline markers: a fresh `updated_at`
+  // over the frozen state/elapsed. Priced at 07:00 that would be the fallback
+  // window for 06:30–07:00 — GBP 0.30 for energy that was drawn off-peak.
+  const frozen = date(2026, 1, 5, 5, 45).getTime();
+  const marker = date(2026, 1, 5, 7, 0).getTime();
+  assert.equal(statusCostLabel(liveStatus(3, frozen, 1800), nightly()), 'GBP 0.10');
+  assert.equal(statusCostLabel(liveStatus(3, marker, 1800), nightly()), 'GBP 0.30');
+  // Under the offline banner the figure is hidden, however fresh the marker is.
+  assert.equal(
+    statusCostLabel(liveStatus(3, marker, 1800, 1000, { charger_online: false }), nightly()),
+    null,
+  );
+  assert.equal(
+    statusCostLabel(liveStatus(3, frozen, 1800, 1000, { charger_online: false }), nightly()),
+    null,
+  );
+  // Flat configs keep pricing the last known energy under the same banner.
+  assert.equal(
+    statusCostLabel(liveStatus(3, marker, 1800, 1000, { charger_online: false }), FLAT),
+    'GBP 0.25',
+  );
+  // An absent flag (older document) is not offline; the clock gate agrees.
+  assert.equal(
+    statusCostLabel(liveStatus(3, marker, 1800, 1000, { charger_online: null }), nightly()),
+    'GBP 0.30',
+  );
+});
 test('a missing write time or elapsed hides the scheduled cost', () => {
   const at = date(2026, 1, 5, 3, 0).getTime();
   assert.equal(statusCostLabel(liveStatus(3, null, 3600), nightly()), null);
