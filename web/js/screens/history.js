@@ -17,7 +17,8 @@ import {
   sectionView,
   sumSeries,
 } from '../history.js';
-import { fmtCost, fmtK, formatDuration, toNumber } from '../format.js';
+import { aggregateCostLabel, costSettings, hasRateSchedule, sessionCostLabel } from '../cost.js';
+import { fmtK, formatDuration, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const VIEW_W = CHART_VIEW_W;
@@ -31,8 +32,9 @@ const BAR_W = 5.6;
 let active = false;
 let loaded = false;
 let loading = false;
-let rate = null;
-let currency = '';
+// Full cost settings ({rate, currency, rates}); per-session costs use the
+// schedule, and its presence hides the aggregate daily/30-day cost below.
+let settings = null;
 let series = [];
 let selectedId = null;
 let todayId = null;
@@ -66,8 +68,19 @@ function svgEl(tag, attrs) {
 
 // ---------- summary + chart ----------
 
+// Daily/30-day cost from a kWh total. Null when a schedule exists: a day stores
+// one kWh figure, so its cost cannot be split across the windows it was drawn in.
+// The chart and summary then show kWh only.
 function seriesCost(kwh) {
-  return fmtCost(kwh, rate, currency);
+  return aggregateCostLabel(kwh, settings);
+}
+
+// Say why the aggregate cost is absent: with a schedule the summary reflows to
+// one full-width kWh card and the chart drops its cost readout, and an absence
+// alone reads as lost data. Only ever shown beside a rendered summary.
+function setCostNote(visible) {
+  const note = $('history-cost-note');
+  if (note) note.hidden = !visible;
 }
 
 function renderSummary() {
@@ -75,6 +88,7 @@ function renderSummary() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
+    setCostNote(false);
     return;
   }
   const total = sumSeries(series);
@@ -83,6 +97,7 @@ function renderSummary() {
   $('history-cost-cell').hidden = !cost;
   $('history-summary').classList.toggle('solo', !cost);
   setText($('history-cost'), cost || '');
+  setCostNote(!cost && hasRateSchedule(settings));
 }
 
 function showChartEmpty(title, line) {
@@ -231,6 +246,7 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
+    setCostNote(false);
     const copy =
       historyState === 'offline'
         ? OFFLINE_COPY
@@ -288,7 +304,7 @@ function renderSession(item) {
   const meta = el('span', 'session-meta');
   const duration = formatDuration(item.elapsed);
   meta.textContent = duration === '—' ? '—' : `${duration} h`;
-  const cost = kwh == null ? null : seriesCost(kwh);
+  const cost = sessionCostLabel(item, settings);
   if (cost) {
     const dot = el('span', 'session-dot', '·');
     dot.setAttribute('aria-hidden', 'true');
@@ -515,11 +531,11 @@ export function activateHistory() {
   if (!loaded && !loading) loadAll();
 }
 
-// settings/current — costs update in place; no reload needed.
-export function showHistorySettings(settings) {
-  const r = settings && settings.rate;
-  rate = typeof r === 'number' && Number.isFinite(r) ? r : null;
-  currency = settings && typeof settings.currency === 'string' ? settings.currency : '';
+// settings/current — costs update in place; no reload needed. The whole document
+// is kept: sessions are priced over their own interval, and a schedule also
+// decides that the aggregate cost is hidden.
+export function showHistorySettings(data) {
+  settings = costSettings(data);
   if (series.length) {
     const hadFocus = $('history-chart').contains(document.activeElement);
     renderHistory();
@@ -536,8 +552,7 @@ export function resetHistory() {
   active = false;
   loaded = false;
   loading = false;
-  rate = null;
-  currency = '';
+  settings = null;
   series = [];
   selectedId = null;
   todayId = null;
@@ -556,6 +571,7 @@ export function resetHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setText($('history-cost'), '');
+    setCostNote(false);
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);

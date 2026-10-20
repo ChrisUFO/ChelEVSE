@@ -78,6 +78,16 @@ export function statusWriteKey(data) {
   return `${writeMillis(data)}|${data.elapsed}|${data.state_label ?? ''}`;
 }
 
+// A status write that says the charger is charging right now. The bridge derives
+// the label from the state code once (STATE_LABELS), so gating on it here keeps
+// the session clock and the live cost on one source of truth. A charger the
+// bridge has marked offline is not live: its state/elapsed stay frozen while the
+// marker refreshes updated_at, so treating that as charging would advance the
+// clock (and re-price the live cost) over hours that drew no energy.
+export function liveCharging(data) {
+  return Boolean(data) && data.state_label === 'charging' && data.charger_online !== false;
+}
+
 // Render one step of a clock. `data` is null when the snapshot must be ignored
 // (an older write), which keeps the liveness of the write we already anchored
 // to. `floor` is the largest value rendered for this write: the clock is
@@ -86,9 +96,7 @@ export function statusWriteKey(data) {
 function clockStep(clock, nowMs, data) {
   const age = Math.max(0, nowMs - clock.anchorMs);
   const live =
-    data == null
-      ? clock.live === true && age <= FRESH_MS
-      : data.state_label === 'charging' && data.charger_online !== false && age <= FRESH_MS;
+    data == null ? clock.live === true && age <= FRESH_MS : liveCharging(data) && age <= FRESH_MS;
   const ticked = clock.base + (live ? age / 1000 : 0);
   const seconds = Math.max(0, clock.floor, ticked);
   return { clock: { ...clock, live, floor: seconds }, seconds };

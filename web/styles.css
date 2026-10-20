@@ -955,6 +955,14 @@ input[type='range']::-moz-range-thumb {
   margin-left: 3px;
   color: var(--muted);
 }
+/* Shown only while a rate schedule hides the aggregate cost: absence of the
+   "Estimated cost" cell otherwise reads as data loss. */
+.summary-note {
+  margin: 8px 2px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
 .chart-card {
   margin-top: 14px;
   padding: 15px 16px 12px;

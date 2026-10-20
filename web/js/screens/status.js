@@ -5,17 +5,18 @@
 import { $, setText } from '../ui.js';
 import {
   elapsedClock,
-  fmtCost,
   fmtK,
   formatElapsed,
   freezeClock,
   freshnessState,
   holdAfterSnapshot,
+  liveCharging,
   numOrDash,
   relTime,
   stateFor,
   toNumber,
 } from '../format.js';
+import { costSettings, statusCostLabel } from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -33,8 +34,9 @@ const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;
 let schedule = null;
-let rate = null;
-let currency = '';
+// Full cost settings ({rate, currency, rates}); the schedule prices a session
+// over its elapsed interval and the flat rate is the fallback.
+let settings = null;
 let active = false;
 let ampsTouched = false;
 let holdOpen = false;
@@ -92,9 +94,13 @@ function freezeElapsed() {
 }
 
 function renderCost() {
-  const energy = status ? toNumber(status.session_energy) : Number.NaN;
-  const kwh = Number.isFinite(energy) ? energy / 1000 : null;
-  const cost = kwh == null ? null : fmtCost(kwh, rate, currency);
+  // Live cost over the snapshot's own interval, [updated_at - elapsed,
+  // updated_at], and only while the charger is charging: `elapsed` is cumulative
+  // for the whole plug-in, so pricing a paused or cached snapshot against a later
+  // clock would slide the window over hours that added no energy. The bridge
+  // stores only session energy, so the schedule pro-rates it across that span.
+  // With no schedule this is exactly the flat fmtCost path.
+  const cost = statusCostLabel(status, settings);
   const el = $('session-cost');
   el.hidden = !cost;
   setText(el, cost || '');
@@ -127,7 +133,10 @@ function renderStatus() {
   const theState = stateFor(status && status.state_label);
   document.documentElement.style.setProperty('--state', theState.color);
   setText($('state-label'), theState.label);
-  $('state-badge').classList.toggle('pulse', status && status.state_label === 'charging');
+  // Same liveness gate as the session clock and the live cost: an offline marker
+  // keeps the last known `charging` label, so pulsing there would advertise a
+  // live charge whose clock has already frozen.
+  $('state-badge').classList.toggle('pulse', liveCharging(status));
 
   setText($('power'), status && status.power != null ? fmtK(toNumber(status.power) / 1000) : '—');
   setText($('fig-amp'), status ? numOrDash(status.amp) : '—');
@@ -306,8 +315,7 @@ export function leaveStatus() {
   ticker = resultTimer = null;
   status = null;
   schedule = null;
-  rate = null;
-  currency = '';
+  settings = null;
   ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;
@@ -354,11 +362,11 @@ export function showCommands(cmds) {
   renderCommands(cmds);
 }
 
-// settings/current — null until an owner saves a rate.
-export function showSettings(settings) {
-  const r = settings && settings.rate;
-  rate = typeof r === 'number' && Number.isFinite(r) ? r : null;
-  currency = settings && typeof settings.currency === 'string' ? settings.currency : '';
+// settings/current — null until an owner saves a rate. The whole document is
+// kept so the live cost can use the optional schedule; the flat rate remains the
+// fallback for any moment no window covers.
+export function showSettings(data) {
+  settings = costSettings(data);
   renderCost();
 }
 
