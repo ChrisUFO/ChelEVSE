@@ -195,6 +195,50 @@ export function queuedSaveState({
   return idle;
 }
 
+// A `schedule/current` snapshot carries `metadata.hasPendingWrites`. Across a
+// reload that flag is the only evidence of an unacknowledged write: the save
+// that issued it belonged to a previous page, so no promise in this session
+// will settle it. One transition rule drives the editor's queued state:
+//   - a local save in flight (`saving`/`savingUnconfirmed`) owns the save bar;
+//     a watch snapshot never relabels it.
+//   - `pendingWrites === true` means the write is still queued (or a newer write
+//     replaced it): the snapshot's key becomes the queued payload.
+//   - `pendingWrites === false` while queued resolves it. The snapshot key
+//     matching the queued payload is 'acked' (the draft is untouched); a
+//     different key is 'reverted' — the queued change never landed.
+//   - metadata absent (`undefined`/`null`) is not evidence of acknowledgement
+//     and leaves the state alone.
+// `adopt` marks a reverted snapshot the screen may replace the draft with: only
+// when the draft still matches the queued payload, never a dirty draft.
+export function reloadQueuedState({
+  pendingWrites,
+  queued = false,
+  saving = false,
+  savingUnconfirmed = false,
+  dataKey = null,
+  payloadKey = null,
+  draftKey = null,
+} = {}) {
+  const unchanged = { queued, payloadKey, outcome: 'none', adopt: false };
+  if (saving || savingUnconfirmed) return unchanged;
+  if (pendingWrites === true) {
+    return {
+      queued: true,
+      payloadKey: dataKey,
+      outcome: payloadKey != null && payloadKey === dataKey ? 'none' : 'queued',
+      adopt: false,
+    };
+  }
+  if (!queued || pendingWrites !== false) return unchanged;
+  const acked = payloadKey != null && payloadKey === dataKey;
+  return {
+    queued: false,
+    payloadKey: null,
+    outcome: acked ? 'acked' : 'reverted',
+    adopt: !acked && payloadKey != null && draftKey === payloadKey,
+  };
+}
+
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
 // that arrive after a successful save. Day order is not meaningful. The
 // malformed flag is part of the key: clearing it by editing is a real change

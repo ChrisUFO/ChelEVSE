@@ -2,7 +2,10 @@
 // validator, and an optimistic save that rolls back on failure. Incoming
 // snapshots never replace unsaved edits. Offline, the save is handed to
 // Firestore's persistent queue and labelled "Queued" instead of being refused
-// or held on an unbounded "Saving…".
+// or held on an unbounded "Saving…". The flag that identifies such a write after
+// a reload travels as `schedule/current` snapshot metadata (`hasPendingWrites`,
+// forwarded by store.js and app.js): the promise from the earlier page is gone,
+// so the acknowledged snapshot is what clears the queued label.
 
 import { $, setText } from '../ui.js';
 import { saveSchedule } from '../store.js';
@@ -17,6 +20,7 @@ import {
   queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
+  reloadQueuedState,
   scheduleKey,
   scheduleSaveValid,
   toggleNote,
@@ -35,6 +39,11 @@ let saving = false;
 // The write is durable in Firestore's local queue but not acknowledged. The
 // editor stays unlocked; a later save queues a newer payload behind it.
 let queued = false;
+// True when `queued` was rediscovered from snapshot metadata after a reload:
+// the write came from an earlier page, so no promise in this session settles
+// it. The watch owns the transition until the backend acknowledges or replaces
+// the write; a local save takes over from here.
+let queuedFromSnapshot = false;
 // The UI stopped waiting at the deadline while the browser still reports
 // online: the write may or may not reach the backend, and its settle is late.
 let savingUnconfirmed = false;
@@ -44,7 +53,14 @@ let savingPayloadKey = null;
 // Latest snapshot received while the form is dirty or a save is in flight.
 // It never clobbers the draft; save settle decides whether to adopt it.
 let pendingRemote = null;
-let remoteNotice = false;
+// '' when hidden, otherwise the notice copy: a remote change the draft would
+// overwrite, or a queued change the server never accepted.
+const REMOTE_NOTICE = 'Remote schedule changed — saving will overwrite it.';
+const REVERTED_NOTICE = 'The queued change was not saved — showing the charger’s schedule.';
+// A dirty draft is kept, so the reverted notice must not claim to show the
+// charger's copy.
+const REVERTED_DIRTY_NOTICE = 'The queued change was not saved — your edits are still here.';
+let remoteNotice = '';
 let validation = validateSchedule(defaultSchedule());
 let feedbackMode = 'derived'; // derived | saved | discarded | load-error
 // A failed save stays visible through the SDK's revert snapshot (and any later
@@ -100,7 +116,7 @@ function markDirty() {
       adopt(pendingRemote);
       return;
     }
-    if (!inFlight) remoteNotice = false;
+    if (!inFlight) remoteNotice = '';
   }
   feedbackMode = 'derived';
   validateAndPaint();
@@ -108,7 +124,9 @@ function markDirty() {
 
 function renderRemoteNotice() {
   const notice = $('schedule-remote-notice');
-  if (notice) notice.hidden = !remoteNotice;
+  if (!notice) return;
+  notice.hidden = !remoteNotice;
+  if (remoteNotice) setText(notice, remoteNotice);
 }
 
 function saveState() {
@@ -377,7 +395,7 @@ function adopt(schedule) {
   draft = clone(confirmed);
   dirty = false;
   pendingRemote = null;
-  remoteNotice = false;
+  remoteNotice = '';
   initialized = true;
   loadError = false;
   feedbackMode = 'derived';
@@ -419,13 +437,14 @@ function settleSave({ gen, token, payload, editGen, ok }) {
   saving = false;
   savingUnconfirmed = false;
   queued = false;
+  queuedFromSnapshot = false;
   savingPayloadKey = null;
   // A snapshot that arrived while saving is at least as new as this write (the
   // client stream is ordered); otherwise our payload is the baseline.
   const result = reconcileAfterSave({ confirmed, payload, pendingRemote, ok });
   confirmed = result.baseline;
   pendingRemote = null;
-  remoteNotice = false;
+  remoteNotice = '';
   // A late failure always keeps the draft, even untouched: the user was handed
   // the editor back, and a write that failed must not dismiss what they typed.
   if (editedSinceSave || (late && !ok)) {
@@ -467,6 +486,7 @@ async function issueWrite(payload, { discarded = false } = {}) {
   saving = true;
   savingUnconfirmed = false;
   queued = false;
+  queuedFromSnapshot = false;
   savingPayloadKey = payloadKey;
   saveError = '';
   feedbackMode = discarded ? 'discarded' : 'derived';
@@ -529,6 +549,7 @@ function handleOffline() {
     saving = false;
     savingUnconfirmed = false;
     queued = true;
+    queuedFromSnapshot = false;
     // The released write is now the draft's baseline: it is no longer "unsaved"
     // unless the user typed something newer after the editor unlocked.
     dirty = scheduleKey(draft) !== acceptedKey();
@@ -582,39 +603,125 @@ export function activateSchedule() {
   renderLive();
 }
 
-// schedule/current — first snapshot adopts; later ones never clobber edits.
-export function showSchedule(data) {
-  if (!active) return;
-  const incoming = clone(data);
-  if (!initialized) {
-    adopt(incoming);
+// Apply the queued-state transition decided by `reloadQueuedState`. Entering
+// the queued state only relabels the save bar (the draft already matches the
+// payload); leaving it never replaces the draft unless the helper allowed the
+// reverted snapshot to be adopted.
+function applyQueueTransition(transition, incoming) {
+  if (transition.outcome === 'queued') {
+    queued = true;
+    queuedFromSnapshot = true;
+    savingPayloadKey = transition.payloadKey;
+    // The draft was built from the same cached snapshot, so it is not "unsaved"
+    // against the queued payload unless the user typed something newer.
+    dirty = scheduleKey(draft) !== acceptedKey();
+    pendingRemote = null;
+    validateAndPaint();
     return;
   }
-  if (saving || savingUnconfirmed || queued) {
+  if (transition.outcome !== 'acked' && transition.outcome !== 'reverted') return;
+  queued = false;
+  queuedFromSnapshot = false;
+  savingPayloadKey = null;
+  pendingRemote = null;
+  if (transition.outcome === 'acked') {
+    // The queued write landed: server truth is the payload the draft already
+    // shows, so only the label changes. A newer draft is reported as such by
+    // queuedSaveState instead of claiming it was saved.
+    confirmed = incoming;
+    dirty = scheduleKey(draft) !== scheduleKey(confirmed);
+    feedbackMode = 'saved';
+    validateAndPaint();
+    return;
+  }
+  // The queued change did not land. Adopt the server's copy only for a clean
+  // draft; a dirty draft is never clobbered, it just gains the notice.
+  if (transition.adopt) {
+    adopt(incoming);
+    remoteNotice = REVERTED_NOTICE;
+    renderRemoteNotice();
+    return;
+  }
+  confirmed = incoming;
+  dirty = scheduleKey(draft) !== scheduleKey(confirmed);
+  remoteNotice = REVERTED_DIRTY_NOTICE;
+  feedbackMode = 'derived';
+  validateAndPaint();
+}
+
+// schedule/current — first snapshot adopts; later ones never clobber edits.
+// `meta.pendingWrites` marks a write still queued in the persistent cache; after
+// a reload it is the only evidence that the cached document is not server truth.
+export function showSchedule(data, meta) {
+  if (!active) return;
+  const incoming = clone(data);
+  const key = scheduleKey(incoming);
+  const pendingWrites = meta ? meta.pendingWrites : undefined;
+
+  if (!initialized) {
+    adopt(incoming);
+    // The cached document can itself be a still-queued write. adopt() builds the
+    // form; this only relabels the save bar, so focus and scroll are untouched.
+    applyQueueTransition(
+      reloadQueuedState({
+        pendingWrites,
+        queued,
+        saving,
+        savingUnconfirmed,
+        dataKey: key,
+        payloadKey: savingPayloadKey,
+        draftKey: scheduleKey(draft),
+      }),
+      incoming,
+    );
+    return;
+  }
+  // A write issued by this page owns the bar until its promise settles; a watch
+  // snapshot is only a candidate baseline, and settleSave reconciles it.
+  if (saving || savingUnconfirmed || (queued && !queuedFromSnapshot)) {
     // Queue the latest snapshot (including the local write echo). Save settle
     // decides whether it becomes the confirmed baseline; the draft is untouched,
     // and a queued echo must not replace the confirmed rollback baseline.
     pendingRemote = incoming;
-    remoteNotice = savingPayloadKey ? scheduleKey(incoming) !== savingPayloadKey : false;
+    remoteNotice = savingPayloadKey && key !== savingPayloadKey ? REMOTE_NOTICE : '';
     validateAndPaint();
     return;
+  }
+  // A write rediscovered after a reload has no promise to settle it, so the
+  // snapshot metadata decides: still queued, acknowledged, or replaced.
+  if (queuedFromSnapshot || pendingWrites === true) {
+    const transition = reloadQueuedState({
+      pendingWrites,
+      queued,
+      saving,
+      savingUnconfirmed,
+      dataKey: key,
+      payloadKey: savingPayloadKey,
+      draftKey: scheduleKey(draft),
+    });
+    if (transition.outcome !== 'none') {
+      applyQueueTransition(transition, incoming);
+      return;
+    }
+    // Still queued on the same payload (or metadata absent): nothing changed.
+    if (queued) return;
   }
   if (dirty) {
     const result = reconcileDirtyRemote({ confirmed, draft, incoming });
     confirmed = result.confirmed;
     dirty = result.dirty;
-    remoteNotice = result.remoteNotice;
+    remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
     pendingRemote = null;
     validateAndPaint();
     return;
   }
-  if (scheduleKey(incoming) === scheduleKey(confirmed)) {
+  if (key === scheduleKey(confirmed)) {
     // Data-identical echo: refresh the normalized baseline without rebuilding
     // the form, and keep "Saved." in place.
     confirmed = incoming;
     if (pendingRemote || remoteNotice) {
       pendingRemote = null;
-      remoteNotice = false;
+      remoteNotice = '';
       renderRemoteNotice();
     }
     return;
@@ -655,9 +762,10 @@ export function resetSchedule() {
   dirty = false;
   saving = false;
   queued = false;
+  queuedFromSnapshot = false;
   savingPayloadKey = null;
   pendingRemote = null;
-  remoteNotice = false;
+  remoteNotice = '';
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
   saveError = '';
