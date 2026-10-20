@@ -5,7 +5,6 @@
 import { $, setText } from '../ui.js';
 import {
   elapsedClock,
-  fmtCost,
   fmtK,
   formatElapsed,
   freezeClock,
@@ -16,6 +15,7 @@ import {
   stateFor,
   toNumber,
 } from '../format.js';
+import { costSettings, liveCostLabel } from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -33,8 +33,9 @@ const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;
 let schedule = null;
-let rate = null;
-let currency = '';
+// Full cost settings ({rate, currency, rates}); the schedule prices a session
+// over its elapsed interval and the flat rate is the fallback.
+let settings = null;
 let active = false;
 let ampsTouched = false;
 let holdOpen = false;
@@ -92,9 +93,12 @@ function freezeElapsed() {
 }
 
 function renderCost() {
-  const energy = status ? toNumber(status.session_energy) : Number.NaN;
-  const kwh = Number.isFinite(energy) ? energy / 1000 : null;
-  const cost = kwh == null ? null : fmtCost(kwh, rate, currency);
+  // Live cost over [now - elapsed, now]: the bridge stores only session energy,
+  // so the schedule pro-rates it across the elapsed span. With no schedule this
+  // is exactly the flat fmtCost path.
+  const cost = status
+    ? liveCostLabel(status.session_energy, status.elapsed, Date.now(), settings)
+    : null;
   const el = $('session-cost');
   el.hidden = !cost;
   setText(el, cost || '');
@@ -306,8 +310,7 @@ export function leaveStatus() {
   ticker = resultTimer = null;
   status = null;
   schedule = null;
-  rate = null;
-  currency = '';
+  settings = null;
   ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;
@@ -354,11 +357,11 @@ export function showCommands(cmds) {
   renderCommands(cmds);
 }
 
-// settings/current — null until an owner saves a rate.
-export function showSettings(settings) {
-  const r = settings && settings.rate;
-  rate = typeof r === 'number' && Number.isFinite(r) ? r : null;
-  currency = settings && typeof settings.currency === 'string' ? settings.currency : '';
+// settings/current — null until an owner saves a rate. The whole document is
+// kept so the live cost can use the optional schedule; the flat rate remains the
+// fallback for any moment no window covers.
+export function showSettings(data) {
+  settings = costSettings(data);
   renderCost();
 }
 
