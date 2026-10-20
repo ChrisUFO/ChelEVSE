@@ -90,9 +90,9 @@ tries a bounded recovery instead of only logging `charger offline`:
 1. **Probe.** One extra `GET /status`. Only a usable reply means the gateway can
    be reached. A timeout, connection error, auth failure or non-2xx reply means
    it cannot (mains off, Wi-Fi dropped, wrong credentials), so **no restart is
-   attempted**: the watchdog pushes `Recovery failed — power cycle may be
-required` and alerts only. `POST /restart` uses the same HTTP endpoint, so a
-   gateway that answers nothing cannot be restarted remotely.
+   attempted**: the watchdog alerts only, with
+   `Recovery failed — power cycle may be required`. `POST /restart` uses the same
+   HTTP endpoint, so a gateway that answers nothing cannot be restarted remotely.
 2. **Classify.** The last two successful `/status` samples decide the domain:
    `rapi_connected`/`evse_connected` false, or `comm_success` frozen while
    `comm_sent` rises, is controller-side (firmware v5.1.5 counters); otherwise
@@ -112,11 +112,16 @@ required` and alerts only. `POST /restart` uses the same HTTP endpoint, so a
 
 While unhealthy the bridge makes one probe per tick in addition to the failed
 poll; a restart attempt is recorded only when the probe (and the guards) allow
-one. Pushes are edge-only: one per unhealthy episode (restart attempted, or
-alert-only when HTTP is dead), one when the hour's restart allowance is spent
-(`Recovery failed — power cycle may be required`), and one on recovery. The
-existing `Charger offline` push still fires on the first failed poll of an
-outage, so one outage can produce two pushes.
+one. Pushes are edge-only: one per unhealthy episode — the restart body, the
+alert-only `Recovery failed — power cycle may be required` when HTTP is dead, or
+`Charger unresponsive — restart blocked (…)` when a guard stopped the attempt
+(charging guard, cooldown, hourly cap; the charging body names
+`WATCHDOG_RESTART_WHILE_CHARGING`) — then one when the episode still has not
+recovered after an attempt (`Recovery failed — power cycle may be required`,
+also raised when the hour's allowance is spent), and one on recovery. A blocked
+entry never claims a failure, because nothing was attempted. The existing
+`Charger offline` push still fires on the first failed poll of an outage, so one
+outage can produce two pushes.
 
 `status/health` is written on every transition and every attempt — not on every
 tick, so a healthy bridge writes it once:
@@ -128,8 +133,11 @@ status/health  { state, reason, http_ok, controller_ok, last_attempt_at,
 
 `state` is `healthy` or `unhealthy`; `reason` is the decision's explanation
 (e.g. `cooldown after the last attempt (600s)`); `last_action` is
-`restart_gateway`, `restart_evse` or `alert`; `last_result` is the HTTP status or
-the failure of the last attempt.
+`restart_gateway`, `restart_evse`, `alert` (unreachable, never attempted) or
+`none` (a guard blocked the attempt); `last_result` is the outcome of the last
+attempt (`HTTP 200` / `failed (…)`), or the explanation when no attempt has been
+made. Once an attempt exists, the attempt's fields stay on record for the rest of
+the process — later probe results are carried by `http_ok` and `reason`.
 
 **When a physical power cycle is still required.** A gateway that is not
 answering HTTP at all cannot be restarted from the Pi, and a controller that does
@@ -280,14 +288,15 @@ mean.
 The status loop queues one push per state transition, and a single background
 daemon worker performs the sends via the Admin SDK:
 
-| Event                                                    | Body                                                                                                       |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Charger enters `state: 3`                                | `Charging started`                                                                                         |
-| Charger leaves `state: 3`                                | `Charging stopped`                                                                                         |
-| Charger stops answering (first failed poll of an outage) | `Charger offline`                                                                                          |
-| Watchdog restarts a gateway / controller                 | `Charger gateway unresponsive — restart attempted` / `Charger controller unresponsive — restart attempted` |
-| Restart allowance spent and still unhealthy              | `Recovery failed — power cycle may be required`                                                            |
-| Charger answers again after an unhealthy episode         | `Charger recovered`                                                                                        |
+| Event                                                                | Body                                                                                                             |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Charger enters `state: 3`                                            | `Charging started`                                                                                               |
+| Charger leaves `state: 3`                                            | `Charging stopped`                                                                                               |
+| Charger stops answering (first failed poll of an outage)             | `Charger offline`                                                                                                |
+| Watchdog restarts a gateway / controller                             | `Charger gateway unresponsive — restart attempted` / `Charger controller unresponsive — restart attempted`       |
+| Restart attempted and the charger is still down (or allowance spent) | `Recovery failed — power cycle may be required`                                                                  |
+| Unhealthy but a guard blocked the restart                            | `Charger unresponsive — restart blocked (…)` (names the guard; charging names `WATCHDOG_RESTART_WHILE_CHARGING`) |
+| Charger answers again after an unhealthy episode                     | `Charger recovered`                                                                                              |
 
 The title is always `ChelEVSE`. The transition is computed from the tracker's
 pre-tick state, so each edge produces exactly one notification. The first tick

@@ -73,6 +73,16 @@ WATCHDOG_ALERT_RESTART = "Charger gateway unresponsive — restart attempted"
 WATCHDOG_ALERT_RESTART_EVSE = "Charger controller unresponsive — restart attempted"
 WATCHDOG_ALERT_RECOVERED = "Charger recovered"
 WATCHDOG_ALERT_FAILED = "Recovery failed — power cycle may be required"
+WATCHDOG_ALERT_BLOCKED_CHARGING = (
+    "Charger unresponsive — restart blocked while charging "
+    "(set WATCHDOG_RESTART_WHILE_CHARGING=true to allow)"
+)
+WATCHDOG_ALERT_BLOCKED_CAP = (
+    "Charger unresponsive — restart blocked (hourly restart cap reached)"
+)
+WATCHDOG_ALERT_BLOCKED_COOLDOWN = (
+    "Charger unresponsive — restart blocked (waiting out the cooldown)"
+)
 WATCHDOG_RESTART_ACTIONS = frozenset({"restart_gateway", "restart_evse"})
 _TRUE_ENV = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV = frozenset({"0", "false", "no", "off"})
@@ -848,7 +858,9 @@ def recovery_decision(
 
     Returns ``{action, reason, alert}``: action is ``none``, ``alert``,
     ``restart_gateway`` or ``restart_evse``, and ``alert`` is the body the
-    caller should push (it owns edge detection).
+    caller should push when it enters an unhealthy episode (it owns edge
+    detection). A guard-blocked ``none`` carries a body naming the guard, so a
+    blocked episode never reads as a failed restart.
     """
     if not enabled:
         return _decision("none", "watchdog disabled")
@@ -867,17 +879,23 @@ def recovery_decision(
         )
     if charging and not restart_while_charging:
         return _decision(
-            "none", "charging in progress; WATCHDOG_RESTART_WHILE_CHARGING is off"
+            "none",
+            "charging in progress; WATCHDOG_RESTART_WHILE_CHARGING is off",
+            WATCHDOG_ALERT_BLOCKED_CHARGING,
         )
     recent = attempts_within(now, attempts_in_window, window)
     if len(recent) >= max_attempts:
         return _decision(
-            "none", f"hourly cap reached ({len(recent)}/{max_attempts} attempts)"
+            "none",
+            f"hourly cap reached ({len(recent)}/{max_attempts} attempts)",
+            WATCHDOG_ALERT_BLOCKED_CAP,
         )
     if last_attempt_at is not None:
         if (now - last_attempt_at).total_seconds() < cooldown:
             return _decision(
-                "none", f"cooldown after the last attempt ({cooldown:g}s)"
+                "none",
+                f"cooldown after the last attempt ({cooldown:g}s)",
+                WATCHDOG_ALERT_BLOCKED_COOLDOWN,
             )
     if controller_ok:
         return _decision(
@@ -931,8 +949,8 @@ class Watchdog:
     Holds the failure streak, the last two successful ``/status`` samples and
     the restart-attempt history; ``recovery_decision`` stays pure. This class
     only feeds it, performs the restart, publishes ``status/health`` and raises
-    the edge notifications (one per unhealthy episode, one on recovery, one
-    when the restart allowance is spent).
+    the edge notifications (one per unhealthy episode, one on recovery, one when
+    a restart did not bring the charger back or the allowance is spent).
     """
 
     def __init__(self, db, base, auth, transport, notifier, config, clock=None):
@@ -954,6 +972,7 @@ class Watchdog:
         self.last_result = None
         self.last_decision = None
         self.failed_alerted = False
+        self.episode_attempts = 0
 
     def _remember(self, payload):
         """Keep the last two successful samples for controller classification."""
@@ -1031,6 +1050,7 @@ class Watchdog:
         self.last_attempt_at = now
         self.attempts.append(now)
         self.last_action = action
+        self.episode_attempts += 1
         log(f"watchdog: restart device={device} -> {self.last_result}")
 
     def _cap_reached(self, now):
@@ -1080,6 +1100,7 @@ class Watchdog:
         self.reason = "status polls succeeding"
         self.last_decision = None
         self.failed_alerted = False
+        self.episode_attempts = 0
         self.write_health(True, self._controller_ok())
         if previous == "unhealthy":
             log("watchdog: charger recovered")
@@ -1108,6 +1129,7 @@ class Watchdog:
         if entered:
             self.state = "unhealthy"
             self.failed_alerted = False
+            self.episode_attempts = 0
             log(
                 f"watchdog: unhealthy after {self.failures} failed polls "
                 f"(http_ok={http_ok} controller_ok={controller_ok} "
@@ -1122,21 +1144,35 @@ class Watchdog:
             self._attempt(action, now, http_ok, controller_ok, charging)
             changed = True
         elif action == "alert":
-            self.last_action = "alert"
-            self.last_result = "charger unreachable over HTTP; not restarted"
-        elif self._cap_reached(now) and self.last_attempt_at is not None:
-            # Attempts for this hour are spent and the charger is still down.
-            if not self.failed_alerted:
-                self.failed_alerted = True
+            if self.episode_attempts and not self.failed_alerted:
+                # The probe cannot reach a gateway that a restart was meant to
+                # revive: automatic recovery has failed, which is exactly what
+                # the operator has to hear. Once per episode.
                 alert = WATCHDOG_ALERT_FAILED
-                self.last_action = "alert"
-                self.last_result = "recovery failed: hourly cap reached"
+                self.failed_alerted = True
                 changed = True
-
-        if entered and alert is None:
-            # Unhealthy but nothing was attempted (charging/cooldown guard):
-            # the operator still needs to know the charger is down.
+        elif (
+            self.episode_attempts
+            and self._cap_reached(now)
+            and not self.failed_alerted
+        ):
+            # This episode already spent an attempt and the hour's allowance is
+            # gone while the charger is still down. The last attempt stays on
+            # record; only the push is added.
             alert = WATCHDOG_ALERT_FAILED
+            self.failed_alerted = True
+            changed = True
+
+        if self.last_attempt_at is None:
+            # Nothing was ever attempted, so there is no attempt to report: say
+            # what the watchdog did (or why a guard stopped it) instead of
+            # claiming the last attempt's fields.
+            self.last_action = "alert" if action == "alert" else "none"
+            self.last_result = (
+                "charger unreachable over HTTP; not restarted"
+                if action == "alert"
+                else decision["reason"]
+            )
         if alert == WATCHDOG_ALERT_FAILED:
             # One "recovery failed" push per unhealthy episode.
             self.failed_alerted = True
