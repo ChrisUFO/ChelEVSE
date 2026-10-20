@@ -818,6 +818,14 @@ def watchdog_config():
     )
 
 
+def watchdog_config_or_exit():
+    """Watchdog settings for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return watchdog_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
 def attempts_within(now, attempts, window):
     """Attempt timestamps inside the trailing ``window`` seconds.
 
@@ -1819,10 +1827,7 @@ def main():
     except RuntimeError as exc:
         sys.exit(str(exc))
 
-    try:
-        watchdog = watchdog_config()
-    except ValueError as exc:
-        sys.exit(str(exc))
+    watchdog = watchdog_config_or_exit()
 
     def stop(signum, _frame):
         log(f"received signal {signum}, stopping")

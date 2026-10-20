@@ -1017,6 +1017,39 @@ class WatchdogConfigTests(unittest.TestCase):
             self.parse(WATCHDOG_RESTART_WHILE_CHARGING="2")
 
 
+class WatchdogConfigExitTests(unittest.TestCase):
+    """main()'s fail-loud wiring: a bad WATCHDOG_* value stops the bridge."""
+
+    def exit_message(self, **env):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, env, clear=True
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                bridge.watchdog_config_or_exit()
+        return str(raised.exception.code)
+
+    def test_bad_values_exit_naming_the_variable(self):
+        cases = {
+            "WATCHDOG_ENABLED": "maybe",
+            "WATCHDOG_FAILURES": "three",
+            "WATCHDOG_COOLDOWN_SEC": "-1",
+            "WATCHDOG_MAX_PER_HOUR": "0",
+            "WATCHDOG_RESTART_WHILE_CHARGING": "2",
+        }
+        for name, value in cases.items():
+            with self.subTest(variable=name):
+                self.assertIn(name, self.exit_message(**{name: value}))
+
+    def test_a_valid_config_is_returned(self):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, {"WATCHDOG_FAILURES": "5"}, clear=True
+        ):
+            self.assertEqual(
+                bridge.watchdog_config_or_exit(),
+                bridge.WatchdogConfig(True, 5, 600.0, 3, False),
+            )
+
+
 class RecoveryDecisionTests(unittest.TestCase):
     """The pure decision matrix: every guard and every action."""
 
@@ -1363,6 +1396,35 @@ class WatchdogLoopTests(unittest.TestCase):
         self.assertEqual(health["state"], "healthy")
         self.assertEqual(health["reason"], "status polls succeeding")
         self.assertEqual(health["attempts_last_hour"], 1)
+
+    @staticmethod
+    def health_writes(db):
+        return [write for write in db.writes if write[:3] == ("set", "status", "health")]
+
+    def test_a_healthy_charger_writes_health_once(self):
+        db, session, notifier, watchdog = self.run_loop([], polls=4)
+        self.assertEqual(watchdog.state, "healthy")
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][3]["state"], "healthy")
+
+    def test_recovery_writes_health_once_then_only_ticks(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=5,
+        )
+        self.assertEqual(watchdog.state, "healthy")
+        self.assertEqual(
+            [write[3]["state"] for write in self.health_writes(db)],
+            ["unhealthy", "healthy"],
+        )
 
     def test_a_frozen_controller_restarts_the_evse(self):
         db, session, notifier, _ = self.run_loop(

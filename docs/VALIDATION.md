@@ -79,16 +79,16 @@ exists.
 The bridge writes this document on watchdog transitions and restart attempts
 only (not every tick), so a healthy charger shows it once per bridge start:
 
-| Field                | Expected while healthy     | Expected while unhealthy                                                      |
-| -------------------- | -------------------------- | ----------------------------------------------------------------------------- |
-| `state`              | `healthy`                  | `unhealthy`                                                                   |
-| `reason`             | `status polls succeeding`  | the decision's explanation (`cooldown after the last attempt (600s)`, …)      |
-| `http_ok`            | `true`                     | `true` only when the probe answered with a usable `/status` reply             |
-| `controller_ok`      | `true`                     | `false` when `rapi_connected`/`evse_connected` drop or `comm_success` freezes |
-| `last_attempt_at`    | `null` or the last attempt | the last restart attempt (timestamp)                                          |
-| `attempts_last_hour` | `0`                        | restart attempts in the trailing hour (never above `WATCHDOG_MAX_PER_HOUR`)   |
-| `last_action`        | `null` or the last action  | `restart_gateway`, `restart_evse`, `alert` or `none` (a guard blocked it)     |
-| `last_result`        | `null` or the outcome      | `HTTP 200` / `failed (…)`, or the guard's explanation when nothing was tried  |
+| Field                | Expected while healthy                                                                                                               | Expected while unhealthy                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `state`              | `healthy`                                                                                                                            | `unhealthy`                                                                   |
+| `reason`             | `status polls succeeding`                                                                                                            | the decision's explanation (`cooldown after the last attempt (600s)`, …)      |
+| `http_ok`            | `true`                                                                                                                               | `true` only when the probe answered with a usable `/status` reply             |
+| `controller_ok`      | `true`; `false` if `/status` still reports a dropped `rapi_connected`/`evse_connected` or a frozen `comm_success`                    | `false` when `rapi_connected`/`evse_connected` drop or `comm_success` freezes |
+| `last_attempt_at`    | `null` or the last attempt                                                                                                           | the last restart attempt (timestamp)                                          |
+| `attempts_last_hour` | attempts in the trailing hour (`0`–`N`); a recovery inside that hour keeps its count, so it does not mean restarts are happening now | restart attempts in the trailing hour (never above `WATCHDOG_MAX_PER_HOUR`)   |
+| `last_action`        | `null` or the last action                                                                                                            | `restart_gateway`, `restart_evse`, `alert` or `none` (a guard blocked it)     |
+| `last_result`        | `null` or the outcome                                                                                                                | `HTTP 200` / `failed (…)`, or the guard's explanation when nothing was tried  |
 
 A `state: "unhealthy"` that never clears, with `http_ok: false` throughout, means
 the charger is not answering HTTP at all (power, Wi-Fi, or credential problem):
