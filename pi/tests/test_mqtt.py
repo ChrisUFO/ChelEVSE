@@ -148,7 +148,10 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(client.credentials, ("chelevse", "secret"))
         self.assertEqual(client.reconnect_delay, (1, 30))
         self.assertTrue(client.looping)
-        self.assertEqual(client.subscriptions, [("chelevse/#", 0)])
+        self.assertEqual(
+            client.subscriptions,
+            [("chelevse/#", 0), ("openevse/announce/#", 0)],
+        )
         self.assertTrue(self.source.connected)
         self.source.stop()
         self.assertFalse(self.source.connected)
@@ -160,7 +163,9 @@ class MqttSourceTests(MqttSourceBase):
         self.assertFalse(self.source.connected)
         client.connect()
         self.assertTrue(self.source.connected)
-        self.assertEqual(client.subscriptions, [("chelevse/#", 0)] * 2)
+        self.assertEqual(
+            client.subscriptions, [("chelevse/#", 0), ("openevse/announce/#", 0)] * 2
+        )
 
     def test_topic_mapping_reaches_the_status_contract(self):
         client = self.connect()
@@ -267,7 +272,6 @@ class MqttSourceTests(MqttSourceBase):
             "chelevse/rapi/out",
             "chelevse/limit",
             "chelevse/elapsed",  # deprecated; session_elapsed is the source
-            "openevse/announce/3988",
             "othertopic/amp",
         ):
             client.deliver(topic, 42)
@@ -284,12 +288,55 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.source.config_version, 4)
         self.assertEqual(self.source.messages, 0)
 
-    def test_announce_is_not_consumed_but_connection_state_is_exposed(self):
+    def test_the_last_will_marks_the_gateway_gone_and_a_reconnect_clears_it(self):
         client = self.connect()
+        client.ack_subscribe([0])
+        self.assertIsNone(self.source.announced)  # nothing announced yet
+        self.assertIsNone(self.source.last_lwt_at)
+        client.deliver("openevse/announce/3988", '{"state":"connected"}')
+        self.assertTrue(self.source.announced)
+        self.assertIsNone(self.source.last_lwt_at)
         client.deliver("openevse/announce/3988", '{"state":"disconnected"}')
-        self.assertTrue(self.source.connected)  # LWT consumption is PR-3
-        client.drop()
-        self.assertFalse(self.source.connected)
+        self.assertFalse(self.source.announced)
+        self.assertIsNotNone(self.source.last_lwt_at)
+        self.assertEqual(self.source.announce_messages, 2)
+        # Our own link is untouched: the broker is fine, the gateway is not.
+        self.assertTrue(self.source.connected)
+        self.assertTrue(self.source.mqtt_ready)
+        # A reconnect re-announces and clears the Last Will state.
+        client.deliver("openevse/announce/3988", '{"state":"connected"}')
+        self.assertTrue(self.source.announced)
+
+    def test_an_announce_without_a_known_state_is_ignored(self):
+        client = self.connect()
+        for payload in ('{"state":"booting"}', '{"other":1}', "42", "", '{"state":1}'):
+            client.deliver("openevse/announce/3988", payload)
+        self.assertIsNone(self.source.announced)
+        self.assertEqual(self.source.announce_messages, 0)
+        self.assertEqual(self.source.messages, 0)
+
+    def test_the_announce_topic_is_configurable(self):
+        factory = FakeMqttFactory()
+        source = MqttSource(
+            "192.168.0.224",
+            topic="chelevse",
+            announce_topic="home/evse/status/#",
+            client_factory=factory,
+            log=self.logs.append,
+        )
+        self.addCleanup(source.stop)
+        source.start()
+        client = factory.client
+        client.connect()
+        self.assertEqual(
+            client.subscriptions,
+            [("chelevse/#", 0), ("home/evse/status/#", 0)],
+        )
+        client.deliver("home/evse/status/1", '{"state":"disconnected"}')
+        self.assertFalse(source.announced)
+        # A topic outside the configured filter is not an announce.
+        client.deliver("openevse/announce/3988", '{"state":"connected"}')
+        self.assertFalse(source.announced)
 
 
 class MqttSourceLoggingTests(MqttSourceBase):
@@ -327,6 +374,29 @@ class MqttSourceLoggingTests(MqttSourceBase):
         self.assertTrue(any("mqtt disconnected" in line for line in self.logs))
         self.assertTrue(any("Connection lost" in line for line in self.logs))
 
+    def test_a_denied_announce_subscription_keeps_the_status_source(self):
+        client = self.connect()
+        # Mid 1 is the status subscription, mid 2 the announce one.
+        client.ack_subscribe([0], mid=1)
+        client.ack_subscribe([_ReasonCode(128, "Unspecified error")], mid=2)
+        self.assertTrue(self.source.subscribed)
+        self.assertFalse(self.source.announce_subscribed)
+        self.assertTrue(
+            any("announce subscription denied" in line for line in self.logs)
+        )
+        self.assertNotIn("mqtt subscription denied", " ".join(self.logs))
+
+    def test_a_granted_announce_subscription_is_logged_once(self):
+        client = self.connect()
+        client.ack_subscribe([0], mid=1)
+        client.ack_subscribe([0], mid=2)
+        client.ack_subscribe([0], mid=2)  # a duplicate grant does not re-log
+        self.assertTrue(self.source.announce_subscribed)
+        self.assertEqual(
+            [line for line in self.logs if "announce subscribed" in line],
+            ["mqtt announce subscribed (openevse/announce/#)"],
+        )
+
 
 class MqttConfigTests(unittest.TestCase):
     def parse(self, **env):
@@ -342,6 +412,7 @@ class MqttConfigTests(unittest.TestCase):
         self.assertEqual(config.port, 1883)
         self.assertEqual(config.reconcile_sec, 60)
         self.assertEqual(config.client_id, "chelevse-bridge")
+        self.assertEqual(config.announce_topic, "openevse/announce/#")
         self.assertEqual(config, bridge.MqttConfig())
 
     def test_overrides(self):
@@ -354,6 +425,7 @@ class MqttConfigTests(unittest.TestCase):
             MQTT_TOPIC="/chelevse/",
             MQTT_RECONCILE_SEC="120",
             MQTT_CLIENT_ID="bridge-1",
+            MQTT_ANNOUNCE_TOPIC="home/evse/status/#",
         )
         self.assertTrue(config.enabled)
         self.assertEqual(config.host, "192.168.0.224")
@@ -363,6 +435,7 @@ class MqttConfigTests(unittest.TestCase):
         self.assertEqual(config.topic, "chelevse")
         self.assertEqual(config.reconcile_sec, 120)
         self.assertEqual(config.client_id, "bridge-1")
+        self.assertEqual(config.announce_topic, "home/evse/status/#")
 
     def test_enabled_without_a_host_fails_loudly(self):
         with self.assertRaises(ValueError) as raised:
@@ -1141,9 +1214,9 @@ class StatusLoopMqttTests(unittest.TestCase):
         writes = []
         original = bridge.write_transport_health
 
-        def spy(db, source, connected):
+        def spy(db, source, connected, announced=None, last_lwt_at=None):
             writes.append((source, connected))
-            original(db, source, connected)
+            original(db, source, connected, announced, last_lwt_at)
 
         def on_wait():
             if client.connected:
@@ -1152,6 +1225,47 @@ class StatusLoopMqttTests(unittest.TestCase):
         with mock.patch.object(bridge, "write_transport_health", spy):
             self.run_loop(session, polls=3, on_wait=on_wait)
         self.assertEqual(writes, [("mqtt", True), ("http", False)])
+
+    def test_an_lwt_drop_falls_back_to_http_and_a_reconnect_restores_mqtt(self):
+        client = self.connect()
+        session = FakeSession([FakeResponse(200, status_payload())] * 6)
+        waits = {"n": 0}
+
+        def on_wait():
+            waits["n"] += 1
+            if waits["n"] == 2:
+                client.deliver(
+                    "openevse/announce/3988", '{"state":"disconnected"}'
+                )
+            elif waits["n"] == 4:
+                client.deliver("openevse/announce/3988", '{"state":"connected"}')
+
+        self.run_loop(session, polls=6, on_wait=on_wait)
+        health = self.db.data["status"]["health"]
+        self.assertEqual(health["source"], "mqtt")
+        self.assertTrue(health["mqtt_connected"])
+        self.assertTrue(health["mqtt_announced"])
+        # The Last Will was written while it held: HTTP source, link fact false.
+        self.assertTrue(
+            any(
+                write[3].get("source") == "http"
+                and write[3].get("mqtt_connected") is False
+                and write[3].get("mqtt_announced") is False
+                for write in self.db.writes
+                if write[:3] == ("set", "status", "health")
+            )
+        )
+        self.assertIsNotNone(health["mqtt_last_lwt_at"])
+
+    def test_an_lwt_with_a_denied_announce_grant_is_unknown_not_disconnected(self):
+        # No announce message ever arrives: the watchdog must not invent an
+        # outage, so the source stays MQTT.
+        self.connect()
+        session = FakeSession([FakeResponse(200, status_payload())] * 2)
+        self.run_loop(session, polls=1)
+        health = self.db.data["status"]["health"]
+        self.assertEqual(health["source"], "mqtt")
+        self.assertIsNone(health["mqtt_announced"])
 
     def test_http_failure_while_mqtt_reports_is_not_an_outage(self):
         client = self.connect()
@@ -1454,6 +1568,7 @@ class _StubMqtt:
         self.subscribed = True
         self.subscription = "chelevse/#"
         self.config_version = 1
+        self.announced = None
 
 
 class ConfigLoopMqttTests(unittest.TestCase):
@@ -1624,6 +1739,22 @@ class ConfigLoopMqttTests(unittest.TestCase):
             ["config source: http (mqtt connected, chelevse/# not subscribed)"],
         )
 
+    def test_a_last_will_keeps_the_config_poll(self):
+        # The charger announced `disconnected`: no config_version will arrive
+        # while it is away, so the HTTP poll must resume instead of waiting on
+        # an event that cannot come.
+        source = _StubMqtt()
+        source.announced = False
+        logs = []
+        session = self.Session()
+        self.start(session, source=source, logs=logs, interval=0.01)
+        wait_for(lambda: session.calls >= 2)
+        wait_for(self.synced)
+        self.assertEqual(
+            [line for line in logs if line.startswith("config source:")],
+            ["config source: http (mqtt connected, gateway announced disconnected)"],
+        )
+
     def test_a_granted_but_silent_subscription_bootstraps_over_http(self):
         # Connected and subscribed, but no config_version has ever been
         # delivered (topic mismatch, charger-side MQTT off, no retained
@@ -1685,6 +1816,69 @@ class HealthTests(unittest.TestCase):
         with mock.patch.object(bridge, "log") as fake_log:
             bridge.write_transport_health(db, "mqtt", True)
         self.assertTrue(fake_log.called)
+
+    def test_the_last_will_fields_merge_with_the_watchdog_state(self):
+        db = FakeDB()
+        source = mock.Mock()
+        source.connected = True
+        source.announced = False
+        source.last_lwt_at = "2026-10-20T12:00:00Z"
+        fields = bridge.mqtt_health_fields(source)
+        self.assertEqual(
+            fields,
+            {
+                "mqtt_connected": False,
+                "mqtt_announced": False,
+                "mqtt_last_lwt_at": "2026-10-20T12:00:00Z",
+            },
+        )
+        bridge.write_transport_health(
+            db, "http", False, source.announced, source.last_lwt_at
+        )
+        watchdog = bridge.Watchdog(
+            db,
+            "http://charger",
+            None,
+            bridge.ChargerTransport(FakeSession()),
+            _RecordingNotifier(),
+            bridge.WatchdogConfig(),
+            mqtt=source,
+        )
+        watchdog.record_success(status_payload())
+        health = db.data["status"]["health"]
+        self.assertEqual(health["state"], "healthy")
+        self.assertEqual(health["source"], "http")
+        self.assertFalse(health["mqtt_connected"])
+        self.assertFalse(health["mqtt_announced"])
+        self.assertEqual(health["mqtt_last_lwt_at"], "2026-10-20T12:00:00Z")
+
+    def test_the_watchdog_refreshes_the_last_will_fields_it_writes(self):
+        db = FakeDB()
+        source = mock.Mock()
+        source.connected = True
+        source.announced = True
+        source.last_lwt_at = None
+        watchdog = bridge.Watchdog(
+            db,
+            "http://charger",
+            None,
+            bridge.ChargerTransport(FakeSession()),
+            _RecordingNotifier(),
+            bridge.WatchdogConfig(),
+            mqtt=source,
+        )
+        watchdog.record_success(status_payload())
+        health = db.data["status"]["health"]
+        self.assertTrue(health["mqtt_connected"])
+        self.assertTrue(health["mqtt_announced"])
+        # A Last Will that fires later replaces the transport fields without
+        # erasing the watchdog's.
+        source.announced = False
+        watchdog.write_health(False, True)
+        health = db.data["status"]["health"]
+        self.assertEqual(health["state"], "healthy")
+        self.assertFalse(health["mqtt_connected"])
+        self.assertFalse(health["mqtt_announced"])
 
 
 class RunWiringTests(unittest.TestCase):

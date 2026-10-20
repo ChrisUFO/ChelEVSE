@@ -238,6 +238,7 @@ class FakeMqttClient:
         self.client_id = client_id
         self.connected = False
         self.subscriptions = []
+        self.subscribe_mid = 0
         self.credentials = None
         self.reconnect_delay = None
         self.connect_args = None
@@ -269,7 +270,8 @@ class FakeMqttClient:
 
     def subscribe(self, topic, qos=0):
         self.subscriptions.append((topic, qos))
-        return (0, 1)
+        self.subscribe_mid += 1
+        return (0, self.subscribe_mid)
 
     def publish(self, topic, payload=None, qos=0, retain=False):
         self.published.append((topic, payload, qos))
@@ -301,9 +303,10 @@ class FakeMqttClient:
         if self.on_connect_fail is not None:
             self.on_connect_fail(self, None)
 
-    def ack_subscribe(self, reason_codes):
+    def ack_subscribe(self, reason_codes, mid=1):
+        """Grant/deny one SUBACK. Default mid 1 is the status subscription."""
         if self.on_subscribe is not None:
-            self.on_subscribe(self, None, 1, reason_codes, None)
+            self.on_subscribe(self, None, mid, reason_codes, None)
 
     def deliver(self, topic, payload):
         if self.on_message is not None:

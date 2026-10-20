@@ -1121,6 +1121,7 @@ class RecoveryDecisionTests(unittest.TestCase):
             "cooldown": 600,
             "restart_while_charging": False,
             "enabled": True,
+            "mqtt_ready": False,
         }
         inputs.update(overrides)
         return bridge.recovery_decision(**inputs)
@@ -1134,16 +1135,48 @@ class RecoveryDecisionTests(unittest.TestCase):
     def test_healthy_controller_behind_failing_http_restarts_the_gateway(self):
         decision = self.decide()
         self.assertEqual(decision["action"], "restart_gateway")
+        self.assertEqual(decision["transport"], "http")
         self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART)
 
     def test_unhealthy_controller_restarts_the_evse(self):
         decision = self.decide(controller_ok=False)
         self.assertEqual(decision["action"], "restart_evse")
+        self.assertEqual(decision["transport"], "http")
         self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART_EVSE)
 
-    def test_http_dead_alerts_and_never_restarts(self):
+    def test_http_dead_without_mqtt_alerts_and_never_restarts(self):
         decision = self.decide(http_reachable=False)
         self.assertEqual(decision["action"], "alert")
+        self.assertEqual(decision["transport"], None)
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_FAILED)
+
+    def test_http_dead_with_mqtt_ready_restarts_the_gateway_over_mqtt(self):
+        decision = self.decide(http_reachable=False, mqtt_ready=True)
+        self.assertEqual(decision["action"], "restart_gateway")
+        self.assertEqual(decision["transport"], "mqtt")
+        self.assertIn("MQTT", decision["reason"])
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART)
+
+    def test_http_dead_with_mqtt_ready_and_a_bad_controller_restarts_the_evse(self):
+        decision = self.decide(
+            http_reachable=False, mqtt_ready=True, controller_ok=False
+        )
+        self.assertEqual(decision["action"], "restart_evse")
+        self.assertEqual(decision["transport"], "mqtt")
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART_EVSE)
+
+    def test_mqtt_ready_does_not_change_the_http_transport(self):
+        # A ready link is only the fallback: an answering HTTP server keeps the
+        # restart on HTTP.
+        decision = self.decide(mqtt_ready=True)
+        self.assertEqual(decision["action"], "restart_gateway")
+        self.assertEqual(decision["transport"], "http")
+
+    def test_both_transports_down_alerts_only(self):
+        decision = self.decide(http_reachable=False, mqtt_ready=False)
+        self.assertEqual(decision["action"], "alert")
+        self.assertEqual(decision["reason"], "charger unreachable over HTTP and MQTT")
+        self.assertIsNone(decision["transport"])
         self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_FAILED)
 
     def test_cooldown_blocks_a_restart(self):
@@ -1234,6 +1267,52 @@ class RecoveryDecisionTests(unittest.TestCase):
         decision = self.decide(enabled=False, http_reachable=False)
         self.assertEqual(decision["action"], "none")
         self.assertIn("disabled", decision["reason"])
+
+    def test_the_mqtt_path_is_below_threshold_too(self):
+        decision = self.decide(
+            http_reachable=False, mqtt_ready=True, consecutive_failures=2
+        )
+        self.assertEqual(decision["action"], "none")
+
+    def test_guards_precede_the_mqtt_transport(self):
+        """Every guard blocks the MQTT restart exactly as it blocks HTTP."""
+        cap_spent = (self.NOW - timedelta(minutes=5),) * 3
+        recent_attempt = self.NOW - timedelta(seconds=60)
+        cases = (
+            (
+                "disabled",
+                {"enabled": False},
+                None,
+                "disabled",
+            ),
+            (
+                "charging",
+                {"charging": True},
+                bridge.WATCHDOG_ALERT_BLOCKED_CHARGING,
+                "charging in progress",
+            ),
+            (
+                "cap",
+                {"attempts_in_window": cap_spent},
+                bridge.WATCHDOG_ALERT_BLOCKED_CAP,
+                "hourly cap",
+            ),
+            (
+                "cooldown",
+                {"last_attempt_at": recent_attempt},
+                bridge.WATCHDOG_ALERT_BLOCKED_COOLDOWN,
+                "cooldown",
+            ),
+        )
+        for guard, overrides, alert, reason in cases:
+            with self.subTest(guard=guard):
+                decision = self.decide(
+                    http_reachable=False, mqtt_ready=True, **overrides
+                )
+                self.assertEqual(decision["action"], "none")
+                self.assertIsNone(decision["transport"])
+                self.assertIn(reason, decision["reason"])
+                self.assertEqual(decision["alert"], alert)
 
     def test_attempts_within_keeps_the_closed_window(self):
         edge = self.NOW - timedelta(seconds=bridge.WATCHDOG_WINDOW)
@@ -1365,13 +1444,35 @@ class _RecordingNotifier:
         self.bodies.append(body)
 
 
+class _FakeMqtt:
+    """The MQTT source surface the watchdog reads, with a publish recorder."""
+
+    def __init__(self, connected=True, subscribed=True, announced=None):
+        self.connected = connected
+        self.subscribed = subscribed
+        self.announced = announced
+        self.last_lwt_at = None
+        self.subscription = "chelevse/#"
+        self.published = []
+        self.refuse = None
+
+    @property
+    def mqtt_ready(self):
+        return self.connected and self.subscribed
+
+    def publish(self, topic, payload, qos=0):
+        if self.refuse is not None:
+            raise bridge.MqttPublishError(self.refuse)
+        self.published.append((topic, payload, qos))
+
+
 class WatchdogLoopTests(unittest.TestCase):
     """status_loop + Watchdog against a scripted transport and clock."""
 
     START = datetime(2026, 10, 20, 12, tzinfo=UTC)
     OUTAGE = requests.ConnectionError("charger unreachable")
 
-    def run_loop(self, script, polls, config=None, data=None, step=10):
+    def run_loop(self, script, polls, config=None, data=None, step=10, mqtt=None):
         db = FakeDB(data)
         clock = _Clock(self.START)
         session = _WatchdogSession(script)
@@ -1386,6 +1487,7 @@ class WatchdogLoopTests(unittest.TestCase):
             notifier,
             config or bridge.WatchdogConfig(),
             clock,
+            mqtt,
         )
         stop = _StopAfter(polls, on_wait=lambda: clock.advance(step))
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
@@ -1833,6 +1935,169 @@ class WatchdogLoopTests(unittest.TestCase):
         # returns online while status/health stays absent.
         self.assertTrue(db.data["status"]["current"]["charger_online"])
         self.assertNotIn("health", db.data["status"])
+
+    # -- MQTT restart fallback (issue #45) --------------------------------
+
+    def test_http_dead_with_mqtt_ready_restarts_once_over_mqtt(self):
+        mqtt = _FakeMqtt()
+        db, session, notifier, watchdog = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            mqtt=mqtt,
+        )
+        # No HTTP restart at all: the MQTT publish is the only attempt.
+        self.assertEqual(self.posts(session), [])
+        self.assertEqual(
+            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
+        )
+        self.assertEqual(
+            notifier.bodies,
+            ["Charger offline", bridge.WATCHDOG_ALERT_RESTART],
+        )
+        health = self.health(db)
+        self.assertEqual(health["state"], "unhealthy")
+        self.assertEqual(health["last_action"], "restart_gateway")
+        self.assertEqual(health["last_transport"], "mqtt")
+        self.assertEqual(health["last_result"], "MQTT published")
+        self.assertEqual(health["last_attempt_at"], self.START + timedelta(seconds=20))
+        self.assertEqual(health["attempts_last_hour"], 1)
+        self.assertEqual(watchdog.last_transport, "mqtt")
+
+    def test_an_lwt_disconnect_makes_the_outage_alert_only(self):
+        mqtt = _FakeMqtt(announced=False)
+        db, session, notifier, watchdog = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            mqtt=mqtt,
+        )
+        self.assertEqual(mqtt.published, [])
+        self.assertEqual(self.posts(session), [])
+        self.assertEqual(
+            notifier.bodies,
+            ["Charger offline", bridge.WATCHDOG_ALERT_FAILED],
+        )
+        health = self.health(db)
+        self.assertEqual(health["last_action"], "alert")
+        self.assertIsNone(health["last_transport"])
+        self.assertIsNone(health["last_attempt_at"])
+        self.assertEqual(health["attempts_last_hour"], 0)
+        self.assertFalse(health["mqtt_connected"])
+        self.assertFalse(health["mqtt_announced"])
+
+    def test_an_announced_connected_gateway_keeps_the_mqtt_path(self):
+        mqtt = _FakeMqtt(announced=True)
+        db, session, notifier, _ = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            mqtt=mqtt,
+        )
+        self.assertEqual(
+            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
+        )
+        self.assertEqual(notifier.bodies[-1], bridge.WATCHDOG_ALERT_RESTART)
+
+    def test_the_charging_guard_blocks_an_mqtt_restart(self):
+        db, session, notifier, _ = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            data={"status": {"current": {"state": 3}}},
+            mqtt=_FakeMqtt(),
+        )
+        self.assertEqual(self.posts(session), [])
+        health = self.health(db)
+        self.assertIn("charging in progress", health["reason"])
+        self.assertIsNone(health["last_transport"])
+        self.assertEqual(
+            notifier.bodies, ["Charger offline", bridge.WATCHDOG_ALERT_BLOCKED_CHARGING]
+        )
+
+    def test_the_hourly_cap_bounds_mqtt_restarts(self):
+        mqtt = _FakeMqtt()
+        db, session, notifier, _ = self.run_loop(
+            [self.OUTAGE] * 10,
+            polls=4,
+            config=bridge.WatchdogConfig(cooldown=0, max_per_hour=1),
+            mqtt=mqtt,
+        )
+        self.assertEqual(
+            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
+        )
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+                bridge.WATCHDOG_ALERT_FAILED,
+            ],
+        )
+        health = self.health(db)
+        self.assertEqual(health["attempts_last_hour"], 1)
+        self.assertIn("hourly cap", health["reason"])
+
+    def test_a_controller_fault_restarts_the_evse_over_mqtt(self):
+        mqtt = _FakeMqtt()
+        db, session, notifier, _ = self.run_loop(
+            [
+                FakeResponse(200, _status_payload(rapi_connected=False)),
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+            ],
+            polls=4,
+            mqtt=mqtt,
+        )
+        self.assertEqual(self.posts(session), [])
+        self.assertEqual(mqtt.published, [("restart", '{"device": "evse"}', 0)])
+        self.assertEqual(notifier.bodies[-1], bridge.WATCHDOG_ALERT_RESTART_EVSE)
+        health = self.health(db)
+        self.assertFalse(health["controller_ok"])
+        self.assertEqual(health["last_action"], "restart_evse")
+        self.assertEqual(health["last_transport"], "mqtt")
+
+    def test_a_refused_publish_is_recorded_and_counts(self):
+        mqtt = _FakeMqtt()
+        mqtt.refuse = "publish restart rejected (rc 4)"
+        db, session, notifier, watchdog = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            mqtt=mqtt,
+        )
+        self.assertEqual(self.posts(session), [])
+        health = self.health(db)
+        self.assertTrue(health["last_result"].startswith("failed ("))
+        self.assertEqual(health["last_transport"], "mqtt")
+        self.assertEqual(health["attempts_last_hour"], 1)
+        # The failed publish still spends the cooldown.
+        self.assertEqual(watchdog.last_attempt_at, self.START + timedelta(seconds=20))
+
+    def test_recovery_after_an_mqtt_restart_keeps_the_transport_on_record(self):
+        mqtt = _FakeMqtt()
+        db, session, notifier, _ = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=4,
+            mqtt=mqtt,
+        )
+        # The restart is proved by the next successful probe (the reconcile
+        # poll), not by the publish.
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+                bridge.WATCHDOG_ALERT_RECOVERED,
+            ],
+        )
+        health = self.health(db)
+        self.assertEqual(health["state"], "healthy")
+        self.assertEqual(health["last_action"], "restart_gateway")
+        self.assertEqual(health["last_transport"], "mqtt")
 
 
 if __name__ == "__main__":

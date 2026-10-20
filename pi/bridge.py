@@ -32,7 +32,7 @@ import requests
 import firebase_admin
 from firebase_admin import credentials, exceptions, firestore, messaging
 
-from mqtt_source import MqttPublishError, MqttSource
+from mqtt_source import DEFAULT_ANNOUNCE_TOPIC, MqttPublishError, MqttSource
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
@@ -1266,7 +1266,31 @@ class StatusSink:
             self.notifier.enqueue(body)
 
 
-def write_transport_health(db, source, mqtt_connected):
+def mqtt_health_fields(mqtt):
+    """The ``status/health`` transport facts for the current MQTT state.
+
+    ``mqtt_connected`` is the usable path to the charger: our broker link is up
+    **and** the gateway has not announced ``disconnected``. The Last Will is
+    broker-side evidence that the charger is gone even while our own link stays
+    healthy, so it must clear the field. ``mqtt_announced`` keeps the raw
+    announce view (``None`` until the first announcement) and
+    ``mqtt_last_lwt_at`` when the Last Will last fired.
+
+    The subscription grant is deliberately not part of ``mqtt_connected``: a
+    connected broker with a denied subscription is the degraded case where
+    ``source`` stays ``http`` while the link is up.
+    """
+    announced = mqtt.announced
+    return {
+        "mqtt_connected": mqtt.connected and announced is not False,
+        "mqtt_announced": announced,
+        "mqtt_last_lwt_at": mqtt.last_lwt_at,
+    }
+
+
+def write_transport_health(
+    db, source, mqtt_connected, announced=None, last_lwt_at=None
+):
     """Publish the active status source into status/health (merge semantics).
 
     Merged, never replaced: the watchdog owns the rest of the document and its
@@ -1277,6 +1301,8 @@ def write_transport_health(db, source, mqtt_connected):
             {
                 "source": source,
                 "mqtt_connected": mqtt_connected,
+                "mqtt_announced": announced,
+                "mqtt_last_lwt_at": last_lwt_at,
                 "updated_at": firestore.SERVER_TIMESTAMP,
             },
             merge=True,
@@ -1452,6 +1478,7 @@ class MqttConfig(NamedTuple):
     topic: str = DEFAULT_MQTT_TOPIC
     reconcile_sec: float = MQTT_RECONCILE_SEC
     client_id: str = DEFAULT_MQTT_CLIENT_ID
+    announce_topic: str = DEFAULT_ANNOUNCE_TOPIC
 
 
 def mqtt_config():
@@ -1462,6 +1489,9 @@ def mqtt_config():
     reconcile_sec = _env_finite("MQTT_RECONCILE_SEC", MQTT_RECONCILE_SEC, float)
     topic = (cfg("MQTT_TOPIC") or DEFAULT_MQTT_TOPIC).strip().strip("/")
     client_id = (cfg("MQTT_CLIENT_ID") or "").strip() or DEFAULT_MQTT_CLIENT_ID
+    announce_topic = (
+        cfg("MQTT_ANNOUNCE_TOPIC") or ""
+    ).strip() or DEFAULT_ANNOUNCE_TOPIC
     if not 1 <= port <= 65535:
         raise ValueError(f"MQTT_PORT must be 1-65535, got {port}.")
     if reconcile_sec <= 0:
@@ -1479,6 +1509,7 @@ def mqtt_config():
         topic=topic,
         reconcile_sec=reconcile_sec,
         client_id=client_id,
+        announce_topic=announce_topic,
     )
 
 
@@ -1499,9 +1530,13 @@ def attempts_within(now, attempts, window):
     return [at for at in attempts if (now - at).total_seconds() <= window]
 
 
-def _decision(action, reason, alert=None):
-    """One watchdog decision; ``alert`` is the push body when one is due."""
-    return {"action": action, "reason": reason, "alert": alert}
+def _decision(action, reason, alert=None, transport=None):
+    """One watchdog decision; ``alert`` is the push body when one is due.
+
+    ``transport`` names the path a restart action used (``"http"``/``"mqtt"``);
+    it is ``None`` for an alert or a guard-blocked ``none``.
+    """
+    return {"action": action, "reason": reason, "alert": alert, "transport": transport}
 
 
 def recovery_decision(
@@ -1519,6 +1554,7 @@ def recovery_decision(
     cooldown,
     restart_while_charging,
     enabled,
+    mqtt_ready=False,
 ):
     """Decide what the watchdog does about the current failure streak.
 
@@ -1528,11 +1564,18 @@ def recovery_decision(
     seconds are ignored here, so the caller can keep the full history and let
     the window expire it.
 
-    Returns ``{action, reason, alert}``: action is ``none``, ``alert``,
-    ``restart_gateway`` or ``restart_evse``, and ``alert`` is the body the
-    caller should push when it enters an unhealthy episode (it owns edge
-    detection). A guard-blocked ``none`` carries a body naming the guard, so a
-    blocked episode never reads as a failed restart.
+    Returns ``{action, reason, alert, transport}``: action is ``none``,
+    ``alert``, ``restart_gateway`` or ``restart_evse``, ``alert`` is the body
+    the caller should push when it enters an unhealthy episode (it owns edge
+    detection), and ``transport`` is the path a restart would use. A
+    guard-blocked ``none`` carries a body naming the guard, so a blocked episode
+    never reads as a failed restart.
+
+    Reachability is "at least one transport can restart": HTTP answering (the
+    normal path) or, when it is not, a ready MQTT link — the firmware accepts
+    ``restart`` over MQTT, so a wedged HTTP server no longer means hands-on
+    recovery. Both down is alert-only. The transport is chosen only for a
+    restart action; every guard is transport-independent.
     """
     if not enabled:
         return _decision("none", "watchdog disabled")
@@ -1540,13 +1583,13 @@ def recovery_decision(
         return _decision(
             "none", f"{consecutive_failures}/{threshold} consecutive failures"
         )
-    if not http_reachable:
-        # POST /restart uses the same HTTP endpoint, so a gateway that answers
-        # nothing at all (mains off, Wi-Fi dropped) cannot be recovered
-        # remotely; a human has to power-cycle it.
+    if not http_reachable and not mqtt_ready:
+        # Neither transport can carry a restart: a gateway that answers nothing
+        # and has dropped off the broker (or whose Last Will fired) needs a
+        # human to power-cycle it.
         return _decision(
             "alert",
-            "charger unreachable over HTTP; cannot restart remotely",
+            "charger unreachable over HTTP and MQTT",
             WATCHDOG_ALERT_FAILED,
         )
     if charging and not restart_while_charging:
@@ -1569,15 +1612,22 @@ def recovery_decision(
                 f"cooldown after the last attempt ({cooldown:g}s)",
                 WATCHDOG_ALERT_BLOCKED_COOLDOWN,
             )
+    transport = "http" if http_reachable else "mqtt"
     if controller_ok:
-        return _decision(
-            "restart_gateway",
-            "HTTP answered but the gateway was failing",
-            WATCHDOG_ALERT_RESTART,
+        reason = (
+            "HTTP answered but the gateway was failing"
+            if http_reachable
+            else "HTTP unreachable; restarting the gateway over MQTT"
         )
-    return _decision(
-        "restart_evse", "controller is not answering", WATCHDOG_ALERT_RESTART_EVSE
+        return _decision(
+            "restart_gateway", reason, WATCHDOG_ALERT_RESTART, transport
+        )
+    reason = (
+        "controller is not answering"
+        if http_reachable
+        else "HTTP unreachable; controller was not answering; restarting it over MQTT"
     )
+    return _decision("restart_evse", reason, WATCHDOG_ALERT_RESTART_EVSE, transport)
 
 
 def _counter_delta(before, after):
@@ -1623,9 +1673,17 @@ class Watchdog:
     only feeds it, performs the restart, publishes ``status/health`` and raises
     the edge notifications (one per unhealthy episode, one on recovery, one when
     a restart did not bring the charger back or the allowance is spent).
+
+    ``mqtt`` (an ``MqttSource``) adds the MQTT restart path: a ready link lets a
+    restart go out when HTTP cannot answer, and the gateway's Last Will counts
+    as its being unavailable even while our broker link stays up. The HTTP
+    probe is still the only source of controller classification — ``comm_*``
+    and ``rapi_connected`` are not published over MQTT.
     """
 
-    def __init__(self, db, base, auth, transport, notifier, config, clock=None):
+    def __init__(
+        self, db, base, auth, transport, notifier, config, clock=None, mqtt=None
+    ):
         self.db = db
         self.base = base
         self.auth = auth
@@ -1633,6 +1691,7 @@ class Watchdog:
         self.notifier = notifier
         self.config = config
         self.clock = clock or _utcnow
+        self.mqtt = mqtt
         self.health_doc = db.collection("status").document("health")
         self.failures = 0
         self.samples = []
@@ -1641,6 +1700,7 @@ class Watchdog:
         self.state = None  # None (no observation yet) | "healthy" | "unhealthy"
         self.reason = "starting"
         self.last_action = None
+        self.last_transport = None
         self.last_result = None
         self.last_decision = None
         self.failed_alerted = False
@@ -1679,7 +1739,19 @@ class Watchdog:
             return False, None
         return True, payload
 
-    def _decide(self, now, charging, http_ok, controller_ok):
+    def _mqtt_ready(self):
+        """True when an MQTT restart would reach the charger.
+
+        The link and its subscription must be granted, and the gateway must not
+        have announced ``disconnected``: a Last Will means the charger is gone
+        (or rebooting) even though our own broker connection is healthy.
+        """
+        mqtt = self.mqtt
+        if mqtt is None:
+            return False
+        return bool(mqtt.mqtt_ready and mqtt.announced is not False)
+
+    def _decide(self, now, charging, http_ok, controller_ok, mqtt_ready):
         return recovery_decision(
             now=now,
             consecutive_failures=self.failures,
@@ -1694,6 +1766,7 @@ class Watchdog:
             cooldown=self.config.cooldown,
             restart_while_charging=self.config.restart_while_charging,
             enabled=self.config.enabled,
+            mqtt_ready=mqtt_ready,
         )
 
     def _restart(self, device):
@@ -1710,20 +1783,44 @@ class Watchdog:
             return f"failed ({exc})"
         return f"HTTP {resp.status_code}"
 
-    def _attempt(self, action, now, http_ok, controller_ok, charging):
+    def _restart_mqtt(self, device):
+        """Publish ``<base>/restart`` for one device; return a short result.
+
+        Fire-and-forget at QoS 0 (the issue's default): the firmware restarts on
+        receipt and drops the connection, so a grant would not survive to prove
+        anything. The caller waits for the next successful probe before clearing
+        health, which is the real proof.
+        """
+        try:
+            self.mqtt.publish("restart", json.dumps({"device": device}), qos=0)
+        except MqttPublishError as exc:
+            return f"failed ({exc})"
+        return "MQTT published"
+
+    def _attempt(self, action, now, http_ok, controller_ok, charging, transport):
         """Send one restart and record its outcome."""
         device = "evse" if action == "restart_evse" else "gateway"
-        log(
-            f"watchdog: {action} -> POST /restart device={device} "
-            f"(failures={self.failures} http_ok={http_ok} "
-            f"controller_ok={controller_ok} charging={charging})"
+        inputs = (
+            f"failures={self.failures} http_ok={http_ok} "
+            f"controller_ok={controller_ok} charging={charging}"
         )
-        self.last_result = self._restart(device)
+        if transport == "mqtt":
+            log(
+                f"watchdog: {action} -> mqtt restart device={device} "
+                f"({inputs} mqtt_ready=True)"
+            )
+            self.last_result = self._restart_mqtt(device)
+        else:
+            log(
+                f"watchdog: {action} -> POST /restart device={device} ({inputs})"
+            )
+            self.last_result = self._restart(device)
         self.last_attempt_at = now
         self.attempts.append(now)
         self.last_action = action
+        self.last_transport = transport
         self.episode_attempts += 1
-        log(f"watchdog: restart device={device} -> {self.last_result}")
+        log(f"watchdog: restart device={device} via {transport} -> {self.last_result}")
 
     def _cap_reached(self, now):
         recent = attempts_within(now, self.attempts, WATCHDOG_WINDOW)
@@ -1739,9 +1836,10 @@ class Watchdog:
         """Publish status/health; a failed write is a log line, not a crash.
 
         Called on every state transition and every attempt, not on every tick,
-        so a healthy bridge writes it once. Merged so the transport fields
-        (``source``/``mqtt_connected``) survive, and so a transport write never
-        erases the watchdog's state.
+        so a healthy bridge writes it once. Merged so neither writer erases the
+        other's fields: the transport fields (``source``, ``mqtt_connected``,
+        the Last Will pair) are refreshed from the live source here, so a
+        watchdog write cannot leave a stale announcement behind.
         """
         now = self.clock()
         document = {
@@ -1754,9 +1852,12 @@ class Watchdog:
                 attempts_within(now, self.attempts, WATCHDOG_WINDOW)
             ),
             "last_action": self.last_action,
+            "last_transport": self.last_transport,
             "last_result": self.last_result,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
+        if self.mqtt is not None:
+            document.update(mqtt_health_fields(self.mqtt))
         try:
             self.health_doc.set(document, merge=True)
         except Exception as exc:
@@ -1797,7 +1898,8 @@ class Watchdog:
         if payload is not None:
             self._remember(payload)
         controller_ok = self._controller_ok()
-        decision = self._decide(now, charging, http_ok, controller_ok)
+        mqtt_ready = self._mqtt_ready()
+        decision = self._decide(now, charging, http_ok, controller_ok, mqtt_ready)
         action = decision["action"]
         entered = self.state != "unhealthy"
         if entered:
@@ -1807,7 +1909,7 @@ class Watchdog:
             log(
                 f"watchdog: unhealthy after {self.failures} failed polls "
                 f"(http_ok={http_ok} controller_ok={controller_ok} "
-                f"charging={charging})"
+                f"charging={charging} mqtt_ready={mqtt_ready})"
             )
         self.reason = decision["reason"]
         self._log_decision(decision)
@@ -1815,7 +1917,9 @@ class Watchdog:
         alert = decision["alert"] if entered else None
         changed = entered
         if action in WATCHDOG_RESTART_ACTIONS:
-            self._attempt(action, now, http_ok, controller_ok, charging)
+            self._attempt(
+                action, now, http_ok, controller_ok, charging, decision["transport"]
+            )
             changed = True
         elif action == "alert":
             if self.episode_attempts and not self.failed_alerted:
@@ -1840,10 +1944,11 @@ class Watchdog:
         if self.last_attempt_at is None:
             # Nothing was ever attempted, so there is no attempt to report: say
             # what the watchdog did (or why a guard stopped it) instead of
-            # claiming the last attempt's fields.
+            # claiming the last attempt's fields. It never ran on a transport
+            # either, so last_transport stays null.
             self.last_action = "alert" if action == "alert" else "none"
             self.last_result = (
-                "charger unreachable over HTTP; not restarted"
+                f"{decision['reason']}; not restarted"
                 if action == "alert"
                 else decision["reason"]
             )
@@ -1894,32 +1999,50 @@ def status_loop(
     reconcile_failures = 0
     while not _stop.is_set():
         now = time.monotonic()
-        mqtt_connected = mqtt is not None and mqtt.connected
+        announced = mqtt.announced if mqtt is not None else None
+        # The usable path to the charger, not just our link: a gateway that has
+        # announced `disconnected` (its Last Will) is gone even while the broker
+        # connection stays up, so status falls back to HTTP and health says so.
+        mqtt_connected = (
+            mqtt is not None and mqtt.connected and announced is not False
+        )
         # A granted subscription is what makes the topics a status source: a
         # broker that accepts the connection and then denies ``<topic>/#``
         # delivers nothing, which looks exactly like an idle charger. Until the
         # SUBACK grants it the HTTP poll is the source, and a denial keeps it
         # there (logged once per source change) with the 10 s cadence.
-        mqtt_ready = mqtt_connected and mqtt.subscribed
+        mqtt_ready = mqtt is not None and mqtt.mqtt_ready and announced is not False
         current = "mqtt" if mqtt_ready else "http"
-        # The pair, not just the source: a link that drops while the source
+        # The triplet, not just the source: a link that drops while the source
         # stays ``http`` (a denied subscription, then a disconnect) still has to
-        # refresh ``status/health.mqtt_connected``.
-        if mqtt is not None and (current, mqtt_connected) != transport_state:
-            previous, transport_state = transport_state, (current, mqtt_connected)
+        # refresh ``status/health.mqtt_connected``, and the first announcement
+        # must land even though nothing else changed.
+        if (
+            mqtt is not None
+            and (current, mqtt_connected, announced) != transport_state
+        ):
+            previous, transport_state = transport_state, (
+                current,
+                mqtt_connected,
+                announced,
+            )
             previous = previous[0] if previous is not None else None
             source = current
             if mqtt_ready:
                 detail = "mqtt connected"
                 mqtt_snapshots = mqtt.snapshots
-            elif mqtt_connected:
+            elif mqtt.connected and not mqtt.mqtt_ready:
                 detail = f"mqtt connected, {mqtt.subscription} not subscribed"
+            elif mqtt.connected:
+                detail = "mqtt connected, gateway announced disconnected"
             elif previous == "mqtt":
                 detail = f"mqtt disconnected after {mqtt.messages} messages"
             else:
                 detail = "mqtt not connected"
             log(f"status source: {source} ({detail})")
-            write_transport_health(db, source, mqtt_connected)
+            write_transport_health(
+                db, source, mqtt_connected, announced, mqtt.last_lwt_at
+            )
             reconcile_failures = 0
             next_poll = now
         try:
@@ -2099,8 +2222,15 @@ def config_loop(
             # ``<topic>/#`` delivers no ``config_version`` ever, so waiting on
             # the event would freeze ``status/config`` for as long as the link
             # stays up. Until the SUBACK grants it the HTTP poll is the source
-            # and keeps its own cadence.
-            mqtt_mode = connected and config_event is not None and mqtt.subscribed
+            # and keeps its own cadence. A gateway that announced
+            # ``disconnected`` publishes nothing at all, so it is treated the
+            # same way: no event will arrive, and the HTTP poll resumes.
+            mqtt_mode = (
+                connected
+                and mqtt.announced is not False
+                and config_event is not None
+                and mqtt.subscribed
+            )
             if mqtt is not None:
                 current = "mqtt" if mqtt_mode else "http"
                 if current != source:
@@ -2109,6 +2239,8 @@ def config_loop(
                         detail = "mqtt connected"
                     elif not connected:
                         detail = "mqtt not connected"
+                    elif mqtt.announced is False:
+                        detail = "mqtt connected, gateway announced disconnected"
                     elif config_event is None:
                         detail = "mqtt connected, no config version trigger"
                     else:
@@ -2747,7 +2879,6 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     tracker = StatusTracker(db)
     tracker.seed()
     notifier = Notifier(db)
-    watchdog = Watchdog(db, base, auth, transport, notifier, watchdog_config)
 
     source = None
     snapshots = None
@@ -2765,11 +2896,16 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
             user=mqtt.user,
             password=mqtt.password,
             client_id=mqtt.client_id,
+            announce_topic=mqtt.announce_topic,
             on_status=lambda record: enqueue_latest(snapshots, record),
             on_config_version=lambda _version: config_event.set(),
             log=log,
         )
-    # Built after the source: the outage decision needs its arrival sequence.
+    # Built after the source: the outage decision needs its arrival sequence,
+    # and the watchdog needs the link/LWT state for its restart transport.
+    watchdog = Watchdog(
+        db, base, auth, transport, notifier, watchdog_config, mqtt=source
+    )
     sink = StatusSink(
         db,
         tracker,
@@ -2869,6 +3005,7 @@ def main():
         # Host/topic only: the broker password never reaches the journal.
         log(
             f"mqtt: enabled host={mqtt.host}:{mqtt.port} topic={mqtt.topic} "
+            f"announce={mqtt.announce_topic} "
             f"reconcile={mqtt.reconcile_sec:g}s client_id={mqtt.client_id} "
             f"user={'set' if mqtt.user else 'none'}"
         )
