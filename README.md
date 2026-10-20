@@ -45,6 +45,24 @@ App settings hold an optional **rate schedule** on top of the fallback rate:
 - Saving writes the fallback rate, currency, and the window list. With no windows, the document keeps
   exactly its two flat fields.
 
+### How costs are worked out
+
+Costs are calculated whenever a screen is shown, never saved, so editing the schedule re-prices the
+live session and the whole history immediately.
+
+- **Live session** cost covers `now - elapsed` to `now`; the bridge stores only the elapsed seconds.
+  Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
+  price yet). For a flat rate the figure is still `kWh × rate`, exactly as before.
+- **History session** costs use the session's own stored start and end.
+- **Uniform pro-rating (approximation).** Sessions store one energy total, not the energy drawn in
+  each window. Each slice between rate boundaries is assumed to have drawn energy in proportion to
+  its share of the session's duration. A charge that ramps up inside one window is therefore priced
+  slightly off; the alternative would require per-window energy from the bridge.
+- **The 30-day total and the daily bar cost are hidden when a schedule exists**, because a history
+  document holds a single kWh figure per day and it cannot be split across the windows it was drawn
+  in. Energy (kWh) stays visible, and per-session costs are still shown. With no schedule, every
+  total and bar cost is exactly what it was before schedules existed.
+
 ## How it works
 
 1. **Bridge agent** (`pi/`) — a small Python service on the Raspberry Pi. Polls the charger's local HTTP API and writes status, config, history and sessions to Firestore; mirrors the schedule into the charger's scheduler; watches Firestore for commands and applies them; sends FCM notifications on state transitions.
