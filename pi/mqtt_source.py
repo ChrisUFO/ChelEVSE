@@ -32,12 +32,18 @@ Design notes:
   ``config_version`` only triggers one HTTP sync.
 - **Announce/LWT is not consumed here.** PR-3 adds the announce subscription;
   this module only exposes the broker connection state.
+- **Commands are published, acknowledged by the firmware's own topics.** PR-2
+  adds ``publish`` plus one waiter each for the retained ``<base>/override``
+  document (pause/resume/set-current) and the next ``<base>/rapi/out`` (RAPI).
+  The connection is only usable for commands when ``connected`` and
+  ``subscribed`` both hold; the bridge decides that, not this module.
 
 The client is injected (``client_factory``), so the unit tests need no broker.
 """
 
 import json
 import threading
+import time
 from typing import NamedTuple
 
 import paho.mqtt.client as mqtt
@@ -70,6 +76,21 @@ TOPIC_FIELDS = {
 }
 
 CONFIG_VERSION_TOPIC = "config_version"
+# Retained document the firmware rewrites on every override change. It is the
+# acknowledgement for pause/resume/set-current: {"state": "null"} for auto,
+# {"state": "disabled", "auto_release": …} for pause, and
+# {"state": "active", "charge_current": N, "max_current": N, …} for a hold.
+OVERRIDE_TOPIC = "override"
+# RAPI replies arrive with no correlation id, so the bridge must serialise
+# commands and match the next one itself.
+RAPI_OUT_TOPIC = "rapi/out"
+# QoS 1: the bridge waits for the firmware's own acknowledgement anyway, and a
+# dropped command is worse than a duplicate publish.
+COMMAND_QOS = 1
+
+
+class MqttPublishError(RuntimeError):
+    """The client did not accept a publish (nothing was delivered)."""
 
 
 def _default_client_factory(client_id):
@@ -192,6 +213,15 @@ class MqttSource:
         self.connects = 0
         self.disconnects = 0
         self.connect_failures = 0
+        self.publishes = 0
+        # Command acknowledgement state (PR-2): the retained override document,
+        # and the count plus payload of the last rapi/out reply.
+        self.override = None
+        self.override_updates = 0
+        self.rapi_output = None
+        self.rapi_messages = 0
+        self._command_cv = threading.Condition()
+        self._rapi_lock = threading.Lock()
         self._client_factory = client_factory or _default_client_factory
         self._client = None
         self._pending = {}
@@ -237,6 +267,102 @@ class MqttSource:
         """Broker connection state (paho's own view; never message recency)."""
         client = self._client
         return bool(client is not None and client.is_connected())
+
+    @property
+    def ready(self):
+        """Usable as a command transport: connected **and** subscribed.
+
+        A denied SUBACK leaves the link up but delivers nothing, so publishing
+        there would never be acknowledged. The bridge only falls back to HTTP
+        when this is false *before* a publish.
+        """
+        return self.connected and self.subscribed
+
+    # -- commands (PR-2) ---------------------------------------------------
+
+    def publish(self, topic, payload, qos=COMMAND_QOS):
+        """Publish under the base topic; raise when the client rejects it.
+
+        ``topic`` is relative to ``self.base`` (``override/set``,
+        ``rapi/in/$FS``). A rejected publish means the client never queued the
+        message, so the caller may still use its HTTP fallback; a publish with
+        rc 0 may or may not reach the broker and must never be re-applied.
+        """
+        client = self._client
+        if client is None:
+            raise MqttPublishError("mqtt client not started")
+        full_topic = f"{self.base}/{topic}" if self.base else topic
+        try:
+            info = client.publish(full_topic, payload, qos=qos)
+        except Exception as exc:  # paho raises when the loop is gone
+            raise MqttPublishError(
+                f"publish {full_topic} failed ({exc.__class__.__name__}: {exc})"
+            ) from exc
+        rc = getattr(info, "rc", 0)
+        if rc != 0:
+            raise MqttPublishError(f"publish {full_topic} rejected (rc {rc})")
+        with self._lock:
+            self.publishes += 1
+        return info
+
+    def command_view(self):
+        """Raw status snapshot plus the retained override document."""
+        with self._lock:
+            override = dict(self.override) if isinstance(self.override, dict) else None
+            return {"status": dict(self.snapshot), "override": override}
+
+    def wait_for_state(self, predicate, timeout):
+        """Wait until ``predicate(command_view())`` holds, or the window closes.
+
+        Woken by every status flush, override update and rapi/out reply. The
+        view is re-read under the condition: a callback that lands between the
+        check and the wait still wakes this thread, and one that landed before
+        it is seen by the first check (an already-satisfied state confirms at
+        once, which is the idempotent no-op case).
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._command_cv:
+            while True:
+                if predicate(self.command_view()):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._command_cv.wait(remaining)
+
+    def rapi_generation(self):
+        """rapi/out replies received so far (capture before publishing)."""
+        with self._lock:
+            return self.rapi_messages
+
+    def wait_for_rapi(self, expected, timeout):
+        """Payload of the next rapi/out after ``expected``, or None on timeout."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._command_cv:
+            while True:
+                with self._lock:
+                    if self.rapi_messages > expected:
+                        return self.rapi_output
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._command_cv.wait(remaining)
+
+    def rapi_transaction(self, topic, payload, timeout):
+        """Publish one RAPI command and wait for its reply, serialised.
+
+        The firmware answers ``rapi/out`` with no correlation id, so two
+        overlapping commands cannot be matched. The lock covers the publish
+        *and* the wait: the next reply always belongs to this command.
+        """
+        with self._rapi_lock:
+            expected = self.rapi_generation()
+            self.publish(topic, payload, qos=COMMAND_QOS)
+            return self.wait_for_rapi(expected, timeout)
+
+    def _notify_command_waiters(self):
+        with self._command_cv:
+            self._command_cv.notify_all()
 
     # -- seeding and flushing ---------------------------------------------
 
@@ -304,6 +430,8 @@ class MqttSource:
             record = Snapshot(dict(self.snapshot), self.snapshots, self.seeded)
         if self.on_status is not None:
             self.on_status(record)
+        # A new status snapshot can satisfy an override confirmation.
+        self._notify_command_waiters()
 
     # -- paho callbacks ----------------------------------------------------
 
@@ -361,8 +489,14 @@ class MqttSource:
         if leaf == CONFIG_VERSION_TOPIC:
             self._config_version(_decode(getattr(message, "payload", b"")))
             return
+        if leaf == OVERRIDE_TOPIC:
+            self._override(_decode(getattr(message, "payload", b"")))
+            return
+        if leaf == RAPI_OUT_TOPIC:
+            self._rapi_out(_decode(getattr(message, "payload", b"")))
+            return
         field = TOPIC_FIELDS.get(leaf)
-        if field is None:  # retained JSON, commands, rapi/out, deprecated topics
+        if field is None:  # retained JSON, commands, rapi/in, deprecated topics
             return
         self.messages += 1
         value = _decode(getattr(message, "payload", b""))
@@ -373,6 +507,24 @@ class MqttSource:
                 timer.daemon = True
                 self._timer = timer
                 timer.start()
+
+    def _override(self, value):
+        """Retained override document -> confirmation state for override commands.
+
+        ``<base>/override/set`` echoes the command and is ignored: only the
+        retained ``<base>/override`` document is the firmware's state.
+        """
+        with self._lock:
+            self.override = value if isinstance(value, dict) else None
+            self.override_updates += 1
+        self._notify_command_waiters()
+
+    def _rapi_out(self, value):
+        """One RAPI reply; there is no correlation id, so the count orders it."""
+        with self._lock:
+            self.rapi_output = value
+            self.rapi_messages += 1
+        self._notify_command_waiters()
 
     def _config_version(self, value):
         """One config sync per version change (the first value counts too)."""

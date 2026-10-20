@@ -32,7 +32,7 @@ import requests
 import firebase_admin
 from firebase_admin import credentials, exceptions, firestore, messaging
 
-from mqtt_source import MqttSource
+from mqtt_source import MqttPublishError, MqttSource
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
@@ -91,10 +91,16 @@ MQTT_OUTAGE_FAILURES = 2
 CONFIG_SAFETY_RESYNC_SEC = 600
 # A pending command older than this is failed without touching the charger.
 COMMAND_MAX_AGE = 600
+# How long an MQTT-published override command waits for the firmware's retained
+# <base>/override document (or the status field) to confirm it.
+COMMAND_CONFIRM_SEC = 5
+# Command types the bridge applies; anything else fails before a transport is
+# chosen.
+COMMAND_TYPES = frozenset({"pause", "resume", "set_current", "rapi"})
 # Pending commands handled per poll.
 COMMAND_BATCH = 10
-# Applied-but-unacked command ids remembered per process, so a failed ack write
-# is retried instead of re-applying the command.
+# Settled-but-unwritten command ids remembered per process (acked or failed), so
+# a failed status write is retried instead of re-applying the command.
 COMMAND_ACK_MEMORY = 256
 # Two session records whose intervals touch within this window are the same
 # charger session (the firmware keeps cumulative counters while plugged in).
@@ -253,7 +259,16 @@ def redact_config(data):
 
 
 class CommandError(ValueError):
-    """Command document cannot be applied to the charger."""
+    """Command document cannot be applied to the charger.
+
+    ``transport`` names the path that produced the failure (``"mqtt"`` or
+    ``"http"``), so the command document can record it. It is None when the
+    failure was decided before a transport was chosen.
+    """
+
+    def __init__(self, message, transport=None):
+        super().__init__(message)
+        self.transport = transport
 
 
 def parse_status(data):
@@ -701,8 +716,33 @@ def _rapi_result(resp):
     return body.get("ret") if isinstance(body, dict) else None
 
 
-def apply_command(transport, base, auth, cmd):
-    """Apply one command document; return extra fields for the command doc."""
+def _command_amps(cmd, transport):
+    """Validated, firmware-clamped amps; CommandError when absent/invalid."""
+    try:
+        return max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
+    except (TypeError, ValueError):
+        raise CommandError("missing or invalid amps", transport)
+
+
+def _command_rapi(cmd, transport):
+    """The validated RAPI command string, or CommandError."""
+    command = cmd.get("command")
+    if (
+        not isinstance(command, str)
+        or not command.startswith("$")
+        or len(command) > 32
+    ):
+        raise CommandError("invalid rapi", transport)
+    return command
+
+
+def mqtt_command_ready(source):
+    """True when MQTT may carry a command: connected **and** subscribed."""
+    return bool(source is not None and getattr(source, "ready", False))
+
+
+def _apply_command_http(transport, base, auth, cmd):
+    """The existing HTTP path: fallback, and the only path with MQTT off."""
     ctype = cmd.get("type")
     if ctype == "pause":
         resp = transport.post(
@@ -732,10 +772,7 @@ def apply_command(transport, base, auth, cmd):
         _require_ok(resp)
         return {}
     if ctype == "set_current":
-        try:
-            amps = max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
-        except (TypeError, ValueError):
-            raise CommandError("missing or invalid amps")
+        amps = _command_amps(cmd, "http")
         resp = transport.post(
             f"{base}/override",
             json={"state": "active", "charge_current": amps, "max_current": amps},
@@ -745,13 +782,7 @@ def apply_command(transport, base, auth, cmd):
         _require_ok(resp)
         return {}
     if ctype == "rapi":
-        command = cmd.get("command")
-        if (
-            not isinstance(command, str)
-            or not command.startswith("$")
-            or len(command) > 32
-        ):
-            raise CommandError("invalid rapi")
+        command = _command_rapi(cmd, "http")
         resp = transport.post(
             f"{base}/rapi",
             data={"rapi": command, "json": 1},
@@ -763,6 +794,181 @@ def apply_command(transport, base, auth, cmd):
         log(f"rapi {command}: ret={result!r}")
         return {"result": result}
     raise CommandError("unsupported type")
+
+
+def _http_command(transport, base, auth, cmd):
+    """``_apply_command_http`` with the transport recorded on its failures."""
+    try:
+        return _apply_command_http(transport, base, auth, cmd)
+    except CommandError as exc:
+        if exc.transport is None:
+            exc.transport = "http"
+        raise
+
+
+def _as_int(value):
+    """int(value) for numeric-ish input, else None (never raises)."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _override_confirms(ctype, amps, view):
+    """Does an acknowledged override view reflect ``ctype`` / ``amps``?
+
+    The retained ``<base>/override`` document is authoritative: ``null`` is
+    auto, ``disabled`` is paused, ``active`` carries the held current. The raw
+    status seed is the fallback for the moment before the retained copy lands
+    (``manual_override`` 0 = auto, 1 = any override, and ``pilot`` is the held
+    setpoint). Firmware v8.2.3 publishes ``manual_override`` but does not
+    distinguish active from disabled with it, hence the override document.
+    """
+    override = view.get("override") or {}
+    status = view.get("status") or {}
+    state = override.get("state")
+    # Once the retained document has been seen it is authoritative; the status
+    # seed is only a fallback for the moment before it lands (state is None).
+    if ctype == "pause":
+        if state == "disabled":
+            return True
+        return state is None and (
+            status.get("status") == "disabled"
+            or _as_int(status.get("state")) == 255
+        )
+    if ctype == "resume":
+        # "null" is the firmware's auto state (observed on 8.2.3).
+        if state in ("null", "auto", "clear"):
+            return True
+        return state is None and _as_int(status.get("manual_override")) == 0
+    # set_current
+    if state == "active":
+        current = override.get("max_current", override.get("charge_current"))
+        return current is None or _as_int(current) == amps
+    return (
+        state is None
+        and _as_int(status.get("manual_override")) == 1
+        and _as_int(status.get("pilot")) == amps
+    )
+
+
+def _status_confirms(ctype, amps, status):
+    """The same predicate against a plain HTTP ``/status`` reply."""
+    if not isinstance(status, dict):
+        return False
+    if ctype == "pause":
+        return status.get("status") == "disabled" or _as_int(status.get("state")) == 255
+    if ctype == "resume":
+        return _as_int(status.get("manual_override")) == 0
+    return (
+        _as_int(status.get("manual_override")) == 1
+        and _as_int(status.get("pilot")) == amps
+    )
+
+
+def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec):
+    """Publish one override command and wait for the firmware to reflect it."""
+    if ctype == "pause":
+        amps = None
+        payload = {"state": "disabled"}
+    elif ctype == "resume":
+        amps = None
+        payload = "clear"
+    else:
+        amps = _command_amps(cmd, "mqtt")
+        payload = {"state": "active", "charge_current": amps, "max_current": amps}
+    try:
+        source.publish(
+            "override/set", json.dumps(payload) if isinstance(payload, dict) else payload
+        )
+    except MqttPublishError as exc:
+        # The client refused the message, so nothing was delivered and the HTTP
+        # fallback cannot double-apply. An *accepted* publish never falls back.
+        log(f"command transport: http (mqtt publish failed: {exc})")
+        return _http_command(transport, base, auth, cmd)
+    try:
+        confirmed = source.wait_for_state(
+            lambda view: _override_confirms(ctype, amps, view), confirm_sec
+        )
+    except Exception as exc:  # never re-apply because an ack wait crashed
+        raise CommandError(
+            f"mqtt acknowledgement failed ({exc.__class__.__name__}: {exc})",
+            transport="mqtt",
+        ) from exc
+    if confirmed:
+        return {"transport": "mqtt"}
+    # The command may have applied while its broadcast was lost. Reconcile
+    # read-only over HTTP (the command itself is never re-applied).
+    try:
+        resp = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        status = resp.json()
+    except (requests.RequestException, ValueError):
+        status = None
+    if _status_confirms(ctype, amps, status):
+        log(f"{ctype}: mqtt confirmation missed; confirmed by status reconcile")
+        return {"transport": "mqtt"}
+    raise CommandError(
+        f"no confirmation within {confirm_sec:g}s "
+        f"(manual_override/state did not reflect {ctype})",
+        transport="mqtt",
+    )
+
+
+def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
+    """Publish one RAPI command and map the next rapi/out reply."""
+    command = _command_rapi(cmd, "mqtt")
+    parts = command.split(None, 1)
+    head = parts[0]
+    params = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        reply = source.rapi_transaction(f"rapi/in/{head}", params, confirm_sec)
+    except MqttPublishError as exc:
+        log(f"command transport: http (mqtt publish failed: {exc})")
+        return _http_command(transport, base, auth, cmd)
+    except Exception as exc:  # never re-publish because an ack wait crashed
+        raise CommandError(
+            f"mqtt rapi failed ({exc.__class__.__name__}: {exc})",
+            transport="mqtt",
+        ) from exc
+    if reply is None:
+        raise CommandError(
+            f"no rapi/out within {confirm_sec:g}s", transport="mqtt"
+        )
+    text = str(reply).strip()
+    if text.startswith("$OK"):
+        log(f"rapi {command}: ret={text!r}")
+        return {"result": text, "transport": "mqtt"}
+    raise CommandError(
+        f"rapi {command} failed: {text or 'empty reply'}", transport="mqtt"
+    )
+
+
+def apply_command(transport, base, auth, cmd, source=None, confirm_sec=None):
+    """Apply one command document; return extra fields for the command doc.
+
+    MQTT carries the command only while ``source.ready`` (connected and
+    subscribed) at the moment it is picked up; otherwise the existing HTTP path
+    runs unchanged. A command accepted by the MQTT client is never re-applied
+    over HTTP — a missing confirmation fails it instead. The returned
+    ``transport`` is recorded on the command document; the HTTP path leaves it
+    out, as it always has, and the loop supplies the default.
+    """
+    ctype = cmd.get("type")
+    if ctype not in COMMAND_TYPES:
+        raise CommandError("unsupported type")
+    confirm_sec = COMMAND_CONFIRM_SEC if confirm_sec is None else float(confirm_sec)
+    if mqtt_command_ready(source):
+        if ctype == "rapi":
+            return _apply_rapi_mqtt(
+                transport, base, auth, source, cmd, confirm_sec
+            )
+        return _apply_override_mqtt(
+            transport, base, auth, source, ctype, cmd, confirm_sec
+        )
+    return _http_command(transport, base, auth, cmd)
 
 
 def notify(db, body):
@@ -2013,18 +2219,20 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
-def command_loop(db, base, auth, transport, interval):
-    # Commands applied whose ack write failed. Retry the write rather than the
-    # charger request; bounded and process-local, so an apply/ack gap that spans
-    # a restart can still re-apply (at-least-once across restarts).
-    unacked = OrderedDict()
+def command_loop(db, base, auth, transport, interval, source=None):
+    # Commands already applied — acked or failed — whose status write did not
+    # land. Retry the write, never the command: an accepted MQTT publish must
+    # not be repeated (over MQTT or HTTP). Bounded and process-local, so a gap
+    # spanning a restart can still re-apply (at-least-once across restarts).
+    settled = OrderedDict()
+    last_transport = None
     while not _stop.is_set():
         try:
             for doc in pending_commands(db):
                 cmd = _command_data(doc)
-                if doc.id in unacked:
-                    # Already applied; only its ack write still needs to land.
-                    extra = unacked[doc.id]
+                if doc.id in settled:
+                    # Already settled; only its status write still needs to land.
+                    fields = settled[doc.id]
                 else:
                     if command_is_stale(cmd):
                         reason = f"stale command (older than {COMMAND_MAX_AGE}s)"
@@ -2038,30 +2246,51 @@ def command_loop(db, base, auth, transport, interval):
                             continue
                         log(f"command {doc.id} failed: {reason}")
                         continue
+                    selected = "mqtt" if mqtt_command_ready(source) else "http"
                     try:
-                        extra = apply_command(transport, base, auth, cmd)
+                        extra = apply_command(
+                            transport, base, auth, cmd, source=source
+                        )
                     except CommandError as exc:
-                        doc.reference.update({"status": "failed", "error": str(exc)})
-                        log(f"command {doc.id} failed: {exc}")
-                        continue
+                        fields = {
+                            "status": "failed",
+                            "error": str(exc),
+                            "transport": exc.transport or selected,
+                        }
                     except requests.RequestException as exc:
-                        reason = f"charger request failed ({exc.__class__.__name__})"
-                        doc.reference.update({"status": "failed", "error": reason})
-                        log(f"command {doc.id} failed: {reason}")
-                        continue
-                    unacked[doc.id] = extra
-                    while len(unacked) > COMMAND_ACK_MEMORY:
-                        unacked.popitem(last=False)
+                        fields = {
+                            "status": "failed",
+                            "error": f"charger request failed ({exc.__class__.__name__})",
+                            "transport": selected,
+                        }
+                    else:
+                        extra.setdefault("transport", "http")
+                        fields = {"status": "acked", **extra}
+                    settled[doc.id] = fields
+                    while len(settled) > COMMAND_ACK_MEMORY:
+                        settled.popitem(last=False)
+                used = fields.get("transport")
+                if used is not None and used != last_transport:
+                    detail = (
+                        "mqtt connected and subscribed"
+                        if used == "mqtt"
+                        else "mqtt unavailable before publish"
+                    )
+                    log(f"command transport: {used} ({detail})")
+                    last_transport = used
                 try:
-                    doc.reference.update({"status": "acked", **extra})
+                    doc.reference.update(fields)
                 except Exception as exc:
                     log(
-                        f"command {doc.id} ack update failed "
+                        f"command {doc.id} status update failed "
                         f"({exc.__class__.__name__}: {exc}); will retry without re-applying"
                     )
                     continue
-                unacked.pop(doc.id, None)
-                log(f"command {doc.id} acked: {cmd.get('type')}")
+                settled.pop(doc.id, None)
+                if fields["status"] == "acked":
+                    log(f"command {doc.id} acked: {cmd.get('type')}")
+                else:
+                    log(f"command {doc.id} failed: {fields['error']}")
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"command loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)
@@ -2539,7 +2768,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
         ).start()
         source.start()
-    command_loop(db, base, auth, transport, command_interval)
+    command_loop(db, base, auth, transport, command_interval, source)
     if source is not None:
         source.stop()
 
