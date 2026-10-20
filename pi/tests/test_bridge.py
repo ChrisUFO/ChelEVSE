@@ -1016,6 +1016,29 @@ class WatchdogConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.parse(WATCHDOG_RESTART_WHILE_CHARGING="2")
 
+    def test_non_finite_numbers_fail_loudly(self):
+        for name in (
+            "WATCHDOG_COOLDOWN_SEC",
+            "WATCHDOG_FAILURES",
+            "WATCHDOG_MAX_PER_HOUR",
+        ):
+            for value in ("nan", "inf", "-inf", "Infinity"):
+                with self.subTest(variable=name, value=value), self.assertRaises(
+                    ValueError
+                ) as raised:
+                    self.parse(**{name: value})
+                self.assertIn(name, str(raised.exception))
+
+    def test_finite_numbers_still_parse(self):
+        config = self.parse(
+            WATCHDOG_COOLDOWN_SEC="0.5",
+            WATCHDOG_FAILURES="1",
+            WATCHDOG_MAX_PER_HOUR="24",
+        )
+        self.assertEqual(config, bridge.WatchdogConfig(True, 1, 0.5, 24, False))
+        # Zero is documented as "no cooldown" and must stay accepted.
+        self.assertEqual(self.parse(WATCHDOG_COOLDOWN_SEC="0").cooldown, 0.0)
+
 
 class WatchdogConfigExitTests(unittest.TestCase):
     """main()'s fail-loud wiring: a bad WATCHDOG_* value stops the bridge."""
@@ -1039,6 +1062,16 @@ class WatchdogConfigExitTests(unittest.TestCase):
         for name, value in cases.items():
             with self.subTest(variable=name):
                 self.assertIn(name, self.exit_message(**{name: value}))
+
+    def test_non_finite_values_exit_naming_the_variable(self):
+        for name in (
+            "WATCHDOG_COOLDOWN_SEC",
+            "WATCHDOG_FAILURES",
+            "WATCHDOG_MAX_PER_HOUR",
+        ):
+            for value in ("nan", "inf", "-inf"):
+                with self.subTest(variable=name, value=value):
+                    self.assertIn(name, self.exit_message(**{name: value}))
 
     def test_a_valid_config_is_returned(self):
         with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(

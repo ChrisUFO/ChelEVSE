@@ -792,17 +792,29 @@ def _env_bool(name, default):
     raise ValueError(f"{name} must be a boolean (true/false), got {raw!r}.")
 
 
+def _env_finite(name, default, parse):
+    """Parse one numeric env var; unparseable or non-finite values are loud errors.
+
+    ``nan``/``inf`` must never reach a comparison: against ``nan`` every elapsed
+    time reads as "long enough", which would silently disable a cooldown.
+    """
+    raw = cfg(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = parse(raw.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {raw!r}.") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {raw!r}.")
+    return value
+
+
 def watchdog_config():
     """Watchdog settings from the environment; bad values raise ValueError."""
-    try:
-        threshold = int(cfg("WATCHDOG_FAILURES") or 3)
-        cooldown = float(cfg("WATCHDOG_COOLDOWN_SEC") or 600)
-        max_per_hour = int(cfg("WATCHDOG_MAX_PER_HOUR") or 3)
-    except ValueError:
-        raise ValueError(
-            "WATCHDOG_FAILURES, WATCHDOG_COOLDOWN_SEC and WATCHDOG_MAX_PER_HOUR "
-            "must be numbers."
-        ) from None
+    threshold = _env_finite("WATCHDOG_FAILURES", 3, int)
+    cooldown = _env_finite("WATCHDOG_COOLDOWN_SEC", 600.0, float)
+    max_per_hour = _env_finite("WATCHDOG_MAX_PER_HOUR", 3, int)
     if threshold < 1:
         raise ValueError("WATCHDOG_FAILURES must be at least 1.")
     if cooldown < 0:
