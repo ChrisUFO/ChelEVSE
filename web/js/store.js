@@ -6,6 +6,7 @@ import {
   doc,
   collection,
   addDoc,
+  getDocFromServer,
   getDocs,
   setDoc,
   deleteDoc,
@@ -94,10 +95,23 @@ export function startStore({
     (data) => onConfig && onConfig(data),
     (err) => onConfigError && onConfigError(err),
   );
-  unsubSchedule = watch(
-    'schedule/current',
-    (data) => onSchedule && onSchedule(data),
-    (err) => onScheduleError && onScheduleError(err),
+  // Schedule metadata travels with the data: a write still queued in the
+  // persistent cache across a reload is durable but unacknowledged, and the
+  // editor labels it instead of trusting the cached document as server truth.
+  // `includeMetadataChanges` is what makes the acknowledgment visible: the
+  // backend confirms a write without changing the data, and Firestore filters
+  // metadata-only changes unless the listener asks for them.
+  unsubSchedule = onSnapshot(
+    doc(db, 'schedule', 'current'),
+    { includeMetadataChanges: true },
+    (snap) =>
+      onSchedule &&
+      onSchedule(snap && snap.exists() ? snap.data() : null, {
+        pendingWrites: Boolean(snap && snap.metadata && snap.metadata.hasPendingWrites),
+      }),
+    (err) => {
+      if (!denied(err) && onScheduleError) onScheduleError(err);
+    },
   );
   // The Advanced console keeps its own 20-entry RAPI history: a where+orderBy
   // query needs the declared (type, created_at) composite index.
@@ -203,6 +217,21 @@ export function saveSchedule(schedule) {
       amps: rule.amps,
     })),
   });
+}
+
+// A reloaded page's cached schedule already carries a queued write, so the
+// pre-write document exists only on the backend. `getDocFromServer` bypasses
+// the cache (and rejects while offline) — exactly the baseline Discard needs to
+// compensate against after a reload. The caller renders the failure, so this
+// reports it instead of throwing (a read racing a route change must not become
+// an unhandled rejection).
+export async function readScheduleBaseline() {
+  try {
+    const snap = await getDocFromServer(doc(db, 'schedule', 'current'));
+    return { ok: true, data: snap && snap.exists() ? snap.data() : null };
+  } catch {
+    return { ok: false, data: null };
+  }
 }
 
 // The daily history range: zero-padded day ids sort lexicographically in

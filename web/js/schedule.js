@@ -195,6 +195,175 @@ export function queuedSaveState({
   return idle;
 }
 
+// A `schedule/current` snapshot carries `metadata.hasPendingWrites`. Across a
+// reload that flag is the only evidence of an unacknowledged write: the save
+// that issued it belonged to a previous page, so no promise in this session
+// will settle it. One transition rule drives the editor's queued state:
+//   - a local save in flight (`saving`/`savingUnconfirmed`) owns the save bar;
+//     a watch snapshot never relabels it.
+//   - `pendingWrites === true` means the write is still queued (or a newer write
+//     replaced it): the snapshot's key becomes the queued payload.
+//   - `pendingWrites === false` while queued resolves it. The snapshot key
+//     matching the queued payload is 'acked' (the draft is untouched); a
+//     different key is 'reverted' — the queued change never landed.
+//   - metadata absent (`undefined`/`null`) is not evidence of acknowledgement
+//     and leaves the state alone.
+// `adopt` marks a reverted snapshot the screen may replace the draft with: only
+// when the draft still matches the queued payload, never a dirty draft.
+export function reloadQueuedState({
+  pendingWrites,
+  queued = false,
+  saving = false,
+  savingUnconfirmed = false,
+  dataKey = null,
+  payloadKey = null,
+  draftKey = null,
+} = {}) {
+  const unchanged = { queued, payloadKey, outcome: 'none', adopt: false };
+  if (saving || savingUnconfirmed) return unchanged;
+  if (pendingWrites === true) {
+    return {
+      queued: true,
+      payloadKey: dataKey,
+      outcome: payloadKey != null && payloadKey === dataKey ? 'none' : 'queued',
+      adopt: false,
+    };
+  }
+  if (!queued || pendingWrites !== false) return unchanged;
+  const acked = payloadKey != null && payloadKey === dataKey;
+  return {
+    queued: false,
+    payloadKey: null,
+    outcome: acked ? 'acked' : 'reverted',
+    adopt: !acked && payloadKey != null && draftKey === payloadKey,
+  };
+}
+
+// A queued write rediscovered after a reload has no cached pre-write baseline:
+// the local document already carries the mutation, so Discard would re-save the
+// queued change. The previous schedule has to come from the server, and the
+// control is only honest when that read succeeded. `status` is the single
+// decision the screen renders:
+//   ready       – the server copy differs from the queued payload; Discard can
+//                 restore it with the compensating write.
+//   committed   – the server already holds the queued payload: there is nothing
+//                 to discard, and writing again would repeat it.
+//   checking    – the server read is still in flight, or the fetched copy
+//                 belongs to a different queued payload and a fresh read is
+//                 starting.
+//   unavailable – no baseline can be trusted. The copy names the actual cause:
+//                 offline needs a connection to restore the saved schedule; a
+//                 read that failed (or never answered) on a healthy connection
+//                 is a check failure, not a connectivity problem.
+// `baselineKey` is the queued payload the fetched copy was read for: it must
+// still be the current `payloadKey`, or the copy says nothing about the queued
+// write Discard would compensate.
+export const DISCARD_OFFLINE_REASON = 'Discard needs a connection to restore the saved schedule.';
+export const DISCARD_FAILED_REASON = "Couldn't check the saved schedule — Discard is unavailable.";
+export const DISCARD_CHECKING_REASON = 'Checking the saved schedule before Discard…';
+export const DISCARD_COMMITTED_REASON = 'The queued change is already saved — nothing to discard.';
+
+export function reloadDiscardBaseline({
+  baseline = null,
+  baselineKey = null,
+  payloadKey = null,
+  online = true,
+  pending = false,
+  failed = false,
+} = {}) {
+  if (!online) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_OFFLINE_REASON };
+  }
+  if (failed) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_FAILED_REASON };
+  }
+  if (pending) {
+    return { status: 'checking', baseline: null, reason: DISCARD_CHECKING_REASON };
+  }
+  if (baseline == null) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_FAILED_REASON };
+  }
+  // A copy fetched for an earlier queued payload cannot justify Discard for the
+  // current one: the screen invalidates it and reads again.
+  if (payloadKey != null && baselineKey !== payloadKey) {
+    return { status: 'checking', baseline: null, reason: DISCARD_CHECKING_REASON };
+  }
+  if (payloadKey != null && scheduleKey(baseline) === payloadKey) {
+    return { status: 'committed', baseline: null, reason: DISCARD_COMMITTED_REASON };
+  }
+  return { status: 'ready', baseline, reason: '' };
+}
+
+// What the screen must do when a baseline read is requested for the current
+// queued payload. A ready or in-flight read is reusable only for the payload it
+// was started for; a different payload invalidates it (the screen bumps its read
+// token so a late response cannot land) and starts a fresh server read. A
+// `fresh` trigger resets the bounded retry budget even when the read it
+// interrupts was still in flight, so that reset must happen before any early
+// return. No queued payload key means there is nothing to fetch a baseline for.
+export function discardBaselineStart({
+  status = 'idle',
+  baselineKey = null,
+  payloadKey = null,
+  fresh = false,
+  online = true,
+} = {}) {
+  const applies = payloadKey != null && baselineKey === payloadKey;
+  const reusable = (status === 'loading' || status === 'ready') && applies;
+  return {
+    reusable,
+    invalidate: (status === 'loading' || status === 'ready') && !applies,
+    resetRetries: fresh,
+    start: !reusable && online && payloadKey != null,
+  };
+}
+
+// A server read for a reload-queued Discard baseline may only install its
+// result while it still owns the baseline: the same page generation, the same
+// read token (bumped when a new payload invalidates the read), and the queued
+// payload it was issued for.
+export function discardBaselineReadApplies({
+  readGeneration = null,
+  generation = null,
+  readToken = null,
+  token = null,
+  readKey = null,
+  payloadKey = null,
+} = {}) {
+  return (
+    readGeneration === generation &&
+    readToken === token &&
+    readKey != null &&
+    readKey === payloadKey
+  );
+}
+
+// A baseline read that failed while the browser reports online is usually
+// transient (a 500, a timeout). Retrying it with bounded backoff gives Discard a
+// second chance without waiting for a reconnect event that may never fire;
+// `attempts` counts the retries already made, and `null` means the budget is
+// spent (a reconnect or a new queued payload starts a fresh one). A failed read
+// while offline is not retried on a timer: the `online` event is its trigger.
+export const DISCARD_RETRY_DELAYS_MS = [5000, 15000, 30000];
+
+export function discardRetry({ status = 'idle', online = true, attempts = 0 } = {}) {
+  if (status !== 'failed' || !online) return null;
+  return attempts < DISCARD_RETRY_DELAYS_MS.length ? DISCARD_RETRY_DELAYS_MS[attempts] : null;
+}
+
+// Which schedule Discard restores, and `null` when there is nothing it may
+// write. A write rediscovered after a reload can only compensate against the
+// fetched server copy, and only once the read is `ready`; an in-session write
+// keeps reverting to the confirmed snapshot, as before.
+export function discardTarget({
+  queuedFromSnapshot = false,
+  decision = null,
+  confirmed = null,
+} = {}) {
+  if (!queuedFromSnapshot) return confirmed;
+  return decision && decision.status === 'ready' ? decision.baseline : null;
+}
+
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
 // that arrive after a successful save. Day order is not meaningful. The
 // malformed flag is part of the key: clearing it by editing is a real change
@@ -218,6 +387,9 @@ export function scheduleKey(schedule) {
 // baseline always tracks server truth (the live banner and rollback read it),
 // the draft is never overwritten, and the overwrite notice marks a real remote
 // change. If the remote copy happens to match the draft, nothing is unsaved.
+// `metadataOnly` marks a notification that repeated the data (a metadata change
+// such as an acknowledgment or a fromCache flip): it must not erase the notice
+// explaining the last real change.
 export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
   const incomingKey = scheduleKey(incoming);
   const changed = incomingKey !== scheduleKey(confirmed);
@@ -226,7 +398,80 @@ export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
     confirmed: incoming,
     dirty,
     remoteNotice: changed && dirty,
+    metadataOnly: !changed,
   };
+}
+
+// Route a `schedule/current` snapshot to the one branch the screen may take.
+// The branch order is the contract:
+//   1. a write this page issued (`saving`/`savingUnconfirmed`) or a queued write
+//      that still has a promise (`queued && !queuedFromSnapshot`) owns the save
+//      bar until it settles; the snapshot is only a candidate baseline, and a
+//      metadata repeat changes no notice.
+//   2. a write rediscovered from snapshot metadata (or a `pendingWrites` flag)
+//      is resolved by `reloadQueuedState`: an ack or a replacement transitions,
+//      while a same-payload repeat of an already queued write is inert.
+//   3. a dirty draft reconciles through `reconcileDirtyRemote`, whose
+//      `metadataOnly` flag keeps the notice explaining the last real change.
+//   4. a clean draft treats a data-identical repeat as a no-op (keeping "Saved."
+//      and any notice) and only adopts a genuinely new server state.
+// `remoteChange` is `null` when the notice must stay as it is, otherwise whether
+// the snapshot is a real remote change.
+export function routeScheduleSnapshot({
+  initialized = false,
+  saving = false,
+  savingUnconfirmed = false,
+  queued = false,
+  queuedFromSnapshot = false,
+  dirty = false,
+  confirmed = null,
+  draft = null,
+  incoming = null,
+  pendingWrites = undefined,
+  payloadKey = null,
+} = {}) {
+  const dataKey = scheduleKey(incoming);
+  if (!initialized) {
+    // The screen adopts the snapshot before applying the transition, so the
+    // draft it compares is the incoming data.
+    return {
+      kind: 'initial',
+      transition: reloadQueuedState({
+        pendingWrites,
+        queued,
+        saving,
+        savingUnconfirmed,
+        dataKey,
+        payloadKey,
+        draftKey: dataKey,
+      }),
+    };
+  }
+  const confirmedKey = scheduleKey(confirmed);
+  if (saving || savingUnconfirmed || (queued && !queuedFromSnapshot)) {
+    return {
+      kind: 'in-flight',
+      remoteChange: dataKey === confirmedKey ? null : Boolean(payloadKey && dataKey !== payloadKey),
+    };
+  }
+  if (queuedFromSnapshot || pendingWrites === true) {
+    const transition = reloadQueuedState({
+      pendingWrites,
+      queued,
+      saving,
+      savingUnconfirmed,
+      dataKey,
+      payloadKey,
+      draftKey: scheduleKey(draft),
+    });
+    if (transition.outcome !== 'none') return { kind: 'transition', transition };
+    if (queued) return { kind: 'queued-still' };
+  }
+  if (dirty) {
+    return { kind: 'dirty', reconcile: reconcileDirtyRemote({ confirmed, draft, incoming }) };
+  }
+  if (dataKey === confirmedKey) return { kind: 'repeat' };
+  return { kind: 'adopt' };
 }
 
 // Copy for the schedule toggle. A malformed stored container is an unknown

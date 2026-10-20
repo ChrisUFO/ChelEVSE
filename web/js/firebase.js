@@ -23,6 +23,7 @@ export let signInWithRedirect;
 
 export let doc;
 export let getDoc;
+export let getDocFromServer;
 export let getDocs;
 export let setDoc;
 export let deleteDoc;
@@ -86,6 +87,7 @@ export async function initFirebase() {
     ({
       doc,
       getDoc,
+      getDocFromServer,
       getDocs,
       setDoc,
       deleteDoc,

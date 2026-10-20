@@ -246,8 +246,10 @@ function enterApp(user) {
       showConfigData(data);
     },
     onConfigError: showConfigError,
-    onSchedule: (data) => {
-      showSchedule(data);
+    // The editor needs the write metadata; the status badge resolves only the
+    // active window from the data.
+    onSchedule: (data, meta) => {
+      showSchedule(data, meta);
       showStatusSchedule(data);
     },
     onScheduleError: showScheduleError,
