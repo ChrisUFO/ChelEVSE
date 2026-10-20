@@ -18,6 +18,7 @@ import {
   serverTimestamp,
   documentId,
 } from './firebase.js';
+import { settingsPayload } from './settings.js';
 
 let unsubStatus = null;
 let unsubCmds = null;
@@ -183,10 +184,12 @@ export function mergeCommandWindows(recent = [], pending = []) {
   return merged;
 }
 
-// Both fields travel together because firestore.rules rejects a partial
-// settings document.
-export function saveSettings({ rate, currency }) {
-  return setDoc(doc(db, 'settings', 'current'), { rate, currency });
+// Both flat fields travel together because firestore.rules rejects a partial
+// settings document. The optional rate schedule rides along only when it has
+// rows: an empty list is omitted, so flat saves stay byte-identical (and old
+// rules versions keep accepting them).
+export function saveSettings(values) {
+  return setDoc(doc(db, 'settings', 'current'), settingsPayload(values));
 }
 
 // Own-token-only, per firestore.rules: the doc id is the FCM token and the uid
