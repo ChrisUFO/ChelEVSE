@@ -94,10 +94,19 @@ export function startStore({
     (data) => onConfig && onConfig(data),
     (err) => onConfigError && onConfigError(err),
   );
-  unsubSchedule = watch(
-    'schedule/current',
-    (data) => onSchedule && onSchedule(data),
-    (err) => onScheduleError && onScheduleError(err),
+  // Schedule metadata travels with the data: a write still queued in the
+  // persistent cache across a reload is durable but unacknowledged, and the
+  // editor labels it instead of trusting the cached document as server truth.
+  unsubSchedule = onSnapshot(
+    doc(db, 'schedule', 'current'),
+    (snap) =>
+      onSchedule &&
+      onSchedule(snap && snap.exists() ? snap.data() : null, {
+        pendingWrites: Boolean(snap && snap.metadata && snap.metadata.hasPendingWrites),
+      }),
+    (err) => {
+      if (!denied(err) && onScheduleError) onScheduleError(err);
+    },
   );
   // The Advanced console keeps its own 20-entry RAPI history: a where+orderBy
   // query needs the declared (type, created_at) composite index.
