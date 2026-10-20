@@ -908,6 +908,26 @@ class LoopWiringTests(unittest.TestCase):
             self.assertTrue(thread.daemon)
         tracker.return_value.seed.assert_called_once_with()
 
+    def test_run_leaves_shutdown_logging_to_main(self):
+        """main() owns lifecycle logging: run() must not log a second stop line."""
+        transport = bridge.ChargerTransport(FakeSession())
+        with mock.patch.object(bridge, "status_loop"), mock.patch.object(
+            bridge, "config_loop"
+        ), mock.patch.object(bridge, "schedule_loop"), mock.patch.object(
+            bridge, "command_loop"
+        ), mock.patch.object(
+            bridge.threading, "Thread"
+        ), mock.patch.object(
+            bridge, "StatusTracker"
+        ), mock.patch.object(
+            bridge, "Notifier"
+        ), mock.patch.object(
+            bridge, "log"
+        ) as fake_log:
+            bridge.run(FakeDB(), "http://charger", None, (10, 60, 60, 300, 5), transport)
+
+        self.assertEqual([call.args[0] for call in fake_log.call_args_list], [])
+
 
 if __name__ == "__main__":
     unittest.main()

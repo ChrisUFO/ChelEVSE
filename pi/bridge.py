@@ -1342,7 +1342,6 @@ def run(db, base, auth, intervals, transport):
     )
     threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
     command_loop(db, base, auth, transport, command_interval)
-    log("bridge stopped")
 
 
 def main():
