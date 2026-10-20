@@ -283,6 +283,9 @@ want to watch it apply.
 3. **Plan.** `GET http://<charger>/schedule/plan` and `status/current.schedule`
    agree: during the window `in_window: true` and `active_rule_id` names the
    saved rule; outside it, `in_window: false` and `active_rule_id: null`.
+   An empty `[]` response (no events configured) is normal: it publishes
+   `{in_window: false, active_rule_id: null}` and the journal shows no
+   `schedule plan failed` line.
 4. **Badge.** The status screen shows the scheduled window while it is active,
    and hides the badge afterwards.
 5. **Edit.** Change the start time/amps and save; the bridge re-syncs (journal

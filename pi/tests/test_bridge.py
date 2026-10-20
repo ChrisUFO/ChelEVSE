@@ -789,6 +789,23 @@ class SchedulePlanResponseTests(unittest.TestCase):
         self.assertEqual(schedule, {"in_window": False, "active_rule_id": None})
         self.assertFalse([line for line in logs if "schedule plan failed" in line])
 
+    def test_the_schedule_loop_logs_a_malformed_plan(self):
+        db = FakeDB()
+        stop = _RecordingStop(1)
+        transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [1])]))
+        logs = []
+        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
+            bridge, "log", logs.append
+        ):
+            bridge.schedule_loop(db, "http://charger", None, transport, 60, 300)
+        self.assertTrue(
+            any(
+                "schedule plan failed (ValueError: schedule plan is not a JSON object)"
+                in line
+                for line in logs
+            )
+        )
+
 
 class ChargerSessionTests(unittest.TestCase):
     def test_factory_bounds_the_pool(self):
