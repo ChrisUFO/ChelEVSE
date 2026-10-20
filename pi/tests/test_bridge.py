@@ -1797,14 +1797,24 @@ class WatchdogLoopTests(unittest.TestCase):
 
     def test_disabled_watchdog_only_flags_the_outage(self):
         db, session, notifier, watchdog = self.run_loop(
-            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
-            polls=3,
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=4,
             config=bridge.WatchdogConfig(enabled=False),
         )
         self.assertEqual(self.posts(session), [])
+        # The outage edge pushes once; the restore sends no recovery push even
+        # though the disabled watchdog never observed the failure.
         self.assertEqual(notifier.bodies, ["Charger offline"])
-        self.assertNotIn("health", db.data.get("status", {}))
         self.assertEqual(watchdog.failures, 0)
+        # Restore is status-loop business, not watchdog business: the document
+        # returns online while status/health stays absent.
+        self.assertTrue(db.data["status"]["current"]["charger_online"])
+        self.assertNotIn("health", db.data["status"])
 
 
 if __name__ == "__main__":
