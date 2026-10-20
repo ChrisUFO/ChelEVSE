@@ -229,6 +229,48 @@ test('validateRateWindows rejects overlapping windows on shared days, months and
     ),
     true,
   );
+  // A wrapping window's tail is compared against the next weekday, so a Monday
+  // night (0 = Monday) and a Tuesday early window collide on Tuesday 00:00–06:00.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ id: 'a', days: [0], start: '22:00', end: '06:00' }),
+      windowRow({ id: 'b', days: [1], start: '00:00', end: '07:00' }),
+    ),
+    true,
+  );
+  // …and in the same month: a Wednesday tail is Wednesday's early hours.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ id: 'a', days: [1], months: [3], start: '22:00', end: '06:00' }),
+      windowRow({ id: 'b', days: [2], months: [3], start: '00:00', end: '07:00' }),
+    ),
+    true,
+  );
+  // …and against the next month, so a December wrap collides with January's
+  // early hours.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ id: 'a', months: [12], start: '22:00', end: '06:00' }),
+      windowRow({ id: 'b', months: [1], start: '00:00', end: '06:00' }),
+    ),
+    true,
+  );
+  // Endpoints that touch across the boundary do not overlap.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ id: 'a', months: [12], start: '22:00', end: '06:00' }),
+      windowRow({ id: 'b', months: [1], start: '06:00', end: '07:00' }),
+    ),
+    false,
+  );
+  // The tail rolls exactly one month: February does not meet December's night.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ id: 'a', months: [12], start: '22:00', end: '06:00' }),
+      windowRow({ id: 'b', months: [2], start: '00:00', end: '06:00' }),
+    ),
+    false,
+  );
 
   const result = validateRateWindows([
     windowRow({ id: 'night', start: '22:00', end: '06:00' }),
@@ -251,13 +293,18 @@ test('validateRateWindows rejects overlapping windows on shared days, months and
 // ---------- matching ----------
 
 test('windowMatches uses the local weekday, month and wall clock', () => {
-  const mondayNight = windowRow({ days: [1], start: '22:00', end: '06:00' });
-  assert.equal(date(2026, 10, 19).getDay(), 1); // Monday
+  // `days` is 0 = Monday, so a Monday-only night tariff is days [0].
+  const mondayNight = windowRow({ days: [0], start: '22:00', end: '06:00' });
+  assert.equal(date(2026, 10, 19).getDay(), 1); // Monday, in Date#getDay terms
   assert.equal(windowMatches(mondayNight, date(2026, 10, 19, 23, 0)), true);
-  assert.equal(windowMatches(mondayNight, date(2026, 10, 19, 1, 0)), true);
+  // The post-midnight tail belongs to the day the window started: Monday 01:00
+  // is Sunday night, and Tuesday 01:00 is Monday night.
+  assert.equal(windowMatches(mondayNight, date(2026, 10, 19, 1, 0)), false);
   assert.equal(windowMatches(mondayNight, date(2026, 10, 19, 6, 0)), false);
   assert.equal(windowMatches(mondayNight, date(2026, 10, 19, 12, 0)), false);
-  assert.equal(windowMatches(mondayNight, date(2026, 10, 20, 1, 0)), false); // Tuesday
+  assert.equal(windowMatches(mondayNight, date(2026, 10, 20, 1, 0)), true); // Tuesday tail
+  assert.equal(windowMatches(mondayNight, date(2026, 10, 20, 5, 59)), true);
+  assert.equal(windowMatches(mondayNight, date(2026, 10, 20, 6, 0)), false);
 
   const summerOnly = windowRow({ months: [6, 7, 8] });
   assert.equal(windowMatches(summerOnly, date(2026, 7, 1, 3, 0)), true);
@@ -266,6 +313,29 @@ test('windowMatches uses the local weekday, month and wall clock', () => {
   const allDay = windowRow({ start: '00:00', end: '00:00' });
   assert.equal(windowMatches(allDay, date(2026, 10, 19, 0, 0)), true);
   assert.equal(windowMatches(allDay, date(2026, 10, 19, 23, 59)), true);
+});
+
+test('the month-limited tail of a wrapping window rolls into the next month', () => {
+  const decemberNight = windowRow({ months: [12], start: '22:00', end: '06:00' });
+  assert.equal(windowMatches(decemberNight, date(2026, 12, 31, 23, 0)), true);
+  // New Year's early hours are December's window, not January's own night.
+  assert.equal(windowMatches(decemberNight, date(2027, 1, 1, 1, 0)), true);
+  assert.equal(windowMatches(decemberNight, date(2027, 1, 1, 5, 59)), true);
+  assert.equal(windowMatches(decemberNight, date(2027, 1, 1, 6, 0)), false);
+  assert.equal(windowMatches(decemberNight, date(2027, 1, 1, 22, 0)), false);
+  // The start date's month governs: later January nights are not December's.
+  assert.equal(windowMatches(decemberNight, date(2027, 1, 5, 1, 0)), false);
+  // A December tail rolls exactly one month; February is not December's night.
+  assert.equal(windowMatches(decemberNight, date(2027, 2, 1, 1, 0)), false);
+});
+
+test('window days use 0 = Monday, matching the schedule editor chips', () => {
+  const monday = windowRow({ days: [0], start: '10:00', end: '11:00' });
+  assert.equal(windowMatches(monday, date(2026, 10, 19, 10, 30)), true); // Monday
+  assert.equal(windowMatches(monday, date(2026, 10, 18, 10, 30)), false); // Sunday
+  const sunday = windowRow({ days: [6], start: '10:00', end: '11:00' });
+  assert.equal(windowMatches(sunday, date(2026, 10, 18, 10, 30)), true);
+  assert.equal(windowMatches(sunday, date(2026, 10, 19, 10, 30)), false);
 });
 
 test('rateAt falls back to the flat rate and documents last-match precedence', () => {
@@ -285,6 +355,14 @@ test('rateAt falls back to the flat rate and documents last-match precedence', (
   // Both match at 07:00; the later row wins deterministically.
   assert.equal(rateAt(date(2026, 10, 19, 7, 0), rate), 0.2);
   assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0.3);
+
+  // A weekday window's post-midnight tail is priced on the next day.
+  const mondayNight = schedule(
+    [windowRow({ id: 'monday', rate: 0.1, days: [0], start: '22:00', end: '06:00' })],
+    0.3,
+  );
+  assert.equal(rateAt(date(2026, 10, 20, 1, 0), mondayNight), 0.1);
+  assert.equal(rateAt(date(2026, 10, 19, 1, 0), mondayNight), 0.3);
 });
 
 // ---------- costing ----------
@@ -330,6 +408,45 @@ test('costForInterval follows a window across midnight', () => {
   );
 });
 
+test('a weekday-limited wrap is costed on the night it started', () => {
+  // `days` is 0 = Monday: a Monday-night window.
+  const s = schedule([windowRow({ rate: 0.1, days: [0], start: '22:00', end: '06:00' })], 0.3);
+  // Monday 22:00 → Tuesday 02:00 is one Monday-night window.
+  close(
+    costForInterval(2000, date(2026, 10, 19, 22, 0), date(2026, 10, 20, 2, 0), s),
+    0.2,
+    'Monday night',
+  );
+  // Tuesday 01:00 → 02:00 is that same window's tail.
+  close(
+    costForInterval(1000, date(2026, 10, 20, 1, 0), date(2026, 10, 20, 2, 0), s),
+    0.1,
+    'Monday tail',
+  );
+  // Sunday 22:00 → Monday 02:00 is not: Sunday night is outside the window.
+  close(
+    costForInterval(2000, date(2026, 10, 18, 22, 0), date(2026, 10, 19, 2, 0), s),
+    0.6,
+    'Sunday night',
+  );
+});
+
+test('a month-limited wrap is costed into the next month', () => {
+  const s = schedule([windowRow({ rate: 0.1, months: [12], start: '22:00', end: '06:00' })], 0.3);
+  // 31 December 23:00 → 1 January 02:00: three hours of December's window.
+  close(
+    costForInterval(3000, date(2026, 12, 31, 23, 0), date(2027, 1, 1, 2, 0), s),
+    0.3,
+    'December into January',
+  );
+  // January's own night is not December's window.
+  close(
+    costForInterval(2000, date(2027, 1, 1, 22, 0), date(2027, 1, 2, 2, 0), s),
+    0.6,
+    'January night',
+  );
+});
+
 test('costForInterval splits at a month boundary', () => {
   const s = schedule([windowRow({ rate: 0.1, months: [12], start: '00:00', end: '00:00' })], 0.3);
   close(
@@ -340,7 +457,8 @@ test('costForInterval splits at a month boundary', () => {
 });
 
 test('costForInterval splits at a weekday boundary', () => {
-  const s = schedule([windowRow({ rate: 0.1, days: [1], start: '00:00', end: '12:00' })], 0.3);
+  // A Monday window (0 = Monday), 00:00–12:00.
+  const s = schedule([windowRow({ rate: 0.1, days: [0], start: '00:00', end: '12:00' })], 0.3);
   // Monday 11:00 → 13:00: one hour in the Monday window, one at the fallback.
   close(
     costForInterval(2000, date(2026, 10, 19, 11, 0), date(2026, 10, 19, 13, 0), s),

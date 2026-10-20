@@ -10,10 +10,20 @@
 //       months: null },
 //   ] }
 //
-// `days` uses 0 = Sunday … 6 = Saturday, matching Date#getDay(). `months` is
-// null (all year) or an inclusive list of 1–12. Windows are matched on the
-// local wall clock, so daylight-saving transitions move with the owner's clock
-// instead of a fixed UTC offset.
+// `days` uses 0 = Monday … 6 = Sunday: the same convention as `DAY_NAMES`, the
+// schedule editor's weekday chips and `schedule/current`, so the two `days`
+// fields in the database agree. `Date#getDay()` counts 0 = Sunday, so it is
+// converted with `(getDay() + 6) % 7`. `months` is null (all year) or an
+// inclusive list of 1–12. `start`/`end` are `HH:MM` on a half-open
+// `[start, end)` local interval; `end <= start` wraps midnight, and
+// `start === end` covers the whole day. Windows are matched on the local wall
+// clock, so daylight-saving transitions move with the owner's clock instead of
+// a fixed UTC offset.
+//
+// A window's post-midnight hours belong to the day the window *started*
+// (matching the bridge's schedule model): a Monday 22:00–06:00 window also
+// covers Tuesday 00:00–05:59, and a December-only 22:00–06:00 window covers
+// 1 January 00:00–05:59. See `windowSegments`.
 
 export const RATE_MIN = 0;
 export const RATE_MAX = 5;
@@ -24,6 +34,7 @@ const TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 const MINUTES_PER_DAY = 24 * 60;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const ALL_MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
+const ALL_MONTHS_SET = new Set(ALL_MONTHS);
 
 // ---------- primitive parsing ----------
 
@@ -94,7 +105,7 @@ function validateWindow(window) {
   if (!Array.isArray(days) || days.length === 0) {
     errors.days = 'Pick at least one day.';
   } else if (days.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) {
-    errors.days = 'Days must be whole numbers from 0 to 6.';
+    errors.days = 'Days must be whole numbers from 0 (Monday) to 6 (Sunday).';
   } else if (new Set(days).size !== days.length) {
     errors.days = 'Each weekday can only appear once.';
   }
@@ -129,24 +140,81 @@ function windowIsValid(window) {
 
 // ---------- matching ----------
 
-// A window covers the local time-of-day [start, end); `end <= start` wraps
-// midnight, and start === end therefore covers the whole day.
-function coversTimeOfDay(window, minutes) {
+// A window's month set: `null` (all year) is every month; a malformed value the
+// caller did not validate is no month, so matching fails closed.
+// `ALL_MONTHS_SET` is shared read-only.
+function monthSet(window) {
+  const months = window.months;
+  if (months == null) return ALL_MONTHS_SET;
+  return new Set(Array.isArray(months) ? months : []);
+}
+
+// 0 = Monday … 6 = Sunday, from a local Date whose `getDay()` is 0 = Sunday.
+function dayIndex(date) {
+  return (date.getDay() + 6) % 7;
+}
+
+// A window as the calendar ranges it actually covers: one segment per weekday,
+// each carrying the month set of the day the window *started*. `end <= start`
+// wraps midnight (`start === end` covers the whole day), and a wrapping window
+// splits in two:
+//
+//   main  [start, 1440)  on the start day
+//   tail  [0, end)       on the *next* day (`tail: true`)
+//
+// The tail is the next day's early hours, so its weekday is the instant's
+// weekday, but its weekday *and* month are judged on the previous calendar day
+// — the day the window started. A December-only window therefore covers 1
+// January 00:00–05:59 and nothing later in January.
+function windowSegments(window) {
   const start = parseTime(window.start);
   const end = parseTime(window.end);
-  if (start == null || end == null) return false;
-  return start < end ? minutes >= start && minutes < end : minutes >= start || minutes < end;
+  if (start == null || end == null) return [];
+  const days = Array.isArray(window.days)
+    ? window.days.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+    : [];
+  const months = monthSet(window);
+  if (start === end) {
+    return days.map((day) => ({ day, months, from: 0, to: MINUTES_PER_DAY }));
+  }
+  if (start < end) {
+    return days.map((day) => ({ day, months, from: start, to: end }));
+  }
+  const segments = [];
+  for (const day of days) {
+    segments.push({ day, months, from: start, to: MINUTES_PER_DAY });
+    segments.push({
+      day: (day + 1) % 7,
+      months,
+      from: 0,
+      to: end,
+      tail: true,
+    });
+  }
+  return segments;
+}
+
+// Noon of the local day before `date`. Anchoring at noon keeps the weekday and
+// month read away from a missing or repeated DST hour.
+function previousDayNoon(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - 1, 12, 0);
 }
 
 export function windowMatches(window, date) {
   if (!window || !(date instanceof Date) || !Number.isFinite(date.getTime())) return false;
-  const days = Array.isArray(window.days) ? window.days : [];
-  if (!days.includes(date.getDay())) return false;
-  const months = window.months;
-  if (months != null && (!Array.isArray(months) || !months.includes(date.getMonth() + 1))) {
-    return false;
-  }
-  return coversTimeOfDay(window, date.getHours() * 60 + date.getMinutes());
+  const day = dayIndex(date);
+  const month = date.getMonth() + 1;
+  const minutes = date.getHours() * 60 + date.getMinutes();
+  let startMonth = null;
+  return windowSegments(window).some((segment) => {
+    if (segment.day !== day) return false;
+    if (minutes < segment.from || minutes >= segment.to) return false;
+    if (!segment.tail) return segment.months.has(month);
+    // A tail belongs to the instant's previous calendar day: its weekday is
+    // implied by `segment.day`, and its month is that day's month.
+    if (startMonth == null) startMonth = previousDayNoon(date).getMonth() + 1;
+    return segment.months.has(startMonth);
+  });
 }
 
 // A stored document's optional window list. Invalid rows are dropped one at a
@@ -167,9 +235,12 @@ export function normalizeRateSchedule(data) {
 
 function rateFor(schedule, date) {
   let rate = null;
-  // Last matching window wins. Validation rejects overlapping windows, so this
-  // only decides between rows stored by an older or hand-edited writer; it
-  // keeps matching deterministic instead of depending on the read order.
+  // Last matching window wins. Validation rejects overlapping windows on a
+  // calendar-segment basis (a wrapping window's tail is compared against the
+  // next weekday, with the possible months its start day implies), so a
+  // schedule it accepts never matches one instant twice; this only decides
+  // between rows stored by an older or hand-edited writer, keeping the result
+  // deterministic instead of depending on the read order.
   for (const window of schedule.rates) {
     if (windowMatches(window, date)) rate = window.rate;
   }
@@ -190,35 +261,34 @@ function setsIntersect(left, right) {
   return false;
 }
 
-function monthSet(window) {
-  const months = window.months;
-  return new Set(Array.isArray(months) ? months : ALL_MONTHS);
+// The same month set, one month later (December rolls into January).
+function rollMonths(months) {
+  return new Set([...months].map((month) => (month === 12 ? 1 : month + 1)));
 }
 
-// [start, end) segments on a circular 0…1440 clock. `end <= start` wraps
-// midnight; equal endpoints cover the whole day.
-function timeSegments(window) {
-  const start = parseTime(window.start);
-  const end = parseTime(window.end);
-  if (start == null || end == null) return [];
-  if (start < end) return [[start, end]];
-  if (start === end) return [[0, MINUTES_PER_DAY]];
-  return [
-    [start, MINUTES_PER_DAY],
-    [0, end],
-  ];
+// The month sets two segments can meet in. A tail's instant can fall in a
+// month that the start day is in (mid-month) or in the month after it (the
+// start day was the last day of the month), so the tail contributes both.
+function segmentMonths(segment) {
+  if (!segment.tail) return segment.months;
+  return new Set([...segment.months, ...rollMonths(segment.months)]);
 }
 
-// Two windows collide when they can both match one instant: a shared weekday, a
-// shared month, and an overlapping time-of-day range. Touching endpoints do not
-// overlap (one window ends exactly where the other starts).
+// Two windows collide when they can both match one instant: two segments on the
+// same weekday, with intersecting month sets and overlapping time-of-day
+// ranges. Comparing segments (rather than day/month sets) is what catches a
+// Tuesday-early window against a Monday night, and January's early hours against
+// a December wrap. The tail's months are the possible months of its start day,
+// so a calendar pair that can never meet is the only thing this over-rejects.
+// Touching endpoints do not overlap (one window ends exactly where the other
+// starts).
 export function windowsOverlap(left, right) {
   if (!left || !right) return false;
-  if (!setsIntersect(new Set(left.days), new Set(right.days))) return false;
-  if (!setsIntersect(monthSet(left), monthSet(right))) return false;
-  for (const [leftStart, leftEnd] of timeSegments(left)) {
-    for (const [rightStart, rightEnd] of timeSegments(right)) {
-      if (leftStart < rightEnd && rightStart < leftEnd) return true;
+  for (const a of windowSegments(left)) {
+    for (const b of windowSegments(right)) {
+      if (a.day !== b.day) continue;
+      if (!setsIntersect(segmentMonths(a), segmentMonths(b))) continue;
+      if (a.from < b.to && b.from < a.to) return true;
     }
   }
   return false;

@@ -209,6 +209,8 @@ export function deleteFcmToken(token) {
 }
 
 // Exact schedule shape: keys are fixed so no draft-only fields ever reach rules.
+// `days` is 0 = Monday … 6 = Sunday, the same convention as the rate windows in
+// rates.js (and `DAY_NAMES`), not Date#getDay()'s 0 = Sunday.
 export function saveSchedule(schedule) {
   return setDoc(doc(db, 'schedule', 'current'), {
     enabled: schedule.enabled,
