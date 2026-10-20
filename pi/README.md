@@ -6,14 +6,19 @@ the charger's local HTTP API, mirrors status and config into Firestore
 sessions, mirrors `schedule/current` into the charger's own scheduler, sends FCM
 push notifications on charging/offline transitions, and applies pending
 `commands/*` documents back to the charger, and restarts a charger that stops
-answering (see [Watchdog](#watchdog-charger-health)). Runs under systemd with
-`Restart=always`.
+answering (see [Watchdog](#watchdog-charger-health)). Status can also arrive
+over MQTT from a broker on the LAN (see [MQTT status
+source](#mqtt-status-source-issue-44)), behind a feature flag. Runs under
+systemd with `Restart=always`.
 See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the big picture.
 
 ## Prerequisites
 
 - Raspberry Pi OS (Bookworm) on the same LAN as the charger
 - `git` and `python3-venv`: `sudo apt install git python3-venv`
+- Optional, for MQTT status: `mosquitto` (broker) and `mosquitto-clients` on the
+  Pi — see [MQTT status source](#mqtt-status-source-issue-44) and
+  [../docs/DEPLOY.md](../docs/DEPLOY.md)
 
 ## Install
 
@@ -42,25 +47,35 @@ Environment variables, read from `private/bridge.env` (see
 [../private.example/bridge.env.example](../private.example/bridge.env.example));
 real environment variables take precedence.
 
-| Variable                          | Default         | Meaning                                                                                   |
-| --------------------------------- | --------------- | ----------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                    | `192.168.0.145` | Charger IP on the LAN                                                                     |
-| `CHARGER_USER` / `CHARGER_PASS`   | unset           | HTTP Basic auth if set on the charger (blank username is valid)                           |
-| `FIREBASE_SERVICE_ACCOUNT`        | —               | Path to the service-account key (**required**; relative paths resolve from the repo root) |
-| `STATUS_INTERVAL`                 | `10`            | Seconds between charger status polls                                                      |
-| `CONFIG_INTERVAL`                 | `60`            | Seconds between charger config polls                                                      |
-| `SCHEDULE_INTERVAL`               | `60`            | Seconds between schedule/plan polls and sync checks                                       |
-| `SCHEDULE_RECONCILE_INTERVAL`     | `300`           | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
-| `COMMAND_INTERVAL`                | `5`             | Seconds between command polls                                                             |
-| `WATCHDOG_ENABLED`                | `true`          | Probe, restart and alert when `/status` keeps failing (see below)                         |
-| `WATCHDOG_FAILURES`               | `3`             | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
-| `WATCHDOG_COOLDOWN_SEC`           | `600`           | Minimum seconds between restart attempts                                                  |
-| `WATCHDOG_MAX_PER_HOUR`           | `3`             | Hard cap on restart attempts in a trailing hour                                           |
-| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`         | Allow a restart while the last known state is charging                                    |
+| Variable                          | Default           | Meaning                                                                                   |
+| --------------------------------- | ----------------- | ----------------------------------------------------------------------------------------- |
+| `CHARGER_HOST`                    | `192.168.0.145`   | Charger IP on the LAN                                                                     |
+| `CHARGER_USER` / `CHARGER_PASS`   | unset             | HTTP Basic auth if set on the charger (blank username is valid)                           |
+| `FIREBASE_SERVICE_ACCOUNT`        | —                 | Path to the service-account key (**required**; relative paths resolve from the repo root) |
+| `STATUS_INTERVAL`                 | `10`              | Seconds between charger status polls                                                      |
+| `CONFIG_INTERVAL`                 | `60`              | Seconds between charger config polls                                                      |
+| `SCHEDULE_INTERVAL`               | `60`              | Seconds between schedule/plan polls and sync checks                                       |
+| `SCHEDULE_RECONCILE_INTERVAL`     | `300`             | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
+| `COMMAND_INTERVAL`                | `5`               | Seconds between command polls                                                             |
+| `WATCHDOG_ENABLED`                | `true`            | Probe, restart and alert when `/status` keeps failing (see below)                         |
+| `WATCHDOG_FAILURES`               | `3`               | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
+| `WATCHDOG_COOLDOWN_SEC`           | `600`             | Minimum seconds between restart attempts                                                  |
+| `WATCHDOG_MAX_PER_HOUR`           | `3`               | Hard cap on restart attempts in a trailing hour                                           |
+| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`           | Allow a restart while the last known state is charging                                    |
+| `MQTT_ENABLED`                    | `false`           | Ingest status from the charger's MQTT topics (see below); HTTP stays the fallback         |
+| `MQTT_HOST`                       | —                 | Broker host (required when `MQTT_ENABLED=true`)                                           |
+| `MQTT_PORT`                       | `1883`            | Broker port                                                                               |
+| `MQTT_USER` / `MQTT_PASS`         | unset             | Broker credentials; keep the password in `private/bridge.env` only                        |
+| `MQTT_TOPIC`                      | `chelevse`        | Base topic the charger publishes to (`mqtt_topic` in the charger config)                  |
+| `MQTT_RECONCILE_SEC`              | `60`              | Seconds between HTTP `/status` reconciles while MQTT is connected                         |
+| `MQTT_CLIENT_ID`                  | `chelevse-bridge` | MQTT client id                                                                            |
 
 Bad `WATCHDOG_*` values (a non-number, `WATCHDOG_FAILURES=0`, a cooldown below
 zero, a cap below 1, a non-boolean flag) stop the bridge at startup with a
-message naming the variable, like the interval settings.
+message naming the variable, like the interval settings. The same applies to bad
+`MQTT_*` values — a non-boolean flag, a port outside 1–65535, a
+`MQTT_RECONCILE_SEC` of zero or `nan`, a blank topic, or `MQTT_ENABLED=true`
+without `MQTT_HOST`.
 
 ### One charger HTTP session
 
@@ -80,6 +95,74 @@ Accepted because polls are low-rate. Firestore work and the notifier run
 outside the lock. The config and schedule pollers start 3 s and 7 s late so
 `/status`, `/config` and `/schedule/plan` do not hit the charger together.
 Polling intervals, timeouts, auth, payloads and failure logging are unchanged.
+
+### MQTT status source (issue #44)
+
+With `MQTT_ENABLED=true` the bridge subscribes to `<MQTT_TOPIC>/#` and writes
+status as the charger publishes it, instead of inferring freshness from a 10 s
+poll. The flag is **off by default**; with it off nothing below changes.
+
+The firmware publishes one topic per value (`<base>/amp`, `<base>/state`, …)
+when its EVSE poll reports a change. Values reach the same `parse_status` /
+`apply_status` path as an HTTP poll, so the document shape, unit conversions,
+history, sessions and notifications are shared — a second source describing the
+same state cannot fire a second transition, ring up history twice, or write a
+second session.
+
+| Topic                     | `status/current` field | Notes                                               |
+| ------------------------- | ---------------------- | --------------------------------------------------- |
+| `<base>/amp`              | `amp`                  | milliamps → amps in `parse_status`                  |
+| `<base>/voltage`, `power` | `voltage`, `power`     | volts; watts (the app shows kW)                     |
+| `<base>/pilot`            | `pilot`                | amps                                                |
+| `<base>/state`            | `state`, `state_label` | numeric EVSE state                                  |
+| `<base>/vehicle`          | `vehicle`              | 1 = plugged in                                      |
+| `<base>/session_energy`   | `session_energy`       | Wh                                                  |
+| `<base>/session_elapsed`  | `elapsed`              | seconds (the deprecated `elapsed` topic is ignored) |
+| `<base>/total_energy`     | `total_energy`         | kWh                                                 |
+| `<base>/temp1`–`temp3`    | `temp1`–`temp3`        | 10ths of °C; `false` when absent                    |
+| `<base>/config_version`   | —                      | triggers one `/config` sync                         |
+
+Everything else on the base topic (retained `config`/`claim`/`override`/
+`schedule`/`limit`/`boost`, the command topics, `rapi/out`, availability
+counters) is ignored: commands and LWT handling are #46/#45.
+
+**Cadence.** While the broker is connected, `/status` is fetched once every
+`MQTT_RECONCILE_SEC` (60 s) and merged into the snapshot — reconciliation only.
+`/config` is fetched when `config_version` changes (the retained value on
+connect counts as the first change), **not** every 60 s. The schedule loop is
+unchanged. While the broker is disconnected — or the flag is off — the bridge
+polls exactly as before: 10 s status, 60 s config, 60 s schedule.
+
+**Merged snapshots.** A burst carries only the fields that changed, so a burst is
+buffered for ~500 ms and merged into a snapshot seeded from the last `/status`
+reply. Fields the firmware never publishes over MQTT (`comm_sent`,
+`comm_success`, `rapi_connected`) therefore survive, and a burst that only
+carries `amp` cannot null `voltage`. The 60 s reconcile refreshes both the seed
+and the authoritative document.
+
+**Liveness, fallback and outages.** Liveness is the client's connection state,
+not message recency: an idle charger publishes nothing for minutes and must not
+look dead. Each source change is logged once (`status source: mqtt …` /
+`status source: http (fallback)`), written to `status/health.source`, and a drop
+resumes the 10 s poll immediately. A failed HTTP reconcile while MQTT is
+connected is logged as `status reconcile failed (…)` and still counts towards the
+watchdog's failure streak (only a successful HTTP poll clears it). It is treated
+as a charger outage only when **no MQTT snapshot arrived since the previous
+reconcile** — i.e. neither transport sees the charger. The broker-side LWT is
+#45.
+
+**Health.** `status/health` gains two transport fields, written with merge
+semantics so neither the watchdog's writes nor these can clobber the other:
+
+```text
+status/health  { …, source: "mqtt"|"http", mqtt_connected: bool }
+```
+
+**Rollback.** Set `MQTT_ENABLED=false` and restart the service — no redeploy.
+The charger's own MQTT settings are independent: `POST /config
+{"mqtt_enabled":false}` plus a gateway restart stops its publishing without
+touching the bridge. The charger stores `mqtt_pass` in plain text like its other
+credentials (it is redacted from `status/config`).
 
 ### Watchdog (charger health)
 
@@ -128,10 +211,13 @@ tick, so a healthy bridge writes it once:
 
 ```text
 status/health  { state, reason, http_ok, controller_ok, last_attempt_at,
-                 attempts_last_hour, last_action, last_result, updated_at }
+                 attempts_last_hour, last_action, last_result, updated_at,
+                 source, mqtt_connected }
 ```
 
-`state` is `healthy` or `unhealthy`; `reason` is the decision's explanation
+`state` is `healthy` or `unhealthy`; `source`/`mqtt_connected` are the transport
+fields from the MQTT section above (present only when MQTT is configured, and
+merged so they survive watchdog writes); `reason` is the decision's explanation
 (e.g. `cooldown after the last attempt (600s)`); `last_action` is
 `restart_gateway`, `restart_evse`, `alert` (unreachable, never attempted) or
 `none` (a guard blocked the attempt); `last_result` is the outcome of the last
@@ -165,6 +251,7 @@ timestamped line and the loop carries on at its next interval.
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` per completed plug-in session         |
 | Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan     |
 | Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt |
+| Status   | `status/health`    | `source`/`mqtt_connected` transport fields (MQTT mode, merged)              |
 | Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`         |
 | Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)  |
 | Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                     |
@@ -432,8 +519,11 @@ client-side.
 ## Tests
 
 The bridge and ACL helper have stdlib `unittest` coverage under `pi/tests/`
-with in-memory Firestore/HTTP fakes; no charger, Firestore, or FCM access is
-needed. Run it with the same venv as the service:
+with in-memory Firestore/HTTP/MQTT fakes; no charger, broker, Firestore, or FCM
+access is needed. `pi/tests/test_mqtt.py` covers the topic mapping, the
+debounce/merge, the no-nulling rule, fallback, the config-version trigger,
+source transitions and the no-duplicate-transition rule. Run it with the same
+venv as the service:
 
 ```bash
 pi/.venv/bin/python -m unittest discover -s pi/tests -v

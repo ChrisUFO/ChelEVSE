@@ -14,6 +14,8 @@ reach the public repo.
 | `<owner@example.com>` | Google account that owns the deployment (the first allowlisted) |
 | `<repo-url>`          | Clone URL of this repository                                    |
 | `<pi-host>`           | The Pi's LAN hostname or IP                                     |
+| `<charger-host>`      | The charger's LAN hostname or IP                                |
+| `<mqtt-user>`         | Broker username for the bridge and the charger                  |
 | `<your-domain>`       | Optional custom domain, e.g. `charge.example.com`               |
 
 ## 1. Prerequisites
@@ -27,6 +29,7 @@ reach the public repo.
 | rsync          | on the Pi; `pi/install.sh` refuses to run without it                                                      |
 | git            | to clone the repo (and to run `npm run prepare`'s hooks)                                                  |
 | A Raspberry Pi | Raspberry Pi OS Bookworm, wired or wireless on the charger's LAN                                          |
+| mosquitto      | optional: the broker, when status is ingested over MQTT (§10.1)                                           |
 
 From the repo root:
 
@@ -366,6 +369,111 @@ sudo journalctl -u chelevse-bridge -b --no-pager | tail -20
 ```
 
 Expect `active` and a fresh `bridge started` line with no errors.
+
+### 10.1 MQTT status transport (optional)
+
+Status arrives event-driven when the charger publishes to a broker. The Pi is
+the natural broker host (it is already on the charger's LAN and always on); the
+bridge keeps HTTP for `/status` reconciliation, `/config`, `/schedule/plan`,
+OTA and commands. The bridge **ships with `MQTT_ENABLED=false`** — provision the
+broker and charger first, verify, then enable the flag.
+
+The broker password lives only in gitignored `private/bridge.env` (and in
+`/etc/mosquitto/passwd`, mode 0640 root:mosquitto). Do not paste it into a
+terminal you are recording, an issue, or this repo.
+
+**1. Broker on the Pi.**
+
+```bash
+sudo apt update && sudo apt install -y mosquitto mosquitto-clients
+# Prompts once for the password: this is the only place it is typed.
+sudo mosquitto_passwd -c /etc/mosquitto/passwd <mqtt-user>
+```
+
+Create `/etc/mosquitto/conf.d/chelevse.conf` (LAN listener, authenticated only):
+
+```conf
+listener 1883 0.0.0.0
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+
+```bash
+sudo systemctl enable --now mosquitto
+sudo systemctl restart mosquitto      # survives a restart
+systemctl is-enabled mosquitto        # enabled
+systemctl is-active mosquitto         # active
+```
+
+Verify from the Pi: an anonymous subscribe must be refused
+(`Connection Refused: not authorised`), and an authenticated publish/subscribe
+must round-trip:
+
+```bash
+mosquitto_sub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" -t 'test/#' -C 1 -W 3 &
+mosquitto_pub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" -t 'test/hello' -m ok
+```
+
+**2. Bridge credentials** (flag still off) in `private/bridge.env`:
+
+```bash
+MQTT_ENABLED=false
+MQTT_HOST=<pi-host>
+MQTT_PORT=1883
+MQTT_USER=<mqtt-user>
+MQTT_PASS=<broker password>
+MQTT_TOPIC=chelevse
+```
+
+**3. Charger.** Point it at the broker over plain MQTT on the LAN. The password
+is stored on the charger in plain text (like `www_password`) and is redacted
+from `status/config` by the existing redaction list.
+
+```bash
+curl -s -X POST http://<charger-host>/config \
+  -H 'Content-Type: application/json' \
+  -d '{"mqtt_enabled":true,"mqtt_protocol":"mqtt","mqtt_server":"<pi-host>",
+       "mqtt_port":1883,"mqtt_user":"<mqtt-user>","mqtt_pass":"<broker password>",
+       "mqtt_topic":"chelevse"}'
+curl -s -X POST http://<charger-host>/restart \
+  -H 'Content-Type: application/json' -d '{"device":"gateway"}'
+```
+
+After the reboot `/config` reports `mqtt_enabled: true`, the server/port/topic,
+and `mqtt_user`; `/status` reports `mqtt_connected: 1`. From the Pi:
+
+```bash
+mosquitto_sub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" \
+  -t 'chelevse/#' -t 'openevse/announce/#' -v
+```
+
+Expect retained `chelevse/config`, `chelevse/override`, `chelevse/schedule`,
+the per-field status topics (`state`, `amp`, `voltage`, `total_energy`, …), and
+the retained `openevse/announce/<id>` message (`state: connected`; the same
+topic carries `state: disconnected` as the Last Will — #45 consumes it).
+
+**4. Enable the bridge.** Set `MQTT_ENABLED=true`, then redeploy the service:
+
+```bash
+sudo bash pi/install.sh
+sudo journalctl -u chelevse-bridge -n 30 --no-pager
+```
+
+Expect `mqtt: enabled host=<pi-host>:1883 topic=chelevse …` and
+`status source: mqtt (mqtt connected)`. `status/health` gains
+`source: "mqtt"`, `mqtt_connected: true`; `status/current` keeps updating
+without a 10 s poll (the journal shows one reconcile a minute at most).
+
+**5. Rollback.** Either switch alone is enough:
+
+- Bridge: `MQTT_ENABLED=false` + `sudo systemctl restart chelevse-bridge`. The
+  10 s/60 s/60 s HTTP cadence returns; nothing is redeployed.
+- Charger: `POST /config {"mqtt_enabled": false}` + gateway restart. Publishing
+  stops; the bridge falls back to HTTP on its next tick.
+
+Mosquitto can keep running or be `disable --now`'d independently. Record Pi CPU
+and RSS before and during the bake-in (`ps -o rss,%cpu -p <bridge pid>` and the
+`mosquitto` process): the broker is expected to add a few MB and idle CPU.
 
 ## 11. Custom domain (optional)
 
