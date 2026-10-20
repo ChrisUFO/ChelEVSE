@@ -425,6 +425,101 @@ class StatusSinkTests(unittest.TestCase):
         self.assertEqual(self.tracker.previous_state, 3)
         self.assertEqual(self.db.data["status"]["current"]["amp"], 15.4)
 
+    def test_the_seed_and_the_apply_are_one_locked_decision(self):
+        # The seed used to run under its own lock acquisition, so an MQTT apply
+        # could land between the staleness check and the apply, leaving a seed
+        # older than that apply behind for the next flush. It now runs inside
+        # the apply's critical section: the worker waits, then applies after it.
+        mark = self.sink.mqtt_generation()
+        seeding = threading.Event()
+        release = threading.Event()
+        seeds = []
+
+        def seed():
+            seeds.append("seed")
+            seeding.set()
+            release.wait(2)  # the apply lock is held for the whole seed
+
+        outcome = []
+        http = threading.Thread(
+            target=lambda: outcome.append(
+                self.sink.apply_status(
+                    bridge.parse_status(status_payload(state=1)),
+                    "http",
+                    mqtt_mark=mark,
+                    seed=seed,
+                )
+            ),
+            daemon=True,
+        )
+        http.start()
+        self.assertTrue(seeding.wait(2))
+
+        applied = threading.Event()
+
+        def apply_live():
+            self.sink.apply_status(
+                bridge.parse_status(status_payload(state=3, total_energy=110)), "mqtt"
+            )
+            applied.set()
+
+        worker = threading.Thread(target=apply_live, daemon=True)
+        worker.start()
+        self.assertFalse(applied.wait(0.05))  # cannot land while the seed runs
+        release.set()
+        self.assertTrue(applied.wait(2))
+        http.join(2)
+        worker.join(2)
+        self.assertEqual(seeds, ["seed"])
+        self.assertEqual(outcome, [True])
+        # The HTTP reply was applied first (its seed was still current), then
+        # the live snapshot: exactly one edge, no torn ordering.
+        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.tracker.state, 3)
+
+    def test_the_offline_edge_cannot_interleave_with_an_apply(self):
+        # The offline transition used to run outside the sink lock: an MQTT
+        # flush landing mid-transition could leave the tracker online and the
+        # document offline. It now shares the lock, so the apply waits.
+        real_doc = self.sink.status_doc
+        writing = threading.Event()
+        release = threading.Event()
+
+        class _BlockingDoc:
+            def set(self, data, merge=False):
+                writing.set()
+                release.wait(2)
+                real_doc.set(data, merge=merge)
+
+        self.sink.status_doc = _BlockingDoc()
+        offline = threading.Thread(
+            target=self.sink.apply_offline, args=("blackholed",), daemon=True
+        )
+        offline.start()
+        self.assertTrue(writing.wait(2))
+        self.assertFalse(self.tracker.charger_online)  # in effect before the doc
+
+        applied = threading.Event()
+
+        def apply_live():
+            self.sink.apply_status(
+                bridge.parse_status(status_payload(state=1)), "mqtt"
+            )
+            applied.set()
+
+        worker = threading.Thread(target=apply_live, daemon=True)
+        worker.start()
+        self.assertFalse(applied.wait(0.05))  # cannot land mid-offline-write
+        release.set()
+        self.assertTrue(applied.wait(2))
+        offline.join(2)
+        worker.join(2)
+        # Whichever runs last owns both halves: the live snapshot restores the
+        # tracker and the document together.
+        self.assertTrue(self.tracker.charger_online)
+        self.assertTrue(self.db.data["status"]["current"]["charger_online"])
+        self.assertEqual(self.notifier.bodies, ["Charger offline"])
+
 
 class MqttWorkerBase(unittest.TestCase):
     """The production path: raw topic values -> parse -> apply -> document."""
@@ -752,6 +847,30 @@ class StatusLoopMqttTests(unittest.TestCase):
         # MQTT application happens on the sink, never through the watchdog.
         self.assertEqual(self.watchdog.failures, 0)
 
+    def test_a_reconcile_overtaken_by_an_mqtt_apply_does_not_seed(self):
+        # The seed belongs to the same decision as the apply: a reply that
+        # predates an MQTT apply may not rewind the raw snapshot either (the
+        # next flush would republish its stale fields).
+        sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
+        seeded = []
+        original_seed = self.source.seed
+        self.source.seed = lambda payload: (
+            seeded.append(payload),
+            original_seed(payload),
+        )[1]
+        self.source.start()
+        self.factory.client.connect()
+
+        def apply_while_in_flight(_url):
+            sink.apply_status(bridge.parse_status(status_payload(state=1)), "mqtt")
+
+        session = _HookedSession(
+            [FakeResponse(200, status_payload(comm_sent=99))], apply_while_in_flight
+        )
+        self.run_loop(session, polls=1, sink=sink)
+        self.assertEqual(seeded, [])
+        self.assertNotIn("comm_sent", self.source.snapshot)
+
 
 class _StubMqtt:
     """Just the MQTT source surface ``config_loop`` reads."""
@@ -763,21 +882,37 @@ class _StubMqtt:
 
 class ConfigLoopMqttTests(unittest.TestCase):
     class Session:
-        def __init__(self, failures=0):
+        def __init__(self, failures=0, on_get=None, payload=None):
             self.calls = 0
             self.failures = failures
+            self.on_get = on_get
+            # Copied per instance: a test may change it mid-flight.
+            self.payload = (
+                {"firmware": "master", "config_version": 1}
+                if payload is None
+                else payload
+            )
 
         def get(self, url, **kwargs):
             self.calls += 1
             if self.calls <= self.failures:
                 raise requests.ConnectionError("config blackholed")
-            return FakeResponse(200, {"firmware": "master", "config_version": 1})
+            # The reply is generated before the hook runs: a change the hook
+            # makes is one the charger reported during this fetch, not in it.
+            payload = dict(self.payload)
+            if self.on_get is not None:
+                self.on_get(self)
+            return FakeResponse(200, payload)
 
-    def start(self, session, source=None, retry=(0.05, 0.2)):
-        self.db = FakeDB()
+    def start(self, session, source=None, retry=(0.05, 0.2), logs=None, db=None):
+        self.db = db if db is not None else FakeDB()
         self.source = source or _StubMqtt()
         self.event = threading.Event()
         self.stop = threading.Event()
+        if logs is not None:
+            log_patch = mock.patch.object(bridge, "log", logs.append)
+            log_patch.start()
+            self.addCleanup(log_patch.stop)
 
         def run():
             with mock.patch.object(bridge, "_stop", self.stop), mock.patch.object(
@@ -837,6 +972,48 @@ class ConfigLoopMqttTests(unittest.TestCase):
         self.event.set()
         wait_for(lambda: session.calls == 2, timeout=1)
         wait_for(self.synced)
+
+    def test_a_failed_config_write_is_retried_instead_of_hot_looping(self):
+        # A Firestore write that fails after a good fetch leaves the config as
+        # stale as a failed fetch. It used to escape the handler with the
+        # trigger still set: no backoff, no wait, ~136k fetches/s. It must now
+        # arm the same bounded retry.
+        session = self.Session()
+        db = FakeDB()
+        db.fail_writes = True
+        logs = []
+        self.start(session, retry=(0.05, 0.2), logs=logs, db=db)
+        started = time.monotonic()
+        self.event.set()
+        wait_for(lambda: session.calls >= 2)  # the owed retry runs
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)  # waited it out
+        self.assertFalse(self.event.is_set())  # trigger consumed, retry armed
+        time.sleep(0.15)
+        self.assertLessEqual(session.calls, 5)  # bounded, not one fetch per loop
+        self.assertTrue(
+            [line for line in logs if "retrying in" in line], "backoff not logged"
+        )
+        self.assertFalse([line for line in logs if "config loop error" in line])
+        self.assertNotIn("config", db.data.get("status", {}))
+
+    def test_a_version_change_during_the_fetch_is_re_armed_not_lost(self):
+        logs = []
+
+        def bump(session):
+            if session.calls == 1:
+                # The charger's settings changed while this GET was in flight.
+                self.source.config_version = 2
+                session.payload = {"firmware": "master", "config_version": 2}
+
+        session = self.Session(on_get=bump)
+        self.start(session, logs=logs)
+        self.event.set()
+        wait_for(lambda: session.calls == 2)
+        # The newer config was synced on its own, without a new trigger.
+        wait_for(lambda: logs.count("config synced") == 2)
+        self.assertEqual(self.db.data["status"]["config"]["config_version"], 2)
+        time.sleep(0.05)
+        self.assertEqual(session.calls, 2)  # the re-arm is consumed once
 
 
 class HealthTests(unittest.TestCase):

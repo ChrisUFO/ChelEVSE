@@ -894,6 +894,24 @@ class LoopJitterTests(unittest.TestCase):
         self.assertEqual(self.run_config(1, 60), [60])
         self.assertEqual(self.run_schedule(1, 60), [60])
 
+    def test_a_config_write_failure_in_http_mode_is_one_error_per_interval(self):
+        # Flag-off parity: with no MQTT event to wait on, a failed write is the
+        # loop's own error and the tail wait is still the interval.
+        db = FakeDB()
+        db.fail_writes = True
+        stop = _RecordingStop(2)
+        transport = bridge.ChargerTransport(
+            FakeSession([FakeResponse(200, {"firmware": "master"})] * 2)
+        )
+        logs = []
+        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
+            bridge, "log", logs.append
+        ):
+            bridge.config_loop(db, "http://charger", None, transport, 60)
+        self.assertEqual(stop.waits, [60, 60])
+        self.assertEqual(len(logs), 2)
+        self.assertTrue(all(line.startswith("config loop error") for line in logs))
+
     def test_pollers_start_at_different_offsets(self):
         self.assertTrue(0 < bridge.CONFIG_INITIAL_DELAY < bridge.SCHEDULE_INITIAL_DELAY)
 

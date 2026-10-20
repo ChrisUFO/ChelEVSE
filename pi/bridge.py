@@ -858,22 +858,45 @@ class StatusSink:
         with self._lock:
             return self._mqtt_applies
 
-    def apply_status(self, fields, source, complete=True, mqtt_mark=None):
+    def apply_status(self, fields, source, complete=True, mqtt_mark=None, seed=None):
         """Merge one parsed status snapshot and run the derived edge logic.
 
         ``complete`` says the snapshot is a full observation (a parsed
         ``/status`` reply); a partial MQTT snapshot only merges its fields.
         ``mqtt_mark`` is the ``mqtt_generation()`` taken before an HTTP fetch:
         if an MQTT snapshot applied since, the HTTP result is discarded and
-        False is returned.
+        False is returned. ``seed`` (the raw ``/status`` payload, for the MQTT
+        snapshot) runs in the same critical section as that decision, so a
+        reply an MQTT apply overtook can neither seed nor rewind the snapshot.
         """
         with self._lock:
             if mqtt_mark is not None and mqtt_mark != self._mqtt_applies:
                 return False
+            if seed is not None:
+                seed()
             self._apply(fields, source, complete)
             if source == "mqtt":
                 self._mqtt_applies += 1
             return True
+
+    def apply_offline(self, reason):
+        """Flag the charger offline through the same lock as the applies.
+
+        The tracker and document writes happen under the apply lock, so an MQTT
+        snapshot arriving now cannot leave the tracker online with an offline
+        document (or a "Charger offline" push racing live data).
+        """
+        with self._lock:
+            edge = self.tracker.charger_online is not False
+            if edge:
+                self.tracker.charger_online = False
+            # Write the state before notifying so a slow push cannot leave the
+            # app showing a stale online status.
+            self.status_doc.set(OFFLINE, merge=True)
+            if edge:
+                # Journal and notify once per outage, on the edge.
+                log(f"charger offline ({reason})")
+                self.notifier.enqueue("Charger offline")
 
     def maybe_seed(self):
         """Retry the stored baseline under the same lock as the applies."""
@@ -1473,7 +1496,6 @@ def status_loop(
     before; an HTTP failure while MQTT is connected is logged and feeds the
     watchdog, but does not mark the charger offline (it is still reporting).
     """
-    status_doc = db.collection("status").document("current")
     sink = sink or StatusSink(db, tracker, notifier)
     source = None
     next_poll = 0.0
@@ -1523,31 +1545,27 @@ def status_loop(
                         # Compare the next failure against this check, not the
                         # last successful poll (which may be long past).
                         mqtt_snapshots = mqtt.snapshots
-                    elif tracker.charger_online is not False:
-                        # Charger unreachable or sent garbage: flag offline, keep
-                        # going. Edge only: journal and notify once per outage.
-                        log(f"charger offline ({_offline_reason(exc)})")
-                        tracker.charger_online = False
-                        # Write the state before notifying so a slow push cannot
-                        # leave the app showing a stale online status.
-                        status_doc.set(OFFLINE, merge=True)
-                        notifier.enqueue("Charger offline")
                     else:
-                        status_doc.set(OFFLINE, merge=True)
+                        # Charger unreachable or sent garbage: flag offline
+                        # through the sink lock, so the tracker and document
+                        # writes cannot interleave with an MQTT apply. Journal
+                        # and push once per outage.
+                        sink.apply_offline(_offline_reason(exc))
                     # Only a successful HTTP poll clears the streak, so a
                     # failure still means what it always meant to the watchdog.
                     watchdog.observe_failure(tracker.state == 3)
                 else:
-                    if mqtt is not None:
-                        # Seed before applying: the snapshot then carries the
-                        # fields MQTT never publishes (comm_*, rapi_connected).
-                        # The seed stays raw; every delivery is parsed. A reply
-                        # older than an MQTT apply is not allowed to rewind the
-                        # snapshot either.
-                        if sink.mqtt_generation() == mqtt_mark:
-                            mqtt.seed(payload)
-                            mqtt_snapshots = mqtt.snapshots
-                    if not sink.apply_status(fields, "http", mqtt_mark=mqtt_mark):
+                    # Seed before applying: the snapshot then carries the
+                    # fields MQTT never publishes (comm_*, rapi_connected).
+                    # The seed stays raw; every delivery is parsed. Seed and
+                    # apply are one locked decision, so a reply an MQTT apply
+                    # overtook can neither rewind the snapshot nor be applied.
+                    seed_snapshot = (
+                        (lambda: mqtt.seed(payload)) if mqtt is not None else None
+                    )
+                    if not sink.apply_status(
+                        fields, "http", mqtt_mark=mqtt_mark, seed=seed_snapshot
+                    ):
                         # A snapshot applied while this poll was in flight, so
                         # the reply predates it; applying it would rewind the
                         # tracker and re-fire a transition (a stale state=3
@@ -1556,6 +1574,8 @@ def status_loop(
                             "status reconcile discarded "
                             "(mqtt applied during the poll)"
                         )
+                    elif mqtt is not None:
+                        mqtt_snapshots = mqtt.snapshots
                     watchdog.record_success(payload)
                 next_poll = now + (
                     reconcile_interval if mqtt_connected else interval
@@ -1582,11 +1602,12 @@ def config_loop(
     the periodic HTTP poll is skipped entirely; the ``tick`` wait bounds how long
     a disconnect can go unnoticed (then the 60 s poll resumes).
 
-    A failed fetch must not leave the config stale until the charger's next
-    setting change, so the event is cleared only once a sync succeeds: the
-    failure keeps a retry owed, retried with a bounded backoff. A version change
-    that arrives meanwhile (the retained value republished on a reconnect is one)
-    retries immediately.
+    A failed sync must not leave the config stale until the charger's next
+    setting change, so the failed trigger is consumed and the retry is owed
+    under ``pending``/``retry_at`` with a bounded backoff. A write that fails
+    after a good fetch is the same failure as a failed fetch: the document is
+    equally stale. A version change that arrives meanwhile (the retained value
+    republished on a reconnect is one) retries immediately.
     """
     config_doc = db.collection("status").document("config")
     last_synced = None
@@ -1594,6 +1615,23 @@ def config_loop(
     pending = False
     retry_delay = 0.0
     retry_at = 0.0
+
+    def retry(exc):
+        """Consume the trigger and arm the bounded retry after a failed sync."""
+        nonlocal retry_delay, retry_at, pending
+        retry_delay = min(
+            max(retry_delay * 2, CONFIG_RETRY_MIN_SEC), CONFIG_RETRY_MAX_SEC
+        )
+        retry_at = time.monotonic() + retry_delay
+        # The owed retry is tracked here, so the trigger is consumed; a *new*
+        # version still retries immediately.
+        config_event.clear()
+        pending = True
+        log(
+            f"config sync failed ({exc.__class__.__name__}); "
+            f"retrying in {retry_delay:g}s"
+        )
+
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
@@ -1621,47 +1659,59 @@ def config_loop(
                 if not isinstance(data, dict):
                     raise ValueError("config response is not a JSON object")
             except (requests.RequestException, ValueError) as exc:
-                if not mqtt_mode:
-                    log(f"config sync failed ({exc.__class__.__name__})")
+                if mqtt_mode:
+                    retry(exc)
                 else:
-                    retry_delay = min(
-                        max(retry_delay * 2, CONFIG_RETRY_MIN_SEC), CONFIG_RETRY_MAX_SEC
-                    )
-                    retry_at = time.monotonic() + retry_delay
-                    # Consume the trigger; the owed retry is tracked here, and a
-                    # *new* version still retries immediately.
-                    config_event.clear()
-                    pending = True
-                    log(
-                        f"config sync failed ({exc.__class__.__name__}); "
-                        f"retrying in {retry_delay:g}s"
-                    )
+                    log(f"config sync failed ({exc.__class__.__name__})")
             else:
-                redacted = redact_config(data)
-                safe_data = firestore_safe(redacted)
-                config_doc.set({**safe_data, "updated_at": firestore.SERVER_TIMESTAMP})
-                if config_event is not None:
-                    config_event.clear()
-                    if mqtt_mode and getattr(mqtt, "config_version", None) != version:
-                        # The version moved while the fetch was in flight: keep
-                        # the newer change pending instead of losing it.
-                        config_event.set()
-                pending = False
-                retry_delay = 0.0
-                retry_at = 0.0
-                # Only log when the charger config actually changed: this loop
-                # runs every minute and would otherwise spam the journal.
-                if data != last_synced:
-                    secret_count = sum(1 for key in data if key in SECRET_CONFIG_KEYS)
-                    if secret_count:
-                        log(f"config: redacted {secret_count} credential fields")
-                    if firestore_safe(data) != data:
-                        log("config: coerced values Firestore cannot store")
-                    log("config synced")
-                    last_synced = data
+                try:
+                    redacted = redact_config(data)
+                    safe_data = firestore_safe(redacted)
+                    config_doc.set(
+                        {**safe_data, "updated_at": firestore.SERVER_TIMESTAMP}
+                    )
+                except Exception as exc:
+                    if not mqtt_mode:
+                        # Unchanged flag-off path: the loop's error handler logs
+                        # a non-fetch failure.
+                        raise
+                    # A failed write leaves the config as stale as a failed
+                    # fetch, so it takes the same bounded retry instead of
+                    # escaping with the trigger still set (a hot loop).
+                    retry(exc)
+                else:
+                    if config_event is not None:
+                        config_event.clear()
+                        if (
+                            mqtt_mode
+                            and getattr(mqtt, "config_version", None) != version
+                        ):
+                            # The version moved while the fetch was in flight:
+                            # keep the newer change pending instead of losing it.
+                            config_event.set()
+                    pending = False
+                    retry_delay = 0.0
+                    retry_at = 0.0
+                    # Only log when the charger config actually changed: this
+                    # loop runs every minute and would otherwise spam the
+                    # journal.
+                    if data != last_synced:
+                        secret_count = sum(
+                            1 for key in data if key in SECRET_CONFIG_KEYS
+                        )
+                        if secret_count:
+                            log(f"config: redacted {secret_count} credential fields")
+                        if firestore_safe(data) != data:
+                            log("config: coerced values Firestore cannot store")
+                        log("config synced")
+                        last_synced = data
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"config loop error ({exc.__class__.__name__}: {exc})")
-        if not mqtt_mode:
+        if mqtt_mode:
+            # Never spin: the tail wait bounds every MQTT-mode iteration, so
+            # even a failure that escaped the backoff costs at most one tick.
+            _stop.wait(tick)
+        else:
             _stop.wait(interval)
 
 
