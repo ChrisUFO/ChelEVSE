@@ -248,11 +248,16 @@ export function reloadQueuedState({
 //                 restore it with the compensating write.
 //   committed   – the server already holds the queued payload: there is nothing
 //                 to discard, and writing again would repeat it.
-//   checking    – the server read is still in flight.
+//   checking    – the server read is still in flight, or the fetched copy
+//                 belongs to a different queued payload and a fresh read is
+//                 starting.
 //   unavailable – no baseline can be trusted. The copy names the actual cause:
 //                 offline needs a connection to restore the saved schedule; a
 //                 read that failed (or never answered) on a healthy connection
 //                 is a check failure, not a connectivity problem.
+// `baselineKey` is the queued payload the fetched copy was read for: it must
+// still be the current `payloadKey`, or the copy says nothing about the queued
+// write Discard would compensate.
 export const DISCARD_OFFLINE_REASON = 'Discard needs a connection to restore the saved schedule.';
 export const DISCARD_FAILED_REASON = "Couldn't check the saved schedule — Discard is unavailable.";
 export const DISCARD_CHECKING_REASON = 'Checking the saved schedule before Discard…';
@@ -260,6 +265,7 @@ export const DISCARD_COMMITTED_REASON = 'The queued change is already saved — 
 
 export function reloadDiscardBaseline({
   baseline = null,
+  baselineKey = null,
   payloadKey = null,
   online = true,
   pending = false,
@@ -277,10 +283,59 @@ export function reloadDiscardBaseline({
   if (baseline == null) {
     return { status: 'unavailable', baseline: null, reason: DISCARD_FAILED_REASON };
   }
+  // A copy fetched for an earlier queued payload cannot justify Discard for the
+  // current one: the screen invalidates it and reads again.
+  if (payloadKey != null && baselineKey !== payloadKey) {
+    return { status: 'checking', baseline: null, reason: DISCARD_CHECKING_REASON };
+  }
   if (payloadKey != null && scheduleKey(baseline) === payloadKey) {
     return { status: 'committed', baseline: null, reason: DISCARD_COMMITTED_REASON };
   }
   return { status: 'ready', baseline, reason: '' };
+}
+
+// What the screen must do when a baseline read is requested for the current
+// queued payload. A ready or in-flight read is reusable only for the payload it
+// was started for; a different payload invalidates it (the screen bumps its read
+// token so a late response cannot land) and starts a fresh server read. A
+// `fresh` trigger resets the bounded retry budget even when the read it
+// interrupts was still in flight, so that reset must happen before any early
+// return. No queued payload key means there is nothing to fetch a baseline for.
+export function discardBaselineStart({
+  status = 'idle',
+  baselineKey = null,
+  payloadKey = null,
+  fresh = false,
+  online = true,
+} = {}) {
+  const applies = payloadKey != null && baselineKey === payloadKey;
+  const reusable = (status === 'loading' || status === 'ready') && applies;
+  return {
+    reusable,
+    invalidate: (status === 'loading' || status === 'ready') && !applies,
+    resetRetries: fresh,
+    start: !reusable && online && payloadKey != null,
+  };
+}
+
+// A server read for a reload-queued Discard baseline may only install its
+// result while it still owns the baseline: the same page generation, the same
+// read token (bumped when a new payload invalidates the read), and the queued
+// payload it was issued for.
+export function discardBaselineReadApplies({
+  readGeneration = null,
+  generation = null,
+  readToken = null,
+  token = null,
+  readKey = null,
+  payloadKey = null,
+} = {}) {
+  return (
+    readGeneration === generation &&
+    readToken === token &&
+    readKey != null &&
+    readKey === payloadKey
+  );
 }
 
 // A baseline read that failed while the browser reports online is usually

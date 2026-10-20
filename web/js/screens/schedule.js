@@ -21,6 +21,8 @@ import {
   MIN_AMPS,
   defaultRule,
   defaultSchedule,
+  discardBaselineReadApplies,
+  discardBaselineStart,
   discardRetry,
   discardTarget,
   normalizeSchedule,
@@ -72,6 +74,10 @@ let remoteNotice = '';
 // document carries the queued payload, so this is the only honest Discard
 // baseline; it never replaces what the form shows.
 let discardBaseline = null;
+// Key of the queued payload `discardBaseline` was fetched for. A copy read for
+// an earlier payload cannot compensate the current one, and a read still in
+// flight for it is abandoned.
+let discardBaselineKey = null;
 let discardBaselineStatus = 'idle'; // idle | loading | ready | failed
 let discardToken = 0;
 // Bounded retry of a failed baseline read while the browser reports online.
@@ -163,6 +169,7 @@ function discardDecision() {
   if (!(queued && queuedFromSnapshot)) return null;
   return reloadDiscardBaseline({
     baseline: discardBaseline,
+    baselineKey: discardBaselineKey,
     payloadKey: savingPayloadKey,
     online: online(),
     pending: discardBaselineStatus === 'loading',
@@ -175,6 +182,7 @@ function clearDiscardBaseline() {
   discardRetries = 0;
   discardToken += 1;
   discardBaseline = null;
+  discardBaselineKey = null;
   discardBaselineStatus = 'idle';
 }
 
@@ -212,37 +220,77 @@ function failDiscardBaseline(gen, token) {
 
 // Read the pre-write schedule from the server. The cached document already
 // contains the queued payload, so this read is what lets Discard compensate
-// against the last saved schedule. It never touches the displayed draft, and a
-// read that is already in flight (or succeeded) is not repeated.
+// against the last saved schedule. It never touches the displayed draft. A copy
+// or read in flight is reused only for the queued payload it was started for: a
+// different payload invalidates it and reads again, and Discard stays disabled
+// ("checking") until the read for the current payload answers.
 function startDiscardBaseline({ fresh = false } = {}) {
-  if (discardBaselineStatus === 'loading' || discardBaselineStatus === 'ready') return;
-  clearDiscardRetry();
-  if (fresh) discardRetries = 0;
-  const gen = generation;
-  const token = ++discardToken;
-  discardBaseline = null;
-  if (!online()) {
+  const request = discardBaselineStart({
+    status: discardBaselineStatus,
+    baselineKey: discardBaselineKey,
+    payloadKey: savingPayloadKey,
+    fresh,
+    online: online(),
+  });
+  // A reconnect or a different queued payload starts the bounded retry budget
+  // over even when the read it interrupts was still in flight, so the reset
+  // happens before any early return.
+  if (request.resetRetries) discardRetries = 0;
+  if (request.invalidate) {
+    // The superseded read no longer owns the baseline: bumping the token makes
+    // its response inert whatever it resolves with.
+    clearDiscardRetry();
+    discardToken += 1;
+    discardBaseline = null;
+    discardBaselineKey = null;
+    discardBaselineStatus = 'idle';
+  }
+  if (request.reusable) return;
+  const key = savingPayloadKey;
+  if (!request.start) {
+    // Offline (or no queued payload): no server copy is reachable. The `online`
+    // event is the trigger that tries again.
+    clearDiscardRetry();
+    discardBaseline = null;
+    discardBaselineKey = null;
     discardBaselineStatus = 'idle';
     return;
   }
+  clearDiscardRetry();
+  const gen = generation;
+  const token = ++discardToken;
+  discardBaseline = null;
+  discardBaselineKey = null;
   discardBaselineStatus = 'loading';
+  // A response may only land while this read still owns the baseline for the
+  // queued payload it was issued for.
+  const stillOwnsRead = () =>
+    discardBaselineReadApplies({
+      readGeneration: gen,
+      generation,
+      readToken: token,
+      token: discardToken,
+      readKey: key,
+      payloadKey: savingPayloadKey,
+    }) &&
+    queued &&
+    queuedFromSnapshot;
   readScheduleBaseline()
     .then(({ ok, data }) => {
-      if (gen !== generation || token !== discardToken) return;
-      if (!(queued && queuedFromSnapshot)) return;
+      if (!stillOwnsRead()) return;
       if (!ok) {
         failDiscardBaseline(gen, token);
         return;
       }
       // An absent document is the same schedule the editor shows for it.
       discardBaseline = normalizeSchedule(data);
+      discardBaselineKey = key;
       discardBaselineStatus = 'ready';
       discardRetries = 0;
       validateAndPaint();
     })
     .catch(() => {
-      if (gen !== generation || token !== discardToken) return;
-      if (!(queued && queuedFromSnapshot)) return;
+      if (!stillOwnsRead()) return;
       failDiscardBaseline(gen, token);
     });
 }
@@ -762,8 +810,9 @@ function applyQueueTransition(transition, incoming) {
     dirty = scheduleKey(draft) !== acceptedKey();
     pendingRemote = null;
     // Discard needs the pre-write server copy; the read starts with the state
-    // and never blocks the paint (it shows "checking" until it answers). A new
-    // payload is a new baseline, so its retry budget starts fresh.
+    // and never blocks the paint (it shows "checking" until it answers). A
+    // changed payload is a new baseline: a copy read for the previous payload is
+    // invalidated and the retry budget starts fresh.
     startDiscardBaseline({ fresh: true });
     validateAndPaint();
     return;

@@ -13,6 +13,8 @@ import {
   MIN_AMPS,
   defaultRule,
   defaultSchedule,
+  discardBaselineReadApplies,
+  discardBaselineStart,
   discardRetry,
   discardTarget,
   normalizeSchedule,
@@ -492,21 +494,30 @@ test('reloadDiscardBaseline enables Discard only with a trustworthy server copy'
   const server = schedule({ rules: [rule({ amps: 24 })] });
   const payloadKey = scheduleKey(payload);
 
-  const ready = reloadDiscardBaseline({ baseline: server, payloadKey });
+  const ready = reloadDiscardBaseline({ baseline: server, baselineKey: payloadKey, payloadKey });
   assert.equal(ready.status, 'ready');
   assert.equal(ready.reason, '');
   assert.equal(scheduleKey(ready.baseline), scheduleKey(server));
 
   // The server already holds the queued payload: writing it again would repeat
   // the change, so there is nothing to discard.
-  const committed = reloadDiscardBaseline({ baseline: payload, payloadKey });
+  const committed = reloadDiscardBaseline({
+    baseline: payload,
+    baselineKey: payloadKey,
+    payloadKey,
+  });
   assert.equal(committed.status, 'committed');
   assert.equal(committed.baseline, null);
   assert.equal(committed.reason, DISCARD_COMMITTED_REASON);
   assert.match(committed.reason, /already saved/);
 
   // The server read is in flight: disabled, but with progress copy.
-  const checking = reloadDiscardBaseline({ baseline: server, payloadKey, pending: true });
+  const checking = reloadDiscardBaseline({
+    baseline: server,
+    baselineKey: payloadKey,
+    payloadKey,
+    pending: true,
+  });
   assert.equal(checking.status, 'checking');
   assert.equal(checking.baseline, null);
   assert.equal(checking.reason, DISCARD_CHECKING_REASON);
@@ -771,7 +782,7 @@ test('routeScheduleSnapshot keeps "Saved." on a data-identical clean repeat', ()
 test('discardTarget writes only a baseline the state can justify', () => {
   const server = schedule({ rules: [rule({ amps: 24 })] });
   const key = scheduleKey(payload);
-  const ready = reloadDiscardBaseline({ baseline: server, payloadKey: key });
+  const ready = reloadDiscardBaseline({ baseline: server, baselineKey: key, payloadKey: key });
   assert.equal(
     scheduleKey(discardTarget({ queuedFromSnapshot: true, decision: ready, confirmed: payload })),
     scheduleKey(server),
@@ -788,7 +799,7 @@ test('discardTarget writes only a baseline the state can justify', () => {
   assert.equal(
     discardTarget({
       queuedFromSnapshot: true,
-      decision: reloadDiscardBaseline({ baseline: payload, payloadKey: key }),
+      decision: reloadDiscardBaseline({ baseline: payload, baselineKey: key, payloadKey: key }),
       confirmed: payload,
     }),
     null,
@@ -796,7 +807,12 @@ test('discardTarget writes only a baseline the state can justify', () => {
   assert.equal(
     discardTarget({
       queuedFromSnapshot: true,
-      decision: reloadDiscardBaseline({ baseline: server, payloadKey: key, pending: true }),
+      decision: reloadDiscardBaseline({
+        baseline: server,
+        baselineKey: key,
+        payloadKey: key,
+        pending: true,
+      }),
       confirmed: payload,
     }),
     null,
@@ -823,6 +839,101 @@ test('discardRetry retries only a failed online read, within a bounded budget', 
   assert.deepEqual(
     DISCARD_RETRY_DELAYS_MS,
     [...DISCARD_RETRY_DELAYS_MS].sort((a, b) => a - b),
+  );
+});
+
+test('a discard baseline is only usable for the payload it was read for', () => {
+  const server = schedule({ rules: [rule({ amps: 24 })] });
+  const keyP1 = scheduleKey(payload);
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+  assert.notEqual(keyP1, keyP2);
+
+  const current = reloadDiscardBaseline({
+    baseline: server,
+    baselineKey: keyP1,
+    payloadKey: keyP1,
+  });
+  assert.equal(current.status, 'ready');
+  assert.equal(scheduleKey(current.baseline), scheduleKey(server));
+
+  // A copy read for an earlier queued payload says nothing about the current
+  // one: Discard waits for a fresh read instead of writing the stale copy.
+  const superseded = reloadDiscardBaseline({
+    baseline: server,
+    baselineKey: keyP1,
+    payloadKey: keyP2,
+  });
+  assert.equal(superseded.status, 'checking');
+  assert.equal(superseded.baseline, null);
+  assert.equal(superseded.reason, DISCARD_CHECKING_REASON);
+  assert.equal(
+    discardTarget({ queuedFromSnapshot: true, decision: superseded, confirmed: payload }),
+    null,
+  );
+});
+
+test('a new queued payload invalidates the old baseline and starts a fresh read', () => {
+  const keyP1 = scheduleKey(payload);
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+
+  // A ready copy for the previous payload: dropped, and a new read started.
+  assert.deepEqual(
+    discardBaselineStart({ status: 'ready', baselineKey: keyP1, payloadKey: keyP2, fresh: true }),
+    { reusable: false, invalidate: true, resetRetries: true, start: true },
+  );
+  // A read still in flight for the previous payload is abandoned the same way,
+  // and the fresh trigger still resets the retry budget.
+  assert.deepEqual(
+    discardBaselineStart({ status: 'loading', baselineKey: keyP1, payloadKey: keyP2, fresh: true }),
+    { reusable: false, invalidate: true, resetRetries: true, start: true },
+  );
+  // A same-payload read in flight is reused, but a fresh trigger still restarts
+  // the bounded retry budget before the early return.
+  assert.deepEqual(
+    discardBaselineStart({ status: 'loading', baselineKey: keyP2, payloadKey: keyP2, fresh: true }),
+    { reusable: true, invalidate: false, resetRetries: true, start: false },
+  );
+  // Ready for the current payload: reusable, no second read.
+  assert.deepEqual(
+    discardBaselineStart({ status: 'ready', baselineKey: keyP2, payloadKey: keyP2 }),
+    { reusable: true, invalidate: false, resetRetries: false, start: false },
+  );
+  // A failed read for the current payload is retried, not invalidated.
+  assert.deepEqual(
+    discardBaselineStart({ status: 'failed', baselineKey: keyP2, payloadKey: keyP2 }),
+    { reusable: false, invalidate: false, resetRetries: false, start: true },
+  );
+  // Offline: the stale copy is dropped and nothing is read until `online`.
+  assert.deepEqual(
+    discardBaselineStart({
+      status: 'ready',
+      baselineKey: keyP1,
+      payloadKey: keyP2,
+      fresh: true,
+      online: false,
+    }),
+    { reusable: false, invalidate: true, resetRetries: true, start: false },
+  );
+  // No queued payload means there is no key to fetch a baseline for.
+  assert.equal(discardBaselineStart({ status: 'idle', online: true }).start, false);
+});
+
+test('a baseline read for a superseded payload cannot land', () => {
+  const keyP1 = scheduleKey(payload);
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+  const read = { readGeneration: 3, readToken: 7, readKey: keyP1 };
+  const current = { generation: 3, token: 7, payloadKey: keyP1 };
+
+  assert.equal(discardBaselineReadApplies({ ...read, ...current }), true);
+  // A new payload bumped the token: the old response is inert.
+  assert.equal(discardBaselineReadApplies({ ...read, ...current, token: 8 }), false);
+  // So is a response from before a page reset, or one keyed to another payload.
+  assert.equal(discardBaselineReadApplies({ ...read, ...current, generation: 4 }), false);
+  assert.equal(discardBaselineReadApplies({ ...read, ...current, payloadKey: keyP2 }), false);
+  // A read with no payload key never owns a baseline.
+  assert.equal(
+    discardBaselineReadApplies({ ...read, ...current, readKey: null, payloadKey: null }),
+    false,
   );
 });
 
