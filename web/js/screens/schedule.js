@@ -723,6 +723,10 @@ function discard() {
   draft = clone(baseline);
   dirty = false;
   saveError = '';
+  // The draft no longer holds the edits the notice described: a reverted-queued
+  // notice ("your edits are still here") or an overwrite warning would now
+  // contradict the form. Discard's own feedback is the only message.
+  remoteNotice = '';
   feedbackMode = 'derived';
   // The draft was replaced wholesale: rebuild the fields so they show the
   // reverted schedule (an edit-only repaint would leave the old values there).
