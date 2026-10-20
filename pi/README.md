@@ -5,7 +5,8 @@ the charger's local HTTP API, mirrors status and config into Firestore
 (`status/current`, `status/config`), derives daily energy history and completed
 sessions, mirrors `schedule/current` into the charger's own scheduler, sends FCM
 push notifications on charging/offline transitions, and applies pending
-`commands/*` documents back to the charger. Runs under systemd with
+`commands/*` documents back to the charger, and restarts a charger that stops
+answering (see [Watchdog](#watchdog-charger-health)). Runs under systemd with
 `Restart=always`.
 See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the big picture.
 
@@ -41,16 +42,25 @@ Environment variables, read from `private/bridge.env` (see
 [../private.example/bridge.env.example](../private.example/bridge.env.example));
 real environment variables take precedence.
 
-| Variable                        | Default         | Meaning                                                                                   |
-| ------------------------------- | --------------- | ----------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                  | `192.168.0.145` | Charger IP on the LAN                                                                     |
-| `CHARGER_USER` / `CHARGER_PASS` | unset           | HTTP Basic auth if set on the charger (blank username is valid)                           |
-| `FIREBASE_SERVICE_ACCOUNT`      | —               | Path to the service-account key (**required**; relative paths resolve from the repo root) |
-| `STATUS_INTERVAL`               | `10`            | Seconds between charger status polls                                                      |
-| `CONFIG_INTERVAL`               | `60`            | Seconds between charger config polls                                                      |
-| `SCHEDULE_INTERVAL`             | `60`            | Seconds between schedule/plan polls and sync checks                                       |
-| `SCHEDULE_RECONCILE_INTERVAL`   | `300`           | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
-| `COMMAND_INTERVAL`              | `5`             | Seconds between command polls                                                             |
+| Variable                          | Default         | Meaning                                                                                   |
+| --------------------------------- | --------------- | ----------------------------------------------------------------------------------------- |
+| `CHARGER_HOST`                    | `192.168.0.145` | Charger IP on the LAN                                                                     |
+| `CHARGER_USER` / `CHARGER_PASS`   | unset           | HTTP Basic auth if set on the charger (blank username is valid)                           |
+| `FIREBASE_SERVICE_ACCOUNT`        | —               | Path to the service-account key (**required**; relative paths resolve from the repo root) |
+| `STATUS_INTERVAL`                 | `10`            | Seconds between charger status polls                                                      |
+| `CONFIG_INTERVAL`                 | `60`            | Seconds between charger config polls                                                      |
+| `SCHEDULE_INTERVAL`               | `60`            | Seconds between schedule/plan polls and sync checks                                       |
+| `SCHEDULE_RECONCILE_INTERVAL`     | `300`           | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
+| `COMMAND_INTERVAL`                | `5`             | Seconds between command polls                                                             |
+| `WATCHDOG_ENABLED`                | `true`          | Probe, restart and alert when `/status` keeps failing (see below)                         |
+| `WATCHDOG_FAILURES`               | `3`             | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
+| `WATCHDOG_COOLDOWN_SEC`           | `600`           | Minimum seconds between restart attempts                                                  |
+| `WATCHDOG_MAX_PER_HOUR`           | `3`             | Hard cap on restart attempts in a trailing hour                                           |
+| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`         | Allow a restart while the last known state is charging                                    |
+
+Bad `WATCHDOG_*` values (a non-number, `WATCHDOG_FAILURES=0`, a cooldown below
+zero, a cap below 1, a non-boolean flag) stop the bridge at startup with a
+message naming the variable, like the interval settings.
 
 ### One charger HTTP session
 
@@ -71,21 +81,94 @@ outside the lock. The config and schedule pollers start 3 s and 7 s late so
 `/status`, `/config` and `/schedule/plan` do not hit the charger together.
 Polling intervals, timeouts, auth, payloads and failure logging are unchanged.
 
+### Watchdog (charger health)
+
+The status loop counts consecutive `/status` failures. After `WATCHDOG_FAILURES`
+(default 3, ≈ 30 s at the 10 s poll) the charger is **unhealthy** and the bridge
+tries a bounded recovery instead of only logging `charger offline`:
+
+1. **Probe.** One extra `GET /status`. Only a usable reply means the gateway can
+   be reached. A timeout, connection error, auth failure or non-2xx reply means
+   it cannot (mains off, Wi-Fi dropped, wrong credentials), so **no restart is
+   attempted**: the watchdog alerts only, with
+   `Recovery failed — power cycle may be required`. `POST /restart` uses the same
+   HTTP endpoint, so a gateway that answers nothing cannot be restarted remotely.
+2. **Classify.** The last two successful `/status` samples decide the domain:
+   `rapi_connected`/`evse_connected` false, or `comm_success` frozen while
+   `comm_sent` rises, is controller-side (firmware v5.1.5 counters); otherwise
+   it is gateway-side (a healthy controller behind a failing HTTP server).
+   Missing fields are treated as healthy — the watchdog never invents a
+   controller fault it cannot see.
+3. **Restart.** `POST /restart` with `{"device": "gateway"}` or
+   `{"device": "evse"}` through the shared session. Each attempt logs its inputs
+   (`failures`, `http_ok`, `controller_ok`, `charging`) and its outcome.
+4. **Guards.** At most `WATCHDOG_MAX_PER_HOUR` (3) attempts in a trailing hour,
+   at least `WATCHDOG_COOLDOWN_SEC` (600 s) between attempts, and no restart
+   while the last known state is charging unless
+   `WATCHDOG_RESTART_WHILE_CHARGING=true`. A stale "charging" state keeps
+   blocking, because with no successful poll there is no fresher one.
+5. **Recover.** A successful `/status` poll clears the streak and pushes
+   `Charger recovered`.
+
+While unhealthy the bridge makes one probe per tick in addition to the failed
+poll; a restart attempt is recorded only when the probe (and the guards) allow
+one. Pushes are edge-only: one per unhealthy episode — the restart body, the
+alert-only `Recovery failed — power cycle may be required` when HTTP is dead, or
+`Charger unresponsive — restart blocked (…)` when a guard stopped the attempt
+(charging guard, cooldown, hourly cap; the charging body names
+`WATCHDOG_RESTART_WHILE_CHARGING`) — then one when the episode still has not
+recovered after an attempt (`Recovery failed — power cycle may be required`,
+also raised when the hour's allowance is spent), and one on recovery. A blocked
+entry never claims a failure, because nothing was attempted. The existing
+`Charger offline` push still fires on the first failed poll of an outage, so one
+outage can produce two pushes.
+
+`status/health` is written on every transition and every attempt — not on every
+tick, so a healthy bridge writes it once:
+
+```text
+status/health  { state, reason, http_ok, controller_ok, last_attempt_at,
+                 attempts_last_hour, last_action, last_result, updated_at }
+```
+
+`state` is `healthy` or `unhealthy`; `reason` is the decision's explanation
+(e.g. `cooldown after the last attempt (600s)`); `last_action` is
+`restart_gateway`, `restart_evse`, `alert` (unreachable, never attempted) or
+`none` (a guard blocked the attempt); `last_result` is the outcome of the last
+attempt (`HTTP 200` / `failed (…)`), or the explanation when no attempt has been
+made. Once an attempt exists, the attempt's fields stay on record for the rest of
+the process — later probe results are carried by `http_ok` and `reason`.
+
+**When a physical power cycle is still required.** A gateway that is not
+answering HTTP at all cannot be restarted from the Pi, and a controller that does
+not come back after `{"device": "evse"}` needs hands-on attention. If
+`status/health.http_ok` stays `false`, check the charger's power and its LAN
+association before assuming a firmware problem. The hourly cap bounds restart
+attempts only when the probe reaches the gateway; an unreachable device gets the
+edge alert and is probed once per status tick until it recovers or the watchdog
+is disabled, so no restart allowance is consumed.
+
+**Disabling.** `WATCHDOG_ENABLED=false` stops all probes, restarts, health writes
+and watchdog pushes, and the failure counter is not kept; `status/health` is then
+left exactly as it was (possibly stale). Charging/offline notifications are
+unaffected.
+
 ## What the bridge writes
 
 Each loop is failure-isolated: a charger or Firestore error is logged as one
 timestamped line and the loop carries on at its next interval.
 
-| Loop     | Firestore document | Content                                                                    |
-| -------- | ------------------ | -------------------------------------------------------------------------- |
-| Status   | `status/current`   | Curated `/status` fields, merged on every poll                             |
-| Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                |
-| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` per completed plug-in session        |
-| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan    |
-| Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`        |
-| Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below) |
-| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                    |
-| Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)       |
+| Loop     | Firestore document | Content                                                                     |
+| -------- | ------------------ | --------------------------------------------------------------------------- |
+| Status   | `status/current`   | Curated `/status` fields, merged on every poll                              |
+| Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                 |
+| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` per completed plug-in session         |
+| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan     |
+| Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt |
+| Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`         |
+| Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)  |
+| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                     |
+| Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)        |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -207,11 +290,15 @@ mean.
 The status loop queues one push per state transition, and a single background
 daemon worker performs the sends via the Admin SDK:
 
-| Event                                                    | Body               |
-| -------------------------------------------------------- | ------------------ |
-| Charger enters `state: 3`                                | `Charging started` |
-| Charger leaves `state: 3`                                | `Charging stopped` |
-| Charger stops answering (first failed poll of an outage) | `Charger offline`  |
+| Event                                                                | Body                                                                                                             |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Charger enters `state: 3`                                            | `Charging started`                                                                                               |
+| Charger leaves `state: 3`                                            | `Charging stopped`                                                                                               |
+| Charger stops answering (first failed poll of an outage)             | `Charger offline`                                                                                                |
+| Watchdog restarts a gateway / controller                             | `Charger gateway unresponsive — restart attempted` / `Charger controller unresponsive — restart attempted`       |
+| Restart attempted and the charger is still down (or allowance spent) | `Recovery failed — power cycle may be required`                                                                  |
+| Unhealthy but a guard blocked the restart                            | `Charger unresponsive — restart blocked (…)` (names the guard; charging names `WATCHDOG_RESTART_WHILE_CHARGING`) |
+| Charger answers again after an unhealthy episode                     | `Charger recovered`                                                                                              |
 
 The title is always `ChelEVSE`. The transition is computed from the tracker's
 pre-tick state, so each edge produces exactly one notification. The first tick
@@ -220,7 +307,8 @@ state seeded from `status/current` is a real baseline, so a change that happened
 while the bridge was down notifies once. `charger offline` / `charger online`
 are also journaled only on those edges, and the offline reason includes the HTTP
 status (401/403/5xx) or transport exception so auth failures are distinguishable
-from an unreachable charger.
+from an unreachable charger. Watchdog pushes follow the same edge-only rule — see
+[Watchdog](#watchdog-charger-health).
 
 On the offline edge the bridge writes `charger_online: false` **before**
 queueing `Charger offline`, so the app sees the outage even if FCM is slow.

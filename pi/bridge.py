@@ -23,6 +23,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 import firebase_admin
@@ -63,6 +64,28 @@ SESSION_MERGE_TOLERANCE = 120
 # scheduled charging); beyond this the previous record is too old to assume the
 # same plug-in event and is left as its own session.
 SESSION_MERGE_MAX_GAP = 48 * 3600
+# --- Watchdog (issue #39) ---------------------------------------------------
+# A restart of the ESP32 gateway or the EVSE controller is bounded: at most this
+# many attempts per trailing hour and at least a cooldown after each one, so a
+# charger that stays unreachable (or is simply powered off) is never looped on.
+WATCHDOG_WINDOW = 3600
+WATCHDOG_ALERT_RESTART = "Charger gateway unresponsive — restart attempted"
+WATCHDOG_ALERT_RESTART_EVSE = "Charger controller unresponsive — restart attempted"
+WATCHDOG_ALERT_RECOVERED = "Charger recovered"
+WATCHDOG_ALERT_FAILED = "Recovery failed — power cycle may be required"
+WATCHDOG_ALERT_BLOCKED_CHARGING = (
+    "Charger unresponsive — restart blocked while charging "
+    "(set WATCHDOG_RESTART_WHILE_CHARGING=true to allow)"
+)
+WATCHDOG_ALERT_BLOCKED_CAP = (
+    "Charger unresponsive — restart blocked (hourly restart cap reached)"
+)
+WATCHDOG_ALERT_BLOCKED_COOLDOWN = (
+    "Charger unresponsive — restart blocked (waiting out the cooldown)"
+)
+WATCHDOG_RESTART_ACTIONS = frozenset({"restart_gateway", "restart_evse"})
+_TRUE_ENV = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV = frozenset({"0", "false", "no", "off"})
 # /config fields that must never be replicated into the cloud-readable doc.
 SECRET_CONFIG_KEYS = frozenset(
     {
@@ -746,7 +769,440 @@ def _transition_body(had_state, was_charging, is_charging):
     return "Charging started" if is_charging else "Charging stopped"
 
 
-def status_loop(db, base, auth, transport, interval, tracker, notifier):
+class WatchdogConfig(NamedTuple):
+    """Validated watchdog settings; ``watchdog_config()`` fills them from env."""
+
+    enabled: bool = True
+    threshold: int = 3
+    cooldown: float = 600.0
+    max_per_hour: int = 3
+    restart_while_charging: bool = False
+
+
+def _env_bool(name, default):
+    """Parse one boolean env var; anything unparseable is a loud config error."""
+    raw = cfg(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_ENV:
+        return True
+    if value in _FALSE_ENV:
+        return False
+    raise ValueError(f"{name} must be a boolean (true/false), got {raw!r}.")
+
+
+def _env_finite(name, default, parse):
+    """Parse one numeric env var; unparseable or non-finite values are loud errors.
+
+    ``nan``/``inf`` must never reach a comparison: against ``nan`` every elapsed
+    time reads as "long enough", which would silently disable a cooldown.
+    """
+    raw = cfg(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = parse(raw.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {raw!r}.") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {raw!r}.")
+    return value
+
+
+def watchdog_config():
+    """Watchdog settings from the environment; bad values raise ValueError."""
+    threshold = _env_finite("WATCHDOG_FAILURES", 3, int)
+    cooldown = _env_finite("WATCHDOG_COOLDOWN_SEC", 600.0, float)
+    max_per_hour = _env_finite("WATCHDOG_MAX_PER_HOUR", 3, int)
+    if threshold < 1:
+        raise ValueError("WATCHDOG_FAILURES must be at least 1.")
+    if cooldown < 0:
+        raise ValueError("WATCHDOG_COOLDOWN_SEC must be zero or more.")
+    if max_per_hour < 1:
+        raise ValueError("WATCHDOG_MAX_PER_HOUR must be at least 1.")
+    return WatchdogConfig(
+        enabled=_env_bool("WATCHDOG_ENABLED", True),
+        threshold=threshold,
+        cooldown=cooldown,
+        max_per_hour=max_per_hour,
+        restart_while_charging=_env_bool("WATCHDOG_RESTART_WHILE_CHARGING", False),
+    )
+
+
+def watchdog_config_or_exit():
+    """Watchdog settings for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return watchdog_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def attempts_within(now, attempts, window):
+    """Attempt timestamps inside the trailing ``window`` seconds.
+
+    An attempt exactly ``window`` seconds old still counts, so the cap is a
+    closed hour rather than one that silently forgets its oldest entry.
+    """
+    return [at for at in attempts if (now - at).total_seconds() <= window]
+
+
+def _decision(action, reason, alert=None):
+    """One watchdog decision; ``alert`` is the push body when one is due."""
+    return {"action": action, "reason": reason, "alert": alert}
+
+
+def recovery_decision(
+    *,
+    now,
+    consecutive_failures,
+    threshold,
+    http_reachable,
+    controller_ok,
+    charging,
+    last_attempt_at,
+    attempts_in_window,
+    window,
+    max_attempts,
+    cooldown,
+    restart_while_charging,
+    enabled,
+):
+    """Decide what the watchdog does about the current failure streak.
+
+    Pure: every input, the clock included, is injected, so the whole guard
+    matrix is testable without a charger or Firestore. ``attempts_in_window`` is
+    the sequence of previous attempt times; entries older than ``window``
+    seconds are ignored here, so the caller can keep the full history and let
+    the window expire it.
+
+    Returns ``{action, reason, alert}``: action is ``none``, ``alert``,
+    ``restart_gateway`` or ``restart_evse``, and ``alert`` is the body the
+    caller should push when it enters an unhealthy episode (it owns edge
+    detection). A guard-blocked ``none`` carries a body naming the guard, so a
+    blocked episode never reads as a failed restart.
+    """
+    if not enabled:
+        return _decision("none", "watchdog disabled")
+    if consecutive_failures < threshold:
+        return _decision(
+            "none", f"{consecutive_failures}/{threshold} consecutive failures"
+        )
+    if not http_reachable:
+        # POST /restart uses the same HTTP endpoint, so a gateway that answers
+        # nothing at all (mains off, Wi-Fi dropped) cannot be recovered
+        # remotely; a human has to power-cycle it.
+        return _decision(
+            "alert",
+            "charger unreachable over HTTP; cannot restart remotely",
+            WATCHDOG_ALERT_FAILED,
+        )
+    if charging and not restart_while_charging:
+        return _decision(
+            "none",
+            "charging in progress; WATCHDOG_RESTART_WHILE_CHARGING is off",
+            WATCHDOG_ALERT_BLOCKED_CHARGING,
+        )
+    recent = attempts_within(now, attempts_in_window, window)
+    if len(recent) >= max_attempts:
+        return _decision(
+            "none",
+            f"hourly cap reached ({len(recent)}/{max_attempts} attempts)",
+            WATCHDOG_ALERT_BLOCKED_CAP,
+        )
+    if last_attempt_at is not None:
+        if (now - last_attempt_at).total_seconds() < cooldown:
+            return _decision(
+                "none",
+                f"cooldown after the last attempt ({cooldown:g}s)",
+                WATCHDOG_ALERT_BLOCKED_COOLDOWN,
+            )
+    if controller_ok:
+        return _decision(
+            "restart_gateway",
+            "HTTP answered but the gateway was failing",
+            WATCHDOG_ALERT_RESTART,
+        )
+    return _decision(
+        "restart_evse", "controller is not answering", WATCHDOG_ALERT_RESTART_EVSE
+    )
+
+
+def _counter_delta(before, after):
+    """Increment of a cumulative firmware counter, or None when unusable."""
+    if not (_is_number(before) and _is_number(after)):
+        return None
+    delta = after - before
+    return delta if delta >= 0 else None
+
+
+def controller_healthy(previous, latest):
+    """True when the EVSE controller looks alive from two ``/status`` samples.
+
+    Firmware v5.1.5 reports cumulative ``comm_sent``/``comm_success`` counters
+    (RAPI commands sent to the controller and answered) plus ``rapi_connected``
+    and ``evse_connected``. A frozen success count while commands keep being
+    sent, or a dropped connection flag, is a controller-side failure; a healthy
+    controller behind an HTTP server that stopped answering is gateway-side.
+    Missing fields (other firmware) are assumed healthy: the watchdog must not
+    invent a controller fault it cannot see.
+    """
+    if not isinstance(latest, dict):
+        return True
+    for flag in ("rapi_connected", "evse_connected"):
+        value = latest.get(flag)
+        if value is not None and not value:
+            return False
+    if isinstance(previous, dict):
+        sent = _counter_delta(previous.get("comm_sent"), latest.get("comm_sent"))
+        success = _counter_delta(
+            previous.get("comm_success"), latest.get("comm_success")
+        )
+        if sent is not None and success is not None and sent > 0 and success <= 0:
+            return False
+    return True
+
+
+class Watchdog:
+    """Bounded recovery for a stalled gateway or controller (issue #39).
+
+    Holds the failure streak, the last two successful ``/status`` samples and
+    the restart-attempt history; ``recovery_decision`` stays pure. This class
+    only feeds it, performs the restart, publishes ``status/health`` and raises
+    the edge notifications (one per unhealthy episode, one on recovery, one when
+    a restart did not bring the charger back or the allowance is spent).
+    """
+
+    def __init__(self, db, base, auth, transport, notifier, config, clock=None):
+        self.db = db
+        self.base = base
+        self.auth = auth
+        self.transport = transport
+        self.notifier = notifier
+        self.config = config
+        self.clock = clock or _utcnow
+        self.health_doc = db.collection("status").document("health")
+        self.failures = 0
+        self.samples = []
+        self.attempts = []
+        self.last_attempt_at = None
+        self.state = None  # None (no observation yet) | "healthy" | "unhealthy"
+        self.reason = "starting"
+        self.last_action = None
+        self.last_result = None
+        self.last_decision = None
+        self.failed_alerted = False
+        self.episode_attempts = 0
+
+    def _remember(self, payload):
+        """Keep the last two successful samples for controller classification."""
+        self.samples.append(payload)
+        del self.samples[:-2]
+
+    def _controller_ok(self):
+        latest = self.samples[-1] if self.samples else None
+        previous = self.samples[-2] if len(self.samples) > 1 else None
+        return controller_healthy(previous, latest)
+
+    def _probe(self):
+        """One fresh ``/status`` request: ``(http_ok, payload or None)``.
+
+        A restart is only worth attempting when the gateway answers this request
+        with a usable ``/status`` reply; a timeout, connection error, auth
+        failure or non-2xx reply means the watchdog cannot reach it (or the
+        config is wrong) and alerts instead. A stale pooled socket can make the
+        probe fail where a later poll would succeed: treated as unreachable
+        (conservative), and the next successful poll clears the streak.
+        """
+        try:
+            resp = self.transport.get(
+                f"{self.base}/status", auth=self.auth, timeout=HTTP_TIMEOUT
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise ValueError("status response is not a JSON object")
+        except (requests.RequestException, ValueError) as exc:
+            log(f"watchdog: probe failed ({_offline_reason(exc)})")
+            return False, None
+        return True, payload
+
+    def _decide(self, now, charging, http_ok, controller_ok):
+        return recovery_decision(
+            now=now,
+            consecutive_failures=self.failures,
+            threshold=self.config.threshold,
+            http_reachable=http_ok,
+            controller_ok=controller_ok,
+            charging=charging,
+            last_attempt_at=self.last_attempt_at,
+            attempts_in_window=self.attempts,
+            window=WATCHDOG_WINDOW,
+            max_attempts=self.config.max_per_hour,
+            cooldown=self.config.cooldown,
+            restart_while_charging=self.config.restart_while_charging,
+            enabled=self.config.enabled,
+        )
+
+    def _restart(self, device):
+        """POST /restart for one device; return a short result string."""
+        try:
+            resp = self.transport.post(
+                f"{self.base}/restart",
+                json={"device": device},
+                auth=self.auth,
+                timeout=HTTP_TIMEOUT,
+            )
+            _require_ok(resp)
+        except (CommandError, requests.RequestException) as exc:
+            return f"failed ({exc})"
+        return f"HTTP {resp.status_code}"
+
+    def _attempt(self, action, now, http_ok, controller_ok, charging):
+        """Send one restart and record its outcome."""
+        device = "evse" if action == "restart_evse" else "gateway"
+        log(
+            f"watchdog: {action} -> POST /restart device={device} "
+            f"(failures={self.failures} http_ok={http_ok} "
+            f"controller_ok={controller_ok} charging={charging})"
+        )
+        self.last_result = self._restart(device)
+        self.last_attempt_at = now
+        self.attempts.append(now)
+        self.last_action = action
+        self.episode_attempts += 1
+        log(f"watchdog: restart device={device} -> {self.last_result}")
+
+    def _cap_reached(self, now):
+        recent = attempts_within(now, self.attempts, WATCHDOG_WINDOW)
+        return len(recent) >= self.config.max_per_hour
+
+    def _log_decision(self, decision):
+        key = (decision["action"], decision["reason"])
+        if key != self.last_decision:
+            self.last_decision = key
+            log(f"watchdog: {decision['action']} ({decision['reason']})")
+
+    def write_health(self, http_ok, controller_ok):
+        """Publish status/health; a failed write is a log line, not a crash.
+
+        Called on every state transition and every attempt, not on every tick,
+        so a healthy bridge writes it once.
+        """
+        now = self.clock()
+        document = {
+            "state": self.state,
+            "reason": self.reason,
+            "http_ok": http_ok,
+            "controller_ok": controller_ok,
+            "last_attempt_at": self.last_attempt_at,
+            "attempts_last_hour": len(
+                attempts_within(now, self.attempts, WATCHDOG_WINDOW)
+            ),
+            "last_action": self.last_action,
+            "last_result": self.last_result,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        try:
+            self.health_doc.set(document)
+        except Exception as exc:
+            log(f"watchdog: health write failed ({exc.__class__.__name__}: {exc})")
+
+    def record_success(self, payload):
+        """A successful ``/status`` poll: clear the streak and note recovery."""
+        if not self.config.enabled:
+            return
+        self._remember(payload)
+        self.failures = 0
+        if self.state == "healthy":
+            return
+        previous, self.state = self.state, "healthy"
+        self.reason = "status polls succeeding"
+        self.last_decision = None
+        self.failed_alerted = False
+        self.episode_attempts = 0
+        self.write_health(True, self._controller_ok())
+        if previous == "unhealthy":
+            log("watchdog: charger recovered")
+            self.notifier.enqueue(WATCHDOG_ALERT_RECOVERED)
+
+    def observe_failure(self, charging):
+        """Count one failed poll; act once the streak reaches the threshold.
+
+        ``charging`` is the last known charging state: with no successful poll
+        there is no fresher one, and a stale "charging" must keep blocking a
+        restart rather than interrupting a session.
+        """
+        if not self.config.enabled:
+            return
+        self.failures += 1
+        if self.failures < self.config.threshold:
+            return
+        now = self.clock()
+        http_ok, payload = self._probe()
+        if payload is not None:
+            self._remember(payload)
+        controller_ok = self._controller_ok()
+        decision = self._decide(now, charging, http_ok, controller_ok)
+        action = decision["action"]
+        entered = self.state != "unhealthy"
+        if entered:
+            self.state = "unhealthy"
+            self.failed_alerted = False
+            self.episode_attempts = 0
+            log(
+                f"watchdog: unhealthy after {self.failures} failed polls "
+                f"(http_ok={http_ok} controller_ok={controller_ok} "
+                f"charging={charging})"
+            )
+        self.reason = decision["reason"]
+        self._log_decision(decision)
+
+        alert = decision["alert"] if entered else None
+        changed = entered
+        if action in WATCHDOG_RESTART_ACTIONS:
+            self._attempt(action, now, http_ok, controller_ok, charging)
+            changed = True
+        elif action == "alert":
+            if self.episode_attempts and not self.failed_alerted:
+                # The probe cannot reach a gateway that a restart was meant to
+                # revive: automatic recovery has failed, which is exactly what
+                # the operator has to hear. Once per episode.
+                alert = WATCHDOG_ALERT_FAILED
+                self.failed_alerted = True
+                changed = True
+        elif (
+            self.episode_attempts
+            and self._cap_reached(now)
+            and not self.failed_alerted
+        ):
+            # This episode already spent an attempt and the hour's allowance is
+            # gone while the charger is still down. The last attempt stays on
+            # record; only the push is added.
+            alert = WATCHDOG_ALERT_FAILED
+            self.failed_alerted = True
+            changed = True
+
+        if self.last_attempt_at is None:
+            # Nothing was ever attempted, so there is no attempt to report: say
+            # what the watchdog did (or why a guard stopped it) instead of
+            # claiming the last attempt's fields.
+            self.last_action = "alert" if action == "alert" else "none"
+            self.last_result = (
+                "charger unreachable over HTTP; not restarted"
+                if action == "alert"
+                else decision["reason"]
+            )
+        if alert == WATCHDOG_ALERT_FAILED:
+            # One "recovery failed" push per unhealthy episode.
+            self.failed_alerted = True
+        if changed:
+            self.write_health(http_ok, controller_ok)
+        if alert is not None:
+            self.notifier.enqueue(alert)
+
+
+def status_loop(db, base, auth, transport, interval, tracker, notifier, watchdog):
     status_doc = db.collection("status").document("current")
     while not _stop.is_set():
         try:
@@ -770,6 +1226,7 @@ def status_loop(db, base, auth, transport, interval, tracker, notifier):
                     notifier.enqueue("Charger offline")
                 else:
                     status_doc.set(OFFLINE, merge=True)
+                watchdog.observe_failure(tracker.state == 3)
             else:
                 # Detect the charging edge against the pre-tick state; observe()
                 # updates it afterwards.
@@ -782,6 +1239,7 @@ def status_loop(db, base, auth, transport, interval, tracker, notifier):
                     log("charger online")
                 tracker.record_history(fields.get("total_energy"))
                 tracker.observe(fields)
+                watchdog.record_success(payload)
                 body = _transition_body(had_state, was_charging, is_charging)
                 if body is not None:
                     notifier.enqueue(body)
@@ -1316,7 +1774,7 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initi
         _stop.wait(interval)
 
 
-def run(db, base, auth, intervals, transport):
+def run(db, base, auth, intervals, transport, watchdog_config):
     """Start the pollers; blocks on the command loop until the stop event.
 
     Every loop gets the same ``transport``: one Session and one bounded
@@ -1332,8 +1790,18 @@ def run(db, base, auth, intervals, transport):
     tracker = StatusTracker(db)
     tracker.seed()
     notifier = Notifier(db)
+    watchdog = Watchdog(db, base, auth, transport, notifier, watchdog_config)
 
-    status_args = (db, base, auth, transport, status_interval, tracker, notifier)
+    status_args = (
+        db,
+        base,
+        auth,
+        transport,
+        status_interval,
+        tracker,
+        notifier,
+        watchdog,
+    )
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
     config_args = (db, base, auth, transport, config_interval, CONFIG_INITIAL_DELAY)
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
@@ -1371,6 +1839,8 @@ def main():
     except RuntimeError as exc:
         sys.exit(str(exc))
 
+    watchdog = watchdog_config_or_exit()
+
     def stop(signum, _frame):
         log(f"received signal {signum}, stopping")
         _stop.set()
@@ -1383,6 +1853,11 @@ def main():
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s"
     )
+    log(
+        f"watchdog: enabled={watchdog.enabled} failures={watchdog.threshold} "
+        f"cooldown={watchdog.cooldown:g}s cap={watchdog.max_per_hour}/h "
+        f"restart_while_charging={watchdog.restart_while_charging}"
+    )
     intervals = (
         status_interval,
         config_interval,
@@ -1390,7 +1865,14 @@ def main():
         reconcile_interval,
         command_interval,
     )
-    run(db, base, auth, intervals, ChargerTransport(make_charger_session()))
+    run(
+        db,
+        base,
+        auth,
+        intervals,
+        ChargerTransport(make_charger_session()),
+        watchdog,
+    )
     log("bridge stopped")
 
 
