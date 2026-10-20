@@ -1006,6 +1006,8 @@ class _StubMqtt:
 
     def __init__(self):
         self.connected = True
+        self.subscribed = True
+        self.subscription = "chelevse/#"
         self.config_version = 1
 
 
@@ -1033,7 +1035,9 @@ class ConfigLoopMqttTests(unittest.TestCase):
                 self.on_get(self)
             return FakeResponse(200, payload)
 
-    def start(self, session, source=None, retry=(0.05, 0.2), logs=None, db=None):
+    def start(
+        self, session, source=None, retry=(0.05, 0.2), logs=None, db=None, interval=60
+    ):
         self.db = db if db is not None else FakeDB()
         self.source = source or _StubMqtt()
         self.event = threading.Event()
@@ -1052,7 +1056,7 @@ class ConfigLoopMqttTests(unittest.TestCase):
                     "http://charger",
                     None,
                     bridge.ChargerTransport(session),
-                    60,
+                    interval,
                     0,
                     self.source,
                     self.event,
@@ -1143,6 +1147,26 @@ class ConfigLoopMqttTests(unittest.TestCase):
         self.assertEqual(self.db.data["status"]["config"]["config_version"], 2)
         time.sleep(0.05)
         self.assertEqual(session.calls, 2)  # the re-arm is consumed once
+
+    def test_a_denied_subscription_keeps_the_config_poll(self):
+        # The broker accepted the connection and denied <base>/#: no
+        # config_version can ever arrive, so waiting on the event would freeze
+        # status/config for as long as the link stays up. HTTP must stay the
+        # source, at its own cadence, with the degraded edge logged once.
+        source = _StubMqtt()
+        source.subscribed = False
+        logs = []
+        session = self.Session()
+        self.start(session, source=source, logs=logs, interval=0.01)
+        # The event is never set, so only the fallback poll can sync -- and it
+        # keeps polling instead of syncing once.
+        wait_for(lambda: session.calls >= 3)
+        wait_for(self.synced)
+        self.assertFalse(self.event.is_set())
+        self.assertEqual(
+            [line for line in logs if line.startswith("config source:")],
+            ["config source: http (mqtt connected, chelevse/# not subscribed)"],
+        )
 
 
 class HealthTests(unittest.TestCase):

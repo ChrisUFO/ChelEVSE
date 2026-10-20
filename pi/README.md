@@ -137,15 +137,19 @@ denies `<MQTT_TOPIC>/#` delivers nothing, which looks exactly like an idle
 charger: the bridge keeps HTTP as the status source at its usual 10 s cadence,
 logs the degraded source once (`status source: http (mqtt connected,
 <topic>/# not subscribed)`) and writes `source: "http"` with
-`mqtt_connected: true` to `status/health`. `/config` is fetched when
+`mqtt_connected: true` to `status/health`. `/config` follows the same
+subscription gate: while the subscription is granted it is fetched when
 `config_version` changes (the retained value on connect counts as the first
-change), **not** every 60 s. A failed `/config` fetch is not lost: the version
-event is cleared only after a successful sync, so the sync is retried with a
-bounded backoff (5 s, doubling to 60 s) and a new `config_version` — including
-the retained value republished on a reconnect — retries immediately. The
-schedule loop is unchanged. While the broker is disconnected — or the flag is
-off — the bridge polls exactly as before: 10 s status, 60 s config, 60 s
-schedule.
+change), **not** every 60 s; while the subscription is denied or the broker is
+disconnected it is polled every 60 s instead, with the degraded edge logged once
+(`config source: http (mqtt connected, <topic>/# not subscribed)`). A denied
+subscribing broker therefore cannot freeze `status/config`. A failed `/config`
+fetch is not lost: the version event is cleared only after a successful sync, so
+the sync is retried with a bounded backoff (5 s, doubling to 60 s) and a new
+`config_version` — including the retained value republished on a reconnect —
+retries immediately. The schedule loop is unchanged. While the broker is
+disconnected — or the flag is off — the bridge polls exactly as before: 10 s
+status, 60 s config, 60 s schedule.
 
 **Merged snapshots.** A burst carries only the fields that changed, so a burst is
 buffered for ~500 ms and merged into a snapshot seeded from the last `/status`

@@ -1648,8 +1648,11 @@ def config_loop(
     """Sync /config; with MQTT, only when ``config_version`` changed.
 
     The version event is set by the MQTT source. While the broker is connected
-    the periodic HTTP poll is skipped entirely; the ``tick`` wait bounds how long
-    a disconnect can go unnoticed (then the 60 s poll resumes).
+    *and the subscription is granted* the periodic HTTP poll is skipped
+    entirely; the ``tick`` wait bounds how long a disconnect can go unnoticed
+    (then the 60 s poll resumes). A denied ``<base>/#`` subscription delivers no
+    ``config_version`` at all, so it cannot be the trigger: the poll stays the
+    source (logged once per source change) instead of freezing the config.
 
     A failed sync must not leave the config stale until the charger's next
     setting change, so the failed trigger is consumed and the retry is owed
@@ -1684,11 +1687,32 @@ def config_loop(
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
+    source = None
     while not _stop.is_set():
         mqtt_mode = False
         version = None
         try:
-            mqtt_mode = mqtt is not None and config_event is not None and mqtt.connected
+            connected = mqtt is not None and mqtt.connected
+            # A granted subscription is what makes the version event a sync
+            # trigger: a broker that accepts the connection and then denies
+            # ``<topic>/#`` delivers no ``config_version`` ever, so waiting on
+            # the event would freeze ``status/config`` for as long as the link
+            # stays up. Until the SUBACK grants it the HTTP poll is the source
+            # and keeps its own cadence.
+            mqtt_mode = connected and config_event is not None and mqtt.subscribed
+            if mqtt is not None:
+                current = "mqtt" if mqtt_mode else "http"
+                if current != source:
+                    source = current
+                    if mqtt_mode:
+                        detail = "mqtt connected"
+                    elif not connected:
+                        detail = "mqtt not connected"
+                    elif config_event is None:
+                        detail = "mqtt connected, no config version trigger"
+                    else:
+                        detail = f"mqtt connected, {mqtt.subscription} not subscribed"
+                    log(f"config source: {current} ({detail})")
             if mqtt_mode:
                 now = time.monotonic()
                 if pending and now < retry_at:
