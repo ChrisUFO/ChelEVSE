@@ -12,6 +12,7 @@ import {
   queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
+  reloadQueuedState,
   scheduleKey,
   scheduleSaveValid,
   toggleNote,
@@ -383,6 +384,131 @@ test('reconcileDirtyRemote tracks server truth without touching the draft', () =
   const matches = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: draft });
   assert.equal(matches.dirty, false);
   assert.equal(matches.remoteNotice, false);
+});
+
+test('reloadQueuedState labels a pending snapshot with no local save in flight', () => {
+  const key = scheduleKey(payload);
+  const result = reloadQueuedState({ pendingWrites: true, dataKey: key, draftKey: key });
+  assert.deepEqual(result, { queued: true, payloadKey: key, outcome: 'queued', adopt: false });
+
+  // Still queued on the same payload: the label is already correct.
+  const same = reloadQueuedState({
+    pendingWrites: true,
+    queued: true,
+    dataKey: key,
+    payloadKey: key,
+  });
+  assert.deepEqual(same, { queued: true, payloadKey: key, outcome: 'none', adopt: false });
+
+  // A different pending payload (a newer queued write) becomes the baseline.
+  const newerKey = scheduleKey(schedule({ rules: [rule({ amps: 24 })] }));
+  const newer = reloadQueuedState({
+    pendingWrites: true,
+    queued: true,
+    dataKey: newerKey,
+    payloadKey: key,
+  });
+  assert.equal(newer.outcome, 'queued');
+  assert.equal(newer.queued, true);
+  assert.equal(newer.payloadKey, newerKey);
+});
+
+test('reloadQueuedState ignores a pending snapshot while a local save is in flight', () => {
+  const key = scheduleKey(payload);
+  const saving = reloadQueuedState({
+    pendingWrites: true,
+    saving: true,
+    dataKey: key,
+    payloadKey: key,
+  });
+  assert.deepEqual(saving, { queued: false, payloadKey: key, outcome: 'none', adopt: false });
+  // The unconfirmed (late settle) window is the same: the promise is the arbiter.
+  const unconfirmed = reloadQueuedState({
+    pendingWrites: true,
+    savingUnconfirmed: true,
+    queued: true,
+    dataKey: key,
+    payloadKey: key,
+  });
+  assert.deepEqual(unconfirmed, {
+    queued: true,
+    payloadKey: key,
+    outcome: 'none',
+    adopt: false,
+  });
+});
+
+test('reloadQueuedState clears the queued state when the payload is acknowledged', () => {
+  const key = scheduleKey(payload);
+  const acked = reloadQueuedState({
+    pendingWrites: false,
+    queued: true,
+    dataKey: key,
+    payloadKey: key,
+    draftKey: key,
+  });
+  // The draft is untouched; the screen shows "Saved." from queuedSaveState.
+  assert.deepEqual(acked, { queued: false, payloadKey: null, outcome: 'acked', adopt: false });
+  assert.equal(queuedSaveState({ saved: true }).label, 'Saved.');
+});
+
+test('reloadQueuedState reports a changed acknowledged snapshot as reverted', () => {
+  const key = scheduleKey(payload);
+  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const remoteKey = scheduleKey(remote);
+  // Clean draft (still the queued payload): the screen may adopt server truth.
+  const clean = reloadQueuedState({
+    pendingWrites: false,
+    queued: true,
+    dataKey: remoteKey,
+    payloadKey: key,
+    draftKey: key,
+  });
+  assert.deepEqual(clean, {
+    queued: false,
+    payloadKey: null,
+    outcome: 'reverted',
+    adopt: true,
+  });
+  // Dirty draft: the notice shows, but the edits are never clobbered.
+  const dirty = reloadQueuedState({
+    pendingWrites: false,
+    queued: true,
+    dataKey: remoteKey,
+    payloadKey: key,
+    draftKey: scheduleKey(schedule({ rules: [rule({ amps: 16 })] })),
+  });
+  assert.equal(dirty.outcome, 'reverted');
+  assert.equal(dirty.adopt, false);
+  // An unknown draft is never adopted (the conservative default).
+  assert.equal(
+    reloadQueuedState({ pendingWrites: false, queued: true, dataKey: remoteKey, payloadKey: key })
+      .adopt,
+    false,
+  );
+});
+
+test('reloadQueuedState leaves the state alone when snapshot metadata is absent', () => {
+  const key = scheduleKey(payload);
+  assert.deepEqual(reloadQueuedState({ dataKey: key, draftKey: key }), {
+    queued: false,
+    payloadKey: null,
+    outcome: 'none',
+    adopt: false,
+  });
+  // Absent metadata is not evidence of acknowledgement: a queued write stays
+  // queued (only an explicit `false` resolves it).
+  const queuedState = { queued: true, payloadKey: key, outcome: 'none', adopt: false };
+  assert.deepEqual(
+    reloadQueuedState({ queued: true, dataKey: key, payloadKey: key, draftKey: key }),
+    queuedState,
+  );
+  assert.deepEqual(
+    reloadQueuedState({ pendingWrites: null, queued: true, dataKey: key, payloadKey: key }),
+    queuedState,
+  );
+  // An acknowledged snapshot while nothing is queued changes nothing.
+  assert.equal(reloadQueuedState({ pendingWrites: false, dataKey: key }).outcome, 'none');
 });
 
 test('toggleNote reports an unknown state for a malformed stored schedule', () => {
