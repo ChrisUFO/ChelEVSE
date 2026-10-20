@@ -168,6 +168,76 @@ test('settings without currency are rejected', async () => {
   );
 });
 
+function rateWindow(overrides = {}) {
+  return {
+    id: 'w1',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+    ...overrides,
+  };
+}
+
+function writeSettings(context, id, data) {
+  return setDoc(doc(context.firestore(), 'settings', id), data);
+}
+
+// Rules guard the `rates` container only (list, at most 24 rows): Firestore
+// cannot iterate a list. Per-window shape and overlaps are validated by
+// web/js/rates.js before the write, and covered in test/web/rates.test.js.
+test('settings may omit the optional rates list', async () => {
+  await assertSucceeds(writeSettings(allowlisted(), 'flat', { rate: 0.31, currency: 'USD' }));
+});
+
+test('allowlisted user can write a settings document with rate windows', async () => {
+  await assertSucceeds(
+    writeSettings(allowlisted(), 'scheduled', {
+      rate: 0.31,
+      currency: 'USD',
+      rates: [rateWindow(), rateWindow({ id: 'w2', days: [5, 6], months: [6, 7, 8] })],
+    }),
+  );
+});
+
+test('settings with 24 rate windows are accepted', async () => {
+  const rates = Array.from({ length: 24 }, (_, i) => rateWindow({ id: `w${i}` }));
+  await assertSucceeds(
+    writeSettings(allowlisted(), 'twenty-four', { rate: 0.31, currency: '$', rates }),
+  );
+});
+
+test('settings rates must be a list', async () => {
+  await assertFails(
+    writeSettings(allowlisted(), 'rates-object', {
+      rate: 0.31,
+      currency: '$',
+      rates: rateWindow(),
+    }),
+  );
+  await assertFails(
+    writeSettings(allowlisted(), 'rates-string', { rate: 0.31, currency: '$', rates: 'night' }),
+  );
+});
+
+test('settings with more than 24 rate windows are rejected', async () => {
+  const rates = Array.from({ length: 25 }, (_, i) => rateWindow({ id: `w${i}` }));
+  await assertFails(
+    writeSettings(allowlisted(), 'too-many-rates', { rate: 0.31, currency: '$', rates }),
+  );
+});
+
+test('unauthenticated users cannot write settings with rates', async () => {
+  await assertFails(
+    writeSettings(env.unauthenticatedContext(), 'anon-rates', {
+      rate: 0.31,
+      currency: '$',
+      rates: [rateWindow()],
+    }),
+  );
+});
+
 test('allowlisted user can register their own fcm token', async () => {
   await assertSucceeds(
     setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-own'), {

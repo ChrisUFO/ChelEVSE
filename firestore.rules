@@ -52,6 +52,12 @@ service cloud.firestore {
     }
 
     // App settings: client-writable by allowlisted users, shape-validated.
+    // The flat rate/currency stay mandatory; `rates` (the optional
+    // time-of-use/seasonal schedule, with the flat rate as its fallback) may be
+    // absent. Rules cannot iterate a list, so the guard is container-only:
+    // list, at most 24 rows — the same limit and reasoning as the schedule.
+    // Per-window shape and overlaps are validated by web/js/rates.js before
+    // the write is attempted.
     match /settings/{doc} {
       allow read: if allowed();
       allow write: if allowed()
@@ -60,7 +66,14 @@ service cloud.firestore {
         && request.resource.data.rate <= 5
         && request.resource.data.currency is string
         && request.resource.data.currency.size() >= 1
-        && request.resource.data.currency.size() <= 8;
+        && request.resource.data.currency.size() <= 8
+        && (
+             !request.resource.data.keys().hasAny(['rates'])
+             || (
+                  request.resource.data.rates is list
+                  && request.resource.data.rates.size() <= 24
+                )
+           );
     }
 
     // FCM push registrations: users manage only their own token docs. The doc
