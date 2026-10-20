@@ -1,20 +1,32 @@
 // Pure helpers for the app-settings form. No DOM, no Firebase — covered by
 // test/web.
 
-// Mirror firestore.rules: a write must carry both fields, rate is a number from
-// 0 to 5, currency is a string of 1–8 characters.
-export const RATE_MIN = 0;
-export const RATE_MAX = 5;
+import {
+  RATE_MAX,
+  RATE_MIN,
+  normalizeRateSchedule,
+  normalizeWindow,
+  parseRateValue,
+  rateWindowsKey,
+  validateRateWindows,
+} from './rates.js';
+
+// The rate bounds live in rates.js: the same 0–5 limit governs a flat rate and
+// a window row, so both validators share one definition.
+export { RATE_MAX, RATE_MIN } from './rates.js';
+
+// Mirror firestore.rules: a write must carry both flat fields, rate is a number
+// from 0 to 5, currency is a string of 1–8 characters. The optional `rates`
+// list keeps the flat rate as its fallback; its rows are validated by
+// validateRateWindows (rules only guard the container).
 export const CURRENCY_MAX = 8;
 
 // The form trims the currency, so a stray space cannot produce a string that
-// rules would accept but people would read as empty.
+// rules would accept but people would read as empty. An absent `rates` list is
+// a complete configuration: the flat rate covers every moment.
 export function validateSettings(draft) {
   const errors = {};
-  const rawRate = draft && draft.rate;
-  let rate = Number.NaN;
-  if (typeof rawRate === 'number') rate = rawRate;
-  else if (typeof rawRate === 'string' && rawRate.trim() !== '') rate = Number(rawRate);
+  const rate = parseRateValue(draft && draft.rate);
 
   if (!Number.isFinite(rate)) {
     errors.rate = 'Enter a rate between 0 and 5.';
@@ -30,42 +42,66 @@ export function validateSettings(draft) {
     errors.currency = `Use ${CURRENCY_MAX} characters or fewer.`;
   }
 
+  // The window list has no visible field yet, but a stored schedule must still
+  // be validated (and must not be silently dropped) on every save.
+  const windows = validateRateWindows(draft && draft.rates);
+  if (!windows.valid) {
+    // The editor shows per-row errors once the rate table lands (PR-2); for now
+    // the first general problem is the one sentence the card can show.
+    errors.rates = windows.errors.general[0] || 'Fix the rate windows before saving.';
+  }
+
   return {
     valid: Object.keys(errors).length === 0,
     errors,
-    values: { rate, currency },
+    values: { rate, currency, rates: windows.values },
   };
 }
 
 // Only the documented shape is adopted from Firestore; anything else leaves the
-// form empty for the owner to replace.
+// form empty for the owner to replace. Unusable rate rows are dropped one at a
+// time (see rates.js), so a partially corrupt document still prices what it
+// can with the flat fallback.
 export function normalizeSettings(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-  const rate = typeof data.rate === 'number' && Number.isFinite(data.rate) ? data.rate : null;
-  const currency = typeof data.currency === 'string' ? data.currency : null;
-  if (rate == null || currency == null) return null;
-  return { rate, currency };
+  const normalized = normalizeRateSchedule(data);
+  if (normalized.rate == null || normalized.currency == null) return null;
+  return normalized;
 }
 
+// The form's fields. `rates` travels with them even though PR-1 has no rate
+// table: a rate/currency edit must not delete the stored schedule.
 export function settingsFields(settings) {
   const normalized = normalizeSettings(settings);
   return normalized
-    ? { rate: String(normalized.rate), currency: normalized.currency }
-    : { rate: '', currency: '' };
+    ? { rate: String(normalized.rate), currency: normalized.currency, rates: normalized.rates }
+    : { rate: '', currency: '', rates: [] };
+}
+
+// The exact Firestore payload for a validated settings save. `rates` is omitted
+// when empty, so a flat configuration writes byte-for-byte the two fields it
+// always has.
+export function settingsPayload(values) {
+  const source = values || {};
+  const payload = { rate: source.rate, currency: source.currency };
+  const rates = Array.isArray(source.rates) ? source.rates : [];
+  if (rates.length > 0) {
+    payload.rates = rates.map((row) => {
+      const window = normalizeWindow(row);
+      return {
+        id: window.id,
+        rate: window.rate,
+        days: window.days,
+        start: window.start,
+        end: window.end,
+        months: window.months,
+      };
+    });
+  }
+  return payload;
 }
 
 // ---------- draft comparison ----------
-
-// Rate parsing shared by validation and the dirty check: the input is text and
-// the stored value is a number, so "0.250" and ".5" must compare by value.
-function parseRateValue(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : Number.NaN;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : Number.NaN;
-  }
-  return Number.NaN;
-}
 
 function parseCurrencyValue(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -74,7 +110,8 @@ function parseCurrencyValue(value) {
 // The form compares parsed values, never raw strings: a rate typed as "0.250"
 // and a currency typed as " USD " are the same settings as the canonical
 // rendering, so they must not read as unsaved forever. Two non-numeric drafts
-// only match each other when their text is identical.
+// only match each other when their text is identical. Window rows compare
+// through rateWindowsKey so day/month order and numeric text do not matter.
 export function sameSettingsInput(a, b) {
   const left = a || {};
   const right = b || {};
@@ -84,7 +121,11 @@ export function sameSettingsInput(a, b) {
     Number.isNaN(rateLeft) || Number.isNaN(rateRight)
       ? String(left.rate ?? '').trim() === String(right.rate ?? '').trim()
       : rateLeft === rateRight;
-  return ratesMatch && parseCurrencyValue(left.currency) === parseCurrencyValue(right.currency);
+  return (
+    ratesMatch &&
+    parseCurrencyValue(left.currency) === parseCurrencyValue(right.currency) &&
+    rateWindowsKey(left.rates) === rateWindowsKey(right.rates)
+  );
 }
 
 // Raw input fields against a stored settings document.
@@ -96,7 +137,11 @@ function settingsEqual(a, b) {
   const left = normalizeSettings(a);
   const right = normalizeSettings(b);
   if (!left || !right) return left === right;
-  return left.rate === right.rate && left.currency === right.currency;
+  return (
+    left.rate === right.rate &&
+    left.currency === right.currency &&
+    rateWindowsKey(left.rates) === rateWindowsKey(right.rates)
+  );
 }
 
 // ---------- save-state machine ----------
@@ -113,7 +158,7 @@ export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
 // screen owns. `dirty` is computed and returned so the screen never has to keep
 // a second, possibly divergent copy.
 export function settingsSaveState({
-  draft = { rate: '', currency: '' },
+  draft = { rate: '', currency: '', rates: [] },
   confirmed = null,
   saving = false,
   waiting = false,
@@ -156,13 +201,18 @@ export function reconcileSettingsSave({
   ok,
   values,
   previous = null,
-  draft = { rate: '', currency: '' },
+  draft = { rate: '', currency: '', rates: [] },
   remote = null,
   remoteSeen = false,
 } = {}) {
-  const attempted = { rate: values.rate, currency: values.currency };
+  const rates = Array.isArray(values.rates) ? values.rates : [];
+  const attempted = { rate: values.rate, currency: values.currency, rates };
   const untouched = settingsDraftMatches(draft, attempted);
-  const draftFields = { rate: String(draft.rate ?? ''), currency: String(draft.currency ?? '') };
+  const draftFields = {
+    rate: String(draft.rate ?? ''),
+    currency: String(draft.currency ?? ''),
+    rates: Array.isArray(draft.rates) ? draft.rates : [],
+  };
 
   if (ok) {
     // The write is confirmed; canonicalise the fields when only formatting

@@ -29,9 +29,17 @@ let settingsWaiting = false;
 let settingsSaved = false;
 let settingsError = '';
 let settingsGeneration = 0;
+// The optional rate schedule is not editable in this release, so it travels
+// with the draft untouched: saving a rate/currency edit must never delete a
+// stored schedule. The rate-table editor (PR-2) replaces this with row state.
+let draftRates = [];
 
 function readFields() {
-  return { rate: $('setting-rate').value, currency: $('setting-currency').value };
+  return {
+    rate: $('setting-rate').value,
+    currency: $('setting-currency').value,
+    rates: draftRates,
+  };
 }
 
 function paintFieldError(field, message) {
@@ -72,6 +80,7 @@ function paintFeedback() {
 function writeFields(fields) {
   $('setting-rate').value = fields.rate;
   $('setting-currency').value = fields.currency;
+  draftRates = Array.isArray(fields.rates) ? fields.rates : [];
 }
 
 function setFields(settings) {
@@ -151,10 +160,19 @@ async function submit(event) {
   renderErrors(result.errors);
   if (!result.valid) {
     settingsSaved = false;
-    settingsError = 'Fix the highlighted fields before saving.';
+    settingsError =
+      result.errors.rate || result.errors.currency
+        ? 'Fix the highlighted fields before saving.'
+        : result.errors.rates || 'Fix the highlighted fields before saving.';
     paintFeedback();
-    const first = result.errors.rate ? $('setting-rate') : $('setting-currency');
-    first.focus();
+    // A window-only problem has no visible field to focus yet; the message is
+    // the whole feedback until the rate table lands.
+    const first = result.errors.rate
+      ? $('setting-rate')
+      : result.errors.currency
+        ? $('setting-currency')
+        : null;
+    if (first) first.focus();
     return;
   }
 

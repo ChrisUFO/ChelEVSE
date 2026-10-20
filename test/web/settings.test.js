@@ -11,6 +11,7 @@ import {
   sameSettingsInput,
   settingsDraftMatches,
   settingsFields,
+  settingsPayload,
   settingsSaveState,
   validateSettings,
 } from '../../web/js/settings.js';
@@ -19,7 +20,7 @@ test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
     valid: true,
     errors: {},
-    values: { rate: 0.31, currency: 'USD' },
+    values: { rate: 0.31, currency: 'USD', rates: [] },
   });
   assert.equal(validateSettings({ rate: 0, currency: '$' }).valid, true);
   assert.equal(validateSettings({ rate: 5, currency: 'abcdefgh' }).valid, true);
@@ -27,6 +28,7 @@ test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.2', currency: '  €  ' }).values, {
     rate: 0.2,
     currency: '€',
+    rates: [],
   });
 
   for (const rate of [-0.01, 5.01, '', '  ', 'abc', null, undefined, Number.NaN, Infinity]) {
@@ -46,10 +48,46 @@ test('validateSettings mirrors the rules shape', () => {
   assert.ok(empty.errors.currency);
 });
 
+test('validateSettings carries and validates the optional rate windows', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const scheduled = validateSettings({ rate: '0.31', currency: 'USD', rates: [night] });
+  assert.equal(scheduled.valid, true);
+  assert.deepEqual(scheduled.values.rates, [night]);
+
+  // A malformed row blocks the save and reports at document level for now.
+  const broken = validateSettings({
+    rate: '0.31',
+    currency: 'USD',
+    rates: [{ ...night, start: '25:00' }],
+  });
+  assert.equal(broken.valid, false);
+  assert.ok(broken.errors.rates);
+
+  const overlap = validateSettings({
+    rate: '0.31',
+    currency: 'USD',
+    rates: [night, { ...night, id: 'dawn', start: '05:00', end: '07:00' }],
+  });
+  assert.equal(overlap.valid, false);
+  assert.match(overlap.errors.rates, /overlaps/);
+
+  const notAList = validateSettings({ rate: '0.31', currency: 'USD', rates: { night } });
+  assert.equal(notAList.valid, false);
+  assert.match(notAList.errors.rates, /list/);
+});
+
 test('normalizeSettings and settingsFields only adopt the documented shape', () => {
   assert.deepEqual(normalizeSettings({ rate: 0.31, currency: 'USD' }), {
     rate: 0.31,
     currency: 'USD',
+    rates: [],
   });
   assert.equal(normalizeSettings(null), null);
   assert.equal(normalizeSettings({ rate: '0.31', currency: 'USD' }), null);
@@ -58,8 +96,50 @@ test('normalizeSettings and settingsFields only adopt the documented shape', () 
   assert.deepEqual(settingsFields({ rate: 0.31, currency: 'USD' }), {
     rate: '0.31',
     currency: 'USD',
+    rates: [],
   });
-  assert.deepEqual(settingsFields(null), { rate: '', currency: '' });
+  assert.deepEqual(settingsFields(null), { rate: '', currency: '', rates: [] });
+});
+
+test('the stored rate schedule survives normalization and reaches the form fields', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const stored = { rate: 0.31, currency: 'USD', rates: [night] };
+  assert.deepEqual(normalizeSettings(stored), stored);
+  // The form has no rate table yet, but the rows must not be dropped on a save.
+  assert.deepEqual(settingsFields(stored).rates, [night]);
+});
+
+test('settingsPayload omits an empty schedule so flat writes stay byte-identical', () => {
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [] }), {
+    rate: 0.31,
+    currency: 'USD',
+  });
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD' }), {
+    rate: 0.31,
+    currency: 'USD',
+  });
+  assert.equal('rates' in settingsPayload({ rate: 0.31, currency: 'USD' }), false);
+
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [night] }), {
+    rate: 0.31,
+    currency: 'USD',
+    rates: [night],
+  });
 });
 
 test('the draft comparison uses parsed values, not raw text', () => {
@@ -96,6 +176,49 @@ test('the draft comparison uses parsed values, not raw text', () => {
   );
 });
 
+test('the draft comparison includes the rate schedule', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const stored = { rate: 0.25, currency: 'USD', rates: [night] };
+
+  assert.equal(
+    settingsDraftMatches({ rate: '0.25', currency: 'USD', rates: [night] }, stored),
+    true,
+  );
+  // Day and month order are not a change; a different rate is.
+  assert.equal(
+    settingsDraftMatches(
+      {
+        rate: '0.25',
+        currency: 'USD',
+        rates: [{ ...night, days: [4, 3, 2, 1, 0], months: [1] }],
+      },
+      { ...stored, rates: [{ ...night, months: [1] }] },
+    ),
+    true,
+  );
+  assert.equal(
+    settingsDraftMatches(
+      { rate: '0.25', currency: 'USD', rates: [{ ...night, rate: 0.13 }] },
+      stored,
+    ),
+    false,
+  );
+  // Losing the schedule is a change (the editor must never save it away).
+  assert.equal(settingsDraftMatches({ rate: '0.25', currency: 'USD', rates: [] }, stored), false);
+  // A flat document still matches a draft that carries no rows.
+  assert.equal(
+    settingsDraftMatches({ rate: '0.25', currency: 'USD' }, { rate: 0.25, currency: 'USD' }),
+    true,
+  );
+});
+
 test('a successful save of non-canonical input settles clean and shows Saved.', () => {
   const draft = { rate: '0.250', currency: ' USD ' };
   const previous = null;
@@ -103,8 +226,8 @@ test('a successful save of non-canonical input settles clean and shows Saved.', 
   const settled = reconcileSettingsSave({ ok: true, values, previous, draft });
 
   // Fields are canonicalised, so the form no longer looks dirty.
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'USD' });
-  assert.deepEqual(settled.confirmed, { rate: 0.25, currency: 'USD' });
+  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'USD', rates: [] });
+  assert.deepEqual(settled.confirmed, { rate: 0.25, currency: 'USD', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, true);
   assert.equal(settled.error, '');
@@ -128,6 +251,35 @@ test('a successful save of non-canonical input settles clean and shows Saved.', 
   assert.equal(echo.text, 'Saved.');
 });
 
+test('a save and its rollback carry the rate schedule', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const draft = { rate: '0.310', currency: ' USD ', rates: [night] };
+  const values = validateSettings(draft).values;
+
+  const settled = reconcileSettingsSave({ ok: true, values, previous: null, draft });
+  assert.deepEqual(settled.confirmed.rates, [night]);
+  assert.deepEqual(settled.fields.rates, [night]);
+  assert.equal(settled.saved, true);
+  assert.equal(settled.dirty, false);
+
+  const failed = reconcileSettingsSave({
+    ok: false,
+    values,
+    previous: { rate: 0.2, currency: 'EUR', rates: [] },
+    draft,
+  });
+  assert.deepEqual(failed.confirmed, { rate: 0.2, currency: 'EUR', rates: [] });
+  assert.deepEqual(failed.fields, { rate: '0.2', currency: 'EUR', rates: [] });
+  assert.equal(failed.dirty, false);
+});
+
 test('a save typed over while in flight is not canonicalised or called saved', () => {
   const settled = reconcileSettingsSave({
     ok: true,
@@ -135,7 +287,7 @@ test('a save typed over while in flight is not canonicalised or called saved', (
     previous: null,
     draft: { rate: '0.25', currency: 'EUR' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'EUR' });
+  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'EUR', rates: [] });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(
@@ -155,8 +307,8 @@ test('a failed save rolls an untouched form back to the confirmed values', () =>
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.250', currency: ' USD ' },
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.31, currency: 'EUR' });
-  assert.deepEqual(settled.fields, { rate: '0.31', currency: 'EUR' });
+  assert.deepEqual(settled.confirmed, { rate: 0.31, currency: 'EUR', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.31', currency: 'EUR', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
@@ -181,7 +333,7 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
   // No settings/current exists yet, so there is no previous state to restore:
   // every field the user typed stays, the form stays dirty, and Save stays on.
   assert.equal(settled.confirmed, null);
-  assert.deepEqual(settled.fields, draft);
+  assert.deepEqual(settled.fields, { ...draft, rates: [] });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_FIRST_MESSAGE);
@@ -203,7 +355,7 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
     previous: null,
     draft: { rate: '0.4', currency: 'EUR' },
   });
-  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR' });
+  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR', rates: [] });
   assert.equal(typed.dirty, true);
 });
 
@@ -214,7 +366,7 @@ test('a failed save keeps a draft typed during the save', () => {
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.4', currency: 'USD' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD' });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [] });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   const view = settingsSaveState({
@@ -239,8 +391,8 @@ test('a failed save adopts a concurrent remote snapshot instead of the stale bas
   });
   // Another device wrote while our write was failing: that snapshot is the
   // newest server state.
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP' });
+  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
 });
@@ -254,8 +406,8 @@ test('a failed save never clobbers a draft typed during a reflected snapshot', (
     remote: { rate: 0.35, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.35, currency: 'GBP' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD' });
+  assert.deepEqual(settled.confirmed, { rate: 0.35, currency: 'GBP', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [] });
   assert.equal(settled.dirty, true);
 });
 
@@ -268,8 +420,8 @@ test('a successful save adopts a newer snapshot but keeps the typed draft', () =
     remote: { rate: 0.4, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP' });
+  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
 });
