@@ -4,7 +4,8 @@ The OpenEVSE gateway publishes its status as individual topics under a base
 topic (``<base>/amp``, ``<base>/state``, …) whenever the EVSE poll reports a
 change. This module subscribes to them, coalesces a burst into one snapshot and
 hands that snapshot to a callback; the bridge then runs it through the same
-``parse_status``/``apply_status`` path as an HTTP poll.
+``parse_status``/``apply_status`` path as an HTTP poll, so this module never
+writes a document itself.
 
 Design notes:
 
@@ -18,8 +19,9 @@ Design notes:
   and each flush merges the changed fields into it.
 - **Units stay raw.** Topic values are mapped to their ``/status`` key and handed
   over unchanged (``amp`` in milliamps, temperatures in 10ths of °C); the
-  existing ``parse_status`` owns every unit conversion, so MQTT and HTTP cannot
-  disagree about the document shape.
+  receiving worker runs ``parse_status`` on every snapshot, so the existing
+  parser remains the one owner of every unit conversion and of the curated
+  document shape — MQTT and HTTP cannot disagree about the document.
 - **Config is not read from MQTT.** ``<base>/config`` is retained, but the bridge
   keeps ``/config`` as the single redaction/coercion path: a change of
   ``config_version`` only triggers one HTTP sync.
@@ -84,6 +86,45 @@ def _decode(payload):
         return text
 
 
+def _default_log(message):
+    """Fallback journal line; the bridge injects its own ``log`` in production."""
+    print(message, flush=True)
+
+
+def _reason_value(reason_code):
+    """Reason code as an int, whether paho handed over an int or a ReasonCode."""
+    return getattr(reason_code, "value", reason_code)
+
+
+def _is_failure(reason_code):
+    """True when a CONNACK/SUBACK reason code reports a failure."""
+    is_failure = getattr(reason_code, "is_failure", None)
+    if isinstance(is_failure, bool):
+        return is_failure
+    value = _reason_value(reason_code)
+    return value not in (0, None)
+
+
+def _reason_text(reason_code):
+    """Reason code as ``<name> (<value>)``, or ``rc <value>`` without a name."""
+    value = _reason_value(reason_code)
+    name = getattr(reason_code, "getName", None)
+    label = name() if callable(name) else None
+    return f"{label} ({value})" if label else f"rc {value}"
+
+
+def _first_reason(args):
+    """First reason code in a paho callback's variadic tail, or None.
+
+    paho 2.x calls ``on_disconnect(client, userdata, flags, reason_code,
+    properties)``; 1.x calls ``on_disconnect(client, userdata, rc)``.
+    """
+    for value in args:
+        if isinstance(value, int) or hasattr(value, "value"):
+            return value
+    return None
+
+
 class MqttSource:
     """Subscriber for the charger's MQTT status topics.
 
@@ -104,6 +145,7 @@ class MqttSource:
         on_config_version=None,
         debounce=DEBOUNCE_SEC,
         client_factory=None,
+        log=None,
     ):
         self.host = host
         self.port = int(port)
@@ -115,10 +157,15 @@ class MqttSource:
         self.on_config_version = on_config_version
         self.debounce = max(0.0, float(debounce))
         self.subscription = f"{self.base}/#" if self.base else "#"
+        self.log = log or _default_log
         self.snapshot = {}
         self.config_version = None
         self.messages = 0
         self.snapshots = 0
+        # True once the snapshot carries a /status seed: only then is a
+        # snapshot a complete observation the state machine may run on.
+        self.seeded = False
+        self.subscribed = False
         self.connects = 0
         self.disconnects = 0
         self.connect_failures = 0
@@ -136,6 +183,7 @@ class MqttSource:
         self._client = client
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
+        client.on_subscribe = self._on_subscribe
         client.on_message = self._on_message
         client.on_connect_fail = self._on_connect_fail
         if self.user:
@@ -149,6 +197,7 @@ class MqttSource:
         """Stop the network loop and drop the connection."""
         with self._lock:
             timer, self._timer = self._timer, None
+        self.subscribed = False
         if timer is not None:
             timer.cancel()
         client, self._client = self._client, None
@@ -174,12 +223,14 @@ class MqttSource:
         Fields the firmware does not publish over MQTT (``comm_sent``,
         ``comm_success``, ``rapi_connected``, …) stay in the snapshot, so a
         later MQTT flush cannot null them. The 60 s HTTP reconciliation refreshes
-        the seed.
+        the seed. The seed is raw: the receiver parses every snapshot, so the
+        snapshot needs the same raw units a ``/status`` reply carries.
         """
         if not isinstance(payload, dict):
             return
         with self._lock:
             self.snapshot.update(payload)
+            self.seeded = True
 
     def flush(self):
         """Deliver the buffered fields as one snapshot (timer target)."""
@@ -196,17 +247,50 @@ class MqttSource:
 
     # -- paho callbacks ----------------------------------------------------
 
-    def _on_connect(self, client, _userdata, _flags, _reason_code, _properties=None, *_):
+    def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None, *_):
+        if _is_failure(reason_code):
+            # A refused CONNACK (wrong password, unknown client, ACL) never
+            # subscribes: without this line the bridge just serves HTTP.
+            self.connect_failures += 1
+            self.log(f"mqtt connect refused ({_reason_text(reason_code)})")
+            return
         self.connects += 1
         # Re-subscribed on every (re)connect: the session is clean, so the
         # broker holds no subscription across a drop.
-        client.subscribe(self.subscription, qos=0)
+        result = client.subscribe(self.subscription, qos=0)
+        if isinstance(result, tuple) and result and result[0] != 0:
+            self.log(f"mqtt subscribe failed ({self.subscription}: rc {result[0]})")
+
+    def _on_subscribe(self, _client, _userdata, _mid, reason_codes, *_):
+        codes = (
+            list(reason_codes)
+            if isinstance(reason_codes, (list, tuple))
+            else [reason_codes]
+        )
+        denied = [code for code in codes if _is_failure(code)]
+        if denied:
+            # An ACL/misconfigured topic looks exactly like an idle charger
+            # otherwise: connected, no status, no config_version.
+            self.subscribed = False
+            detail = ", ".join(_reason_text(code) for code in denied)
+            self.log(f"mqtt subscription denied ({self.subscription}: {detail})")
+            return
+        if not self.subscribed:
+            self.log(f"mqtt subscribed ({self.subscription})")
+        self.subscribed = True
 
     def _on_disconnect(self, _client, _userdata, *args):
         self.disconnects += 1
+        self.subscribed = False
+        reason = _first_reason(args)
+        if reason is None or not _is_failure(reason):
+            self.log("mqtt disconnected")
+        else:
+            self.log(f"mqtt disconnected ({_reason_text(reason)})")
 
     def _on_connect_fail(self, _client, _userdata):
         self.connect_failures += 1
+        self.log(f"mqtt connect failed (broker {self.host}:{self.port} unreachable)")
 
     def _on_message(self, _client, _userdata, message):
         topic = getattr(message, "topic", "") or ""

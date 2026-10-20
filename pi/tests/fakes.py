@@ -222,7 +222,8 @@ class FakeMqttClient:
     """Stand-in for paho's Client: no broker, callbacks are called by hand.
 
     ``connect()``/``drop()`` simulate the network loop's connection callbacks;
-    ``deliver()`` feeds one message as the broker would.
+    ``ack_subscribe()`` simulates a SUBACK and ``deliver()`` feeds one message
+    as the broker would.
     """
 
     def __init__(self, client_id=None):
@@ -236,6 +237,7 @@ class FakeMqttClient:
         self.disconnected = False
         self.on_connect = None
         self.on_disconnect = None
+        self.on_subscribe = None
         self.on_message = None
         self.on_connect_fail = None
 
@@ -267,20 +269,24 @@ class FakeMqttClient:
 
     # -- test helpers ------------------------------------------------------
 
-    def connect(self):
-        self.connected = True
+    def connect(self, reason_code=0):
+        self.connected = not getattr(reason_code, "is_failure", bool(reason_code))
         if self.on_connect is not None:
-            self.on_connect(self, None, {}, 0)
+            self.on_connect(self, None, {}, reason_code, None)
 
-    def drop(self):
+    def drop(self, reason_code=0):
         self.connected = False
         if self.on_disconnect is not None:
-            self.on_disconnect(self, None, 0)
+            self.on_disconnect(self, None, None, reason_code, None)
 
     def fail_connect(self):
         self.connected = False
         if self.on_connect_fail is not None:
             self.on_connect_fail(self, None)
+
+    def ack_subscribe(self, reason_codes):
+        if self.on_subscribe is not None:
+            self.on_subscribe(self, None, 1, reason_codes, None)
 
     def deliver(self, topic, payload):
         if self.on_message is not None:

@@ -59,6 +59,19 @@ class _StopAfter:
         return True
 
 
+class _HookedSession(FakeSession):
+    """FakeSession that runs ``hook(url)`` before answering (in-flight work)."""
+
+    def __init__(self, responses=None, hook=None):
+        super().__init__(responses)
+        self.hook = hook
+
+    def get(self, url, **kwargs):
+        if self.hook is not None:
+            self.hook(url)
+        return super().get(url, **kwargs)
+
+
 def wait_for(predicate, timeout=5):
     """Bound a test's wait on another thread (raises instead of hanging)."""
     deadline = time.monotonic() + timeout
@@ -67,6 +80,18 @@ def wait_for(predicate, timeout=5):
             return
         time.sleep(0.005)
     raise AssertionError("condition not reached")
+
+
+class _ReasonCode:
+    """The bits of paho's ReasonCode the source reads."""
+
+    def __init__(self, value, name=None):
+        self.value = value
+        self.is_failure = bool(value)
+        self._name = name
+
+    def getName(self):
+        return self._name
 
 
 def status_payload(**overrides):
@@ -93,6 +118,7 @@ class MqttSourceBase(unittest.TestCase):
         self.factory = FakeMqttFactory()
         self.snapshots = []
         self.versions = []
+        self.logs = []
         self.source = MqttSource(
             "192.168.0.224",
             1883,
@@ -104,6 +130,7 @@ class MqttSourceBase(unittest.TestCase):
             on_config_version=self.versions.append,
             debounce=60,  # never fires: the tests flush by hand
             client_factory=self.factory,
+            log=self.logs.append,
         )
         self.addCleanup(self.source.stop)
 
@@ -227,6 +254,42 @@ class MqttSourceTests(MqttSourceBase):
         self.assertFalse(self.source.connected)
 
 
+class MqttSourceLoggingTests(MqttSourceBase):
+    """A refused CONNACK or SUBACK must name itself in the journal."""
+
+    def test_a_refused_connack_is_logged_and_never_subscribes(self):
+        self.source.start()
+        client = self.factory.client
+        client.connect(_ReasonCode(5, "Not authorized"))
+        self.assertEqual(client.subscriptions, [])
+        self.assertFalse(self.source.subscribed)
+        self.assertEqual(self.source.connect_failures, 1)
+        self.assertTrue(any("connect refused" in line for line in self.logs))
+        self.assertTrue(any("Not authorized" in line for line in self.logs))
+
+    def test_an_unreachable_broker_is_logged(self):
+        self.source.start()
+        self.factory.client.fail_connect()
+        self.assertEqual(self.source.connect_failures, 1)
+        self.assertTrue(any("connect failed" in line for line in self.logs))
+
+    def test_a_denied_subscription_is_logged(self):
+        client = self.connect()
+        client.ack_subscribe([_ReasonCode(128, "Unspecified error")])
+        self.assertFalse(self.source.subscribed)
+        self.assertTrue(any("subscription denied" in line for line in self.logs))
+
+    def test_a_granted_subscription_is_recorded_until_the_drop(self):
+        client = self.connect()
+        client.ack_subscribe([0])
+        self.assertTrue(self.source.subscribed)
+        self.assertNotIn("subscription denied", " ".join(self.logs))
+        client.drop(_ReasonCode(7, "Connection lost"))
+        self.assertFalse(self.source.subscribed)
+        self.assertTrue(any("mqtt disconnected" in line for line in self.logs))
+        self.assertTrue(any("Connection lost" in line for line in self.logs))
+
+
 class MqttConfigTests(unittest.TestCase):
     def parse(self, **env):
         with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
@@ -319,43 +382,196 @@ class StatusSinkTests(unittest.TestCase):
         (day,) = self.db.data["history"]
         self.assertAlmostEqual(self.db.data["history"][day]["kwh"]._value, 10.0)
 
-    def test_a_stale_http_poll_cannot_reopen_a_closed_session(self):
-        # One 3 -> 1 edge from MQTT, then an HTTP poll still reporting 3 (a
-        # reconcile sent before the edge) must not create a second edge.
+    def test_a_stale_http_response_cannot_reopen_a_closed_session(self):
+        # The exact race: charging, an MQTT stop, then the reconcile reply that
+        # was generated before the stop. Its state=3 must not re-fire an edge.
         self.apply(status_payload(state=3, session_energy=6000, elapsed=3600), "mqtt")
+        mark = self.sink.mqtt_generation()
         self.apply(status_payload(state=1, session_energy=6000, elapsed=3600), "mqtt")
-        self.apply(status_payload(state=1, session_energy=6000, elapsed=3600), "http")
+        applied = self.sink.apply_status(
+            bridge.parse_status(status_payload(state=3, session_energy=6000)),
+            "http",
+            mqtt_mark=mark,
+        )
+        self.assertFalse(applied)
         self.assertEqual(
             self.notifier.bodies, ["Charging started", "Charging stopped"]
         )
         self.assertEqual(len(self.db.data["sessions"]), 1)
+        self.assertEqual(self.tracker.state, 1)
+
+    def test_an_http_apply_with_no_mqtt_apply_in_between_is_kept(self):
+        mark = self.sink.mqtt_generation()
+        applied = self.sink.apply_status(
+            bridge.parse_status(status_payload(state=3)), "http", mqtt_mark=mark
+        )
+        self.assertTrue(applied)
+        self.assertEqual(self.notifier.bodies, ["Charging started"])
+
+    def test_a_partial_snapshot_only_merges_its_fields(self):
+        # No /status seed and the tracker charging: an amp-only snapshot must
+        # not read as "not charging" (a false stop, a bogus session, and the
+        # loss of the charging guard).
+        self.tracker.previous_state = 3
+        self.tracker.state = 3
+        self.tracker.last_charging_energy = 6000
+        self.tracker.last_charging_elapsed = 3600
+        self.sink.apply_status(
+            bridge.parse_snapshot({"amp": 15400}), "mqtt", complete=False
+        )
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertNotIn("sessions", self.db.data)
+        self.assertEqual(self.tracker.state, 3)
+        self.assertEqual(self.tracker.previous_state, 3)
+        self.assertEqual(self.db.data["status"]["current"]["amp"], 15.4)
 
 
-class MqttStatusLoopTests(unittest.TestCase):
-    def test_snapshots_apply_without_touching_the_watchdog(self):
-        db = FakeDB()
-        tracker = bridge.StatusTracker(db)
-        tracker.seeded = True
-        tracker.has_state = True
-        tracker.state = 1
-        tracker.previous_state = 1
-        notifier = _RecordingNotifier()
-        sink = bridge.StatusSink(db, tracker, notifier)
-        snapshots = bridge.queue.Queue(maxsize=1)
-        bridge.enqueue_latest(snapshots, bridge.parse_status(status_payload(state=3)))
+class MqttWorkerBase(unittest.TestCase):
+    """The production path: raw topic values -> parse -> apply -> document."""
+
+    def setUp(self):
+        self.db = FakeDB()
+        self.factory = FakeMqttFactory()
+        self.notifier = _RecordingNotifier()
+        self.tracker = bridge.StatusTracker(self.db)
+        self.tracker.seeded = True
+        self.tracker.has_state = True
+        self.tracker.state = 1
+        self.tracker.previous_state = 1
+        self.tracker.charger_online = True
+        self.sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
+        self.snapshots = bridge.queue.Queue(maxsize=1)
+        self.source = MqttSource(
+            "192.168.0.224",
+            topic="chelevse",
+            on_status=lambda fields: bridge.enqueue_latest(self.snapshots, fields),
+            debounce=60,  # never fires: the tests flush by hand
+            client_factory=self.factory,
+            log=lambda _message: None,
+        )
+        self.addCleanup(self.source.stop)
+        self.source.start()
+        self.client = self.factory.client
+        self.client.connect()
+
+    def run_worker(self, applied=1):
+        """Apply queued snapshots on the worker until ``applied`` have landed."""
         stop = threading.Event()
         with mock.patch.object(bridge, "_stop", stop):
             thread = threading.Thread(
-                target=bridge.mqtt_status_loop, args=(sink, snapshots), daemon=True
+                target=bridge.mqtt_status_loop,
+                args=(self.sink, self.snapshots, self.source),
+                daemon=True,
             )
             thread.start()
-            wait_for(lambda: "current" in db.data.get("status", {}))
-            stop.set()
-            thread.join(timeout=5)
+            try:
+                wait_for(lambda: len(self.current_writes()) >= applied)
+            finally:
+                stop.set()
+                thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(db.data["status"]["current"]["state"], 3)
-        self.assertEqual(notifier.bodies, ["Charging started"])
 
+    def current_writes(self):
+        return [
+            write
+            for write in self.db.writes
+            if write[1] == "status" and write[2] == "current"
+        ]
+
+    def current(self):
+        return self.db.data["status"]["current"]
+
+
+class MqttWorkerTests(MqttWorkerBase):
+    def test_a_raw_snapshot_reaches_the_document_in_document_units(self):
+        # What the charger actually publishes: milliamps, tenths of °C, the
+        # absent-sensor `false`, and the uncurated /status fields.
+        payload = status_payload(
+            state=3,
+            amp=0,
+            temp1=247,
+            temp2=False,
+            temp3=False,
+            session_energy=6000,
+            elapsed=3600,
+            total_energy=100.5,
+            comm_sent=10,
+            comm_success=10,
+            rapi_connected=1,
+            ipaddress="192.168.0.143",
+            macaddress="aa:bb:cc:dd:ee:ff",
+            mqtt_connected=1,
+        )
+        self.source.seed(payload)
+        self.client.deliver("chelevse/amp", 15400)
+        self.source.flush()
+        self.run_worker()
+        doc = self.current()
+        self.assertEqual(doc["amp"], 15.4)  # mA -> A
+        self.assertEqual(doc["temp1"], 24.7)  # 10ths -> °C
+        self.assertEqual(doc["temp_c"], 24.7)
+        self.assertIsNone(doc["temp2"])  # absent sensor sentinel
+        self.assertEqual(doc["state"], 3)
+        self.assertEqual(doc["state_label"], "charging")
+        self.assertIs(doc["charger_online"], True)
+        self.assertIs(doc["updated_at"], bridge.firestore.SERVER_TIMESTAMP)
+        for key in (
+            "comm_sent",
+            "comm_success",
+            "rapi_connected",
+            "ipaddress",
+            "macaddress",
+            "mqtt_connected",
+        ):
+            self.assertNotIn(key, doc)
+        self.assertEqual(self.notifier.bodies, ["Charging started"])
+
+    def test_an_unseeded_partial_snapshot_only_merges_fields(self):
+        # Bridge restarted while the charger's HTTP is wedged: the tracker is
+        # charging from Firestore, /status has never answered, and the first
+        # MQTT change is an amp update. It must not stop the session.
+        self.tracker.state = 3
+        self.tracker.previous_state = 3
+        self.tracker.last_charging_energy = 6000
+        self.tracker.last_charging_elapsed = 3600
+        self.client.deliver("chelevse/amp", 15400)
+        self.source.flush()
+        self.run_worker()
+        self.assertEqual(self.current()["amp"], 15.4)
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertNotIn("sessions", self.db.data)
+        # state 3 is also what the watchdog reads for its charging guard.
+        self.assertEqual(self.tracker.state, 3)
+        self.assertEqual(self.tracker.previous_state, 3)
+        self.assertFalse(self.source.seeded)
+        # The later HTTP reply for the same state fires no edge either.
+        self.sink.apply_status(
+            bridge.parse_status(status_payload(state=3)),
+            "http",
+            mqtt_mark=self.sink.mqtt_generation(),
+        )
+        self.assertEqual(self.notifier.bodies, [])
+
+    def test_an_unseeded_snapshot_with_state_is_not_a_transition(self):
+        # Without the seed the snapshot has no session counters, so a state
+        # change alone cannot be a complete observation.
+        self.client.deliver("chelevse/state", 3)
+        self.source.flush()
+        self.run_worker()
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertEqual(self.tracker.state, 1)
+        self.assertEqual(self.current()["state_label"], "charging")
+
+    def test_the_seeded_snapshot_is_a_complete_observation(self):
+        self.source.seed(status_payload(state=1))
+        self.client.deliver("chelevse/state", 3)
+        self.source.flush()
+        self.run_worker()
+        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.tracker.state, 3)
+
+
+class EnqueueLatestTests(unittest.TestCase):
     def test_enqueue_latest_replaces_a_queued_snapshot(self):
         snapshots = bridge.queue.Queue(maxsize=1)
         bridge.enqueue_latest(snapshots, {"state": 1})
@@ -377,6 +593,7 @@ class StatusLoopMqttTests(unittest.TestCase):
             on_status=self.db_snapshot,
             debounce=60,
             client_factory=self.factory,
+            log=lambda _message: None,
         )
         self.addCleanup(self.source.stop)
         self.applied = []
@@ -384,7 +601,7 @@ class StatusLoopMqttTests(unittest.TestCase):
     def db_snapshot(self, fields):
         self.applied.append(fields)
 
-    def run_loop(self, session, polls, on_wait=None, reconcile=3600):
+    def run_loop(self, session, polls, on_wait=None, reconcile=3600, sink=None):
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
             bridge.status_loop(
@@ -398,6 +615,7 @@ class StatusLoopMqttTests(unittest.TestCase):
                 self.watchdog,
                 self.source,
                 reconcile,
+                sink,
             )
         return session
 
@@ -481,8 +699,49 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.factory.client.connect()
         session = FakeSession([FakeResponse(200, status_payload())])
         self.run_loop(session, polls=1)
-        self.assertEqual(self.source.snapshot["comm_sent"], 10)
+        self.assertEqual(self.source.snapshot["comm_sent"], 10)  # the seed is raw
         self.assertEqual(self.source.snapshot["voltage"], 240)
+        # ... while the document only gets the curated fields.
+        doc = self.db.data["status"]["current"]
+        self.assertEqual(doc["state_label"], "ready")
+        self.assertNotIn("comm_sent", doc)
+
+    def test_a_reconcile_in_flight_during_an_mqtt_stop_is_discarded(self):
+        # Charging; the reconcile GET is in flight when the MQTT stop lands, so
+        # the reply (state=3) predates it. Exactly one "Charging stopped".
+        self.tracker.seeded = True
+        self.tracker.has_state = True
+        self.tracker.state = 3
+        self.tracker.previous_state = 3
+        self.tracker.last_charging_energy = 6000
+        self.tracker.last_charging_elapsed = 3600
+        self.tracker.charger_online = True
+        sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
+        self.source.start()
+        self.factory.client.connect()
+
+        def stop_while_in_flight(_url):
+            sink.apply_status(
+                bridge.parse_status(
+                    status_payload(state=1, session_energy=6000, elapsed=3600)
+                ),
+                "mqtt",
+            )
+
+        session = _HookedSession(
+            [
+                FakeResponse(
+                    200, status_payload(state=3, session_energy=6000, elapsed=3600)
+                )
+            ],
+            stop_while_in_flight,
+        )
+        self.run_loop(session, polls=2, sink=sink)
+        self.assertEqual(self.notifier.bodies, ["Charging stopped"])
+        self.assertEqual(self.tracker.state, 1)
+        self.assertEqual(len(self.db.data["sessions"]), 1)
+        # The stale reply is still a successful charger poll for the watchdog.
+        self.assertEqual(self.watchdog.successes, 1)
 
     def test_http_polls_still_feed_the_watchdog(self):
         self.source.start()
@@ -494,42 +753,90 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(self.watchdog.failures, 0)
 
 
+class _StubMqtt:
+    """Just the MQTT source surface ``config_loop`` reads."""
+
+    def __init__(self):
+        self.connected = True
+        self.config_version = 1
+
+
 class ConfigLoopMqttTests(unittest.TestCase):
     class Session:
-        def __init__(self):
+        def __init__(self, failures=0):
             self.calls = 0
+            self.failures = failures
 
         def get(self, url, **kwargs):
             self.calls += 1
+            if self.calls <= self.failures:
+                raise requests.ConnectionError("config blackholed")
             return FakeResponse(200, {"firmware": "master", "config_version": 1})
 
+    def start(self, session, source=None, retry=(0.05, 0.2)):
+        self.db = FakeDB()
+        self.source = source or _StubMqtt()
+        self.event = threading.Event()
+        self.stop = threading.Event()
+
+        def run():
+            with mock.patch.object(bridge, "_stop", self.stop), mock.patch.object(
+                bridge, "CONFIG_RETRY_MIN_SEC", retry[0]
+            ), mock.patch.object(bridge, "CONFIG_RETRY_MAX_SEC", retry[1]):
+                bridge.config_loop(
+                    self.db,
+                    "http://charger",
+                    None,
+                    bridge.ChargerTransport(session),
+                    60,
+                    0,
+                    self.source,
+                    self.event,
+                    tick=0.005,
+                )
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(self.stop.set)
+        return thread
+
+    def synced(self):
+        return "config" in self.db.data.get("status", {})
+
     def test_config_syncs_only_when_the_version_changes(self):
-        db = FakeDB()
         session = self.Session()
-        transport = bridge.ChargerTransport(session)
-        source = mock.Mock()
-        source.connected = True
-        event = threading.Event()
-        stop = threading.Event()
-        with mock.patch.object(bridge, "_stop", stop):
-            thread = threading.Thread(
-                target=bridge.config_loop,
-                args=(db, "http://charger", None, transport, 60, 0, source, event),
-                kwargs={"tick": 0.005},
-                daemon=True,
-            )
-            thread.start()
-            event.set()  # the retained version on connect
-            wait_for(lambda: "config" in db.data.get("status", {}))
-            self.assertEqual(session.calls, 1)
-            time.sleep(0.05)
-            self.assertEqual(session.calls, 1)  # no 60 s polling in MQTT mode
-            event.set()
-            wait_for(lambda: session.calls == 2)
-            source.connected = False
-            stop.set()
-            thread.join(timeout=5)
+        thread = self.start(session)
+        self.event.set()  # the retained version on connect
+        wait_for(self.synced)
+        self.assertEqual(session.calls, 1)
+        time.sleep(0.05)
+        self.assertEqual(session.calls, 1)  # no 60 s polling in MQTT mode
+        self.event.set()
+        wait_for(lambda: session.calls == 2)
+        self.source.connected = False
+        self.stop.set()
+        thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
+
+    def test_a_failed_config_sync_is_retried_without_a_new_version(self):
+        session = self.Session(failures=1)
+        self.start(session)
+        self.event.set()
+        wait_for(self.synced)
+        self.assertEqual(session.calls, 2)  # failure, then the retry
+
+    def test_a_version_during_the_backoff_retries_immediately(self):
+        session = self.Session(failures=1)
+        self.start(session, retry=(5, 60))  # a real backoff, not a test one
+        self.event.set()
+        wait_for(lambda: session.calls == 1)
+        time.sleep(0.05)
+        self.assertEqual(session.calls, 1)  # still waiting out the backoff
+        self.source.config_version = 2  # the changed value a reconnect republishes
+        self.event.set()
+        wait_for(lambda: session.calls == 2, timeout=1)
+        wait_for(self.synced)
 
 
 class HealthTests(unittest.TestCase):
@@ -631,6 +938,9 @@ class RunWiringTests(unittest.TestCase):
         self.assertEqual(calls["status_loop"][0][8], source)
         self.assertEqual(calls["status_loop"][0][9], 60)
         self.assertEqual(calls["config_loop"][0][6], source)
+        worker = [args for name, args in threads if name == "mqtt_status_loop"]
+        self.assertEqual(len(worker), 1)
+        self.assertEqual(worker[0][2], source)
         self.assertEqual(
             [name for name, _args in threads],
             ["status_loop", "config_loop", "schedule_loop", "mqtt_status_loop"],

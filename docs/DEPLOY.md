@@ -388,7 +388,14 @@ terminal you are recording, an issue, or this repo.
 sudo apt update && sudo apt install -y mosquitto mosquitto-clients
 # Prompts once for the password: this is the only place it is typed.
 sudo mosquitto_passwd -c /etc/mosquitto/passwd <mqtt-user>
+# mosquitto_passwd -c writes root-only 0600; the broker reads it as `mosquitto`.
+sudo chown root:mosquitto /etc/mosquitto/passwd
+sudo chmod 640 /etc/mosquitto/passwd
+sudo -u mosquitto test -r /etc/mosquitto/passwd && echo "password file readable"
 ```
+
+Skipping the `chown`/`chmod` leaves the broker unable to open its password file
+(`Unable to open pwfile` / connections refused) even though the file exists.
 
 Create `/etc/mosquitto/conf.d/chelevse.conf` (LAN listener, authenticated only):
 
@@ -466,8 +473,13 @@ without a 10 s poll (the journal shows one reconcile a minute at most).
 
 **5. Rollback.** Either switch alone is enough:
 
-- Bridge: `MQTT_ENABLED=false` + `sudo systemctl restart chelevse-bridge`. The
-  10 s/60 s/60 s HTTP cadence returns; nothing is redeployed.
+- Bridge: set `MQTT_ENABLED=false` in **`/opt/chelevse/private/bridge.env`** —
+  the file the unit's `EnvironmentFile` and `bridge.py` actually read — then
+  `sudo systemctl restart chelevse-bridge`. Editing this checkout's
+  `private/bridge.env` and restarting does nothing; either edit the deployed
+  copy or `sudo bash pi/install.sh` first. Expect
+  `mqtt: disabled (HTTP status polling)` and the 10 s/60 s/60 s HTTP cadence;
+  nothing is redeployed.
 - Charger: `POST /config {"mqtt_enabled": false}` + gateway restart. Publishing
   stops; the bridge falls back to HTTP on its next tick.
 

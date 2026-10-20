@@ -103,11 +103,15 @@ status as the charger publishes it, instead of inferring freshness from a 10 s
 poll. The flag is **off by default**; with it off nothing below changes.
 
 The firmware publishes one topic per value (`<base>/amp`, `<base>/state`, …)
-when its EVSE poll reports a change. Values reach the same `parse_status` /
-`apply_status` path as an HTTP poll, so the document shape, unit conversions,
-history, sessions and notifications are shared — a second source describing the
-same state cannot fire a second transition, ring up history twice, or write a
-second session.
+when its EVSE poll reports a change. Topic values are handed over in their raw
+units and every snapshot runs through the same `parse_status` / `apply_status`
+path as an HTTP poll, so the document shape, unit conversions, history,
+sessions and notifications are shared — a second source describing the same
+state cannot fire a second transition, ring up history twice, or write a
+second session. `status/current` therefore carries only the curated fields
+listed under [What the bridge writes](#what-the-bridge-writes); the raw
+`/status` keys (`comm_*`, `ipaddress`, `macaddress`, `mqtt_connected`, …) never
+reach it.
 
 | Topic                     | `status/current` field | Notes                                               |
 | ------------------------- | ---------------------- | --------------------------------------------------- |
@@ -129,27 +133,50 @@ counters) is ignored: commands and LWT handling are #46/#45.
 **Cadence.** While the broker is connected, `/status` is fetched once every
 `MQTT_RECONCILE_SEC` (60 s) and merged into the snapshot — reconciliation only.
 `/config` is fetched when `config_version` changes (the retained value on
-connect counts as the first change), **not** every 60 s. The schedule loop is
-unchanged. While the broker is disconnected — or the flag is off — the bridge
-polls exactly as before: 10 s status, 60 s config, 60 s schedule.
+connect counts as the first change), **not** every 60 s. A failed `/config`
+fetch is not lost: the version event is cleared only after a successful sync, so
+the sync is retried with a bounded backoff (5 s, doubling to 60 s) and a new
+`config_version` — including the retained value republished on a reconnect —
+retries immediately. The schedule loop is unchanged. While the broker is
+disconnected — or the flag is off — the bridge polls exactly as before: 10 s
+status, 60 s config, 60 s schedule.
 
 **Merged snapshots.** A burst carries only the fields that changed, so a burst is
 buffered for ~500 ms and merged into a snapshot seeded from the last `/status`
-reply. Fields the firmware never publishes over MQTT (`comm_sent`,
-`comm_success`, `rapi_connected`) therefore survive, and a burst that only
-carries `amp` cannot null `voltage`. The 60 s reconcile refreshes both the seed
-and the authoritative document.
+reply. The seed stays raw (the same units a `/status` reply uses), so the
+parser sees the fields MQTT never publishes (`comm_sent`, `comm_success`,
+`rapi_connected`) alongside the burst. A burst that only carries `amp` cannot
+null `voltage`, and before the first successful `/status` seed a snapshot is a
+**field update, not an observation**: its fields are merged into
+`status/current` (and `total_energy` still feeds history), but the charging
+state machine, sessions and transition pushes only run once a snapshot is
+complete — the source has a seed and the snapshot carries a numeric `state`.
+Without that gate a bridge that restarted while the charger's HTTP was wedged
+would read the first `amp` update as "charging stopped". The 60 s reconcile
+refreshes both the seed and the authoritative document.
+
+**Reconcile ordering.** A `/status` reply can be older than an MQTT snapshot
+that applied while the request was in flight (a stop arrives during the
+reconcile's round trip). Each MQTT apply advances a counter that the status loop
+reads before its GET; a reply that is older than a newer apply is logged as
+`status reconcile discarded (mqtt applied during the poll)` and dropped
+(including its seed) instead of rewinding the tracker and re-firing an edge. It
+still counts as a successful poll for the watchdog.
 
 **Liveness, fallback and outages.** Liveness is the client's connection state,
 not message recency: an idle charger publishes nothing for minutes and must not
-look dead. Each source change is logged once (`status source: mqtt …` /
-`status source: http (fallback)`), written to `status/health.source`, and a drop
-resumes the 10 s poll immediately. A failed HTTP reconcile while MQTT is
-connected is logged as `status reconcile failed (…)` and still counts towards the
-watchdog's failure streak (only a successful HTTP poll clears it). It is treated
-as a charger outage only when **no MQTT snapshot arrived since the previous
-reconcile** — i.e. neither transport sees the charger. The broker-side LWT is
-#45.
+look dead. Each source change is logged once (`status source: mqtt (mqtt
+connected)` / `status source: http (mqtt disconnected after N messages)`, or
+`(mqtt not connected)` when the broker was never reached), written to
+`status/health.source`, and a drop resumes the 10 s poll immediately. The
+broker link's own failures are logged too — `mqtt connect refused (…)`,
+`mqtt connect failed (…)`, `mqtt subscription denied (…)`, `mqtt disconnected
+(…)` — so a wrong `MQTT_PASS` or an ACL-denied subscription is not silent. A
+failed HTTP reconcile while MQTT is connected is logged as
+`status reconcile failed (…)` and still counts towards the watchdog's failure
+streak (only a successful HTTP poll clears it). It is treated as a charger
+outage only when **no MQTT snapshot arrived since the previous reconcile** —
+i.e. neither transport sees the charger. The broker-side LWT is #45.
 
 **Health.** `status/health` gains two transport fields, written with merge
 semantics so neither the watchdog's writes nor these can clobber the other:
@@ -158,7 +185,12 @@ semantics so neither the watchdog's writes nor these can clobber the other:
 status/health  { …, source: "mqtt"|"http", mqtt_connected: bool }
 ```
 
-**Rollback.** Set `MQTT_ENABLED=false` and restart the service — no redeploy.
+**Rollback.** Set `MQTT_ENABLED=false` in the file the service actually reads —
+`/opt/chelevse/private/bridge.env` (`EnvironmentFile` in the unit, plus
+`bridge.py`'s env file) — and restart. Editing this checkout's
+`private/bridge.env` alone does nothing to the running service: either edit the
+deployed file or `sudo bash pi/install.sh` and restart. No redeploy of code is
+needed, and the startup line reads `mqtt: disabled (HTTP status polling)`.
 The charger's own MQTT settings are independent: `POST /config
 {"mqtt_enabled":false}` plus a gateway restart stops its publishing without
 touching the bridge. The charger stores `mqtt_pass` in plain text like its other
@@ -167,8 +199,10 @@ credentials (it is redacted from `status/config`).
 ### Watchdog (charger health)
 
 The status loop counts consecutive `/status` failures. After `WATCHDOG_FAILURES`
-(default 3, ≈ 30 s at the 10 s poll) the charger is **unhealthy** and the bridge
-tries a bounded recovery instead of only logging `charger offline`:
+(default 3, ≈ 30 s at the 10 s poll — under MQTT the reconcile is the only
+`/status` poll, so the same three failures take ≈ 3 min) the charger is
+**unhealthy** and the bridge tries a bounded recovery instead of only logging
+`charger offline`:
 
 1. **Probe.** One extra `GET /status`. Only a usable reply means the gateway can
    be reached. A timeout, connection error, auth failure or non-2xx reply means
@@ -521,9 +555,12 @@ client-side.
 The bridge and ACL helper have stdlib `unittest` coverage under `pi/tests/`
 with in-memory Firestore/HTTP/MQTT fakes; no charger, broker, Firestore, or FCM
 access is needed. `pi/tests/test_mqtt.py` covers the topic mapping, the
-debounce/merge, the no-nulling rule, fallback, the config-version trigger,
-source transitions and the no-duplicate-transition rule. Run it with the same
-venv as the service:
+debounce/merge, the raw-snapshot → `parse_status` → document path (units,
+derived fields, no uncurated keys), the no-nulling rule, the pre-seed partial
+snapshot (no transition, no session), fallback, the config-version trigger with
+its failure retry, source transitions, the stale-reconcile ordering guard, the
+CONNACK/SUBACK failure logs and the no-duplicate-transition rule. Run it with
+the same venv as the service:
 
 ```bash
 pi/.venv/bin/python -m unittest discover -s pi/tests -v

@@ -37,7 +37,7 @@ Four loops:
 | Schedule | on change + 60 s, reconcile every 300 s                 | Sync `schedule/current` → firmware `POST /schedule` (one event per request; each rule becomes a window-start `active` event and a window-end `disabled` event). Poll `GET /schedule/plan` → `status.current.schedule`                         |
 | Commands | 5 s poll                                                | New pending doc in `commands` → apply to charger → mark acked / failed (stale pending docs are failed without contacting the charger)                                                                                                         |
 
-Both status transports feed **one** `apply_status` path, so history, sessions and transition pushes run once per real change. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan`, OTA and commands. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
+Both status transports feed **one** `parse_status` → `apply_status` path, so an MQTT snapshot gets the same unit conversion (milliamps → amps, 10ths of °C → °C), the same curated field set, and the same history, session and transition logic as an HTTP reply — once per real change. An MQTT snapshot only runs the state machine once it is complete (the source holds a `/status` seed and the snapshot carries a `state`), and a reconcile reply older than an MQTT apply is discarded rather than allowed to rewind the tracker. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan`, OTA and commands. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
 
 The status loop also emits **FCM push notifications** on transitions — charging started, charging stopped, charger offline — sent by a background worker to every registered `fcmTokens` doc via the Admin SDK (invalid tokens are pruned on send error).
 
@@ -103,7 +103,8 @@ updates arrive in seconds and the HTTP `/status` poll drops to a 60 s
 reconciliation. HTTP stays authoritative for `/config` (redaction/coercion in one
 place), `/schedule/plan` (the firmware computes the plan), OTA, commissioning
 and the controller counters (`comm_sent`/`comm_success`/`rapi_connected`) that
-the watchdog uses and that MQTT does not publish — and it remains the fallback
+the watchdog reads from the HTTP reply and that MQTT does not publish (they stay
+out of `status/current`) — and it remains the fallback
 and the rollback. The broker (Mosquitto) runs on the Pi: LAN-only, authenticated,
 no cloud dependency, and a flag flip back to polling.
 
