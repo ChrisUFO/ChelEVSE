@@ -3,7 +3,7 @@
 // the DST cases only mean something in a zone that observes daylight saving.
 process.env.TZ = 'America/Denver';
 
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -11,6 +11,7 @@ import {
   costSettings,
   liveCostLabel,
   sessionCostLabel,
+  statusCostLabel,
 } from '../../web/js/cost.js';
 import { fmtCost } from '../../web/js/format.js';
 
@@ -87,28 +88,92 @@ test('an empty or unusable rates list is the flat path', () => {
 
 test('live cost uses the schedule over the elapsed interval', () => {
   // 1 kWh drawn over one hour inside the off-peak window.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 3, 0), nightly()), 'GBP 0.10');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 3, 0), nightly(), true), 'GBP 0.10');
   // Same energy outside the window pays the fallback.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 12, 0), nightly()), 'GBP 0.30');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 12, 0), nightly(), true), 'GBP 0.30');
   // Straddling the 06:00 boundary: half the hour at each rate.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 6, 30), nightly()), 'GBP 0.20');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 6, 30), nightly(), true), 'GBP 0.20');
   // The 22:00–06:00 wrap keeps the early hours of the next day cheap.
   const wrap = nightly({ start: '22:00', end: '06:00' });
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 6, 0, 30), wrap), 'GBP 0.10');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 6, 0, 30), wrap, true), 'GBP 0.10');
   // Numeric text from a hand-edited status document parses like a number.
-  assert.equal(liveCostLabel('1000', '3600', date(2026, 1, 5, 3, 0), nightly()), 'GBP 0.10');
+  assert.equal(liveCostLabel('1000', '3600', date(2026, 1, 5, 3, 0), nightly(), true), 'GBP 0.10');
 });
 
 test('a schedule hides the live cost when the interval cannot be priced', () => {
   const now = date(2026, 1, 5, 3, 0);
   // No elapsed duration: the fallback would misprice a window that applies now.
-  assert.equal(liveCostLabel(1000, null, now, nightly()), null);
-  assert.equal(liveCostLabel(1000, 0, now, nightly()), null);
-  assert.equal(liveCostLabel(1000, -60, now, nightly()), null);
-  assert.equal(liveCostLabel(1000, '', now, nightly()), null);
+  assert.equal(liveCostLabel(1000, null, now, nightly(), true), null);
+  assert.equal(liveCostLabel(1000, 0, now, nightly(), true), null);
+  assert.equal(liveCostLabel(1000, -60, now, nightly(), true), null);
+  assert.equal(liveCostLabel(1000, '', now, nightly(), true), null);
   // No usable clock.
-  assert.equal(liveCostLabel(1000, 3600, null, nightly()), null);
-  assert.equal(liveCostLabel(1000, 3600, Number.NaN, nightly()), null);
+  assert.equal(liveCostLabel(1000, 3600, null, nightly(), true), null);
+  assert.equal(liveCostLabel(1000, 3600, Number.NaN, nightly(), true), null);
+  // Not charging: the interval would cover idle time that drew no energy.
+  assert.equal(liveCostLabel(1000, 3600, now, nightly()), null);
+  assert.equal(liveCostLabel(1000, 3600, now, nightly(), false), null);
+});
+
+// ---------- live status snapshot ----------
+
+// A status document as Firestore delivers it: `state` is the numeric charge
+// state (3 = charging), `updated_at` a Timestamp-like object.
+function liveStatus(state, updated, elapsed, wh = 1000) {
+  return {
+    state,
+    state_label: state === 3 ? 'charging' : 'ready',
+    updated_at: updated == null ? undefined : { toMillis: () => updated },
+    elapsed,
+    session_energy: wh,
+  };
+}
+
+test('live cost ends at the snapshot write, not the render instant', () => {
+  // 1 kWh over the hour ending 06:30: half at 0.10, half at the fallback 0.30.
+  const at = date(2026, 1, 5, 6, 30).getTime();
+  assert.equal(statusCostLabel(liveStatus(3, at, 3600), nightly()), 'GBP 0.20');
+  // Whole-hour off-peak interval ending 03:00.
+  const offPeak = date(2026, 1, 5, 3, 0).getTime();
+  assert.equal(statusCostLabel(liveStatus(3, offPeak, 3600), nightly()), 'GBP 0.10');
+});
+
+test('a paused or ready snapshot hides the scheduled live cost', () => {
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  // Ready / connected / sleeping / disabled / absent state, plus a hand-edited
+  // string state that is not 3.
+  for (const state of [0, 1, 2, 4, 254, null, undefined, '3.5']) {
+    assert.equal(statusCostLabel(liveStatus(state, at, 3600), nightly()), null);
+  }
+  // Numeric text survives a hand-edited document.
+  assert.equal(statusCostLabel(liveStatus('3', at, 3600), nightly()), 'GBP 0.10');
+  // The flat path ignores the state, exactly as before schedules existed.
+  assert.equal(statusCostLabel(liveStatus(1, at, 3600), FLAT), 'GBP 0.25');
+});
+
+test('a missing write time or elapsed hides the scheduled cost', () => {
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  assert.equal(statusCostLabel(liveStatus(3, null, 3600), nightly()), null);
+  assert.equal(statusCostLabel(liveStatus(3, at, null), nightly()), null);
+  assert.equal(statusCostLabel(null, nightly()), null);
+  // Flat keeps today's behaviour without either.
+  assert.equal(statusCostLabel(liveStatus(3, null, null), FLAT), 'GBP 0.25');
+});
+
+test('a stale cached snapshot does not slide with the wall clock', () => {
+  // 2 h old but still reported as charging: the interval is the charging hour
+  // that ended at the write (05:30–06:30), so it straddles the boundary. Move the
+  // clock forward and the figure must not re-price to the current hour.
+  const at = date(2026, 1, 5, 6, 30).getTime();
+  mock.timers.enable({ apis: ['Date'], now: at });
+  try {
+    const status = liveStatus(3, at, 3600);
+    assert.equal(statusCostLabel(status, nightly()), 'GBP 0.20');
+    mock.timers.setTime(at + 2 * HOUR_MS);
+    assert.equal(statusCostLabel(status, nightly()), 'GBP 0.20');
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 // ---------- finished sessions ----------

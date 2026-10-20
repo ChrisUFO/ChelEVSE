@@ -8,20 +8,24 @@
 // byte-identical.
 //
 // Interval costs:
-//   - live session   [now - elapsed, now] (the snapshot's own elapsed seconds)
+//   - live session   [updated_at - elapsed, updated_at] of the status snapshot
 //   - finished session its stored started_at/ended_at
 //
 // Sessions store only a total `wh`, so `costForInterval` pro-rates it uniformly
-// across the span (see rates.js) — an approximation the UI inherits.
+// across the span (see rates.js) — an approximation the UI inherits. For a
+// merged pause-then-resume record the stored span also covers the idle gap, so
+// the pro-rating is over the plug-in span, not the charging intervals.
 //
 // A day's history document stores one kWh total, not the shape of the intervals
 // behind it, so a daily/30-day cost cannot be re-costed under a schedule.
 // `aggregateCostLabel` therefore returns null whenever a schedule exists and the
 // history screen shows kWh only; per-session costs are still shown.
 //
-// The live interval ends at the render instant. A status snapshot can be one
-// poll interval old, so a session that just crossed a window boundary can be
-// priced a few seconds late; the next write re-renders it.
+// The live interval ends at the snapshot's own `updated_at`, never at the render
+// instant, and only while the charger reports charging (state 3). `elapsed` is
+// cumulative for the whole plug-in, so pricing a paused or cached snapshot
+// against a later clock would slide the window over idle hours that drew no
+// energy. Anchoring to the write freezes the figure until a new write arrives.
 
 import { fmtCost, fmtMoney, toNumber } from './format.js';
 import { costForInterval, costForSession, normalizeRateSchedule } from './rates.js';
@@ -54,17 +58,37 @@ function endMillis(now) {
 // Live session cost: the schedule over the elapsed part of the session, or the
 // flat rate when no schedule exists.
 //
-// A schedule needs a positive elapsed duration to price an interval; without one
-// the cost is hidden rather than guessed from the flat fallback, because the
-// fallback would silently misprice a tariff whose windows apply right now.
-export function liveCostLabel(wh, elapsed, now, settings) {
+// A schedule needs a positive elapsed duration and a snapshot that says the
+// charger is charging; without either the cost is hidden rather than guessed
+// from the flat fallback, because the fallback would silently misprice a tariff
+// whose windows apply right now. `now` must be the snapshot's `updated_at`, not
+// the render instant, so re-rendering a paused or cached write cannot slide the
+// interval forward over hours that added no energy.
+export function liveCostLabel(wh, elapsed, now, settings, charging = false) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
   const seconds = toNumber(elapsed);
   const endMs = endMillis(now);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
+  if (!charging || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
   const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
+}
+
+// Live cost straight from a status document. The interval ends at the write's
+// own `updated_at` (a missing or malformed timestamp hides it) and is priced
+// only while `state` is 3 — charging. The flat path ignores both, so its output
+// stays byte-identical.
+export function statusCostLabel(status, settings) {
+  if (!status) return null;
+  const updated = status.updated_at;
+  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
+  return liveCostLabel(
+    status.session_energy,
+    status.elapsed,
+    endMs,
+    settings,
+    toNumber(status.state) === 3,
+  );
 }
 
 // Finished session cost: its own stored interval under the schedule, or the flat

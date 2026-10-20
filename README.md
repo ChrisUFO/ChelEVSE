@@ -50,18 +50,27 @@ App settings hold an optional **rate schedule** on top of the fallback rate:
 Costs are calculated whenever a screen is shown, never saved, so editing the schedule re-prices the
 live session and the whole history immediately.
 
-- **Live session** cost covers `now - elapsed` to `now`; the bridge stores only the elapsed seconds.
-  Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
-  price yet). For a flat rate the figure is still `kWh × rate`, exactly as before.
+- **Live session** cost covers the snapshot's `updated_at - elapsed` to `updated_at`, and only while
+  the charger reports **charging**. A paused, ready or cached snapshot hides the scheduled figure
+  instead of re-pricing the interval against a later clock, so idle hours that added no energy are
+  never priced. Until it reports a positive elapsed time the scheduled cost stays hidden (there is no
+  interval to price yet). For a flat rate the figure is still `kWh × rate`, exactly as before.
 - **History session** costs use the session's own stored start and end.
 - **Uniform pro-rating (approximation).** Sessions store one energy total, not the energy drawn in
   each window. Each slice between rate boundaries is assumed to have drawn energy in proportion to
   its share of the session's duration. A charge that ramps up inside one window is therefore priced
   slightly off; the alternative would require per-window energy from the bridge.
+- **Paused sessions: cost is pro-rated over the plug-in span, not the charging intervals.** The
+  bridge keeps one record per plug-in, so a session that paused and resumed stores a span that
+  includes the idle gap while `wh` and `elapsed` describe charging only. The pro-rating above cannot
+  separate the two, so such a session can read under or over its true cost (the error is bounded by
+  the rate difference across the gap). Issue #37 accepts this as the best available signal until the
+  bridge stores the real charging intervals.
 - **The 30-day total and the daily bar cost are hidden when a schedule exists**, because a history
   document holds a single kWh figure per day and it cannot be split across the windows it was drawn
-  in. Energy (kWh) stays visible, and per-session costs are still shown. With no schedule, every
-  total and bar cost is exactly what it was before schedules existed.
+  in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary
+  says so. With no schedule, every total and bar cost is exactly what it was before schedules
+  existed.
 
 ## How it works
 

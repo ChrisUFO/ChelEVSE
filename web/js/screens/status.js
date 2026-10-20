@@ -15,7 +15,7 @@ import {
   stateFor,
   toNumber,
 } from '../format.js';
-import { costSettings, liveCostLabel } from '../cost.js';
+import { costSettings, statusCostLabel } from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -93,12 +93,13 @@ function freezeElapsed() {
 }
 
 function renderCost() {
-  // Live cost over [now - elapsed, now]: the bridge stores only session energy,
-  // so the schedule pro-rates it across the elapsed span. With no schedule this
-  // is exactly the flat fmtCost path.
-  const cost = status
-    ? liveCostLabel(status.session_energy, status.elapsed, Date.now(), settings)
-    : null;
+  // Live cost over the snapshot's own interval, [updated_at - elapsed,
+  // updated_at], and only while the charger is charging: `elapsed` is cumulative
+  // for the whole plug-in, so pricing a paused or cached snapshot against a later
+  // clock would slide the window over hours that added no energy. The bridge
+  // stores only session energy, so the schedule pro-rates it across that span.
+  // With no schedule this is exactly the flat fmtCost path.
+  const cost = statusCostLabel(status, settings);
   const el = $('session-cost');
   el.hidden = !cost;
   setText(el, cost || '');

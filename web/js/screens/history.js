@@ -17,7 +17,7 @@ import {
   sectionView,
   sumSeries,
 } from '../history.js';
-import { aggregateCostLabel, costSettings, sessionCostLabel } from '../cost.js';
+import { aggregateCostLabel, costSettings, hasRateSchedule, sessionCostLabel } from '../cost.js';
 import { fmtK, formatDuration, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -75,11 +75,20 @@ function seriesCost(kwh) {
   return aggregateCostLabel(kwh, settings);
 }
 
+// Say why the aggregate cost is absent: with a schedule the summary reflows to
+// one full-width kWh card and the chart drops its cost readout, and an absence
+// alone reads as lost data. Only ever shown beside a rendered summary.
+function setCostNote(visible) {
+  const note = $('history-cost-note');
+  if (note) note.hidden = !visible;
+}
+
 function renderSummary() {
   if (!series.length) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
+    setCostNote(false);
     return;
   }
   const total = sumSeries(series);
@@ -88,6 +97,7 @@ function renderSummary() {
   $('history-cost-cell').hidden = !cost;
   $('history-summary').classList.toggle('solo', !cost);
   setText($('history-cost'), cost || '');
+  setCostNote(!cost && hasRateSchedule(settings));
 }
 
 function showChartEmpty(title, line) {
@@ -236,6 +246,7 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
+    setCostNote(false);
     const copy =
       historyState === 'offline'
         ? OFFLINE_COPY
@@ -560,6 +571,7 @@ export function resetHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setText($('history-cost'), '');
+    setCostNote(false);
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);
