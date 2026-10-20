@@ -249,8 +249,12 @@ export function reloadQueuedState({
 //   committed   – the server already holds the queued payload: there is nothing
 //                 to discard, and writing again would repeat it.
 //   checking    – the server read is still in flight.
-//   unavailable – offline or the read failed; no baseline can be trusted.
-export const DISCARD_UNAVAILABLE_REASON = 'Discard needs a connection to check the saved schedule.';
+//   unavailable – no baseline can be trusted. The copy names the actual cause:
+//                 offline needs a connection to restore the saved schedule; a
+//                 read that failed (or never answered) on a healthy connection
+//                 is a check failure, not a connectivity problem.
+export const DISCARD_OFFLINE_REASON = 'Discard needs a connection to restore the saved schedule.';
+export const DISCARD_FAILED_REASON = "Couldn't check the saved schedule — Discard is unavailable.";
 export const DISCARD_CHECKING_REASON = 'Checking the saved schedule before Discard…';
 export const DISCARD_COMMITTED_REASON = 'The queued change is already saved — nothing to discard.';
 
@@ -261,19 +265,48 @@ export function reloadDiscardBaseline({
   pending = false,
   failed = false,
 } = {}) {
-  if (!online || failed) {
-    return { status: 'unavailable', baseline: null, reason: DISCARD_UNAVAILABLE_REASON };
+  if (!online) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_OFFLINE_REASON };
+  }
+  if (failed) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_FAILED_REASON };
   }
   if (pending) {
     return { status: 'checking', baseline: null, reason: DISCARD_CHECKING_REASON };
   }
   if (baseline == null) {
-    return { status: 'unavailable', baseline: null, reason: DISCARD_UNAVAILABLE_REASON };
+    return { status: 'unavailable', baseline: null, reason: DISCARD_FAILED_REASON };
   }
   if (payloadKey != null && scheduleKey(baseline) === payloadKey) {
     return { status: 'committed', baseline: null, reason: DISCARD_COMMITTED_REASON };
   }
   return { status: 'ready', baseline, reason: '' };
+}
+
+// A baseline read that failed while the browser reports online is usually
+// transient (a 500, a timeout). Retrying it with bounded backoff gives Discard a
+// second chance without waiting for a reconnect event that may never fire;
+// `attempts` counts the retries already made, and `null` means the budget is
+// spent (a reconnect or a new queued payload starts a fresh one). A failed read
+// while offline is not retried on a timer: the `online` event is its trigger.
+export const DISCARD_RETRY_DELAYS_MS = [5000, 15000, 30000];
+
+export function discardRetry({ status = 'idle', online = true, attempts = 0 } = {}) {
+  if (status !== 'failed' || !online) return null;
+  return attempts < DISCARD_RETRY_DELAYS_MS.length ? DISCARD_RETRY_DELAYS_MS[attempts] : null;
+}
+
+// Which schedule Discard restores, and `null` when there is nothing it may
+// write. A write rediscovered after a reload can only compensate against the
+// fetched server copy, and only once the read is `ready`; an in-session write
+// keeps reverting to the confirmed snapshot, as before.
+export function discardTarget({
+  queuedFromSnapshot = false,
+  decision = null,
+  confirmed = null,
+} = {}) {
+  if (!queuedFromSnapshot) return confirmed;
+  return decision && decision.status === 'ready' ? decision.baseline : null;
 }
 
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
@@ -312,6 +345,78 @@ export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
     remoteNotice: changed && dirty,
     metadataOnly: !changed,
   };
+}
+
+// Route a `schedule/current` snapshot to the one branch the screen may take.
+// The branch order is the contract:
+//   1. a write this page issued (`saving`/`savingUnconfirmed`) or a queued write
+//      that still has a promise (`queued && !queuedFromSnapshot`) owns the save
+//      bar until it settles; the snapshot is only a candidate baseline, and a
+//      metadata repeat changes no notice.
+//   2. a write rediscovered from snapshot metadata (or a `pendingWrites` flag)
+//      is resolved by `reloadQueuedState`: an ack or a replacement transitions,
+//      while a same-payload repeat of an already queued write is inert.
+//   3. a dirty draft reconciles through `reconcileDirtyRemote`, whose
+//      `metadataOnly` flag keeps the notice explaining the last real change.
+//   4. a clean draft treats a data-identical repeat as a no-op (keeping "Saved."
+//      and any notice) and only adopts a genuinely new server state.
+// `remoteChange` is `null` when the notice must stay as it is, otherwise whether
+// the snapshot is a real remote change.
+export function routeScheduleSnapshot({
+  initialized = false,
+  saving = false,
+  savingUnconfirmed = false,
+  queued = false,
+  queuedFromSnapshot = false,
+  dirty = false,
+  confirmed = null,
+  draft = null,
+  incoming = null,
+  pendingWrites = undefined,
+  payloadKey = null,
+} = {}) {
+  const dataKey = scheduleKey(incoming);
+  if (!initialized) {
+    // The screen adopts the snapshot before applying the transition, so the
+    // draft it compares is the incoming data.
+    return {
+      kind: 'initial',
+      transition: reloadQueuedState({
+        pendingWrites,
+        queued,
+        saving,
+        savingUnconfirmed,
+        dataKey,
+        payloadKey,
+        draftKey: dataKey,
+      }),
+    };
+  }
+  const confirmedKey = scheduleKey(confirmed);
+  if (saving || savingUnconfirmed || (queued && !queuedFromSnapshot)) {
+    return {
+      kind: 'in-flight',
+      remoteChange: dataKey === confirmedKey ? null : Boolean(payloadKey && dataKey !== payloadKey),
+    };
+  }
+  if (queuedFromSnapshot || pendingWrites === true) {
+    const transition = reloadQueuedState({
+      pendingWrites,
+      queued,
+      saving,
+      savingUnconfirmed,
+      dataKey,
+      payloadKey,
+      draftKey: scheduleKey(draft),
+    });
+    if (transition.outcome !== 'none') return { kind: 'transition', transition };
+    if (queued) return { kind: 'queued-still' };
+  }
+  if (dirty) {
+    return { kind: 'dirty', reconcile: reconcileDirtyRemote({ confirmed, draft, incoming }) };
+  }
+  if (dataKey === confirmedKey) return { kind: 'repeat' };
+  return { kind: 'adopt' };
 }
 
 // Copy for the schedule toggle. A malformed stored container is an unknown

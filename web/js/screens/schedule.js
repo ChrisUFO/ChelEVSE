@@ -21,12 +21,13 @@ import {
   MIN_AMPS,
   defaultRule,
   defaultSchedule,
+  discardRetry,
+  discardTarget,
   normalizeSchedule,
   queuedSaveState,
   reconcileAfterSave,
-  reconcileDirtyRemote,
   reloadDiscardBaseline,
-  reloadQueuedState,
+  routeScheduleSnapshot,
   scheduleKey,
   scheduleSaveValid,
   toggleNote,
@@ -73,6 +74,9 @@ let remoteNotice = '';
 let discardBaseline = null;
 let discardBaselineStatus = 'idle'; // idle | loading | ready | failed
 let discardToken = 0;
+// Bounded retry of a failed baseline read while the browser reports online.
+let discardRetries = 0;
+let discardRetryTimer = null;
 let validation = validateSchedule(defaultSchedule());
 let feedbackMode = 'derived'; // derived | saved | discarded | load-error
 // A failed save stays visible through the SDK's revert snapshot (and any later
@@ -167,17 +171,53 @@ function discardDecision() {
 }
 
 function clearDiscardBaseline() {
+  clearDiscardRetry();
+  discardRetries = 0;
   discardToken += 1;
   discardBaseline = null;
   discardBaselineStatus = 'idle';
+}
+
+function clearDiscardRetry() {
+  if (discardRetryTimer === null) return;
+  clearTimeout(discardRetryTimer);
+  discardRetryTimer = null;
+}
+
+// Retry a baseline read that failed while online: a transient 500 or timeout
+// must not leave Discard disabled until a reconnect event that may never fire.
+// The budget is bounded, and a reconnect or a new queued payload starts over.
+function armDiscardRetry(gen, token) {
+  clearDiscardRetry();
+  const delay = discardRetry({
+    status: discardBaselineStatus,
+    online: online(),
+    attempts: discardRetries,
+  });
+  if (delay === null) return;
+  discardRetries += 1;
+  discardRetryTimer = setTimeout(() => {
+    discardRetryTimer = null;
+    if (gen !== generation || token !== discardToken) return;
+    if (discardBaselineStatus !== 'failed' || !(queued && queuedFromSnapshot)) return;
+    startDiscardBaseline();
+  }, delay);
+}
+
+function failDiscardBaseline(gen, token) {
+  discardBaselineStatus = 'failed';
+  armDiscardRetry(gen, token);
+  validateAndPaint();
 }
 
 // Read the pre-write schedule from the server. The cached document already
 // contains the queued payload, so this read is what lets Discard compensate
 // against the last saved schedule. It never touches the displayed draft, and a
 // read that is already in flight (or succeeded) is not repeated.
-function startDiscardBaseline() {
+function startDiscardBaseline({ fresh = false } = {}) {
   if (discardBaselineStatus === 'loading' || discardBaselineStatus === 'ready') return;
+  clearDiscardRetry();
+  if (fresh) discardRetries = 0;
   const gen = generation;
   const token = ++discardToken;
   discardBaseline = null;
@@ -191,20 +231,19 @@ function startDiscardBaseline() {
       if (gen !== generation || token !== discardToken) return;
       if (!(queued && queuedFromSnapshot)) return;
       if (!ok) {
-        discardBaselineStatus = 'failed';
-        validateAndPaint();
+        failDiscardBaseline(gen, token);
         return;
       }
       // An absent document is the same schedule the editor shows for it.
       discardBaseline = normalizeSchedule(data);
       discardBaselineStatus = 'ready';
+      discardRetries = 0;
       validateAndPaint();
     })
     .catch(() => {
       if (gen !== generation || token !== discardToken) return;
       if (!(queued && queuedFromSnapshot)) return;
-      discardBaselineStatus = 'failed';
-      validateAndPaint();
+      failDiscardBaseline(gen, token);
     });
 }
 
@@ -222,10 +261,10 @@ function saveState() {
   if (decision) {
     state.canDiscard = decision.status === 'ready';
     state.discardReason = decision.reason;
-    // Only the server copy can compensate after a reload; the in-session path
-    // keeps the confirmed snapshot (`undefined` here).
-    state.discardBaseline = decision.baseline;
   }
+  // Only the server copy can compensate after a reload; the in-session path
+  // keeps reverting to the confirmed snapshot.
+  state.discardBaseline = discardTarget({ queuedFromSnapshot, decision, confirmed });
   return state;
 }
 
@@ -630,9 +669,9 @@ function save() {
 function discard() {
   if (saving || loadError || !initialized) return;
   const state = saveState();
-  if (!state.canDiscard) return;
+  if (!state.canDiscard || !state.discardBaseline) return;
   const outstanding = queued || savingUnconfirmed;
-  const baseline = queuedFromSnapshot && state.discardBaseline ? state.discardBaseline : confirmed;
+  const baseline = state.discardBaseline;
   draft = clone(baseline);
   dirty = false;
   saveError = '';
@@ -664,8 +703,9 @@ function handleOnline() {
   if (!active || !initialized) return;
   // Stay queued until the write actually settles; this only refreshes copy that
   // depends on connectivity. A baseline read refused while offline gets its
-  // chance here, which is what re-enables Discard after a reconnect.
-  if (queued && queuedFromSnapshot) startDiscardBaseline();
+  // chance here with a fresh retry budget, which is what re-enables Discard
+  // after a reconnect.
+  if (queued && queuedFromSnapshot) startDiscardBaseline({ fresh: true });
   validateAndPaint();
 }
 
@@ -722,8 +762,9 @@ function applyQueueTransition(transition, incoming) {
     dirty = scheduleKey(draft) !== acceptedKey();
     pendingRemote = null;
     // Discard needs the pre-write server copy; the read starts with the state
-    // and never blocks the paint (it shows "checking" until it answers).
-    startDiscardBaseline();
+    // and never blocks the paint (it shows "checking" until it answers). A new
+    // payload is a new baseline, so its retry budget starts fresh.
+    startDiscardBaseline({ fresh: true });
     validateAndPaint();
     return;
   }
@@ -761,86 +802,72 @@ function applyQueueTransition(transition, incoming) {
 // schedule/current — first snapshot adopts; later ones never clobber edits.
 // `meta.pendingWrites` marks a write still queued in the persistent cache; after
 // a reload it is the only evidence that the cached document is not server truth.
+// `routeScheduleSnapshot` owns the branch order; this only applies its decision.
 export function showSchedule(data, meta) {
   if (!active) return;
   const incoming = clone(data);
-  const key = scheduleKey(incoming);
   const pendingWrites = meta ? meta.pendingWrites : undefined;
-
-  if (!initialized) {
-    adopt(incoming);
-    // The cached document can itself be a still-queued write. adopt() builds the
-    // form; this only relabels the save bar, so focus and scroll are untouched.
-    applyQueueTransition(
-      reloadQueuedState({
-        pendingWrites,
-        queued,
-        saving,
-        savingUnconfirmed,
-        dataKey: key,
-        payloadKey: savingPayloadKey,
-        draftKey: scheduleKey(draft),
-      }),
-      incoming,
-    );
-    return;
-  }
-  // A write issued by this page owns the bar until its promise settles; a watch
-  // snapshot is only a candidate baseline, and settleSave reconciles it.
-  if (saving || savingUnconfirmed || (queued && !queuedFromSnapshot)) {
-    // Queue the latest snapshot (including the local write echo). Save settle
-    // decides whether it becomes the confirmed baseline; the draft is untouched,
-    // and a queued echo must not replace the confirmed rollback baseline.
-    pendingRemote = incoming;
-    // A metadata-only repeat while the write is in flight changes nothing; only
-    // a snapshot whose data differs from the last confirmed copy re-evaluates
-    // the overwrite notice.
-    if (key !== scheduleKey(confirmed)) {
-      remoteNotice = savingPayloadKey && key !== savingPayloadKey ? REMOTE_NOTICE : '';
-    }
-    validateAndPaint();
-    return;
-  }
-  // A write rediscovered after a reload has no promise to settle it, so the
-  // snapshot metadata decides: still queued, acknowledged, or replaced.
-  if (queuedFromSnapshot || pendingWrites === true) {
-    const transition = reloadQueuedState({
-      pendingWrites,
-      queued,
-      saving,
-      savingUnconfirmed,
-      dataKey: key,
-      payloadKey: savingPayloadKey,
-      draftKey: scheduleKey(draft),
-    });
-    if (transition.outcome !== 'none') {
-      applyQueueTransition(transition, incoming);
+  const route = routeScheduleSnapshot({
+    initialized,
+    saving,
+    savingUnconfirmed,
+    queued,
+    queuedFromSnapshot,
+    dirty,
+    confirmed,
+    draft,
+    incoming,
+    pendingWrites,
+    payloadKey: savingPayloadKey,
+  });
+  switch (route.kind) {
+    case 'initial':
+      adopt(incoming);
+      // The cached document can itself be a still-queued write. adopt() builds
+      // the form; this only relabels the save bar, so focus and scroll are
+      // untouched.
+      applyQueueTransition(route.transition, incoming);
+      return;
+    case 'in-flight':
+      // Queue the latest snapshot (including the local write echo). Save settle
+      // decides whether it becomes the confirmed baseline; the draft is
+      // untouched, and a queued echo must not replace the confirmed rollback
+      // baseline.
+      pendingRemote = incoming;
+      if (route.remoteChange !== null) {
+        remoteNotice = route.remoteChange ? REMOTE_NOTICE : '';
+      }
+      validateAndPaint();
+      return;
+    case 'transition':
+      applyQueueTransition(route.transition, incoming);
+      return;
+    case 'queued-still':
+      // Still queued on the same payload (or metadata absent): nothing changed.
+      return;
+    case 'dirty': {
+      const result = route.reconcile;
+      confirmed = result.confirmed;
+      dirty = result.dirty;
+      // A metadata-only repeat (an ack, a fromCache flip) must not erase the
+      // notice explaining the last real change.
+      if (!result.metadataOnly) remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
+      pendingRemote = null;
+      validateAndPaint();
       return;
     }
-    // Still queued on the same payload (or metadata absent): nothing changed.
-    if (queued) return;
+    case 'repeat':
+      // Data-identical repeat (a metadata change or a redundant echo): refresh
+      // the normalized baseline without rebuilding the form, and keep both
+      // "Saved." and any notice about the last real change in place.
+      confirmed = incoming;
+      pendingRemote = null;
+      return;
+    default:
+      // Clean form and a genuinely new server state: adopt it (and clear
+      // "Saved.").
+      adopt(incoming);
   }
-  if (dirty) {
-    const result = reconcileDirtyRemote({ confirmed, draft, incoming });
-    confirmed = result.confirmed;
-    dirty = result.dirty;
-    // A metadata-only repeat (an ack, a fromCache flip) must not erase the
-    // notice explaining the last real change; only a data change re-evaluates it.
-    if (!result.metadataOnly) remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
-    pendingRemote = null;
-    validateAndPaint();
-    return;
-  }
-  if (key === scheduleKey(confirmed)) {
-    // Data-identical repeat (a metadata change or a redundant echo): refresh the
-    // normalized baseline without rebuilding the form, and keep both "Saved."
-    // and any notice about the last real change in place.
-    confirmed = incoming;
-    pendingRemote = null;
-    return;
-  }
-  // Clean form and a genuinely new server state: adopt it (and clear "Saved.").
-  adopt(incoming);
 }
 
 export function showScheduleError() {
