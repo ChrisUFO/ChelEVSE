@@ -446,6 +446,52 @@ class StatusSinkTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertEqual(self.notifier.bodies, ["Charging started"])
 
+    def test_consecutive_http_applies_with_a_quiet_source_all_apply(self):
+        # The HTTP path passes the arrival it read before its GET as its own
+        # arrival. With no flush in between that equals the watermark the
+        # previous reply recorded -- the ordinary idle charger, and the whole
+        # HTTP fallback -- yet the reply is still the newest observation that
+        # exists, so every poll has to apply.
+        for energy in (100, 110, 120):
+            applied = self.sink.apply_status(
+                bridge.parse_status(status_payload(total_energy=energy)),
+                "http",
+                mqtt_mark=self.sink.mqtt_generation(),
+                arrival=0,
+            )
+            self.assertTrue(applied, energy)
+        self.assertEqual(self.db.data["status"]["current"]["total_energy"], 120)
+
+    def test_the_watermark_gates_records_not_the_reconcile_reply(self):
+        # A reconcile records its arrival, so a snapshot flushed at or before
+        # that arrival describes the charger no later than the reply does and is
+        # dropped when the worker reaches it; one flushed afterwards is newer and
+        # applies.
+        self.assertTrue(
+            self.sink.apply_status(
+                bridge.parse_status(status_payload(state=1, total_energy=100)),
+                "http",
+                arrival=2,
+            )
+        )
+        for stale in (1, 2):
+            self.assertFalse(
+                self.sink.apply_status(
+                    bridge.parse_status(status_payload(state=1, total_energy=110)),
+                    "mqtt",
+                    arrival=stale,
+                ),
+                stale,
+            )
+        self.assertTrue(
+            self.sink.apply_status(
+                bridge.parse_status(status_payload(state=1, total_energy=120)),
+                "mqtt",
+                arrival=3,
+            )
+        )
+        self.assertEqual(self.db.data["status"]["current"]["total_energy"], 120)
+
     def test_a_partial_snapshot_only_merges_its_fields(self):
         # No /status seed and the tracker charging: an amp-only snapshot must
         # not read as "not charging" (a false stop, a bogus session, and the
@@ -864,6 +910,14 @@ class StatusLoopMqttTests(unittest.TestCase):
     def db_snapshot(self, record):
         self.applied.append(record.fields)
 
+    def current_writes(self):
+        """The ``status/current`` writes the sink performed, in order."""
+        return [
+            write
+            for write in self.db.writes
+            if write[1] == "status" and write[2] == "current"
+        ]
+
     def connect(self):
         """Start the source and let the broker grant the subscription."""
         self.source.start()
@@ -911,6 +965,84 @@ class StatusLoopMqttTests(unittest.TestCase):
         health = self.db.data["status"]["health"]
         self.assertEqual(health["source"], "http")
         self.assertFalse(health["mqtt_connected"])
+
+    def test_every_reconcile_applies_while_mqtt_is_quiet(self):
+        # A granted subscription that publishes nothing (an idle charger)
+        # advances neither counter, so each reply's arrival equals the previous
+        # watermark. Every poll must still write the document: otherwise
+        # updated_at freezes and the journal claims "mqtt advanced".
+        self.connect()
+        session = FakeSession(
+            [
+                FakeResponse(200, status_payload(total_energy=energy))
+                for energy in (100, 110, 120)
+            ]
+        )
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=3, reconcile=0)
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(
+            [write[3]["total_energy"] for write in self.current_writes()],
+            [100, 110, 120],
+        )
+        self.assertEqual(
+            [line for line in logs if "reconcile discarded" in line],
+            [],
+            "a fresh reply was reported as overtaken by MQTT",
+        )
+
+    def test_every_fallback_poll_after_a_broker_drop_applies(self):
+        # The generation freezes when the broker drops, so every fallback poll
+        # reads the same arrival: the whole fallback must keep updating status,
+        # not just its first poll.
+        client = self.connect()
+        session = FakeSession(
+            [
+                FakeResponse(200, status_payload(total_energy=energy))
+                for energy in (100, 110, 120, 130)
+            ]
+        )
+        waits = {"n": 0}
+
+        def on_wait():
+            waits["n"] += 1
+            if waits["n"] == 1:
+                client.drop()
+
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=4, on_wait=on_wait, interval=0)
+        # One reconcile while MQTT was healthy, then three fallback polls.
+        self.assertEqual(len(session.calls), 4)
+        self.assertEqual(
+            [write[3]["total_energy"] for write in self.current_writes()],
+            [100, 110, 120, 130],
+        )
+        self.assertEqual([line for line in logs if "reconcile discarded" in line], [])
+
+    def test_every_poll_under_a_denied_subscription_applies(self):
+        # Same freeze behind a connected-but-denied subscription: HTTP is the
+        # source and every poll is the newest observation.
+        self.source.start()
+        client = self.factory.client
+        client.connect()
+        client.ack_subscribe([_ReasonCode(135, "Not authorized")])
+        session = FakeSession(
+            [
+                FakeResponse(200, status_payload(total_energy=energy))
+                for energy in (100, 110, 120)
+            ]
+        )
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=3, reconcile=3600, interval=0)
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(
+            [write[3]["total_energy"] for write in self.current_writes()],
+            [100, 110, 120],
+        )
+        self.assertEqual([line for line in logs if "reconcile discarded" in line], [])
 
     def test_transport_source_is_recorded_on_each_edge(self):
         client = self.connect()

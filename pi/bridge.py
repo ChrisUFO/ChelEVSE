@@ -869,7 +869,10 @@ class StatusSink:
         # Highest MQTT arrival sequence a reconcile has applied. A queued
         # snapshot at or below it was flushed before that reply, so applying it
         # would replay an older observation over a newer one. Arrival sequences
-        # start at 1, so -1 means "no reconcile has applied yet".
+        # start at 1, so -1 means "no reconcile has applied yet". Only MQTT
+        # records are gated on it: an HTTP reply is the newest observation that
+        # exists when it applies, so it always applies and only advances the
+        # watermark.
         self._reconciled_arrival = -1
 
     def mqtt_generation(self):
@@ -890,17 +893,35 @@ class StatusSink:
         stands for -- the ``arrival_generation()`` taken before an HTTP GET, or
         the arrival carried by a queued MQTT snapshot: a queued snapshot no
         newer than the last reconciled arrival is discarded, and an applied HTTP
-        reply records its arrival as that watermark. ``seed`` is a callable that
-        merges the raw ``/status`` payload into the MQTT snapshot; it returns
-        ``False`` when that reply is no longer current, and it runs in the same
-        critical section as the apply, so a reply overtaken by newer MQTT data
-        can neither seed nor rewind the snapshot. It may take the MQTT source's
-        lock; the source never takes this one while holding its own.
+        reply records its arrival as that watermark, so records flushed before
+        it are dropped. The watermark never rejects the HTTP reply itself: with
+        no flush since the previous reconcile the generation it read equals the
+        watermark, and that reply is still the newest observation (rejecting it
+        would freeze the document on an idle charger and for the whole HTTP
+        fallback); a reply's own staleness is decided by ``mqtt_mark`` and
+        ``seed``. ``seed`` is a callable that merges the raw ``/status`` payload
+        into the MQTT snapshot; it returns ``False`` when that reply is no
+        longer current, and it runs in the same critical section as the apply,
+        so a reply overtaken by newer MQTT data can neither seed nor rewind the
+        snapshot. It may take the MQTT source's lock; the source never takes
+        this one while holding its own.
         """
         with self._lock:
             if mqtt_mark is not None and mqtt_mark != self._mqtt_applies:
                 return False
-            if arrival is not None and arrival <= self._reconciled_arrival:
+            # Only a *record* can predate a reconcile reply: it carries the
+            # arrival of its flush. An HTTP apply's own arrival is the
+            # generation read before its GET, which is the newest observation
+            # that exists here -- a flush since then is caught by ``mqtt_mark``
+            # and ``seed`` -- so the watermark is recorded, never enforced for
+            # it. Enforcing it would discard every reconcile after the first
+            # whenever no flush happened in between: an idle charger and the
+            # whole HTTP fallback, where it would freeze the status document.
+            if (
+                source == "mqtt"
+                and arrival is not None
+                and arrival <= self._reconciled_arrival
+            ):
                 return False
             if seed is not None and seed() is False:
                 return False
