@@ -1,5 +1,6 @@
 """Unit tests for pi/bridge.py (stdlib unittest; no charger or Firestore)."""
 
+import os
 import sys
 import threading
 import time
@@ -930,7 +931,14 @@ class LoopWiringTests(unittest.TestCase):
         ) as tracker, mock.patch.object(
             bridge, "Notifier"
         ):
-            bridge.run(FakeDB(), "http://charger", None, (10, 60, 60, 300, 5), transport)
+            bridge.run(
+                FakeDB(),
+                "http://charger",
+                None,
+                (10, 60, 60, 300, 5),
+                transport,
+                bridge.WatchdogConfig(),
+            )
 
         self.assertEqual(set(calls), {"status", "config", "schedule", "command"})
         for name, args in calls.items():
@@ -957,9 +965,531 @@ class LoopWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "log"
         ) as fake_log:
-            bridge.run(FakeDB(), "http://charger", None, (10, 60, 60, 300, 5), transport)
+            bridge.run(
+                FakeDB(),
+                "http://charger",
+                None,
+                (10, 60, 60, 300, 5),
+                transport,
+                bridge.WatchdogConfig(),
+            )
 
         self.assertEqual([call.args[0] for call in fake_log.call_args_list], [])
+
+
+class WatchdogConfigTests(unittest.TestCase):
+    """WATCHDOG_* parsing: defaults, overrides, and loud failures."""
+
+    def parse(self, **env):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, env, clear=True
+        ):
+            return bridge.watchdog_config()
+
+    def test_defaults(self):
+        self.assertEqual(self.parse(), bridge.WatchdogConfig(True, 3, 600.0, 3, False))
+
+    def test_overrides(self):
+        config = self.parse(
+            WATCHDOG_ENABLED="false",
+            WATCHDOG_FAILURES="5",
+            WATCHDOG_COOLDOWN_SEC="120",
+            WATCHDOG_MAX_PER_HOUR="2",
+            WATCHDOG_RESTART_WHILE_CHARGING="yes",
+        )
+        self.assertEqual(config, bridge.WatchdogConfig(False, 5, 120.0, 2, True))
+
+    def test_bad_numbers_fail_loudly(self):
+        for env in (
+            {"WATCHDOG_FAILURES": "three"},
+            {"WATCHDOG_FAILURES": "0"},
+            {"WATCHDOG_COOLDOWN_SEC": "-1"},
+            {"WATCHDOG_COOLDOWN_SEC": "soon"},
+            {"WATCHDOG_MAX_PER_HOUR": "0"},
+        ):
+            with self.subTest(env=env), self.assertRaises(ValueError):
+                self.parse(**env)
+
+    def test_bad_boolean_fails_loudly(self):
+        with self.assertRaises(ValueError):
+            self.parse(WATCHDOG_ENABLED="maybe")
+        with self.assertRaises(ValueError):
+            self.parse(WATCHDOG_RESTART_WHILE_CHARGING="2")
+
+
+class RecoveryDecisionTests(unittest.TestCase):
+    """The pure decision matrix: every guard and every action."""
+
+    NOW = datetime(2026, 10, 20, 12, tzinfo=UTC)
+
+    def decide(self, **overrides):
+        inputs = {
+            "now": self.NOW,
+            "consecutive_failures": 3,
+            "threshold": 3,
+            "http_reachable": True,
+            "controller_ok": True,
+            "charging": False,
+            "last_attempt_at": None,
+            "attempts_in_window": (),
+            "window": bridge.WATCHDOG_WINDOW,
+            "max_attempts": 3,
+            "cooldown": 600,
+            "restart_while_charging": False,
+            "enabled": True,
+        }
+        inputs.update(overrides)
+        return bridge.recovery_decision(**inputs)
+
+    def test_below_threshold_does_nothing(self):
+        self.assertEqual(self.decide(consecutive_failures=2)["action"], "none")
+
+    def test_success_resets_the_streak(self):
+        self.assertEqual(self.decide(consecutive_failures=0)["action"], "none")
+
+    def test_healthy_controller_behind_failing_http_restarts_the_gateway(self):
+        decision = self.decide()
+        self.assertEqual(decision["action"], "restart_gateway")
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART)
+
+    def test_unhealthy_controller_restarts_the_evse(self):
+        decision = self.decide(controller_ok=False)
+        self.assertEqual(decision["action"], "restart_evse")
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_RESTART_EVSE)
+
+    def test_http_dead_alerts_and_never_restarts(self):
+        decision = self.decide(http_reachable=False)
+        self.assertEqual(decision["action"], "alert")
+        self.assertEqual(decision["alert"], bridge.WATCHDOG_ALERT_FAILED)
+
+    def test_cooldown_blocks_a_restart(self):
+        decision = self.decide(last_attempt_at=self.NOW - timedelta(seconds=60))
+        self.assertEqual(decision["action"], "none")
+        self.assertIn("cooldown", decision["reason"])
+
+    def test_cooldown_expires(self):
+        decision = self.decide(last_attempt_at=self.NOW - timedelta(seconds=601))
+        self.assertEqual(decision["action"], "restart_gateway")
+
+    def test_hourly_cap_blocks_a_restart(self):
+        attempts = (self.NOW - timedelta(minutes=5),) * 3
+        decision = self.decide(
+            attempts_in_window=attempts,
+            last_attempt_at=self.NOW - timedelta(hours=1, seconds=1),
+        )
+        self.assertEqual(decision["action"], "none")
+        self.assertIn("hourly cap", decision["reason"])
+
+    def test_window_expiry_frees_the_cap(self):
+        attempts = (self.NOW - timedelta(seconds=3601),) * 3
+        decision = self.decide(
+            attempts_in_window=attempts,
+            last_attempt_at=self.NOW - timedelta(seconds=3601),
+        )
+        self.assertEqual(decision["action"], "restart_gateway")
+
+    def test_charging_blocks_a_restart(self):
+        decision = self.decide(charging=True)
+        self.assertEqual(decision["action"], "none")
+        self.assertIn("charging", decision["reason"])
+
+    def test_charging_is_allowed_when_configured(self):
+        decision = self.decide(charging=True, restart_while_charging=True)
+        self.assertEqual(decision["action"], "restart_gateway")
+
+    def test_disabled_watchdog_does_nothing(self):
+        decision = self.decide(enabled=False, http_reachable=False)
+        self.assertEqual(decision["action"], "none")
+        self.assertIn("disabled", decision["reason"])
+
+    def test_attempts_within_keeps_the_closed_window(self):
+        edge = self.NOW - timedelta(seconds=bridge.WATCHDOG_WINDOW)
+        stale = edge - timedelta(seconds=1)
+        recent = bridge.attempts_within(self.NOW, (edge, stale), 3600)
+        self.assertEqual(recent, [edge])
+
+
+class ControllerHealthTests(unittest.TestCase):
+    """Gateway-versus-controller classification from v5.1.5 status fields."""
+
+    def status(self, **overrides):
+        payload = {
+            "state": 1,
+            "comm_sent": 10,
+            "comm_success": 10,
+            "rapi_connected": True,
+            "evse_connected": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_advancing_counters_are_healthy(self):
+        self.assertTrue(
+            bridge.controller_healthy(
+                self.status(), self.status(comm_sent=12, comm_success=12)
+            )
+        )
+
+    def test_frozen_success_with_rising_sent_is_controller_side(self):
+        self.assertFalse(
+            bridge.controller_healthy(
+                self.status(), self.status(comm_sent=14, comm_success=10)
+            )
+        )
+
+    def test_disconnected_flags_are_controller_side(self):
+        for flag in ("rapi_connected", "evse_connected"):
+            with self.subTest(flag=flag):
+                self.assertFalse(
+                    bridge.controller_healthy(None, self.status(**{flag: False}))
+                )
+                self.assertFalse(
+                    bridge.controller_healthy(None, self.status(**{flag: 0}))
+                )
+
+    def test_missing_fields_are_assumed_healthy(self):
+        self.assertTrue(bridge.controller_healthy(None, {"state": 1}))
+        self.assertTrue(bridge.controller_healthy({}, {"state": 1}))
+
+    def test_one_sample_uses_flags_only(self):
+        self.assertTrue(bridge.controller_healthy(None, self.status(comm_sent=99)))
+
+    def test_counter_reset_is_not_controller_side(self):
+        self.assertTrue(
+            bridge.controller_healthy(
+                self.status(comm_sent=10, comm_success=9),
+                self.status(comm_sent=1, comm_success=1),
+            )
+        )
+
+    def test_non_dict_latest_is_healthy(self):
+        self.assertTrue(bridge.controller_healthy(self.status(), None))
+
+
+def _status_payload(**overrides):
+    """A healthy /status reply for the watchdog integration tests."""
+    payload = {
+        "state": 1,
+        "amp": 0,
+        "voltage": 240,
+        "power": 0,
+        "session_energy": 0,
+        "total_energy": 100,
+        "elapsed": 0,
+        "vehicle": 0,
+        "comm_sent": 10,
+        "comm_success": 10,
+        "rapi_connected": True,
+        "evse_connected": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class _Clock:
+    """Controllable UTC clock: the watchdog reads time through it."""
+
+    def __init__(self, start):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += timedelta(seconds=seconds)
+
+
+class _WatchdogSession:
+    """Scripted session: each call pops a response or raises a queued error."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls = []
+
+    def _call(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        item = (
+            self.script.pop(0)
+            if self.script
+            else FakeResponse(200, _status_payload())
+        )
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def get(self, url, **kwargs):
+        return self._call("get", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self._call("post", url, **kwargs)
+
+
+class _RecordingNotifier:
+    def __init__(self):
+        self.bodies = []
+
+    def enqueue(self, body):
+        self.bodies.append(body)
+
+
+class WatchdogLoopTests(unittest.TestCase):
+    """status_loop + Watchdog against a scripted transport and clock."""
+
+    START = datetime(2026, 10, 20, 12, tzinfo=UTC)
+    OUTAGE = requests.ConnectionError("charger unreachable")
+
+    def run_loop(self, script, polls, config=None, data=None, step=10):
+        db = FakeDB(data)
+        clock = _Clock(self.START)
+        session = _WatchdogSession(script)
+        transport = bridge.ChargerTransport(session)
+        notifier = _RecordingNotifier()
+        tracker = bridge.StatusTracker(db)
+        watchdog = bridge.Watchdog(
+            db,
+            "http://charger",
+            None,
+            transport,
+            notifier,
+            config or bridge.WatchdogConfig(),
+            clock,
+        )
+        stop = _StopAfter(polls, on_wait=lambda: clock.advance(step))
+        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
+            bridge, "_utcnow", clock
+        ):
+            bridge.status_loop(
+                db,
+                "http://charger",
+                None,
+                transport,
+                10,
+                tracker,
+                notifier,
+                watchdog,
+            )
+        return db, session, notifier, watchdog
+
+    @staticmethod
+    def posts(session):
+        return [call for call in session.calls if call[0] == "post"]
+
+    def health(self, db):
+        return db.data["status"]["health"]
+
+    def test_three_failures_restart_the_gateway_once(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+            ],
+            polls=3,
+        )
+        posts = self.posts(session)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][1], "http://charger/restart")
+        self.assertEqual(posts[0][2]["json"], {"device": "gateway"})
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+            ],
+        )
+        health = self.health(db)
+        self.assertEqual(health["state"], "unhealthy")
+        self.assertEqual(health["reason"], "HTTP answered but the gateway was failing")
+        self.assertTrue(health["http_ok"])
+        self.assertTrue(health["controller_ok"])
+        self.assertEqual(health["last_attempt_at"], self.START + timedelta(seconds=20))
+        self.assertEqual(health["attempts_last_hour"], 1)
+        self.assertEqual(health["last_action"], "restart_gateway")
+        self.assertEqual(health["last_result"], "HTTP 200")
+        self.assertEqual(watchdog.failures, 3)
+
+    def test_a_further_failure_inside_the_cooldown_does_not_restart(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=4,
+        )
+        self.assertEqual(len(self.posts(session)), 1)
+        self.assertEqual(
+            notifier.bodies,
+            ["Charger offline", bridge.WATCHDOG_ALERT_RESTART],
+        )
+        self.assertEqual(watchdog.failures, 4)
+        self.assertEqual(watchdog.last_attempt_at, self.START + timedelta(seconds=20))
+
+    def test_a_success_clears_the_streak_and_alerts_recovery(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=4,
+        )
+        self.assertEqual(len(self.posts(session)), 1)
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+                bridge.WATCHDOG_ALERT_RECOVERED,
+            ],
+        )
+        self.assertEqual(watchdog.failures, 0)
+        self.assertEqual(watchdog.state, "healthy")
+        health = self.health(db)
+        self.assertEqual(health["state"], "healthy")
+        self.assertEqual(health["reason"], "status polls succeeding")
+        self.assertEqual(health["attempts_last_hour"], 1)
+
+    def test_a_frozen_controller_restarts_the_evse(self):
+        db, session, notifier, _ = self.run_loop(
+            [
+                FakeResponse(200, _status_payload()),
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload(comm_sent=14, comm_success=10)),
+                FakeResponse(200),
+            ],
+            polls=4,
+        )
+        posts = self.posts(session)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0][2]["json"], {"device": "evse"})
+        self.assertEqual(notifier.bodies[-1], bridge.WATCHDOG_ALERT_RESTART_EVSE)
+        health = self.health(db)
+        self.assertFalse(health["controller_ok"])
+        self.assertEqual(health["last_action"], "restart_evse")
+
+    def test_http_dead_alerts_without_touching_the_gateway(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE], polls=3
+        )
+        self.assertEqual(self.posts(session), [])
+        self.assertEqual(
+            notifier.bodies,
+            ["Charger offline", bridge.WATCHDOG_ALERT_FAILED],
+        )
+        health = self.health(db)
+        self.assertEqual(health["state"], "unhealthy")
+        self.assertFalse(health["http_ok"])
+        self.assertEqual(health["last_action"], "alert")
+        self.assertIsNone(health["last_attempt_at"])
+        self.assertEqual(health["attempts_last_hour"], 0)
+        self.assertEqual(watchdog.failures, 3)
+
+    def test_spent_attempts_alert_recovery_failed(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=4,
+            config=bridge.WatchdogConfig(cooldown=0, max_per_hour=1),
+        )
+        self.assertEqual(len(self.posts(session)), 1)
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+                bridge.WATCHDOG_ALERT_FAILED,
+            ],
+        )
+        health = self.health(db)
+        self.assertEqual(health["last_result"], "recovery failed: hourly cap reached")
+
+    def test_one_recovery_failed_push_per_episode(self):
+        db, session, notifier, _ = self.run_loop(
+            [
+                FakeResponse(200, _status_payload()),
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=6,
+            config=bridge.WatchdogConfig(max_per_hour=1),
+        )
+        self.assertEqual(len(self.posts(session)), 1)
+        self.assertEqual(
+            notifier.bodies,
+            [
+                "Charger offline",
+                bridge.WATCHDOG_ALERT_RESTART,
+                bridge.WATCHDOG_ALERT_FAILED,
+            ],
+        )
+
+    def test_charging_blocks_the_restart_until_configured(self):
+        data = {"status": {"current": {"state": 3}}}
+        db, session, notifier, watchdog = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+            ],
+            polls=3,
+            data=data,
+        )
+        self.assertEqual(self.posts(session), [])
+        self.assertIn("charging", self.health(db)["reason"])
+        self.assertEqual(notifier.bodies[-1], bridge.WATCHDOG_ALERT_FAILED)
+        self.assertEqual(watchdog.failures, 3)
+
+        db, session, _, _ = self.run_loop(
+            [
+                self.OUTAGE,
+                self.OUTAGE,
+                self.OUTAGE,
+                FakeResponse(200, _status_payload()),
+                FakeResponse(200),
+            ],
+            polls=3,
+            data={"status": {"current": {"state": 3}}},
+            config=bridge.WatchdogConfig(restart_while_charging=True),
+        )
+        self.assertEqual(len(self.posts(session)), 1)
+
+    def test_disabled_watchdog_only_flags_the_outage(self):
+        db, session, notifier, watchdog = self.run_loop(
+            [self.OUTAGE, self.OUTAGE, self.OUTAGE, self.OUTAGE],
+            polls=3,
+            config=bridge.WatchdogConfig(enabled=False),
+        )
+        self.assertEqual(self.posts(session), [])
+        self.assertEqual(notifier.bodies, ["Charger offline"])
+        self.assertNotIn("health", db.data.get("status", {}))
+        self.assertEqual(watchdog.failures, 0)
 
 
 if __name__ == "__main__":
