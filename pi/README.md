@@ -616,7 +616,10 @@ down.
   `null`. The extra delay check matters because the plan can briefly still
   describe an event whose start lies ahead of now (right after a sync, or the
   previous week's instance); it uses only firmware-computed values, so windows
-  are still never evaluated locally — the firmware enforces them.
+  are still never evaluated locally — the firmware enforces them. An empty
+  `[]` plan (no events configured) is normal and publishes
+  `{in_window: false, active_rule_id: null}` without a failure log; any other
+  non-object payload is still an error.
 - **Amps are not pushed.** Firmware v5.1.5 has no per-event current: its
   schedule events are flat `{id, state, time, days}` and the event charges at
   the EVSE's configured limit. `amps` is validated and stored, but the bridge
