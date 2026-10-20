@@ -173,14 +173,16 @@ bridge that restarted while the charger's HTTP was wedged would read the first
 and the authoritative document.
 
 **Apply queue.** Flushes are handed to the apply worker through a bounded queue
-(`MQTT_PENDING_SNAPSHOTS`, 4). Each entry carries its raw fields, its arrival
-number and its seeded-at-flush flag, so the worker never re-reads state that has
-moved on. Telemetry that repeats the queued `state` coalesces to the newest
-field set, so a slow Firestore write never builds a backlog of stale snapshots;
-a snapshot that _changes_ `state` is an edge, though — the start or stop of a
-charging session and its notification — so it is kept in order behind the queued
-ones rather than discarded. Past the bound the oldest snapshot goes, because the
-newest state is the truth.
+(`MQTT_PENDING_SNAPSHOTS` telemetry slots plus `MQTT_PENDING_EDGES` reserved
+edge records, 36). Each entry carries its raw fields, its arrival number and its
+seeded-at-flush flag, so the worker never re-reads state that has moved on.
+Telemetry that repeats the queued `state` coalesces to the newest field set, so a
+slow Firestore write never builds a backlog of stale snapshots; a snapshot that
+_changes_ `state` is an edge, though — the start or stop of a charging session
+and its notification — so it is kept in order behind the queued ones rather than
+discarded, in the reserved edge capacity. Only a hostile burst of more than 32
+queued transitions drops the oldest, and that loss is logged
+(`mqtt snapshot backlog over capacity …`), never silent.
 
 **Reconcile ordering.** A `/status` reply can be older than MQTT data that
 arrived while the request was in flight (a stop arrives during the reconcile's
@@ -217,7 +219,12 @@ failed poll proves nothing: that case is logged as `status reconcile failed (…
 no mqtt snapshot, outage unconfirmed` and the charger stays online.
 `MQTT_OUTAGE_FAILURES` (2) consecutive failed reconciles with no MQTT snapshot in
 between write `charger_online: false` and push once, and any snapshot resets the
-count. The broker-side LWT is #45.
+count. That second decision is revalidated under the sink lock: the source's
+arrival sequence is re-read in the same critical section as the tracker and
+document writes, so a flush that lands between the "no snapshot" check and the
+offline write refuses the outage — logged as
+`status reconcile failed (…); mqtt snapshot arrived, outage refused` — instead of
+flagging a publishing charger offline. The broker-side LWT is #45.
 
 **Health.** `status/health` gains two transport fields, written with merge
 semantics so neither the watchdog's writes nor these can clobber the other:

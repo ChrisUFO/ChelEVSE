@@ -70,11 +70,16 @@ MQTT_RECONCILE_SEC = 60
 # client itself reconnects in its own network loop; this only bounds how long a
 # fallback or a config-version reaction can take.
 MQTT_TICK_SEC = 1.0
-# Snapshots the apply worker may fall behind before the oldest is dropped.
-# Ordinary telemetry coalesces (only the newest field set matters) but a state
-# change is an edge sessions and notifications run on, so distinct states are
-# kept in order; this only caps a pathological stream.
+# Telemetry capacity of the apply queue: only the newest field set of an
+# unchanged state matters, so repeated telemetry collapses into one record.
 MQTT_PENDING_SNAPSHOTS = 4
+# On top of that, every state change is kept in order: it is the edge sessions
+# and transition notifications run on, so it must never be evicted as if it were
+# redundant telemetry. This bounds a pathological burst of transitions while the
+# worker is stuck; exceeding it is logged loudly.
+MQTT_PENDING_EDGES = 32
+# The queue's real bound: telemetry slots plus the reserved edge backlog.
+MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
 # Consecutive failed reconciles, with no MQTT snapshot in between, before a
 # silent charger is treated as an outage. An idle charger publishes nothing for
 # minutes, so one failed HTTP poll next to that silence proves nothing; the
@@ -855,10 +860,15 @@ class StatusSink:
     advances, so a second source reporting the same state has no edge left.
     """
 
-    def __init__(self, db, tracker, notifier):
+    def __init__(self, db, tracker, notifier, arrivals=None):
         self.status_doc = db.collection("status").document("current")
         self.tracker = tracker
         self.notifier = notifier
+        # The MQTT source's arrival sequence (``MqttSource.arrival_generation``).
+        # An outage decision re-reads it under this lock, so a flush cannot land
+        # between the "no snapshot" check and the offline write. It stays
+        # ``None`` without an MQTT source: HTTP-only runs never use that path.
+        self.arrivals = arrivals
         # The HTTP poll and the MQTT worker can apply at the same time; the
         # tracker's state machine is not thread-safe on its own.
         self._lock = threading.Lock()
@@ -940,16 +950,42 @@ class StatusSink:
         document (or a "Charger offline" push racing live data).
         """
         with self._lock:
-            edge = self.tracker.charger_online is not False
-            if edge:
-                self.tracker.charger_online = False
-            # Write the state before notifying so a slow push cannot leave the
-            # app showing a stale online status.
-            self.status_doc.set(OFFLINE, merge=True)
-            if edge:
-                # Journal and notify once per outage, on the edge.
-                log(f"charger offline ({reason})")
-                self.notifier.enqueue("Charger offline")
+            self._apply_offline(reason)
+
+    def apply_offline_if_no_snapshot(self, expected_arrival, reason):
+        """Flag offline only while no MQTT snapshot arrived since ``expected``.
+
+        The caller's "the charger is silent" decision is made outside this lock,
+        so it is revalidated here: the source's arrival sequence is read in the
+        same critical section as the tracker/document writes. A flush that
+        landed in between proves the charger is publishing, and the outage is
+        refused instead of writing ``charger_online: false`` and pushing a false
+        alert. A flush after this point is simply the newer observation and
+        restores the online state by applying.
+
+        Returns True when the offline transition was written, False when a
+        fresh arrival refused it.
+        """
+        if self.arrivals is None:
+            raise RuntimeError("offline guard needs an MQTT arrival source")
+        with self._lock:
+            if self.arrivals() != expected_arrival:
+                return False
+            self._apply_offline(reason)
+            return True
+
+    def _apply_offline(self, reason):
+        """The offline transition; the caller holds the apply lock."""
+        edge = self.tracker.charger_online is not False
+        if edge:
+            self.tracker.charger_online = False
+        # Write the state before notifying so a slow push cannot leave the
+        # app showing a stale online status.
+        self.status_doc.set(OFFLINE, merge=True)
+        if edge:
+            # Journal and notify once per outage, on the edge.
+            log(f"charger offline ({reason})")
+            self.notifier.enqueue("Charger offline")
 
     def maybe_seed(self):
         """Retry the stored baseline under the same lock as the applies."""
@@ -1010,9 +1046,14 @@ def enqueue_latest(snapshots, snapshot):
     snapshot that repeats the queued state replaces it. A snapshot that changes
     ``state`` is an edge — the start or stop of a charging session and its
     notification — so it is kept in order behind the queued ones instead of
-    being discarded while the worker is busy. The backlog is bounded by the
-    queue's own capacity (``MQTT_PENDING_SNAPSHOTS`` in production); past that
-    the oldest snapshot goes, because the newest state is the truth.
+    being discarded while the worker is busy.
+
+    The bound reserves room for the edges: coalescing removes repeated telemetry
+    only, and the queue holds ``MQTT_PENDING_SNAPSHOTS`` telemetry slots plus
+    ``MQTT_PENDING_EDGES`` distinct-state records, so a blocked worker cannot
+    lose a session by having its transitions mistaken for redundant telemetry.
+    Past that bound — a genuinely stuck worker — the oldest transition is
+    dropped and that loss is logged, never silently absorbed.
 
     The whole ``Snapshot`` record travels, not just its fields: its arrival and
     seeded-at-flush flag are what the worker orders it by.
@@ -1024,8 +1065,18 @@ def enqueue_latest(snapshots, snapshot):
                 pending.append(snapshots.get_nowait())
             except queue.Empty:
                 break
-        capacity = snapshots.maxsize or MQTT_PENDING_SNAPSHOTS
-        for record in _coalesce(pending + [snapshot])[-capacity:]:
+        capacity = snapshots.maxsize or MQTT_PENDING_QUEUE
+        records = _coalesce(pending + [snapshot])
+        if len(records) > capacity:
+            overflow = len(records) - capacity
+            dropped = records[:overflow]
+            records = records[overflow:]
+            log(
+                f"mqtt snapshot backlog over capacity ({capacity}); dropped "
+                f"{overflow} state transition(s), oldest state "
+                f"{dropped[0].fields.get('state')}"
+            )
+        for record in records:
             snapshots.put_nowait(record)
 
 
@@ -1577,7 +1628,12 @@ def status_loop(
     watchdog, but only marks the charger offline after repeated failures with no
     MQTT snapshot in between (an idle charger is silent by design).
     """
-    sink = sink or StatusSink(db, tracker, notifier)
+    sink = sink or StatusSink(
+        db,
+        tracker,
+        notifier,
+        arrivals=mqtt.arrival_generation if mqtt is not None else None,
+    )
     source = None
     transport_state = None
     next_poll = 0.0
@@ -1655,16 +1711,25 @@ def status_loop(
                         # tell them apart. Ask for consecutive evidence before
                         # writing an outage and pushing it.
                         reconcile_failures += 1
-                        if reconcile_failures >= MQTT_OUTAGE_FAILURES:
-                            # Flag offline through the sink lock, so the tracker
-                            # and document writes cannot interleave with an MQTT
-                            # apply. Journal and push once per outage.
-                            sink.apply_offline(_offline_reason(exc))
-                        else:
+                        if reconcile_failures < MQTT_OUTAGE_FAILURES:
                             log(
                                 f"status reconcile failed ({_offline_reason(exc)}); "
                                 "no mqtt snapshot, outage unconfirmed"
                             )
+                        elif not sink.apply_offline_if_no_snapshot(
+                            mqtt_snapshots, _offline_reason(exc)
+                        ):
+                            # A flush landed between the comparison above and
+                            # the offline decision. That is the same proof of
+                            # life the first branch uses, so the outage is
+                            # refused and the streak restarts from this
+                            # snapshot.
+                            log(
+                                f"status reconcile failed ({_offline_reason(exc)}); "
+                                "mqtt snapshot arrived, outage refused"
+                            )
+                            mqtt_snapshots = mqtt.snapshots
+                            reconcile_failures = 0
                     else:
                         # Charger unreachable or sent garbage: flag offline
                         # through the sink lock, so the tracker and document
@@ -2403,14 +2468,15 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     tracker.seed()
     notifier = Notifier(db)
     watchdog = Watchdog(db, base, auth, transport, notifier, watchdog_config)
-    sink = StatusSink(db, tracker, notifier)
 
     source = None
     snapshots = None
     config_event = None
     mqtt_status_args = None
     if mqtt is not None and mqtt.enabled:
-        snapshots = queue.Queue(maxsize=MQTT_PENDING_SNAPSHOTS)
+        # Telemetry slots plus the reserved edge backlog: a blocked worker must
+        # not lose a session edge to queue capacity.
+        snapshots = queue.Queue(maxsize=MQTT_PENDING_QUEUE)
         config_event = threading.Event()
         source = MqttSource(
             host=mqtt.host,
@@ -2423,6 +2489,14 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
             on_config_version=lambda _version: config_event.set(),
             log=log,
         )
+    # Built after the source: the outage decision needs its arrival sequence.
+    sink = StatusSink(
+        db,
+        tracker,
+        notifier,
+        arrivals=source.arrival_generation if source is not None else None,
+    )
+    if source is not None:
         mqtt_status_args = (sink, snapshots)
 
     status_args = (

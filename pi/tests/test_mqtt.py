@@ -619,7 +619,7 @@ class MqttWorkerBase(unittest.TestCase):
         self.tracker.previous_state = 1
         self.tracker.charger_online = True
         self.sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
-        self.snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
+        self.snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_QUEUE)
         self.source = MqttSource(
             "192.168.0.224",
             topic="chelevse",
@@ -852,6 +852,78 @@ class MqttWorkerTests(MqttWorkerBase):
         self.assertEqual(len(self.db.data["sessions"]), 1)
         self.assertEqual(self.tracker.state, 1)
 
+    def test_every_session_edge_survives_a_blocked_worker(self):
+        # Three complete sessions -- six state changes, more than the telemetry
+        # capacity -- arrive while the worker is blocked in its first write.
+        # Coalescing may drop only repeated telemetry: each transition is one
+        # session record and one notification, so truncating the backlog to the
+        # telemetry bound would lose whole sessions even though the final state
+        # is right.
+        self.source.seed(status_payload(state=1, session_energy=0, elapsed=0))
+        busy = threading.Event()
+        release = threading.Event()
+        parse_snapshot = bridge.parse_snapshot
+
+        def blocking_parse(snapshot):
+            if not busy.is_set():
+                busy.set()
+                release.wait(5)  # the worker is busy with this snapshot
+            return parse_snapshot(snapshot)
+
+        def session_writes():
+            return [write for write in self.db.writes if write[1] == "sessions"]
+
+        stop = threading.Event()
+        self.client.deliver("chelevse/amp", 1000)
+        self.source.flush()  # the worker takes this one and blocks on it
+        with mock.patch.object(bridge, "parse_snapshot", blocking_parse), mock.patch.object(
+            bridge, "_stop", stop
+        ):
+            thread = threading.Thread(
+                target=bridge.mqtt_status_loop,
+                args=(self.sink, self.snapshots),
+                daemon=True,
+            )
+            thread.start()
+            try:
+                self.assertTrue(busy.wait(2))
+                for session in (1, 2, 3):
+                    self.client.deliver("chelevse/state", 3)
+                    self.client.deliver("chelevse/session_energy", session * 1000)
+                    self.client.deliver("chelevse/session_elapsed", session * 100)
+                    self.source.flush()  # start edge, queued behind the worker
+                    self.client.deliver("chelevse/state", 1)
+                    self.source.flush()  # stop edge, queued behind the start
+                release.set()
+                wait_for(lambda: len(session_writes()) >= 3)
+            finally:
+                release.set()
+                stop.set()
+                thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(
+            self.notifier.bodies,
+            [
+                "Charging started",
+                "Charging stopped",
+                "Charging started",
+                "Charging stopped",
+                "Charging started",
+                "Charging stopped",
+            ],
+        )
+        # Every stop wrote its session with the energy that session used: no
+        # transition was evicted, so no session was folded into another.
+        self.assertEqual(
+            [write[3]["wh"] for write in session_writes()],
+            [1000.0, 2000.0, 3000.0],
+        )
+        # The rapid sessions merge into one record (cumulative counters), but
+        # each wrote its own energy: none was folded away unobserved.
+        (session_doc,) = self.db.data["sessions"].values()
+        self.assertEqual((session_doc["wh"], session_doc["elapsed"]), (3000.0, 300))
+        self.assertEqual(self.tracker.state, 1)
+
 
 class EnqueueLatestTests(unittest.TestCase):
     @staticmethod
@@ -859,7 +931,7 @@ class EnqueueLatestTests(unittest.TestCase):
         return Snapshot({"state": state, **fields}, arrival, complete)
 
     def test_enqueue_latest_coalesces_telemetry_of_the_same_state(self):
-        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
+        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_QUEUE)
         bridge.enqueue_latest(snapshots, self.record(1, 1, amp=10))
         bridge.enqueue_latest(snapshots, self.record(1, 2, amp=12))
         queued = snapshots.get_nowait()
@@ -870,7 +942,7 @@ class EnqueueLatestTests(unittest.TestCase):
     def test_enqueue_latest_keeps_a_state_change_in_order(self):
         # A start and a stop queued behind a busy worker are edges the tracker
         # has to observe: coalescing to the newest would lose the session.
-        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
+        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_QUEUE)
         for arrival, state in enumerate((1, 3, 1), start=1):
             bridge.enqueue_latest(snapshots, self.record(state, arrival))
         self.assertEqual(
@@ -879,14 +951,33 @@ class EnqueueLatestTests(unittest.TestCase):
         )
         self.assertTrue(snapshots.empty())
 
-    def test_enqueue_latest_drops_the_oldest_past_the_queue_bound(self):
-        snapshots = bridge.queue.Queue(maxsize=2)
-        for arrival, state in enumerate((1, 3, 1), start=1):
+    def test_enqueue_latest_keeps_more_edges_than_the_telemetry_capacity(self):
+        # The telemetry bound must not cap the transitions: six state changes
+        # queued behind a blocked worker all fit, in order, because the queue
+        # reserves an edge backlog on top of the telemetry slots.
+        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_QUEUE)
+        states = (1, 3, 1, 3, 1, 3)
+        for arrival, state in enumerate(states, start=1):
             bridge.enqueue_latest(snapshots, self.record(state, arrival))
+        self.assertEqual(
+            [snapshots.get_nowait().fields["state"] for _ in states], list(states)
+        )
+        self.assertTrue(snapshots.empty())
+
+    def test_enqueue_latest_logs_an_edge_overflow(self):
+        # A bound smaller than the transitions queued behind it can only drop
+        # edges, so the loss is reported instead of silently absorbed.
+        snapshots = bridge.queue.Queue(maxsize=2)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            for arrival, state in enumerate((1, 3, 1), start=1):
+                bridge.enqueue_latest(snapshots, self.record(state, arrival))
         self.assertEqual(
             [snapshots.get_nowait().fields for _ in range(2)],
             [{"state": 3}, {"state": 1}],
         )
+        self.assertEqual(len(logs), 1)
+        self.assertIn("backlog over capacity (2)", logs[0])
 
 
 class StatusLoopMqttTests(unittest.TestCase):
@@ -1304,6 +1395,45 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.run_loop(session, polls=2, reconcile=0)
         self.assertFalse(self.tracker.charger_online)
         self.assertEqual(self.notifier.bodies, ["Charger offline"])
+
+    def test_a_flush_in_the_offline_gap_refuses_the_outage(self):
+        # The second failed reconcile has already decided "no snapshot since
+        # the last one" when a flush lands, before the offline write. The sink
+        # re-reads the arrival sequence in the same critical section as the
+        # tracker/document writes, so the fresh data refuses the outage instead
+        # of writing charger_online: false (and pushing an alert) over live
+        # data. The streak restarts from that snapshot.
+        client = self.connect()
+        flushes = []
+
+        def arrival_hook():
+            if not flushes:
+                flushes.append(True)
+                client.deliver("chelevse/state", 1)
+                self.source.flush()  # arrives after the streak check
+            return self.source.arrival_generation()
+
+        sink = bridge.StatusSink(
+            self.db, self.tracker, self.notifier, arrivals=arrival_hook
+        )
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=3, reconcile=0, sink=sink)
+        self.assertNotEqual(self.tracker.charger_online, False)
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertNotIn(
+            "charger_online", self.db.data.get("status", {}).get("current", {})
+        )
+        self.assertTrue(
+            [line for line in logs if "outage refused" in line],
+            "the refused outage was not logged",
+        )
+        self.assertEqual(self.applied, [{"state": 1}])  # the flush was real
+        # Two unconfirmed failures, one refusal: the refusal reset the streak.
+        self.assertEqual(
+            len([line for line in logs if "outage unconfirmed" in line]), 2
+        )
 
     def test_a_status_write_failure_does_not_repoll_at_the_tick(self):
         # The deadline advanced before the apply, so a Firestore write failure
