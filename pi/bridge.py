@@ -30,6 +30,10 @@ from firebase_admin import credentials, exceptions, firestore, messaging
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
+# First-iteration offsets so /status, /config and /schedule/plan do not fire
+# together against the gateway.
+CONFIG_INITIAL_DELAY = 3
+SCHEDULE_INITIAL_DELAY = 7
 STATE_LABELS = {
     1: "ready",
     2: "connected",
@@ -780,9 +784,12 @@ def status_loop(db, base, auth, transport, interval, tracker, notifier):
         _stop.wait(interval)
 
 
-def config_loop(db, base, auth, transport, interval):
+def config_loop(db, base, auth, transport, interval, initial_delay=0):
     config_doc = db.collection("status").document("config")
     last_synced = None
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
     while not _stop.is_set():
         try:
             try:
@@ -1223,7 +1230,7 @@ def sync_schedule(transport, base, auth, events):
     )
 
 
-def schedule_loop(db, base, auth, transport, interval, reconcile_interval):
+def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initial_delay=0):
     """Mirror schedule/current into the firmware and publish the live window."""
     status_doc = db.collection("status").document("current")
     last_hash = None
@@ -1232,6 +1239,9 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval):
     missing_logged = False
     malformed_logged = False
     amps_logged_hash = None
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
     while not _stop.is_set():
         try:
             snapshot = db.collection("schedule").document("current").get()
@@ -1319,7 +1329,7 @@ def run(db, base, auth, intervals, transport):
 
     status_args = (db, base, auth, transport, status_interval, tracker, notifier)
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
-    config_args = (db, base, auth, transport, config_interval)
+    config_args = (db, base, auth, transport, config_interval, CONFIG_INITIAL_DELAY)
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
     schedule_args = (
         db,
@@ -1328,6 +1338,7 @@ def run(db, base, auth, intervals, transport):
         transport,
         schedule_interval,
         reconcile_interval,
+        SCHEDULE_INITIAL_DELAY,
     )
     threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
     command_loop(db, base, auth, transport, command_interval)
