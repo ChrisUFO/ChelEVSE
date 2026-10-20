@@ -59,7 +59,21 @@ export async function initFirebase() {
 
     const app = appMod.initializeApp(firebaseConfig);
     auth = authMod.getAuth(app);
-    db = dbMod.getFirestore(app);
+    // A persistent cache keeps the last schedule snapshot and any queued write
+    // across a reload. Offline persistence needs IndexedDB; browsers that do
+    // not offer it (some private windows, storage disabled) fall back to the
+    // default in-memory cache so the rest of the app keeps working.
+    // initializeFirestore must run before the first Firestore use, and getFirestore
+    // cannot follow a successful initialize — hence the try/catch, not a probe.
+    try {
+      db = dbMod.initializeFirestore(app, {
+        localCache: dbMod.persistentLocalCache({
+          tabManager: dbMod.persistentMultipleTabManager(),
+        }),
+      });
+    } catch {
+      db = dbMod.getFirestore(app);
+    }
 
     ({
       onAuthStateChanged,
