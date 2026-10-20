@@ -7,6 +7,9 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   schedule every SCHEDULE_INTERVAL: schedule/current -> firmware scheduler,
     GET /schedule/plan -> status/current.schedule
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
+With MQTT_ENABLED=true the status topics arrive on the MQTT source and /status
+becomes reconciliation only (MQTT_RECONCILE_SEC); /config runs on a
+config_version change. Everything still flows through one apply_status path.
 Config: env vars with fallback to <repo root>/private/bridge.env.
 """
 
@@ -29,12 +32,19 @@ import requests
 import firebase_admin
 from firebase_admin import credentials, exceptions, firestore, messaging
 
+from mqtt_source import MqttSource
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
 # First-iteration offsets so /status, /config and /schedule/plan do not fire
 # together against the gateway.
 CONFIG_INITIAL_DELAY = 3
 SCHEDULE_INITIAL_DELAY = 7
+# Retry a failed /config sync with this bounded backoff while MQTT is healthy
+# (the periodic poll is skipped then, so a failure would otherwise strand the
+# config until the charger's next setting change).
+CONFIG_RETRY_MIN_SEC = 5
+CONFIG_RETRY_MAX_SEC = 60
 STATE_LABELS = {
     1: "ready",
     2: "connected",
@@ -50,6 +60,35 @@ MAX_SCHEDULE_RULES = 20
 SCHEDULE_JITTER_GRACE = 10
 # Retry a failed status/current seed at most this often while running.
 SEED_RETRY_INTERVAL = 30
+# --- MQTT status source (issue #44) ----------------------------------------
+# MQTT is opt-in; with the flag off every cadence and write is unchanged.
+DEFAULT_MQTT_TOPIC = "chelevse"
+DEFAULT_MQTT_CLIENT_ID = "chelevse-bridge"
+# Status reconciliation over HTTP while MQTT is healthy (staleness cover).
+MQTT_RECONCILE_SEC = 60
+# How often the status/config loops re-check the MQTT connection. The MQTT
+# client itself reconnects in its own network loop; this only bounds how long a
+# fallback or a config-version reaction can take.
+MQTT_TICK_SEC = 1.0
+# Telemetry capacity of the apply queue: only the newest field set of an
+# unchanged state matters, so repeated telemetry collapses into one record.
+MQTT_PENDING_SNAPSHOTS = 4
+# On top of that, every state change is kept in order: it is the edge sessions
+# and transition notifications run on, so it must never be evicted as if it were
+# redundant telemetry. This bounds a pathological burst of transitions while the
+# worker is stuck; exceeding it is logged loudly.
+MQTT_PENDING_EDGES = 32
+# The queue's real bound: telemetry slots plus the reserved edge backlog.
+MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
+# Consecutive failed reconciles, with no MQTT snapshot in between, before a
+# silent charger is treated as an outage. An idle charger publishes nothing for
+# minutes, so one failed HTTP poll next to that silence proves nothing; the
+# broker-side LWT is #45.
+MQTT_OUTAGE_FAILURES = 2
+# A granted subscription that never delivers a ``config_version`` still leaves
+# ``status/config`` stale: sync once over HTTP straight away, then keep this
+# slow safety resync until a version is observed.
+CONFIG_SAFETY_RESYNC_SEC = 600
 # A pending command older than this is failed without touching the charger.
 COMMAND_MAX_AGE = 600
 # Pending commands handled per poll.
@@ -241,6 +280,49 @@ def parse_status(data):
         "charger_online": True,
         "updated_at": firestore.SERVER_TIMESTAMP,
     }
+
+
+# parse_status outputs that keep the raw key's name.
+_SNAPSHOT_FIELDS = (
+    "state",
+    "amp",
+    "voltage",
+    "power",
+    "session_energy",
+    "total_energy",
+    "elapsed",
+    "vehicle",
+    "pilot",
+    "temp1",
+    "temp2",
+    "temp3",
+)
+_SNAPSHOT_TEMPS = ("temp1", "temp2", "temp3")
+
+
+def parse_snapshot(data):
+    """parse_status for an MQTT snapshot, which may carry only changed fields.
+
+    A snapshot is the last ``/status`` seed merged with the fields of one
+    burst, so before that seed it holds only what changed (``{"amp": …}``).
+    Parsing it as a full reply would merge ``None`` over every field the burst
+    did not carry, so only the fields the snapshot actually has are emitted.
+    ``charger_online`` and ``updated_at`` are transport facts — a snapshot
+    proves the charger is publishing — and are always set.
+    """
+    fields = parse_status(data)
+    parsed = {
+        "charger_online": fields["charger_online"],
+        "updated_at": fields["updated_at"],
+    }
+    for key in _SNAPSHOT_FIELDS:
+        if key in data:
+            parsed[key] = fields[key]
+    if "state" in data:
+        parsed["state_label"] = fields["state_label"]
+    if any(key in data for key in _SNAPSHOT_TEMPS):
+        parsed["temp_c"] = fields["temp_c"]
+    return parsed
 
 
 def _is_number(value):
@@ -769,6 +851,276 @@ def _transition_body(had_state, was_charging, is_charging):
     return "Charging started" if is_charging else "Charging stopped"
 
 
+class StatusSink:
+    """The one status write path, shared by the HTTP poll and MQTT snapshots.
+
+    Both transports describe the same charger state, so history, sessions and
+    transition notifications run here exactly once per real change: the edge is
+    computed against the tracker's pre-tick state, which the first source
+    advances, so a second source reporting the same state has no edge left.
+    """
+
+    def __init__(self, db, tracker, notifier, arrivals=None):
+        self.status_doc = db.collection("status").document("current")
+        self.tracker = tracker
+        self.notifier = notifier
+        # The MQTT source's arrival sequence (``MqttSource.arrival_generation``).
+        # An outage decision re-reads it under this lock, so a flush cannot land
+        # between the "no snapshot" check and the offline write. It stays
+        # ``None`` without an MQTT source: HTTP-only runs never use that path.
+        self.arrivals = arrivals
+        # The HTTP poll and the MQTT worker can apply at the same time; the
+        # tracker's state machine is not thread-safe on its own.
+        self._lock = threading.Lock()
+        # MQTT applies so far. An HTTP response fetched before this mark
+        # describes the charger *before* those applies, so it is dropped rather
+        # than allowed to rewind the state machine and re-fire an edge.
+        self._mqtt_applies = 0
+        # Highest MQTT arrival sequence a reconcile has applied. A queued
+        # snapshot at or below it was flushed before that reply, so applying it
+        # would replay an older observation over a newer one. Arrival sequences
+        # start at 1, so -1 means "no reconcile has applied yet". Only MQTT
+        # records are gated on it: an HTTP reply is the newest observation that
+        # exists when it applies, so it always applies and only advances the
+        # watermark.
+        self._reconciled_arrival = -1
+
+    def mqtt_generation(self):
+        """MQTT apply count; take it before an HTTP GET, pass it to the apply."""
+        with self._lock:
+            return self._mqtt_applies
+
+    def apply_status(
+        self, fields, source, complete=True, mqtt_mark=None, seed=None, arrival=None
+    ):
+        """Merge one parsed status snapshot and run the derived edge logic.
+
+        ``complete`` says the snapshot is a full observation (a parsed
+        ``/status`` reply); a partial MQTT snapshot only merges its fields.
+        ``mqtt_mark`` is the ``mqtt_generation()`` taken before an HTTP fetch:
+        if an MQTT snapshot applied since, the HTTP result is discarded and
+        False is returned. ``arrival`` is the MQTT arrival sequence the data
+        stands for -- the ``arrival_generation()`` taken before an HTTP GET, or
+        the arrival carried by a queued MQTT snapshot: a queued snapshot no
+        newer than the last reconciled arrival is discarded, and an applied HTTP
+        reply records its arrival as that watermark, so records flushed before
+        it are dropped. The watermark never rejects the HTTP reply itself: with
+        no flush since the previous reconcile the generation it read equals the
+        watermark, and that reply is still the newest observation (rejecting it
+        would freeze the document on an idle charger and for the whole HTTP
+        fallback); a reply's own staleness is decided by ``mqtt_mark`` and
+        ``seed``. ``seed`` is a callable that merges the raw ``/status`` payload
+        into the MQTT snapshot; it returns ``False`` when that reply is no
+        longer current, and it runs in the same critical section as the apply,
+        so a reply overtaken by newer MQTT data can neither seed nor rewind the
+        snapshot. It may take the MQTT source's lock; the source never takes
+        this one while holding its own.
+        """
+        with self._lock:
+            if mqtt_mark is not None and mqtt_mark != self._mqtt_applies:
+                return False
+            # Only a *record* can predate a reconcile reply: it carries the
+            # arrival of its flush. An HTTP apply's own arrival is the
+            # generation read before its GET, which is the newest observation
+            # that exists here -- a flush since then is caught by ``mqtt_mark``
+            # and ``seed`` -- so the watermark is recorded, never enforced for
+            # it. Enforcing it would discard every reconcile after the first
+            # whenever no flush happened in between: an idle charger and the
+            # whole HTTP fallback, where it would freeze the status document.
+            if (
+                source == "mqtt"
+                and arrival is not None
+                and arrival <= self._reconciled_arrival
+            ):
+                return False
+            if seed is not None and seed() is False:
+                return False
+            self._apply(fields, source, complete)
+            if source == "mqtt":
+                self._mqtt_applies += 1
+            elif arrival is not None:
+                self._reconciled_arrival = arrival
+            return True
+
+    def apply_offline(self, reason):
+        """Flag the charger offline through the same lock as the applies.
+
+        The tracker and document writes happen under the apply lock, so an MQTT
+        snapshot arriving now cannot leave the tracker online with an offline
+        document (or a "Charger offline" push racing live data).
+        """
+        with self._lock:
+            self._apply_offline(reason)
+
+    def apply_offline_if_no_snapshot(self, expected_arrival, reason):
+        """Flag offline only while no MQTT snapshot arrived since ``expected``.
+
+        The caller's "the charger is silent" decision is made outside this lock,
+        so it is revalidated here: the source's arrival sequence is read in the
+        same critical section as the tracker/document writes. A flush that
+        landed in between proves the charger is publishing, and the outage is
+        refused instead of writing ``charger_online: false`` and pushing a false
+        alert. A flush after this point is simply the newer observation and
+        restores the online state by applying.
+
+        Returns True when the offline transition was written, False when a
+        fresh arrival refused it.
+        """
+        if self.arrivals is None:
+            raise RuntimeError("offline guard needs an MQTT arrival source")
+        with self._lock:
+            if self.arrivals() != expected_arrival:
+                return False
+            self._apply_offline(reason)
+            return True
+
+    def _apply_offline(self, reason):
+        """The offline transition; the caller holds the apply lock."""
+        edge = self.tracker.charger_online is not False
+        if edge:
+            self.tracker.charger_online = False
+        # Write the state before notifying so a slow push cannot leave the
+        # app showing a stale online status.
+        self.status_doc.set(OFFLINE, merge=True)
+        if edge:
+            # Journal and notify once per outage, on the edge.
+            log(f"charger offline ({reason})")
+            self.notifier.enqueue("Charger offline")
+
+    def maybe_seed(self):
+        """Retry the stored baseline under the same lock as the applies."""
+        with self._lock:
+            self.tracker.maybe_seed()
+
+    def _apply(self, fields, source, complete):
+        tracker = self.tracker
+        self.status_doc.set(fields, merge=True)
+        if tracker.charger_online is False:
+            tracker.charger_online = True
+            log(f"charger online ({source})")
+        if not complete:
+            # A pre-seed burst carries only the fields that changed. Merging
+            # them is right, but there is no state observation to make: the
+            # absent state would read as "not charging" and stop a session that
+            # is still running.
+            tracker.record_history(fields.get("total_energy"))
+            return
+        had_state = tracker.has_state
+        was_charging = tracker.has_state and tracker.previous_state == 3
+        is_charging = fields.get("state") == 3
+        tracker.record_history(fields.get("total_energy"))
+        tracker.observe(fields)
+        body = _transition_body(had_state, was_charging, is_charging)
+        if body is not None:
+            self.notifier.enqueue(body)
+
+
+def write_transport_health(db, source, mqtt_connected):
+    """Publish the active status source into status/health (merge semantics).
+
+    Merged, never replaced: the watchdog owns the rest of the document and its
+    writes merge too, so neither can clobber the other's fields.
+    """
+    try:
+        db.collection("status").document("health").set(
+            {
+                "source": source,
+                "mqtt_connected": mqtt_connected,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+    except Exception as exc:
+        log(f"health transport write failed ({exc.__class__.__name__}: {exc})")
+
+
+# Serializes the drain-and-refill in ``enqueue_latest``: the worker only ever
+# removes from the front, so producers must not interleave.
+_enqueue_lock = threading.Lock()
+
+
+def enqueue_latest(snapshots, snapshot):
+    """Queue a delivered snapshot for the apply worker without losing an edge.
+
+    Only the newest field set of an unchanged ``state`` is worth writing, so a
+    snapshot that repeats the queued state replaces it. A snapshot that changes
+    ``state`` is an edge — the start or stop of a charging session and its
+    notification — so it is kept in order behind the queued ones instead of
+    being discarded while the worker is busy.
+
+    The bound reserves room for the edges: coalescing removes repeated telemetry
+    only, and the queue holds ``MQTT_PENDING_SNAPSHOTS`` telemetry slots plus
+    ``MQTT_PENDING_EDGES`` distinct-state records, so a blocked worker cannot
+    lose a session by having its transitions mistaken for redundant telemetry.
+    Past that bound — a genuinely stuck worker — the oldest transition is
+    dropped and that loss is logged, never silently absorbed.
+
+    The whole ``Snapshot`` record travels, not just its fields: its arrival and
+    seeded-at-flush flag are what the worker orders it by.
+    """
+    with _enqueue_lock:
+        pending = []
+        while True:
+            try:
+                pending.append(snapshots.get_nowait())
+            except queue.Empty:
+                break
+        capacity = snapshots.maxsize or MQTT_PENDING_QUEUE
+        records = _coalesce(pending + [snapshot])
+        if len(records) > capacity:
+            overflow = len(records) - capacity
+            dropped = records[:overflow]
+            records = records[overflow:]
+            log(
+                f"mqtt snapshot backlog over capacity ({capacity}); dropped "
+                f"{overflow} state transition(s), oldest state "
+                f"{dropped[0].fields.get('state')}"
+            )
+        for record in records:
+            snapshots.put_nowait(record)
+
+
+def _coalesce(pending):
+    """Collapse repeated telemetry; keep every state change, in order."""
+    kept = []
+    for record in pending:
+        if kept and kept[-1].fields.get("state") == record.fields.get("state"):
+            kept[-1] = record
+        else:
+            kept.append(record)
+    return kept
+
+
+def mqtt_status_loop(sink, snapshots):
+    """Apply debounced MQTT snapshots as they arrive (event-driven writes).
+
+    Runs on its own thread so a Firestore write never blocks paho's network
+    loop. Every snapshot is parsed here with the same ``parse_status`` the HTTP
+    poll uses, so units and derived fields match the HTTP path and only curated
+    fields reach the document. A snapshot counts as a complete observation only
+    once the source held a ``/status`` seed **when it was flushed** and it
+    carries a numeric state; before that it is a field update only, and a seed
+    that lands afterwards does not promote it. A snapshot no newer than the last
+    applied reconcile is dropped: that reply already carries a later view of the
+    charger. A failed write is a log line; the next snapshot and the 60 s HTTP
+    reconciliation both carry the full state.
+    """
+    while not _stop.is_set():
+        try:
+            record = snapshots.get(timeout=MQTT_TICK_SEC)
+        except queue.Empty:
+            continue
+        try:
+            fields = parse_snapshot(record.fields)
+            complete = bool(record.complete) and _is_number(fields.get("state"))
+            if not sink.apply_status(
+                fields, "mqtt", complete=complete, arrival=record.arrival
+            ):
+                log("mqtt snapshot dropped (a reconcile applied a newer view)")
+        except Exception as exc:
+            log(f"mqtt status apply failed ({exc.__class__.__name__}: {exc})")
+
+
 class WatchdogConfig(NamedTuple):
     """Validated watchdog settings; ``watchdog_config()`` fills them from env."""
 
@@ -834,6 +1186,55 @@ def watchdog_config_or_exit():
     """Watchdog settings for ``main()``: a bad value stops the bridge by name."""
     try:
         return watchdog_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+class MqttConfig(NamedTuple):
+    """Validated MQTT settings; ``mqtt_config()`` fills them from env."""
+
+    enabled: bool = False
+    host: str = ""
+    port: int = 1883
+    user: str = ""
+    password: str = ""
+    topic: str = DEFAULT_MQTT_TOPIC
+    reconcile_sec: float = MQTT_RECONCILE_SEC
+    client_id: str = DEFAULT_MQTT_CLIENT_ID
+
+
+def mqtt_config():
+    """MQTT settings from the environment; bad values raise ValueError."""
+    enabled = _env_bool("MQTT_ENABLED", False)
+    host = (cfg("MQTT_HOST") or "").strip()
+    port = _env_finite("MQTT_PORT", 1883, int)
+    reconcile_sec = _env_finite("MQTT_RECONCILE_SEC", MQTT_RECONCILE_SEC, float)
+    topic = (cfg("MQTT_TOPIC") or DEFAULT_MQTT_TOPIC).strip().strip("/")
+    client_id = (cfg("MQTT_CLIENT_ID") or "").strip() or DEFAULT_MQTT_CLIENT_ID
+    if not 1 <= port <= 65535:
+        raise ValueError(f"MQTT_PORT must be 1-65535, got {port}.")
+    if reconcile_sec <= 0:
+        raise ValueError(f"MQTT_RECONCILE_SEC must be above zero, got {reconcile_sec}.")
+    if not topic:
+        raise ValueError("MQTT_TOPIC must not be blank.")
+    if enabled and not host:
+        raise ValueError("MQTT_HOST is required when MQTT_ENABLED is true.")
+    return MqttConfig(
+        enabled=enabled,
+        host=host,
+        port=port,
+        user=cfg("MQTT_USER") or "",
+        password=cfg("MQTT_PASS") or "",
+        topic=topic,
+        reconcile_sec=reconcile_sec,
+        client_id=client_id,
+    )
+
+
+def mqtt_config_or_exit():
+    """MQTT settings for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return mqtt_config()
     except ValueError as exc:
         sys.exit(str(exc))
 
@@ -1087,7 +1488,9 @@ class Watchdog:
         """Publish status/health; a failed write is a log line, not a crash.
 
         Called on every state transition and every attempt, not on every tick,
-        so a healthy bridge writes it once.
+        so a healthy bridge writes it once. Merged so the transport fields
+        (``source``/``mqtt_connected``) survive, and so a transport write never
+        erases the watchdog's state.
         """
         now = self.clock()
         document = {
@@ -1104,7 +1507,7 @@ class Watchdog:
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
         try:
-            self.health_doc.set(document)
+            self.health_doc.set(document, merge=True)
         except Exception as exc:
             log(f"watchdog: health write failed ({exc.__class__.__name__}: {exc})")
 
@@ -1202,60 +1605,296 @@ class Watchdog:
             self.notifier.enqueue(alert)
 
 
-def status_loop(db, base, auth, transport, interval, tracker, notifier, watchdog):
-    status_doc = db.collection("status").document("current")
+def status_loop(
+    db,
+    base,
+    auth,
+    transport,
+    interval,
+    tracker,
+    notifier,
+    watchdog,
+    mqtt=None,
+    reconcile_interval=MQTT_RECONCILE_SEC,
+    sink=None,
+):
+    """Poll /status and apply it; with MQTT, poll only to reconcile.
+
+    With ``mqtt`` the status topics are the primary source (applied by
+    ``mqtt_status_loop``) and this loop polls every ``reconcile_interval`` for
+    staleness cover and to seed the snapshot with HTTP-only fields. When the
+    broker is down it falls back to ``interval`` and flags offline exactly as
+    before; an HTTP failure while MQTT is connected is logged and feeds the
+    watchdog, but only marks the charger offline after repeated failures with no
+    MQTT snapshot in between (an idle charger is silent by design).
+    """
+    sink = sink or StatusSink(
+        db,
+        tracker,
+        notifier,
+        arrivals=mqtt.arrival_generation if mqtt is not None else None,
+    )
+    source = None
+    transport_state = None
+    next_poll = 0.0
+    mqtt_snapshots = 0
+    # Consecutive failed reconciles with no MQTT snapshot in between: one
+    # failure next to a silent idle charger is not outage evidence.
+    reconcile_failures = 0
     while not _stop.is_set():
-        try:
-            tracker.maybe_seed()
-            try:
-                resp = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
-                resp.raise_for_status()
-                payload = resp.json()
-                if not isinstance(payload, dict):
-                    raise ValueError("status response is not a JSON object")
-                fields = parse_status(payload)
-            except (requests.RequestException, ValueError) as exc:
-                # Charger unreachable or sent garbage: flag offline, keep going.
-                # Edge only: journal and notify once per outage, not per tick.
-                if tracker.charger_online is not False:
-                    log(f"charger offline ({_offline_reason(exc)})")
-                    tracker.charger_online = False
-                    # Write the state before notifying so a slow push cannot
-                    # leave the app showing a stale online status.
-                    status_doc.set(OFFLINE, merge=True)
-                    notifier.enqueue("Charger offline")
-                else:
-                    status_doc.set(OFFLINE, merge=True)
-                watchdog.observe_failure(tracker.state == 3)
+        now = time.monotonic()
+        mqtt_connected = mqtt is not None and mqtt.connected
+        # A granted subscription is what makes the topics a status source: a
+        # broker that accepts the connection and then denies ``<topic>/#``
+        # delivers nothing, which looks exactly like an idle charger. Until the
+        # SUBACK grants it the HTTP poll is the source, and a denial keeps it
+        # there (logged once per source change) with the 10 s cadence.
+        mqtt_ready = mqtt_connected and mqtt.subscribed
+        current = "mqtt" if mqtt_ready else "http"
+        # The pair, not just the source: a link that drops while the source
+        # stays ``http`` (a denied subscription, then a disconnect) still has to
+        # refresh ``status/health.mqtt_connected``.
+        if mqtt is not None and (current, mqtt_connected) != transport_state:
+            previous, transport_state = transport_state, (current, mqtt_connected)
+            previous = previous[0] if previous is not None else None
+            source = current
+            if mqtt_ready:
+                detail = "mqtt connected"
+                mqtt_snapshots = mqtt.snapshots
+            elif mqtt_connected:
+                detail = f"mqtt connected, {mqtt.subscription} not subscribed"
+            elif previous == "mqtt":
+                detail = f"mqtt disconnected after {mqtt.messages} messages"
             else:
-                # Detect the charging edge against the pre-tick state; observe()
-                # updates it afterwards.
-                was_charging = tracker.has_state and tracker.previous_state == 3
-                is_charging = fields.get("state") == 3
-                had_state = tracker.has_state
-                status_doc.set(fields, merge=True)
-                if tracker.charger_online is False:
-                    tracker.charger_online = True
-                    log("charger online")
-                tracker.record_history(fields.get("total_energy"))
-                tracker.observe(fields)
-                watchdog.record_success(payload)
-                body = _transition_body(had_state, was_charging, is_charging)
-                if body is not None:
-                    notifier.enqueue(body)
+                detail = "mqtt not connected"
+            log(f"status source: {source} ({detail})")
+            write_transport_health(db, source, mqtt_connected)
+            reconcile_failures = 0
+            next_poll = now
+        try:
+            # Without MQTT the wait interval is the cadence (unchanged); with it
+            # the loop ticks every second and polls only when reconciliation is
+            # due or the source just changed.
+            if mqtt is None or now >= next_poll:
+                # The deadline advances before the poll body: a Firestore
+                # failure inside the apply must not leave it overdue, or the 1 s
+                # tick turns into a 1 Hz charger poll for the whole outage.
+                next_poll = now + (reconcile_interval if mqtt_ready else interval)
+                sink.maybe_seed()
+                # MQTT applies that land while the GET is in flight make this
+                # response stale: it was generated before them. A flush that is
+                # only queued has not applied yet, so the apply counter stands
+                # still; its arrival counter is what catches that race.
+                mqtt_mark = sink.mqtt_generation() if mqtt is not None else None
+                mqtt_arrivals = mqtt.arrival_generation() if mqtt is not None else None
+                try:
+                    resp = transport.get(
+                        f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    if not isinstance(payload, dict):
+                        raise ValueError("status response is not a JSON object")
+                    fields = parse_status(payload)
+                except (requests.RequestException, ValueError) as exc:
+                    if mqtt_ready and mqtt.snapshots != mqtt_snapshots:
+                        # The charger is publishing: the failure belongs to the
+                        # reconciliation path, not to the charger.
+                        log(f"status reconcile failed ({_offline_reason(exc)})")
+                        # Compare the next failure against this check, not the
+                        # last successful poll (which may be long past).
+                        mqtt_snapshots = mqtt.snapshots
+                        reconcile_failures = 0
+                    elif mqtt_ready:
+                        # No snapshot since the last reconcile: the charger may
+                        # be idle (normal) or gone, and one failed poll cannot
+                        # tell them apart. Ask for consecutive evidence before
+                        # writing an outage and pushing it.
+                        reconcile_failures += 1
+                        if reconcile_failures < MQTT_OUTAGE_FAILURES:
+                            log(
+                                f"status reconcile failed ({_offline_reason(exc)}); "
+                                "no mqtt snapshot, outage unconfirmed"
+                            )
+                        elif not sink.apply_offline_if_no_snapshot(
+                            mqtt_snapshots, _offline_reason(exc)
+                        ):
+                            # A flush landed between the comparison above and
+                            # the offline decision. That is the same proof of
+                            # life the first branch uses, so the outage is
+                            # refused and the streak restarts from this
+                            # snapshot.
+                            log(
+                                f"status reconcile failed ({_offline_reason(exc)}); "
+                                "mqtt snapshot arrived, outage refused"
+                            )
+                            mqtt_snapshots = mqtt.snapshots
+                            reconcile_failures = 0
+                    else:
+                        # Charger unreachable or sent garbage: flag offline
+                        # through the sink lock, so the tracker and document
+                        # writes cannot interleave with an MQTT apply. Journal
+                        # and push once per outage.
+                        sink.apply_offline(_offline_reason(exc))
+                    # Only a successful HTTP poll clears the streak, so a
+                    # failure still means what it always meant to the watchdog.
+                    watchdog.observe_failure(tracker.state == 3)
+                else:
+                    # Seed before applying: the snapshot then carries the
+                    # fields MQTT never publishes (comm_*, rapi_connected).
+                    # The seed stays raw; every delivery is parsed. Freshness
+                    # and seed are one compare-and-merge in the source, and the
+                    # apply is one locked decision with it, so a reply a flush or
+                    # an apply overtook can neither rewind the snapshot nor be
+                    # applied.
+                    seed_snapshot = (
+                        (lambda: mqtt.seed_if_current(mqtt_arrivals, payload))
+                        if mqtt is not None
+                        else None
+                    )
+                    if not sink.apply_status(
+                        fields,
+                        "http",
+                        mqtt_mark=mqtt_mark,
+                        seed=seed_snapshot,
+                        arrival=mqtt_arrivals,
+                    ):
+                        # An MQTT snapshot applied, or a flush queued one, while
+                        # this poll was in flight, so the reply predates it;
+                        # applying it would rewind the tracker and re-fire a
+                        # transition (a stale state=3 after an MQTT stop).
+                        log("status reconcile discarded (mqtt advanced during the poll)")
+                    else:
+                        if mqtt is not None:
+                            mqtt_snapshots = mqtt.snapshots
+                        reconcile_failures = 0
+                    watchdog.record_success(payload)
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
-        _stop.wait(interval)
+        _stop.wait(interval if mqtt is None else MQTT_TICK_SEC)
 
 
-def config_loop(db, base, auth, transport, interval, initial_delay=0):
+def config_loop(
+    db,
+    base,
+    auth,
+    transport,
+    interval,
+    initial_delay=0,
+    mqtt=None,
+    config_event=None,
+    tick=MQTT_TICK_SEC,
+):
+    """Sync /config; with MQTT, only when ``config_version`` changed.
+
+    The version event is set by the MQTT source. While the broker is connected
+    *and the subscription is granted* the periodic HTTP poll is skipped; the
+    ``tick`` wait bounds how long a disconnect can go unnoticed (then the 60 s
+    poll resumes). A denied ``<base>/#`` subscription delivers no
+    ``config_version`` at all, so it cannot be the trigger: the poll stays the
+    source (logged once per source change) instead of freezing the config.
+
+    A *granted* subscription can be silent too (topic mismatch, charger-side
+    MQTT off, no retained version). Waiting on an event that never comes would
+    leave ``status/config`` stale forever, so until a ``config_version`` is
+    observed the loop bootstraps over HTTP immediately and then resyncs at
+    ``CONFIG_SAFETY_RESYNC_SEC``, logging the degraded state once.
+
+    A failed sync must not leave the config stale until the charger's next
+    setting change, so the failed trigger is consumed and the retry is owed
+    under ``pending``/``retry_at`` with a bounded backoff. A write that fails
+    after a good fetch is the same failure as a failed fetch: the document is
+    equally stale. A version change that arrives meanwhile (the retained value
+    republished on a reconnect is one) retries immediately.
+    """
     config_doc = db.collection("status").document("config")
     last_synced = None
+    # A sync is owed after a failure; retry_at is the current backoff deadline.
+    pending = False
+    retry_delay = 0.0
+    retry_at = 0.0
+    # When the next HTTP safety sync is due while no config_version is observed.
+    next_sync = 0.0
+    # The silent-subscription state is degraded and worth one journal line.
+    version_missing_logged = False
+
+    def retry(exc):
+        """Consume the trigger and arm the bounded retry after a failed sync."""
+        nonlocal retry_delay, retry_at, pending
+        retry_delay = min(
+            max(retry_delay * 2, CONFIG_RETRY_MIN_SEC), CONFIG_RETRY_MAX_SEC
+        )
+        retry_at = time.monotonic() + retry_delay
+        # The owed retry is tracked here, so the trigger is consumed; a *new*
+        # version still retries immediately.
+        config_event.clear()
+        pending = True
+        log(
+            f"config sync failed ({exc.__class__.__name__}); "
+            f"retrying in {retry_delay:g}s"
+        )
+
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
+    source = None
     while not _stop.is_set():
+        mqtt_mode = False
+        version = None
         try:
+            connected = mqtt is not None and mqtt.connected
+            # A granted subscription is what makes the version event a sync
+            # trigger: a broker that accepts the connection and then denies
+            # ``<topic>/#`` delivers no ``config_version`` ever, so waiting on
+            # the event would freeze ``status/config`` for as long as the link
+            # stays up. Until the SUBACK grants it the HTTP poll is the source
+            # and keeps its own cadence.
+            mqtt_mode = connected and config_event is not None and mqtt.subscribed
+            if mqtt is not None:
+                current = "mqtt" if mqtt_mode else "http"
+                if current != source:
+                    source = current
+                    if mqtt_mode:
+                        detail = "mqtt connected"
+                    elif not connected:
+                        detail = "mqtt not connected"
+                    elif config_event is None:
+                        detail = "mqtt connected, no config version trigger"
+                    else:
+                        detail = f"mqtt connected, {mqtt.subscription} not subscribed"
+                    log(f"config source: {current} ({detail})")
+            if mqtt_mode:
+                now = time.monotonic()
+                version_known = getattr(mqtt, "config_version", None) is not None
+                if not version_known:
+                    # A granted subscription with no version: the event may
+                    # never be set, so bootstrap over HTTP and keep a slow
+                    # safety resync instead of waiting on it.
+                    if not version_missing_logged:
+                        log(
+                            "config: mqtt subscribed but no config_version observed; "
+                            f"syncing over HTTP every {CONFIG_SAFETY_RESYNC_SEC:g}s "
+                            "until one arrives"
+                        )
+                        version_missing_logged = True
+                    if not pending and now < next_sync:
+                        config_event.wait(min(tick, next_sync - now))
+                        continue
+                elif version_missing_logged:
+                    version_missing_logged = False
+                if pending and now < retry_at:
+                    # Waiting out a failed sync's backoff; a new version is a
+                    # reason to retry now rather than when it expires.
+                    if not config_event.wait(min(tick, retry_at - now)):
+                        continue
+                elif version_known and not pending and not config_event.wait(tick):
+                    # Only a config_version change (or a reconnect republish)
+                    # syncs.
+                    continue
+                # Advance the safety deadline before the fetch: a failure must
+                # not leave it in the past and turn the tick into a hot loop.
+                next_sync = time.monotonic() + CONFIG_SAFETY_RESYNC_SEC
+                version = getattr(mqtt, "config_version", None)
             try:
                 resp = transport.get(f"{base}/config", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
@@ -1263,24 +1902,60 @@ def config_loop(db, base, auth, transport, interval, initial_delay=0):
                 if not isinstance(data, dict):
                     raise ValueError("config response is not a JSON object")
             except (requests.RequestException, ValueError) as exc:
-                log(f"config sync failed ({exc.__class__.__name__})")
+                if mqtt_mode:
+                    retry(exc)
+                else:
+                    log(f"config sync failed ({exc.__class__.__name__})")
             else:
-                redacted = redact_config(data)
-                safe_data = firestore_safe(redacted)
-                config_doc.set({**safe_data, "updated_at": firestore.SERVER_TIMESTAMP})
-                # Only log when the charger config actually changed: this loop
-                # runs every minute and would otherwise spam the journal.
-                if data != last_synced:
-                    secret_count = sum(1 for key in data if key in SECRET_CONFIG_KEYS)
-                    if secret_count:
-                        log(f"config: redacted {secret_count} credential fields")
-                    if firestore_safe(data) != data:
-                        log("config: coerced values Firestore cannot store")
-                    log("config synced")
-                    last_synced = data
+                try:
+                    redacted = redact_config(data)
+                    safe_data = firestore_safe(redacted)
+                    config_doc.set(
+                        {**safe_data, "updated_at": firestore.SERVER_TIMESTAMP}
+                    )
+                except Exception as exc:
+                    if not mqtt_mode:
+                        # Unchanged flag-off path: the loop's error handler logs
+                        # a non-fetch failure.
+                        raise
+                    # A failed write leaves the config as stale as a failed
+                    # fetch, so it takes the same bounded retry instead of
+                    # escaping with the trigger still set (a hot loop).
+                    retry(exc)
+                else:
+                    if config_event is not None:
+                        config_event.clear()
+                        if (
+                            mqtt_mode
+                            and getattr(mqtt, "config_version", None) != version
+                        ):
+                            # The version moved while the fetch was in flight:
+                            # keep the newer change pending instead of losing it.
+                            config_event.set()
+                    pending = False
+                    retry_delay = 0.0
+                    retry_at = 0.0
+                    # Only log when the charger config actually changed: this
+                    # loop runs every minute and would otherwise spam the
+                    # journal.
+                    if data != last_synced:
+                        secret_count = sum(
+                            1 for key in data if key in SECRET_CONFIG_KEYS
+                        )
+                        if secret_count:
+                            log(f"config: redacted {secret_count} credential fields")
+                        if firestore_safe(data) != data:
+                            log("config: coerced values Firestore cannot store")
+                        log("config synced")
+                        last_synced = data
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"config loop error ({exc.__class__.__name__}: {exc})")
-        _stop.wait(interval)
+        if mqtt_mode:
+            # Never spin: the tail wait bounds every MQTT-mode iteration, so
+            # even a failure that escaped the backoff costs at most one tick.
+            _stop.wait(tick)
+        else:
+            _stop.wait(interval)
 
 
 def _command_created_at(cmd):
@@ -1774,11 +2449,13 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initi
         _stop.wait(interval)
 
 
-def run(db, base, auth, intervals, transport, watchdog_config):
+def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     """Start the pollers; blocks on the command loop until the stop event.
 
     Every loop gets the same ``transport``: one Session and one bounded
-    keep-alive pool per process.
+    keep-alive pool per process. With ``mqtt`` (an enabled MqttConfig) the
+    source is started and its snapshots are applied on their own worker; the
+    status and config loops then reconcile instead of polling.
     """
     (
         status_interval,
@@ -1792,6 +2469,36 @@ def run(db, base, auth, intervals, transport, watchdog_config):
     notifier = Notifier(db)
     watchdog = Watchdog(db, base, auth, transport, notifier, watchdog_config)
 
+    source = None
+    snapshots = None
+    config_event = None
+    mqtt_status_args = None
+    if mqtt is not None and mqtt.enabled:
+        # Telemetry slots plus the reserved edge backlog: a blocked worker must
+        # not lose a session edge to queue capacity.
+        snapshots = queue.Queue(maxsize=MQTT_PENDING_QUEUE)
+        config_event = threading.Event()
+        source = MqttSource(
+            host=mqtt.host,
+            port=mqtt.port,
+            topic=mqtt.topic,
+            user=mqtt.user,
+            password=mqtt.password,
+            client_id=mqtt.client_id,
+            on_status=lambda record: enqueue_latest(snapshots, record),
+            on_config_version=lambda _version: config_event.set(),
+            log=log,
+        )
+    # Built after the source: the outage decision needs its arrival sequence.
+    sink = StatusSink(
+        db,
+        tracker,
+        notifier,
+        arrivals=source.arrival_generation if source is not None else None,
+    )
+    if source is not None:
+        mqtt_status_args = (sink, snapshots)
+
     status_args = (
         db,
         base,
@@ -1801,9 +2508,21 @@ def run(db, base, auth, intervals, transport, watchdog_config):
         tracker,
         notifier,
         watchdog,
+        source,
+        mqtt.reconcile_sec if source is not None else MQTT_RECONCILE_SEC,
+        sink,
     )
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
-    config_args = (db, base, auth, transport, config_interval, CONFIG_INITIAL_DELAY)
+    config_args = (
+        db,
+        base,
+        auth,
+        transport,
+        config_interval,
+        CONFIG_INITIAL_DELAY,
+        source,
+        config_event,
+    )
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
     schedule_args = (
         db,
@@ -1815,7 +2534,14 @@ def run(db, base, auth, intervals, transport, watchdog_config):
         SCHEDULE_INITIAL_DELAY,
     )
     threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
+    if mqtt_status_args is not None:
+        threading.Thread(
+            target=mqtt_status_loop, args=mqtt_status_args, daemon=True
+        ).start()
+        source.start()
     command_loop(db, base, auth, transport, command_interval)
+    if source is not None:
+        source.stop()
 
 
 def main():
@@ -1840,6 +2566,7 @@ def main():
         sys.exit(str(exc))
 
     watchdog = watchdog_config_or_exit()
+    mqtt = mqtt_config_or_exit()
 
     def stop(signum, _frame):
         log(f"received signal {signum}, stopping")
@@ -1858,6 +2585,15 @@ def main():
         f"cooldown={watchdog.cooldown:g}s cap={watchdog.max_per_hour}/h "
         f"restart_while_charging={watchdog.restart_while_charging}"
     )
+    if mqtt.enabled:
+        # Host/topic only: the broker password never reaches the journal.
+        log(
+            f"mqtt: enabled host={mqtt.host}:{mqtt.port} topic={mqtt.topic} "
+            f"reconcile={mqtt.reconcile_sec:g}s client_id={mqtt.client_id} "
+            f"user={'set' if mqtt.user else 'none'}"
+        )
+    else:
+        log("mqtt: disabled (HTTP status polling)")
     intervals = (
         status_interval,
         config_interval,
@@ -1872,6 +2608,7 @@ def main():
         intervals,
         ChargerTransport(make_charger_session()),
         watchdog,
+        mqtt,
     )
     log("bridge stopped")
 

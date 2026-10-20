@@ -3,16 +3,16 @@
 ## Goals
 
 - Move OpenEVSE charger status and basic control off the home LAN and onto the phone, reliably.
-- Nothing complex: no backend server, no message broker, no inbound connections to the house, minimal moving parts.
+- Nothing complex: no backend server, no cloud broker, no inbound connections to the house, minimal moving parts. The LAN-leg broker (Mosquitto on the Pi) is part of the trusted home network, not a public service.
 
 ## Topology
 
 ```
 ┌────────────────┐  LAN HTTP     ┌───────────────┐  outbound HTTPS ┌────────────────────────┐
 │ OpenEVSE       │◄─────────────►│ Raspberry Pi  │────────────────►│ Firebase               │
-│ (WiFi module)  │ 192.168.0.145 │ bridge agent  │  status writes / │ Firestore (data)       │
-└────────────────┘               └───────────────┘  command watch   │ Hosting (PWA)          │
-                                                                   └───────────┬────────────┘
+│ (WiFi module)  │  LAN MQTT     │ mosquitto +   │  status writes / │ Firestore (data)       │
+│                │◄─────────────►│ bridge agent  │  command watch   │ Hosting (PWA)          │
+└────────────────┘   status      └───────────────┘                  └───────────┬────────────┘
                                                                                │ HTTPS
                                                                     ┌──────────▼───────────┐
                                                                     │ Android phone (PWA)  │
@@ -20,7 +20,7 @@
                                                                     └──────────────────────┘
 ```
 
-The only publicly reachable component is Firebase. The Pi never accepts inbound connections, and there is no self-run server anywhere.
+The only publicly reachable component is Firebase. The Pi accepts no inbound connection from outside the LAN (the MQTT listener is LAN-only and authenticated), and there is no self-run server anywhere.
 
 ## Components
 
@@ -30,12 +30,14 @@ Python 3 service on the Raspberry Pi, run under systemd (`Restart=always`). Auth
 
 Four loops:
 
-| Loop     | Interval                                | Action                                                                                                                                                                                                                |
-| -------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status   | 10 s                                    | `GET http://<charger>/status` → write curated fields to `status/current`; maintain `history/<date>` from `total_energy` deltas; finalize one `sessions/*` doc per plug-in session                                     |
-| Config   | 60 s                                    | `GET /config` → write `status/config` with credential fields redacted                                                                                                                                                 |
-| Schedule | on change + 60 s, reconcile every 300 s | Sync `schedule/current` → firmware `POST /schedule` (one event per request; each rule becomes a window-start `active` event and a window-end `disabled` event). Poll `GET /schedule/plan` → `status.current.schedule` |
-| Commands | 5 s poll                                | New pending doc in `commands` → apply to charger → mark acked / failed (stale pending docs are failed without contacting the charger)                                                                                 |
+| Loop     | Interval                                                | Action                                                                                                                                                                                                                                        |
+| -------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status   | 10 s (HTTP) / 60 s reconciliation while MQTT is healthy | HTTP: `GET http://<charger>/status` → write curated fields to `status/current`; MQTT: subscribed status topics → the same write path; maintain `history/<date>` from `total_energy` deltas; finalize one `sessions/*` doc per plug-in session |
+| Config   | 60 s (HTTP) / on `config_version` change under MQTT     | `GET /config` → write `status/config` with credential fields redacted                                                                                                                                                                         |
+| Schedule | on change + 60 s, reconcile every 300 s                 | Sync `schedule/current` → firmware `POST /schedule` (one event per request; each rule becomes a window-start `active` event and a window-end `disabled` event). Poll `GET /schedule/plan` → `status.current.schedule`                         |
+| Commands | 5 s poll                                                | New pending doc in `commands` → apply to charger → mark acked / failed (stale pending docs are failed without contacting the charger)                                                                                                         |
+
+Both status transports feed **one** `parse_status` → `apply_status` path, so an MQTT snapshot gets the same unit conversion (milliamps → amps, 10ths of °C → °C), the same curated field set, and the same history, session and transition logic as an HTTP reply — once per real change. An MQTT snapshot only runs the state machine once it is complete (the source holds a `/status` seed and the snapshot carries a `state`), and a reconcile reply older than an MQTT apply is discarded rather than allowed to rewind the tracker. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan`, OTA and commands. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
 
 The status loop also emits **FCM push notifications** on transitions — charging started, charging stopped, charger offline — sent by a background worker to every registered `fcmTokens` doc via the Admin SDK (invalid tokens are pruned on send error).
 
@@ -50,7 +52,8 @@ Failure handling: connection errors (charger or Firebase) are logged and retried
 | Path                | Writer                                  | Readers               | Content                                                                                                                                                                                                                             |
 | ------------------- | --------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `status/current`    | bridge (admin)                          | verified, allowlisted | Curated `/status` fields: `{state, state_label, amp, voltage, power, session_energy (Wh), total_energy (kWh), elapsed (s), vehicle, temp1–temp3, temp_c, pilot, charger_online, schedule: {in_window, active_rule_id}, updated_at}` |
-| `status/config`     | bridge (admin)                          | verified, allowlisted | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings) with credential fields redacted to `"***"`; refreshed ~60 s                                                                            |
+| `status/config`     | bridge (admin)                          | verified, allowlisted | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings) with credential fields redacted to `"***"`; refreshed ~60 s (or on a `config_version` change with MQTT)                                |
+| `status/health`     | bridge (admin)                          | verified, allowlisted | Watchdog state (`healthy`/`unhealthy`, reason, `http_ok`, `controller_ok`, attempt history) plus the active status transport (`source`, `mqtt_connected`) with merge writes from both writers                                       |
 | `history/{date}`    | bridge (admin)                          | verified, allowlisted | `{kwh}` per local day, derived from `total_energy` deltas                                                                                                                                                                           |
 | `sessions/{id}`     | bridge (admin)                          | verified, allowlisted | One record per completed plug-in session (merged across pause/resume): `{started_at, ended_at, wh, elapsed}`                                                                                                                        |
 | `schedule/current`  | app (write), bridge (syncs to firmware) | allowlisted users     | Owner-defined charge schedule: `{enabled, rules: [{id, days [0–6 Mon=0], start "HH:MM", end "HH:MM", amps}]}`; `end < start` wraps past midnight; bridge mirrors it into the firmware scheduler                                     |
@@ -94,7 +97,16 @@ The charger's official WiFi module (ESP32 firmware) exposes a local JSON/HTTP AP
 
 Plain HTTP on the trusted home LAN (HTTP Basic auth if an admin password is set on the charger). The API is small enough that the bridge can use a plain HTTP client; [`openevsehttp`](https://github.com/firstof9/python-openevse-http) — the library behind the Home Assistant integration — is the fuller-featured option: actively maintained, async, requires Python ≥ 3.13 on the Pi. The firmware also offers a WebSocket (`GET /ws`) with JSON deltas; v1 polls instead for simplicity.
 
-**HTTP polling vs MQTT**: the WiFi module also speaks MQTT natively, but MQTT needs a broker reachable from both the house and the cloud. HTTP polling is stateless, NAT-friendly, and trivially debuggable — the right fit for "very simple". MQTT remains a documented future alternative.
+**HTTP polling vs MQTT**: status is MQTT-first when `MQTT_ENABLED=true` — the
+firmware publishes one topic per value as its EVSE poll changes, so Firestore
+updates arrive in seconds and the HTTP `/status` poll drops to a 60 s
+reconciliation. HTTP stays authoritative for `/config` (redaction/coercion in one
+place), `/schedule/plan` (the firmware computes the plan), OTA, commissioning
+and the controller counters (`comm_sent`/`comm_success`/`rapi_connected`) that
+the watchdog reads from the HTTP reply and that MQTT does not publish (they stay
+out of `status/current`) — and it remains the fallback
+and the rollback. The broker (Mosquitto) runs on the Pi: LAN-only, authenticated,
+no cloud dependency, and a flag flip back to polling.
 
 ## Security
 
@@ -117,14 +129,15 @@ Full runbook: [docs/DEPLOY.md](docs/DEPLOY.md). End-to-end checklist: [docs/VALI
 
 Failure modes:
 
-| Failure              | Behavior                                                                                                                                                                                                   |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pi offline           | PWA shows stale `updated_at` / **"Bridge offline"** (no status write for 60 s)                                                                                                                             |
-| Charger unreachable  | Bridge retries at the fixed poll interval, writes `charger_online: false`, and the PWA banner distinguishes **"Charger offline"** from the bridge case; a command it cannot apply is marked `failed`       |
-| Firebase blip        | SDKs auto-reconnect; the bridge retries failed writes on the next tick; history baselines only advance after a successful write                                                                            |
-| PWA offline          | An already-loaded app keeps working from the Firestore cache and the service-worker shell; a cold reload needs the network because the Firebase SDK and `firebase-config.js` are deliberately network-only |
-| Stale deployed shell | Shell files are cache-first: `index.html`, `sw.js` and `firebase-config.js` are served `no-cache`, and a shell change must bump `CACHE` in `web/sw.js`; an open tab keeps old modules until reopened       |
-| Index still building | The Advanced console reports the in-progress index (`failed-precondition`) instead of a generic error; reload once Firestore shows it ready                                                                |
+| Failure              | Behavior                                                                                                                                                                                                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi offline           | PWA shows stale `updated_at` / **"Bridge offline"** (no status write for 60 s)                                                                                                                                                                                                |
+| Charger unreachable  | Bridge retries at the fixed poll interval, writes `charger_online: false`, and the PWA banner distinguishes **"Charger offline"** from the bridge case; a command it cannot apply is marked `failed`                                                                          |
+| MQTT broker down     | The bridge logs one `status source: http (mqtt disconnected …)`, resumes the 10 s HTTP poll and records `status/health.source: "http"`; when the broker returns it switches back and logs once. The charger keeps publishing into the void (QoS 0) with no impact on charging |
+| Firebase blip        | SDKs auto-reconnect; the bridge retries failed writes on the next tick; history baselines only advance after a successful write                                                                                                                                               |
+| PWA offline          | An already-loaded app keeps working from the Firestore cache and the service-worker shell; a cold reload needs the network because the Firebase SDK and `firebase-config.js` are deliberately network-only                                                                    |
+| Stale deployed shell | Shell files are cache-first: `index.html`, `sw.js` and `firebase-config.js` are served `no-cache`, and a shell change must bump `CACHE` in `web/sw.js`; an open tab keeps old modules until reopened                                                                          |
+| Index still building | The Advanced console reports the in-progress index (`failed-precondition`) instead of a generic error; reload once Firestore shows it ready                                                                                                                                   |
 
 Each row is triggered and checked in [docs/VALIDATION.md](docs/VALIDATION.md).
 
@@ -136,5 +149,13 @@ Each row is triggered and checked in [docs/VALIDATION.md](docs/VALIDATION.md).
 - **Config parity by functionality, not UI**: the app exposes all configuration the charger offers (view), with changes via whitelisted commands plus the gated RAPI console — we don't mirror the built-in UI's layout.
 - **Firmware-native scheduling**: the app edits `schedule/current` in Firestore; the bridge pushes it to the charger's own scheduler (`POST /schedule`; v5.1.5 events are flat `{id, state, time, days}` with no per-event current, so `amps` is stored but not applied). Windows are enforced by the charger itself and survive a Pi outage; a periodic reconcile re-posts them after a firmware reset. `/override` remains the dynamic manual path. (Research confirmed the v5.x scheduler API — bridge-side window evaluation was considered and rejected.)
 - **Deferred from the built-in UI**: session limits are reachable via the RAPI console in v1; a curated screen can follow if wanted.
+- **MQTT-first status, HTTP for the rest**: the charger publishes per-field
+  status topics, so the bridge subscribes instead of polling and keeps HTTP for
+  `/config`, `/schedule/plan`, OTA, commands and as the automatic fallback
+  (`MQTT_ENABLED=false` reverts to 10 s polling). The broker lives on the Pi —
+  the existing always-on host on the charger's LAN — so the design stays
+  serverless from the internet's point of view and adds no cloud service.
 - **FCM in v1**: push for charging started/stopped and offline events — the PWA self-registers its token, the bridge sends via the Admin SDK. Costs are computed client-side from the stored rate.
-- Future candidates: native Android app, MQTT transport for the LAN leg, per-event notification preferences, firmware's built-in Emoncms posting as a zero-code telemetry fallback.
+- Future candidates: native Android app, commands over MQTT (#46), LWT-driven
+  availability and MQTT restarts (#45), per-event notification preferences,
+  firmware's built-in Emoncms posting as a zero-code telemetry fallback.

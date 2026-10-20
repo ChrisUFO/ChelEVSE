@@ -192,7 +192,10 @@ class FakeSession:
         self.calls.append((method, url, kwargs))
         if not self.responses:
             return FakeResponse()
-        return self.responses.pop(0)
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def get(self, url, **kwargs):
         return self._call("get", url, **kwargs)
@@ -202,3 +205,106 @@ class FakeSession:
 
     def delete(self, url, **kwargs):
         return self._call("delete", url, **kwargs)
+
+
+class FakeMessage:
+    """Just the paho message surface the source reads."""
+
+    def __init__(self, topic, payload):
+        self.topic = topic
+        if isinstance(payload, bytes):
+            self.payload = payload
+        else:
+            self.payload = str(payload).encode()
+
+
+class FakeMqttClient:
+    """Stand-in for paho's Client: no broker, callbacks are called by hand.
+
+    ``connect()``/``drop()`` simulate the network loop's connection callbacks;
+    ``ack_subscribe()`` simulates a SUBACK and ``deliver()`` feeds one message
+    as the broker would.
+    """
+
+    def __init__(self, client_id=None):
+        self.client_id = client_id
+        self.connected = False
+        self.subscriptions = []
+        self.credentials = None
+        self.reconnect_delay = None
+        self.connect_args = None
+        self.looping = False
+        self.disconnected = False
+        self.on_connect = None
+        self.on_disconnect = None
+        self.on_subscribe = None
+        self.on_message = None
+        self.on_connect_fail = None
+
+    def username_pw_set(self, username, password=None):
+        self.credentials = (username, password)
+
+    def reconnect_delay_set(self, min_delay=1, max_delay=120):
+        self.reconnect_delay = (min_delay, max_delay)
+
+    def connect_async(self, host, port, keepalive=60):
+        self.connect_args = (host, port, keepalive)
+
+    def loop_start(self):
+        self.looping = True
+
+    def loop_stop(self):
+        self.looping = False
+
+    def subscribe(self, topic, qos=0):
+        self.subscriptions.append((topic, qos))
+        return (0, 1)
+
+    def is_connected(self):
+        return self.connected
+
+    def disconnect(self):
+        self.disconnected = True
+        self.connected = False
+
+    # -- test helpers ------------------------------------------------------
+
+    def connect(self, reason_code=0):
+        self.connected = not getattr(reason_code, "is_failure", bool(reason_code))
+        if self.on_connect is not None:
+            self.on_connect(self, None, {}, reason_code, None)
+
+    def drop(self, reason_code=0):
+        self.connected = False
+        if self.on_disconnect is not None:
+            self.on_disconnect(self, None, None, reason_code, None)
+
+    def fail_connect(self):
+        self.connected = False
+        if self.on_connect_fail is not None:
+            self.on_connect_fail(self, None)
+
+    def ack_subscribe(self, reason_codes):
+        if self.on_subscribe is not None:
+            self.on_subscribe(self, None, 1, reason_codes, None)
+
+    def deliver(self, topic, payload):
+        if self.on_message is not None:
+            self.on_message(self, None, FakeMessage(topic, payload))
+
+
+class FakeMqttFactory:
+    """Client factory for MqttSource(client_factory=...)."""
+
+    def __init__(self):
+        self.clients = []
+
+    def __call__(self, client_id):
+        client = FakeMqttClient(client_id)
+        self.clients.append(client)
+        return client
+
+    @property
+    def client(self):
+        return self.clients[-1]
+

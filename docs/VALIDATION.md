@@ -72,7 +72,39 @@ healthy, check every value the status screen renders.
 
 `status/current` should also carry `updated_at` moving every `STATUS_INTERVAL`
 (default 10 s), and `schedule: {in_window, active_rule_id}` once a schedule
-exists.
+exists. With MQTT enabled the cadence follows the charger's publishes instead —
+see [MQTT transport](#mqtt-transport-issue-44).
+
+### MQTT transport (issue #44)
+
+Run these with `MQTT_ENABLED=true` and the charger publishing to the broker (the
+setup is in [DEPLOY.md §10.1](DEPLOY.md#101-mqtt-status-transport-optional)).
+Each row can be reverted with the bridge flag or the charger's `mqtt_enabled`.
+
+| #    | Check                     | How                                                                                                                                        | Expected observation                                                                                                                                                                                                                                                                                                         | Evidence                                                 |
+| ---- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| M.1  | Flag off is unchanged     | Start with `MQTT_ENABLED=false`; watch a minute of journal                                                                                 | `mqtt: disabled (HTTP status polling)`, no `status source:` lines, `status/current.updated_at` every 10 s, `status/health` has no `source` field                                                                                                                                                                             | Journal excerpt, `status/current.updated_at`             |
+| M.2  | Broker refuses anonymous  | `mosquitto_sub -h <pi-host> -t 'test/#' -C 1 -W 2`                                                                                         | `Connection error: Connection Refused: not authorised.`; an authenticated publish/subscribe round-trips                                                                                                                                                                                                                      | Terminal output                                          |
+| M.3  | Charger is connected      | `GET http://<charger>/status`                                                                                                              | `mqtt_connected: 1`, `mqtt_status: connected`; `/config` shows `mqtt_enabled: true`, the server/port/topic/user, and `mqtt_pass` redacted                                                                                                                                                                                    | Endpoints' output                                        |
+| M.4  | Topics match the document | `mosquitto_sub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" -v -t 'chelevse/#' -t 'openevse/announce/#'` then compare with `status/current` | Status fields, retained `config`/`override`/`schedule`, and the announce message. `amp` in the topic is mA (÷1000 = `amp`), `temp1`–`temp3` are 10ths of °C (÷10 = `tempN`), `session_elapsed` is `elapsed`; absent sensors stay `null`; the document holds only curated fields (no `comm_*`, `ipaddress`, `mqtt_connected`) | Topic sample, `status/current`                           |
+| M.5  | Event-driven latency      | Start or stop a charge (or change the setpoint)                                                                                            | `status/current` reflects the change within ~5 s, well before the 10 s poll would have — including `state`, `state_label` and a fresh `updated_at`                                                                                                                                                                           | Before/after `updated_at`, journal `status source: mqtt` |
+| M.6  | Reconciliation only       | Watch a few minutes while MQTT is connected                                                                                                | Journal shows no 10 s `/status` churn; a reconcile happens about once a minute. `chelevse/config_version` rising (a charger setting change) produces exactly one `config synced` line                                                                                                                                        | Journal excerpt, `chelevse/config_version`               |
+| M.7  | Fallback is automatic     | `sudo systemctl stop mosquitto`, wait for the next tick, then `sudo systemctl start mosquitto`                                             | One `status source: http (mqtt disconnected after N messages)`, 10 s polls resume, `status/health.source` is `http` and `mqtt_connected` `false`; on reconnect one `status source: mqtt (mqtt connected)` and the health fields flip back                                                                                    | Journal lines, `status/health` before/during/after       |
+| M.8  | No duplicate transitions  | Run a charge start/stop with both sources live (§1.9-style reconcile during an edge)                                                       | Exactly one `Charging started` / `Charging stopped` push, one `sessions/*` doc for the plug-in event, and `history/<date>.kwh` increases by that session's energy (no double count)                                                                                                                                          | Push screenshots, session doc, history doc               |
+| M.9  | Real outage still shows   | Power the charger off for ~2 min while the broker stays up                                                                                 | `charger offline (…)` once, `charger_online: false` in `status/current`, `mqtt_connected` stays `true` (the broker link is fine); it clears on the charger's return, when the first MQTT snapshot or reconcile writes `charger_online: true`                                                                                 | Journal line, `status/current`                           |
+| M.10 | Watchdog input unchanged  | Stop mosquitto for ~2 min                                                                                                                  | No watchdog restart from the MQTT outage alone; the failure streak (and `status/health.reason`) only moves on failed **HTTP** polls                                                                                                                                                                                          | Journal `watchdog:` lines, `status/health`               |
+
+Restore the broker and the charger before continuing.
+
+Notes:
+
+- **Config retry (M.6).** A `/config` fetch that fails while the broker is
+  healthy is retried with a bounded backoff (5 s doubling to 60 s): the journal
+  shows `config sync failed (…); retrying in Ns` then `config synced`, with no
+  new `config_version`. A version change during the backoff retries at once.
+- **After a rollback (M.1).** `status/health.source`/`mqtt_connected` keep their
+  last MQTT values while the flag is off (the HTTP-only path does not write
+  them); do not read them as live transport state after `MQTT_ENABLED=false`.
 
 ### Watchdog health (`status/health`)
 
