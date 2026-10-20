@@ -885,6 +885,7 @@ input[type='range']::-moz-range-thumb {
 /* Informational notes added with the Config/Advanced screens need AA contrast
    on the dark surfaces; the older History/Schedule counters keep --faint. */
 #config-updated,
+#rates-count,
 .advanced-note {
   color: var(--muted);
 }
@@ -1304,9 +1305,9 @@ input[type='range']::-moz-range-thumb {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-.rule-remove {
+.rule-remove,
+.rate-remove {
   min-height: 32px;
-  margin-left: auto;
   padding: 0 8px;
   border-radius: 8px;
   font-size: 12px;
@@ -1315,7 +1316,11 @@ input[type='range']::-moz-range-thumb {
     color 0.15s ease,
     background 0.15s ease;
 }
-.rule-remove:hover {
+.rule-remove {
+  margin-left: auto;
+}
+.rule-remove:hover,
+.rate-remove:hover {
   background: color-mix(in oklab, var(--err) 10%, transparent);
   color: var(--err);
 }
@@ -1564,6 +1569,152 @@ input[aria-invalid='true'] {
 .settings-form {
   display: grid;
   gap: 14px;
+}
+
+/* rate schedule editor — a stack of compact windows above the fallback pair */
+.rate-editor {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.rate-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.rate-head-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.rate-head h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rate-head .block-sub {
+  margin: 0;
+}
+.rate-head .section-note {
+  flex: none;
+  padding-top: 2px;
+}
+.rate-list {
+  display: grid;
+  gap: 10px;
+}
+.rate-window {
+  display: grid;
+  gap: 11px;
+  padding: 12px 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+  transition: border-color 0.15s ease;
+}
+.rate-window.invalid {
+  border-color: color-mix(in oklab, var(--err) 45%, var(--line));
+}
+.rate-window-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+.rate-window-title {
+  min-width: 0;
+}
+.rate-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.rate-summary {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.rate-window .time-row {
+  gap: 6px;
+}
+.rate-window .time-sep {
+  padding-bottom: 12px;
+}
+.rate-window .rule-error {
+  margin: 0;
+}
+.rate-amount .text-input {
+  min-height: 40px;
+  padding-right: 54px;
+}
+.rate-amount .input-suffix {
+  right: 10px;
+}
+.months-row {
+  display: grid;
+  gap: 8px;
+}
+.months-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+}
+.months-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.month-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 6px;
+}
+.month-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  color-scheme: dark;
+}
+.month-select:focus-visible {
+  border-color: transparent;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.month-select[aria-invalid='true'] {
+  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
+}
+.month-select[aria-invalid='true']:focus-visible {
+  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
+  outline-color: var(--err);
+}
+.rate-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 .settings-grid {
   display: grid;
@@ -2078,6 +2229,16 @@ input[aria-invalid='true']:focus-visible {
   }
   .rule-card {
     padding: 12px 12px 10px;
+  }
+  .rate-window {
+    padding: 11px 10px 9px;
+  }
+  .month-select {
+    padding: 0 6px;
+    font-size: 12.5px;
+  }
+  .rate-amount .text-input {
+    padding-right: 48px;
   }
   .day {
     font-size: 10px;

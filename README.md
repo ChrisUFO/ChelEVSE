@@ -11,18 +11,39 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 - **History**: daily kWh chart for the last 30 days and the 20 most recent charging sessions, with cost at your electricity rate.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.
-- **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for rate/currency, notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
+- **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for rate/currency and the rate schedule, notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
 - **Simple**: no backend server to write or run — Firestore carries the data, Hosting serves the app, the free tier covers a household many times over.
 
 ## Screens
 
-| Tab          | What it shows                                                                                                     |
-| ------------ | ----------------------------------------------------------------------------------------------------------------- |
-| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls. |
-| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.  |
-| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.  |
-| **Config**   | Charger configuration with secrets redacted, App settings (rate + currency), and the notification opt-in card.    |
-| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.           |
+| Tab          | What it shows                                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                     |
+| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                      |
+| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                      |
+| **Config**   | Charger configuration with secrets redacted, App settings (fallback rate, rate schedule, currency), and the notification opt-in card. |
+| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                               |
+
+## Electricity rates
+
+App settings hold an optional **rate schedule** on top of the fallback rate:
+
+- The **fallback rate** prices every moment no window covers, so a flat rate keeps working with no
+  schedule at all.
+- A **rate window** sets a rate for a set of weekdays, a local `HH:MM` start and end, and either the
+  whole year or a month range. Up to 24 windows.
+- Weekdays use `0` = Monday … `6` = Sunday, the same convention as the charging schedule. The editor
+  shows the day names, so the numbers only matter in the stored document.
+- Times are local wall clock. An end at or before the start wraps past midnight (22:00 → 06:00 is a
+  night window), and a window's after-midnight hours belong to the day it started.
+- A month range is inclusive and may wrap the year: November → February means November, December,
+  January and February. "All year" stores no month limit.
+- Windows must not overlap. Two windows that share a day, a month and a time would make the rate
+  ambiguous, so the editor rejects the schedule instead of silently choosing one. A document written
+  outside the editor (hand-edited, or by an older client) can still hold overlaps: there the **last
+  matching window wins**, and the editor asks you to resolve the overlap before it will save again.
+- Saving writes the fallback rate, currency, and the window list. With no windows, the document keeps
+  exactly its two flat fields.
 
 ## How it works
 
