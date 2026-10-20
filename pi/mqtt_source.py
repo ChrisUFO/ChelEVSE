@@ -5,7 +5,9 @@ topic (``<base>/amp``, ``<base>/state``, …) whenever the EVSE poll reports a
 change. This module subscribes to them, coalesces a burst into one snapshot and
 hands that snapshot to a callback; the bridge then runs it through the same
 ``parse_status``/``apply_status`` path as an HTTP poll, so this module never
-writes a document itself.
+writes a document itself. Each delivery is a ``Snapshot`` record: the raw fields
+plus the arrival number and the seeded-at-flush flag the receiver needs to order
+it against a reconcile.
 
 Design notes:
 
@@ -36,6 +38,7 @@ The client is injected (``client_factory``), so the unit tests need no broker.
 
 import json
 import threading
+from typing import NamedTuple
 
 import paho.mqtt.client as mqtt
 
@@ -126,6 +129,23 @@ def _first_reason(args):
         if isinstance(value, int) or hasattr(value, "value"):
             return value
     return None
+
+
+class Snapshot(NamedTuple):
+    """One delivered snapshot plus the facts the receiver must not re-read.
+
+    ``fields`` is the raw merged payload, ``arrival`` is the source's snapshot
+    counter for this delivery and ``complete`` says whether a ``/status`` seed
+    was in place when it was flushed. The apply worker runs after the source has
+    moved on -- a seed may have landed, a reconcile may have applied -- so both
+    facts are frozen with the payload: a pre-seed partial must not be promoted
+    to a complete observation later, and its arrival orders it against a
+    reconcile that already applied newer data.
+    """
+
+    fields: dict
+    arrival: int
+    complete: bool
 
 
 class MqttSource:
@@ -237,6 +257,10 @@ class MqttSource:
         later MQTT flush cannot null them. The 60 s HTTP reconciliation refreshes
         the seed. The seed is raw: the receiver parses every snapshot, so the
         snapshot needs the same raw units a ``/status`` reply carries.
+
+        The status loop uses ``seed_if_current`` instead: on its own this merge
+        is not ordered against the snapshots that arrived while the reply was in
+        flight.
         """
         if not isinstance(payload, dict):
             return
@@ -244,18 +268,42 @@ class MqttSource:
             self.snapshot.update(payload)
             self.seeded = True
 
+    def seed_if_current(self, expected_generation, payload):
+        """Seed only if no snapshot arrived since ``expected_generation``.
+
+        The comparison, the merge and the ``seeded`` flag are one critical
+        section. Checking the arrival generation and then calling ``seed`` would
+        leave a gap: a flush landing between them still sees the generation it
+        expects, so the older reply would overwrite the newer snapshot and a
+        later partial flush would republish its fields. Returns True when the
+        payload was merged.
+        """
+        if not isinstance(payload, dict):
+            return False
+        with self._lock:
+            if self.snapshots != expected_generation:
+                return False
+            self.snapshot.update(payload)
+            self.seeded = True
+            return True
+
     def flush(self):
-        """Deliver the buffered fields as one snapshot (timer target)."""
+        """Deliver the buffered fields as one snapshot (timer target).
+
+        The delivered record carries this delivery's arrival number and whether
+        the snapshot was seeded yet, both read under the same lock as the merge:
+        the worker may consume it long after a seed or a newer flush.
+        """
         with self._lock:
             pending, self._pending = self._pending, {}
             self._timer = None
             if not pending:
                 return
             self.snapshot.update(pending)
-            snapshot = dict(self.snapshot)
             self.snapshots += 1
+            record = Snapshot(dict(self.snapshot), self.snapshots, self.seeded)
         if self.on_status is not None:
-            self.on_status(snapshot)
+            self.on_status(record)
 
     # -- paho callbacks ----------------------------------------------------
 

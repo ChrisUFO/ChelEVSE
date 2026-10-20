@@ -397,6 +397,9 @@ sudo -u mosquitto test -r /etc/mosquitto/passwd && echo "password file readable"
 Skipping the `chown`/`chmod` leaves the broker unable to open its password file
 (`Unable to open pwfile` / connections refused) even though the file exists.
 
+Always let `mosquitto_passwd` **prompt** for the password. Its `-b` form takes
+the password as an argument, which puts it in your shell history and in `ps`.
+
 Create `/etc/mosquitto/conf.d/chelevse.conf` (LAN listener, authenticated only):
 
 ```conf
@@ -414,14 +417,28 @@ systemctl is-active mosquitto         # active
 
 Verify from the Pi: an anonymous subscribe must be refused
 (`Connection Refused: not authorised`), and an authenticated publish/subscribe
-must round-trip:
+must round-trip. Put the password in the shell once, without echoing it and
+without writing it to history — `read -rs` reads it silently, or source the
+gitignored env file once step 2 exists:
+
+```bash
+# Either (before private/bridge.env exists):
+read -r -s -p 'broker password: ' MQTT_PASS; echo
+# ... or, once it does (never echo the file or assign the value literally):
+# set -a; . /opt/chelevse/private/bridge.env; set +a
+```
 
 ```bash
 mosquitto_sub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" -t 'test/#' -C 1 -W 3 &
 mosquitto_pub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" -t 'test/hello' -m ok
 ```
 
-**2. Bridge credentials** (flag still off) in `private/bridge.env`:
+`mosquitto_sub`/`mosquitto_pub` have no password-file option, so `-P` does put
+the value in their argv for the second they run (visible to `ps`); the variable
+never appears in the history text and the secret is still never typed into a
+command. Do not put the expanded value in the command line yourself.
+
+**2. Bridge credentials** (flag still off) in `private/bridge.env`, mode 0600:
 
 ```bash
 MQTT_ENABLED=false
@@ -434,14 +451,20 @@ MQTT_TOPIC=chelevse
 
 **3. Charger.** Point it at the broker over plain MQTT on the LAN. The password
 is stored on the charger in plain text (like `www_password`) and is redacted
-from `status/config` by the existing redaction list.
+from `status/config` by the existing redaction list. Send the JSON on **stdin**
+(`-d @-`), so the password is expanded into curl's input rather than its
+arguments: it stays out of the shell history and out of `ps`.
 
 ```bash
+set -a; . /opt/chelevse/private/bridge.env; set +a   # loads MQTT_PASS, no echo
+
 curl -s -X POST http://<charger-host>/config \
   -H 'Content-Type: application/json' \
-  -d '{"mqtt_enabled":true,"mqtt_protocol":"mqtt","mqtt_server":"<pi-host>",
-       "mqtt_port":1883,"mqtt_user":"<mqtt-user>","mqtt_pass":"<broker password>",
-       "mqtt_topic":"chelevse"}'
+  -d @- <<JSON
+{"mqtt_enabled":true,"mqtt_protocol":"mqtt","mqtt_server":"<pi-host>",
+ "mqtt_port":1883,"mqtt_user":"<mqtt-user>","mqtt_pass":"$MQTT_PASS",
+ "mqtt_topic":"chelevse"}
+JSON
 curl -s -X POST http://<charger-host>/restart \
   -H 'Content-Type: application/json' -d '{"device":"gateway"}'
 ```
@@ -471,15 +494,22 @@ Expect `mqtt: enabled host=<pi-host>:1883 topic=chelevse …` and
 `source: "mqtt"`, `mqtt_connected: true`; `status/current` keeps updating
 without a 10 s poll (the journal shows one reconcile a minute at most).
 
+If no `config_version` is ever published (topic mismatch, charger-side MQTT off,
+no retained version), the journal shows `config: mqtt subscribed but no
+config_version observed; syncing over HTTP every 600s until one arrives` and
+`status/config` is still refreshed — once on bootstrap, then every 10 minutes.
+
 **5. Rollback.** Either switch alone is enough:
 
-- Bridge: set `MQTT_ENABLED=false` in **`/opt/chelevse/private/bridge.env`** —
-  the file the unit's `EnvironmentFile` and `bridge.py` actually read — then
-  `sudo systemctl restart chelevse-bridge`. Editing this checkout's
-  `private/bridge.env` and restarting does nothing; either edit the deployed
-  copy or `sudo bash pi/install.sh` first. Expect
-  `mqtt: disabled (HTTP status polling)` and the 10 s/60 s/60 s HTTP cadence;
-  nothing is redeployed.
+- Bridge: set `MQTT_ENABLED=false` in **this checkout's**
+  `private/bridge.env`, then `sudo bash pi/install.sh`. That is the durable
+  path: the installer rsyncs `private/` over `/opt/chelevse/private/`, so an
+  edit of the deployed copy alone is undone by the next install. For an
+  immediate rollback before you get to the checkout, set it in
+  `/opt/chelevse/private/bridge.env` — the file the unit's `EnvironmentFile`
+  and `bridge.py` read — and `sudo systemctl restart chelevse-bridge`, then
+  mirror the change into the checkout. Expect `mqtt: disabled (HTTP status
+polling)` and the 10 s/60 s/60 s HTTP cadence; nothing else is redeployed.
 - Charger: `POST /config {"mqtt_enabled": false}` + gateway restart. Publishing
   stops; the bridge falls back to HTTP on its next tick.
 

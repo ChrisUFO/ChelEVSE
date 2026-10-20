@@ -143,13 +143,18 @@ subscription gate: while the subscription is granted it is fetched when
 change), **not** every 60 s; while the subscription is denied or the broker is
 disconnected it is polled every 60 s instead, with the degraded edge logged once
 (`config source: http (mqtt connected, <topic>/# not subscribed)`). A denied
-subscribing broker therefore cannot freeze `status/config`. A failed `/config`
-fetch is not lost: the version event is cleared only after a successful sync, so
-the sync is retried with a bounded backoff (5 s, doubling to 60 s) and a new
+subscribing broker therefore cannot freeze `status/config`. A _granted_ but
+silent subscription can — a topic mismatch, charger-side MQTT off, or no
+retained version delivers no event at all — so until a `config_version` is
+observed the loop bootstraps with one HTTP `/config` straight away, resyncs
+every `CONFIG_SAFETY_RESYNC_SEC` (10 min) instead of waiting on the event, and
+logs `config: mqtt subscribed but no config_version observed; …` once. A failed
+`/config` fetch **or write** is not lost either: the trigger is consumed and the
+retry is owed with a bounded backoff (5 s, doubling to 60 s); only a _new_
 `config_version` — including the retained value republished on a reconnect —
-retries immediately. The schedule loop is unchanged. While the broker is
-disconnected — or the flag is off — the bridge polls exactly as before: 10 s
-status, 60 s config, 60 s schedule.
+re-arms the event and retries immediately. The schedule loop is unchanged. While
+the broker is disconnected — or the flag is off — the bridge polls exactly as
+before: 10 s status, 60 s config, 60 s schedule.
 
 **Merged snapshots.** A burst carries only the fields that changed, so a burst is
 buffered for ~500 ms and merged into a snapshot seeded from the last `/status`
@@ -160,28 +165,37 @@ null `voltage`, and before the first successful `/status` seed a snapshot is a
 **field update, not an observation**: its fields are merged into
 `status/current` (and `total_energy` still feeds history), but the charging
 state machine, sessions and transition pushes only run once a snapshot is
-complete — the source has a seed and the snapshot carries a numeric `state`.
-Without that gate a bridge that restarted while the charger's HTTP was wedged
-would read the first `amp` update as "charging stopped". The 60 s reconcile
-refreshes both the seed and the authoritative document.
+complete — it was flushed from a seeded source and carries a numeric `state`.
+Completeness is a **flush-time** fact carried with the snapshot, so a seed that
+lands while it waits in the queue does not promote it. Without that gate a
+bridge that restarted while the charger's HTTP was wedged would read the first
+`amp` update as "charging stopped". The 60 s reconcile refreshes both the seed
+and the authoritative document.
 
 **Apply queue.** Flushes are handed to the apply worker through a bounded queue
-(`MQTT_PENDING_SNAPSHOTS`, 4). Telemetry that repeats the queued `state`
-coalesces to the newest field set, so a slow Firestore write never builds a
-backlog of stale snapshots; a snapshot that _changes_ `state` is an edge, though
-— the start or stop of a charging session and its notification — so it is kept
-in order behind the queued ones rather than discarded. Past the bound the oldest
-snapshot goes, because the newest state is the truth.
+(`MQTT_PENDING_SNAPSHOTS`, 4). Each entry carries its raw fields, its arrival
+number and its seeded-at-flush flag, so the worker never re-reads state that has
+moved on. Telemetry that repeats the queued `state` coalesces to the newest
+field set, so a slow Firestore write never builds a backlog of stale snapshots;
+a snapshot that _changes_ `state` is an edge, though — the start or stop of a
+charging session and its notification — so it is kept in order behind the queued
+ones rather than discarded. Past the bound the oldest snapshot goes, because the
+newest state is the truth.
 
 **Reconcile ordering.** A `/status` reply can be older than MQTT data that
 arrived while the request was in flight (a stop arrives during the reconcile's
 round trip). The status loop reads two counters before its GET: each MQTT apply,
 and each delivered snapshot (a flush advances it before the worker applies it,
-so a snapshot still queued counts too). A reply older than either is logged as
-`status reconcile discarded (mqtt advanced during the poll)` and dropped
-(including its seed) instead of rewinding the tracker, re-firing an edge, or
-seeding the snapshot with fields a later flush would republish. It still counts
-as a successful poll for the watchdog.
+so a snapshot still queued counts too). It seeds the snapshot through the source's
+compare-and-seed (`seed_if_current`), which compares that arrival counter and
+merges in one critical section: a flush that lands between the check and the
+merge cannot be overwritten by the older reply. A reply older than either
+counter is logged as `status reconcile discarded (mqtt advanced during the poll)`
+and dropped (including its seed) instead of rewinding the tracker or re-firing an
+edge; it still counts as a successful poll for the watchdog. An applied reply also
+records its arrival as a watermark, so a snapshot that was queued before it —
+`mqtt snapshot dropped (a reconcile applied a newer view)` — is dropped when the
+worker reaches it rather than replaying an older observation over a newer one.
 
 **Liveness, fallback and outages.** Liveness is the client's connection state
 _and_ a granted subscription, not message recency: an idle charger publishes
@@ -190,16 +204,20 @@ caught by the source-selection check above rather than by silence. Each source
 change is logged once (`status source: mqtt (mqtt connected)` /
 `status source: http (mqtt disconnected after N messages)`, `(mqtt not
 connected)` when the broker was never reached, or `(mqtt connected, <topic>/#
-not subscribed)` when the topics are denied), written to `status/health.source`,
-and a drop resumes the 10 s poll immediately. The broker link's own failures are
-logged too — `mqtt connect refused (…)`, `mqtt connect failed (…)`,
-`mqtt subscription denied (…)`, `mqtt disconnected (…)` — so a wrong
-`MQTT_PASS` or an ACL-denied subscription is not silent. A failed HTTP reconcile
-while MQTT carries status is logged as `status reconcile failed (…)` and still
-counts towards the watchdog's failure streak (only a successful HTTP poll clears
-it). It is treated as a charger outage only when **no MQTT snapshot arrived
-since the previous reconcile** — i.e. neither transport sees the charger. The
-broker-side LWT is #45.
+not subscribed)` when the topics are denied), written to `status/health.source`
+together with `mqtt_connected` (a link that drops while the source stays `http`
+is rewritten too), and a drop resumes the 10 s poll immediately. The broker
+link's own failures are logged too — `mqtt connect refused (…)`, `mqtt connect
+failed (…)`, `mqtt subscription denied (…)`, `mqtt disconnected (…)` — so a
+wrong `MQTT_PASS` or an ACL-denied subscription is not silent. A failed HTTP
+reconcile while MQTT carries status is logged as `status reconcile failed (…)`
+and still counts towards the watchdog's failure streak (only a successful HTTP
+poll clears it). An idle charger is silent by design, so silence plus **one**
+failed poll proves nothing: that case is logged as `status reconcile failed (…);
+no mqtt snapshot, outage unconfirmed` and the charger stays online.
+`MQTT_OUTAGE_FAILURES` (2) consecutive failed reconciles with no MQTT snapshot in
+between write `charger_online: false` and push once, and any snapshot resets the
+count. The broker-side LWT is #45.
 
 **Health.** `status/health` gains two transport fields, written with merge
 semantics so neither the watchdog's writes nor these can clobber the other:
@@ -211,7 +229,9 @@ status/health  { …, source: "mqtt"|"http", mqtt_connected: bool }
 The two fields describe different things: `mqtt_connected` is the broker link,
 `source` is where status data actually comes from. A connected broker with a
 denied subscription (or a silent one) therefore reads `source: "http"` with
-`mqtt_connected: true` — the degraded case that is easy to miss.
+`mqtt_connected: true` — the degraded case that is easy to miss. Both are
+rewritten on any change of the pair, including a link drop that leaves `source`
+at `http`.
 
 **Rollback.** Set `MQTT_ENABLED=false` in the file the service actually reads —
 `/opt/chelevse/private/bridge.env` (`EnvironmentFile` in the unit, plus
