@@ -39,7 +39,9 @@ App settings hold an optional **rate schedule** on top of the fallback rate:
 - A month range is inclusive and may wrap the year: November → February means November, December,
   January and February. "All year" stores no month limit.
 - Windows must not overlap. Two windows that share a day, a month and a time would make the rate
-  ambiguous, so the editor rejects the schedule instead of silently choosing one.
+  ambiguous, so the editor rejects the schedule instead of silently choosing one. A document written
+  outside the editor (hand-edited, or by an older client) can still hold overlaps: there the **last
+  matching window wins**, and the editor asks you to resolve the overlap before it will save again.
 - Saving writes the fallback rate, currency, and the window list. With no windows, the document keeps
   exactly its two flat fields.
 

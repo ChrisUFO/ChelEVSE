@@ -885,6 +885,7 @@ input[type='range']::-moz-range-thumb {
 /* Informational notes added with the Config/Advanced screens need AA contrast
    on the dark surfaces; the older History/Schedule counters keep --faint. */
 #config-updated,
+#rates-count,
 .advanced-note {
   color: var(--muted);
 }

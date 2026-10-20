@@ -67,14 +67,20 @@ test('validateSettings carries and validates the optional rate windows', () => {
   assert.equal(scheduled.valid, true);
   assert.deepEqual(scheduled.values.rates, [night]);
 
-  // A malformed row blocks the save and reports at document level for now.
+  // A malformed row blocks the save. The rate editor owns the row- and
+  // document-level messages, so this validator reports no error of its own: the
+  // invalid window list only makes the document unsaveable.
   const broken = validateSettings({
     rate: '0.31',
     currency: 'USD',
     rates: [{ ...night, start: '25:00' }],
   });
   assert.equal(broken.valid, false);
-  assert.ok(broken.errors.rates);
+  assert.deepEqual(broken.errors, {});
+  assert.deepEqual(
+    broken.values.rates.map((row) => row.start),
+    ['25:00'],
+  );
 
   const overlap = validateSettings({
     rate: '0.31',
@@ -82,11 +88,12 @@ test('validateSettings carries and validates the optional rate windows', () => {
     rates: [night, { ...night, id: 'dawn', start: '05:00', end: '07:00' }],
   });
   assert.equal(overlap.valid, false);
-  assert.match(overlap.errors.rates, /overlaps/);
+  assert.deepEqual(overlap.errors, {});
 
   const notAList = validateSettings({ rate: '0.31', currency: 'USD', rates: { night } });
   assert.equal(notAList.valid, false);
-  assert.match(notAList.errors.rates, /list/);
+  assert.deepEqual(notAList.errors, {});
+  assert.deepEqual(notAList.values.rates, []);
 });
 
 test('normalizeSettings and settingsFields only adopt the documented shape', () => {
@@ -157,7 +164,7 @@ test('the editor keeps a malformed stored row that the costing layer drops', () 
   // removed — it is never quietly rewritten by an unrelated rate edit.
   const result = validateSettings(settingsFields(stored));
   assert.equal(result.valid, false);
-  assert.ok(result.errors.rates);
+  assert.deepEqual(result.errors, {});
   // Showing the broken row is not an unsaved change: the draft built from the
   // document matches it exactly.
   assert.equal(settingsDraftMatches(settingsFields(stored), stored), true);

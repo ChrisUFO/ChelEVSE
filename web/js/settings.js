@@ -46,17 +46,14 @@ export function validateSettings(draft) {
     errors.currency = `Use ${CURRENCY_MAX} characters or fewer.`;
   }
 
-  // The window list has no visible field yet, but a stored schedule must still
-  // be validated (and must not be silently dropped) on every save.
+  // The rate editor owns the row and document-level rate messages; this
+  // validator only reports the flat pair. A stored schedule must still be valid
+  // for the document to be saveable (and must never be silently dropped), so its
+  // verdict folds into `valid` without a second message channel.
   const windows = validateRateWindows(draft && draft.rates);
-  if (!windows.valid) {
-    // The editor shows per-row errors once the rate table lands (PR-2); for now
-    // the first general problem is the one sentence the card can show.
-    errors.rates = windows.errors.general[0] || 'Fix the rate windows before saving.';
-  }
 
   return {
-    valid: Object.keys(errors).length === 0,
+    valid: Object.keys(errors).length === 0 && windows.valid,
     errors,
     values: { rate, currency, rates: windows.values },
   };

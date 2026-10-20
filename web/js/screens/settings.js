@@ -81,13 +81,16 @@ function focusFirstRateError() {
   const card = firstRateError();
   if (!card) {
     // A document-level problem (an overlap, or more rows than the cap) has no
-    // inline field; focus the first row it concerns so a keyboard user lands
-    // near the explanation instead of on the Save button.
+    // field of its own. The rows it accuses are marked invalid and carry their
+    // note, and focus moves to the first of them; the document sentence is the
+    // only explanation, so it — not the focused row — is what the viewport
+    // shows. Scrolling the row to centre used to push that sentence off-screen.
     const index = rateValidation.overlaps.length > 0 ? rateValidation.overlaps[0][0] : 0;
     const fallback = rateCards[index];
-    if (!fallback) return;
-    fallback.rateInput.focus({ preventScroll: true });
-    revealCard(fallback);
+    if (fallback) fallback.rateInput.focus({ preventScroll: true });
+    const docError = $('rates-error');
+    if (!docError.hidden) docError.scrollIntoView({ block: 'center', behavior: 'auto' });
+    else if (fallback) revealCard(fallback);
     return;
   }
   const errors = rateValidation.rows[card.index] || {};
@@ -107,9 +110,20 @@ function focusFirstRateError() {
 }
 
 function paintRateValidation() {
+  // An overlap is a document-level problem, but the user fixes it on two rows:
+  // give each member of a colliding pair its own note so the card that is
+  // marked invalid also carries the reason.
+  const overlapNotes = new Map();
+  for (const [a, b] of rateValidation.overlaps) {
+    if (!overlapNotes.has(a)) overlapNotes.set(a, []);
+    if (!overlapNotes.has(b)) overlapNotes.set(b, []);
+    overlapNotes.get(a).push(`Overlaps Rate ${b + 1}`);
+    overlapNotes.get(b).push(`Overlaps Rate ${a + 1}`);
+  }
   rateCards.forEach((card) => {
     const errors = rateValidation.rows[card.index] || {};
-    const messages = [...new Set(Object.values(errors))];
+    const notes = overlapNotes.get(card.index) || [];
+    const messages = [...new Set([...Object.values(errors), ...notes])];
     card.errorEl.hidden = messages.length === 0;
     setText(card.errorEl, messages.join(' '));
     card.rateInput.setAttribute('aria-invalid', String(Boolean(errors.rate)));
@@ -120,6 +134,17 @@ function paintRateValidation() {
     card.fromSelect.setAttribute('aria-invalid', String(Boolean(errors.months)));
     card.toSelect.setAttribute('aria-invalid', String(Boolean(errors.months)));
     card.node.classList.toggle('invalid', messages.length > 0);
+    card.node.setAttribute('aria-invalid', String(messages.length > 0));
+    if (notes.length > 0) {
+      // The row points at the document sentence that names every pair; the row
+      // note in `errorEl` is the short reason beside the fields.
+      card.node.setAttribute('aria-describedby', 'rates-error');
+      card.rateInput.setAttribute('aria-invalid', 'true');
+      card.rateInput.setAttribute('aria-describedby', `${card.errorId} rates-error`);
+    } else {
+      card.node.removeAttribute('aria-describedby');
+      card.rateInput.setAttribute('aria-describedby', card.errorId);
+    }
   });
   const general = rateValidation.general.join(' ');
   const docError = $('rates-error');
