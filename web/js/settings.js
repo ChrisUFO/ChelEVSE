@@ -2,6 +2,8 @@
 // test/web.
 
 import {
+  RATE_MAX,
+  RATE_MIN,
   normalizeRateSchedule,
   normalizeWindow,
   parseRateValue,
@@ -9,12 +11,14 @@ import {
   validateRateWindows,
 } from './rates.js';
 
+// The rate bounds live in rates.js: the same 0–5 limit governs a flat rate and
+// a window row, so both validators share one definition.
+export { RATE_MAX, RATE_MIN } from './rates.js';
+
 // Mirror firestore.rules: a write must carry both flat fields, rate is a number
 // from 0 to 5, currency is a string of 1–8 characters. The optional `rates`
 // list keeps the flat rate as its fallback; its rows are validated by
 // validateRateWindows (rules only guard the container).
-export const RATE_MIN = 0;
-export const RATE_MAX = 5;
 export const CURRENCY_MAX = 8;
 
 // The form trims the currency, so a stray space cannot produce a string that
