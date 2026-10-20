@@ -12,7 +12,10 @@ Design notes:
 - **Liveness is the client's connection state** (``client.is_connected()``), not
   message recency: an idle charger legitimately publishes nothing for minutes,
   and treating silence as failure would flap to HTTP for no reason. The bridge's
-  periodic HTTP reconciliation covers staleness instead.
+  periodic HTTP reconciliation covers staleness instead. A granted subscription
+  is part of that liveness: a denied SUBACK leaves the connection up and
+  delivers nothing, so the bridge only treats MQTT as its status source when
+  ``connected`` and ``subscribed`` both hold.
 - **Snapshots are merged into a seed.** A burst carries only the fields that
   changed, so a snapshot built from it alone would miss (and, merged into
   Firestore, null) everything else. ``seed()`` takes the last ``/status`` reply
@@ -216,6 +219,15 @@ class MqttSource:
         return bool(client is not None and client.is_connected())
 
     # -- seeding and flushing ---------------------------------------------
+
+    def arrival_generation(self):
+        """Snapshots delivered so far (``flush`` advances it before delivery).
+
+        An HTTP reconcile takes this before its GET: a value that moved means
+        newer MQTT data exists, even when the apply worker has not run yet.
+        """
+        with self._lock:
+            return self.snapshots
 
     def seed(self, payload):
         """Merge a ``/status`` reply into the snapshot (HTTP-only fields too).

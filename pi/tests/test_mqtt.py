@@ -535,7 +535,7 @@ class MqttWorkerBase(unittest.TestCase):
         self.tracker.previous_state = 1
         self.tracker.charger_online = True
         self.sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
-        self.snapshots = bridge.queue.Queue(maxsize=1)
+        self.snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
         self.source = MqttSource(
             "192.168.0.224",
             topic="chelevse",
@@ -665,14 +665,84 @@ class MqttWorkerTests(MqttWorkerBase):
         self.assertEqual(self.notifier.bodies, ["Charging started"])
         self.assertEqual(self.tracker.state, 3)
 
+    def test_a_start_and_stop_survive_a_busy_worker(self):
+        # The worker is applying one snapshot (blocked in the Firestore write)
+        # when the charger starts and stops: both edges arrive while it is
+        # busy, and coalescing to the newest snapshot would leave only state=1.
+        # The tracker would then never see the start, and the stop could not
+        # finalize the session or notify.
+        self.source.seed(status_payload(state=1, session_energy=0, elapsed=0))
+        busy = threading.Event()
+        release = threading.Event()
+        parse_snapshot = bridge.parse_snapshot
+
+        def blocking_parse(snapshot):
+            if not busy.is_set():
+                busy.set()
+                release.wait(5)  # the worker is busy with this snapshot
+            return parse_snapshot(snapshot)
+
+        stop = threading.Event()
+        self.client.deliver("chelevse/amp", 1000)
+        self.source.flush()  # the worker takes this one and blocks on it
+        with mock.patch.object(bridge, "parse_snapshot", blocking_parse), mock.patch.object(
+            bridge, "_stop", stop
+        ):
+            thread = threading.Thread(
+                target=bridge.mqtt_status_loop,
+                args=(self.sink, self.snapshots, self.source),
+                daemon=True,
+            )
+            thread.start()
+            try:
+                self.assertTrue(busy.wait(2))
+                self.client.deliver("chelevse/state", 3)
+                self.client.deliver("chelevse/session_energy", 6000)
+                self.source.flush()  # start edge, queued behind the busy worker
+                self.client.deliver("chelevse/state", 1)
+                self.source.flush()  # stop edge, queued behind the start
+                release.set()
+                wait_for(lambda: len(self.db.data.get("sessions", {})) == 1)
+            finally:
+                release.set()
+                stop.set()
+                thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(
+            self.notifier.bodies, ["Charging started", "Charging stopped"]
+        )
+        self.assertEqual(len(self.db.data["sessions"]), 1)
+        self.assertEqual(self.tracker.state, 1)
+
 
 class EnqueueLatestTests(unittest.TestCase):
-    def test_enqueue_latest_replaces_a_queued_snapshot(self):
-        snapshots = bridge.queue.Queue(maxsize=1)
-        bridge.enqueue_latest(snapshots, {"state": 1})
-        bridge.enqueue_latest(snapshots, {"state": 2})
-        self.assertEqual(snapshots.get_nowait(), {"state": 2})
+    def test_enqueue_latest_coalesces_telemetry_of_the_same_state(self):
+        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
+        bridge.enqueue_latest(snapshots, {"state": 1, "amp": 10})
+        bridge.enqueue_latest(snapshots, {"state": 1, "amp": 12})
+        self.assertEqual(snapshots.get_nowait(), {"state": 1, "amp": 12})
         self.assertTrue(snapshots.empty())
+
+    def test_enqueue_latest_keeps_a_state_change_in_order(self):
+        # A start and a stop queued behind a busy worker are edges the tracker
+        # has to observe: coalescing to the newest would lose the session.
+        snapshots = bridge.queue.Queue(maxsize=bridge.MQTT_PENDING_SNAPSHOTS)
+        for state in (1, 3, 1):
+            bridge.enqueue_latest(snapshots, {"state": state})
+        self.assertEqual(
+            [snapshots.get_nowait() for _ in range(3)],
+            [{"state": 1}, {"state": 3}, {"state": 1}],
+        )
+        self.assertTrue(snapshots.empty())
+
+    def test_enqueue_latest_drops_the_oldest_past_the_queue_bound(self):
+        snapshots = bridge.queue.Queue(maxsize=2)
+        for state in (1, 3, 1):
+            bridge.enqueue_latest(snapshots, {"state": state})
+        self.assertEqual(
+            [snapshots.get_nowait(), snapshots.get_nowait()],
+            [{"state": 3}, {"state": 1}],
+        )
 
 
 class StatusLoopMqttTests(unittest.TestCase):
@@ -696,7 +766,17 @@ class StatusLoopMqttTests(unittest.TestCase):
     def db_snapshot(self, fields):
         self.applied.append(fields)
 
-    def run_loop(self, session, polls, on_wait=None, reconcile=3600, sink=None):
+    def connect(self):
+        """Start the source and let the broker grant the subscription."""
+        self.source.start()
+        client = self.factory.client
+        client.connect()
+        client.ack_subscribe([0])
+        return client
+
+    def run_loop(
+        self, session, polls, on_wait=None, reconcile=3600, sink=None, interval=10
+    ):
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
             bridge.status_loop(
@@ -704,7 +784,7 @@ class StatusLoopMqttTests(unittest.TestCase):
                 "http://charger",
                 None,
                 transport,
-                10,
+                interval,
                 self.tracker,
                 self.notifier,
                 self.watchdog,
@@ -715,9 +795,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         return session
 
     def test_falls_back_to_the_http_poll_when_mqtt_drops(self):
-        self.source.start()
-        client = self.factory.client
-        client.connect()
+        client = self.connect()
         session = FakeSession(
             [FakeResponse(200, status_payload()), FakeResponse(200, status_payload())]
         )
@@ -737,9 +815,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertFalse(health["mqtt_connected"])
 
     def test_transport_source_is_recorded_on_each_edge(self):
-        self.source.start()
-        client = self.factory.client
-        client.connect()
+        client = self.connect()
         session = FakeSession([FakeResponse(200, status_payload())] * 2)
         writes = []
         original = bridge.write_transport_health
@@ -757,9 +833,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(writes, [("mqtt", True), ("http", False)])
 
     def test_http_failure_while_mqtt_reports_is_not_an_outage(self):
-        self.source.start()
-        client = self.factory.client
-        client.connect()
+        client = self.connect()
         session = FakeSession(
             [
                 FakeResponse(200, status_payload()),
@@ -780,9 +854,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(self.notifier.bodies, [])
 
     def test_http_failure_without_mqtt_traffic_flags_offline(self):
-        self.source.start()
-        client = self.factory.client
-        client.connect()
+        self.connect()
         session = FakeSession([requests.ConnectionError("gone")] * 3)
         self.run_loop(session, polls=2, reconcile=0)
         self.assertFalse(self.tracker.charger_online)
@@ -790,8 +862,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertFalse(self.db.data["status"]["current"]["charger_online"])
 
     def test_a_successful_reconcile_seeds_the_mqtt_snapshot(self):
-        self.source.start()
-        self.factory.client.connect()
+        self.connect()
         session = FakeSession([FakeResponse(200, status_payload())])
         self.run_loop(session, polls=1)
         self.assertEqual(self.source.snapshot["comm_sent"], 10)  # the seed is raw
@@ -812,8 +883,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.tracker.last_charging_elapsed = 3600
         self.tracker.charger_online = True
         sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
-        self.source.start()
-        self.factory.client.connect()
+        self.connect()
 
         def stop_while_in_flight(_url):
             sink.apply_status(
@@ -839,8 +909,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(self.watchdog.successes, 1)
 
     def test_http_polls_still_feed_the_watchdog(self):
-        self.source.start()
-        self.factory.client.connect()
+        self.connect()
         session = FakeSession([FakeResponse(200, status_payload())] * 2)
         self.run_loop(session, polls=1)
         self.assertEqual(self.watchdog.successes, 1)
@@ -858,8 +927,7 @@ class StatusLoopMqttTests(unittest.TestCase):
             seeded.append(payload),
             original_seed(payload),
         )[1]
-        self.source.start()
-        self.factory.client.connect()
+        self.connect()
 
         def apply_while_in_flight(_url):
             sink.apply_status(bridge.parse_status(status_payload(state=1)), "mqtt")
@@ -870,6 +938,67 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.run_loop(session, polls=1, sink=sink)
         self.assertEqual(seeded, [])
         self.assertNotIn("comm_sent", self.source.snapshot)
+
+    def test_a_reconcile_overtaken_by_a_queued_flush_does_not_seed(self):
+        # The flush that lands during the GET is queued, not applied (no worker
+        # here), so the apply generation has not moved; only the arrival
+        # generation shows the reply is older than it. Accepting it would seed
+        # the raw snapshot with the stale state, and the next flush -- carrying
+        # only amp, say -- would republish that state.
+        sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
+        seeded = []
+        original_seed = self.source.seed
+        self.source.seed = lambda payload: (
+            seeded.append(payload),
+            original_seed(payload),
+        )[1]
+        client = self.connect()
+
+        def flush_while_in_flight(_url):
+            client.deliver("chelevse/state", 1)
+            self.source.flush()  # queued for the worker; not applied yet
+
+        session = _HookedSession(
+            [
+                FakeResponse(
+                    200, status_payload(state=3, session_energy=6000, elapsed=3600)
+                )
+            ],
+            flush_while_in_flight,
+        )
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=1, sink=sink)
+        self.assertTrue(any("reconcile discarded" in line for line in logs))
+        self.assertEqual(seeded, [])
+        self.assertNotIn("comm_sent", self.source.snapshot)
+        self.assertIsNone(self.tracker.state)  # the reply never applied
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertEqual(self.applied, [{"state": 1}])  # still queued
+
+    def test_a_denied_subscription_keeps_the_http_cadence(self):
+        # The broker accepts the connection and denies the subscription: the
+        # topics are dead, which looks exactly like an idle charger, so HTTP
+        # must stay the source and keep its own cadence.
+        logs = []
+        self.source.log = logs.append
+        self.source.start()
+        client = self.factory.client
+        client.connect()
+        client.ack_subscribe([_ReasonCode(135, "Not authorized")])
+        session = FakeSession([FakeResponse(200, status_payload())] * 3)
+        with mock.patch.object(bridge, "log", logs.append):
+            # interval=0 makes the fallback cadence visible: every tick polls,
+            # while the MQTT reconcile cadence (3600 s) would poll once.
+            self.run_loop(session, polls=3, reconcile=3600, interval=0)
+        self.assertEqual(len(session.calls), 3)
+        health = self.db.data["status"]["health"]
+        self.assertEqual(health["source"], "http")
+        self.assertTrue(health["mqtt_connected"])  # degraded, not disconnected
+        self.assertEqual(
+            [line for line in logs if line.startswith("status source:")],
+            ["status source: http (mqtt connected, chelevse/# not subscribed)"],
+        )
 
 
 class _StubMqtt:

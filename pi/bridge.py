@@ -70,6 +70,11 @@ MQTT_RECONCILE_SEC = 60
 # client itself reconnects in its own network loop; this only bounds how long a
 # fallback or a config-version reaction can take.
 MQTT_TICK_SEC = 1.0
+# Snapshots the apply worker may fall behind before the oldest is dropped.
+# Ordinary telemetry coalesces (only the newest field set matters) but a state
+# change is an edge sessions and notifications run on, so distinct states are
+# kept in order; this only caps a pathological stream.
+MQTT_PENDING_SNAPSHOTS = 4
 # A pending command older than this is failed without touching the charger.
 COMMAND_MAX_AGE = 600
 # Pending commands handled per poll.
@@ -858,19 +863,27 @@ class StatusSink:
         with self._lock:
             return self._mqtt_applies
 
-    def apply_status(self, fields, source, complete=True, mqtt_mark=None, seed=None):
+    def apply_status(
+        self, fields, source, complete=True, mqtt_mark=None, seed=None, fresh=None
+    ):
         """Merge one parsed status snapshot and run the derived edge logic.
 
         ``complete`` says the snapshot is a full observation (a parsed
         ``/status`` reply); a partial MQTT snapshot only merges its fields.
         ``mqtt_mark`` is the ``mqtt_generation()`` taken before an HTTP fetch:
         if an MQTT snapshot applied since, the HTTP result is discarded and
-        False is returned. ``seed`` (the raw ``/status`` payload, for the MQTT
-        snapshot) runs in the same critical section as that decision, so a
-        reply an MQTT apply overtook can neither seed nor rewind the snapshot.
+        False is returned. ``fresh`` is a predicate for staleness the apply
+        counter cannot see (a flush that is queued but not applied yet); False
+        discards the result too. Both are evaluated in the same critical
+        section as ``seed`` (the raw ``/status`` payload, merged into the MQTT
+        snapshot), so a reply overtaken by newer MQTT data can neither seed nor
+        rewind the snapshot. A predicate may take the MQTT source's lock; the
+        source never takes this one while holding its own.
         """
         with self._lock:
             if mqtt_mark is not None and mqtt_mark != self._mqtt_applies:
+                return False
+            if fresh is not None and not fresh():
                 return False
             if seed is not None:
                 seed()
@@ -945,23 +958,43 @@ def write_transport_health(db, source, mqtt_connected):
         log(f"health transport write failed ({exc.__class__.__name__}: {exc})")
 
 
-def enqueue_latest(snapshots, fields):
-    """Keep only the newest snapshot queued for the apply worker.
+# Serializes the drain-and-refill in ``enqueue_latest``: the worker only ever
+# removes from the front, so producers must not interleave.
+_enqueue_lock = threading.Lock()
 
-    A slow Firestore write must not build a backlog of stale snapshots: each
-    snapshot is complete, so replacing the queued one loses nothing.
+
+def enqueue_latest(snapshots, fields):
+    """Queue a snapshot for the apply worker without losing a state edge.
+
+    Only the newest field set of an unchanged ``state`` is worth writing, so a
+    snapshot that repeats the queued state replaces it. A snapshot that changes
+    ``state`` is an edge — the start or stop of a charging session and its
+    notification — so it is kept in order behind the queued ones instead of
+    being discarded while the worker is busy. The backlog is bounded by the
+    queue's own capacity (``MQTT_PENDING_SNAPSHOTS`` in production); past that
+    the oldest snapshot goes, because the newest state is the truth.
     """
-    try:
-        snapshots.put_nowait(fields)
-    except queue.Full:
-        try:
-            snapshots.get_nowait()
-        except queue.Empty:
-            pass
-        try:
-            snapshots.put_nowait(fields)
-        except queue.Full:
-            pass
+    with _enqueue_lock:
+        pending = []
+        while True:
+            try:
+                pending.append(snapshots.get_nowait())
+            except queue.Empty:
+                break
+        capacity = snapshots.maxsize or MQTT_PENDING_SNAPSHOTS
+        for snapshot in _coalesce(pending + [fields])[-capacity:]:
+            snapshots.put_nowait(snapshot)
+
+
+def _coalesce(pending):
+    """Collapse repeated telemetry; keep every state change, in order."""
+    kept = []
+    for fields in pending:
+        if kept and kept[-1].get("state") == fields.get("state"):
+            kept[-1] = fields
+        else:
+            kept.append(fields)
+    return kept
 
 
 def mqtt_status_loop(sink, snapshots, source):
@@ -1503,12 +1536,20 @@ def status_loop(
     while not _stop.is_set():
         now = time.monotonic()
         mqtt_connected = mqtt is not None and mqtt.connected
-        current = "mqtt" if mqtt_connected else "http"
+        # A granted subscription is what makes the topics a status source: a
+        # broker that accepts the connection and then denies ``<topic>/#``
+        # delivers nothing, which looks exactly like an idle charger. Until the
+        # SUBACK grants it the HTTP poll is the source, and a denial keeps it
+        # there (logged once per source change) with the 10 s cadence.
+        mqtt_ready = mqtt_connected and mqtt.subscribed
+        current = "mqtt" if mqtt_ready else "http"
         if mqtt is not None and current != source:
             previous, source = source, current
-            if mqtt_connected:
+            if mqtt_ready:
                 detail = "mqtt connected"
                 mqtt_snapshots = mqtt.snapshots
+            elif mqtt_connected:
+                detail = f"mqtt connected, {mqtt.subscription} not subscribed"
             elif previous == "mqtt":
                 detail = f"mqtt disconnected after {mqtt.messages} messages"
             else:
@@ -1523,8 +1564,11 @@ def status_loop(
             if mqtt is None or now >= next_poll:
                 sink.maybe_seed()
                 # MQTT applies that land while the GET is in flight make this
-                # response stale: it was generated before them.
+                # response stale: it was generated before them. A flush that is
+                # only queued has not applied yet, so the apply counter stands
+                # still; its arrival counter is what catches that race.
                 mqtt_mark = sink.mqtt_generation() if mqtt is not None else None
+                mqtt_arrivals = mqtt.arrival_generation() if mqtt is not None else None
                 try:
                     resp = transport.get(
                         f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT
@@ -1539,8 +1583,8 @@ def status_loop(
                     # are still arriving. No snapshot since the last poll means
                     # neither transport sees the charger, which is an outage
                     # (the broker-side LWT is PR-3; this needs no timer).
-                    silent = mqtt_connected and mqtt.snapshots == mqtt_snapshots
-                    if mqtt_connected and not silent:
+                    silent = mqtt_ready and mqtt.snapshots == mqtt_snapshots
+                    if mqtt_ready and not silent:
                         log(f"status reconcile failed ({_offline_reason(exc)})")
                         # Compare the next failure against this check, not the
                         # last successful poll (which may be long past).
@@ -1557,29 +1601,34 @@ def status_loop(
                 else:
                     # Seed before applying: the snapshot then carries the
                     # fields MQTT never publishes (comm_*, rapi_connected).
-                    # The seed stays raw; every delivery is parsed. Seed and
-                    # apply are one locked decision, so a reply an MQTT apply
-                    # overtook can neither rewind the snapshot nor be applied.
+                    # The seed stays raw; every delivery is parsed. Seed,
+                    # arrival freshness and apply are one locked decision, so a
+                    # reply a flush or an apply overtook can neither rewind the
+                    # snapshot nor be applied.
                     seed_snapshot = (
                         (lambda: mqtt.seed(payload)) if mqtt is not None else None
                     )
+                    fresh = (
+                        None
+                        if mqtt is None
+                        else (lambda: mqtt.arrival_generation() == mqtt_arrivals)
+                    )
                     if not sink.apply_status(
-                        fields, "http", mqtt_mark=mqtt_mark, seed=seed_snapshot
+                        fields,
+                        "http",
+                        mqtt_mark=mqtt_mark,
+                        seed=seed_snapshot,
+                        fresh=fresh,
                     ):
-                        # A snapshot applied while this poll was in flight, so
-                        # the reply predates it; applying it would rewind the
-                        # tracker and re-fire a transition (a stale state=3
-                        # after an MQTT stop).
-                        log(
-                            "status reconcile discarded "
-                            "(mqtt applied during the poll)"
-                        )
+                        # An MQTT snapshot applied, or a flush queued one, while
+                        # this poll was in flight, so the reply predates it;
+                        # applying it would rewind the tracker and re-fire a
+                        # transition (a stale state=3 after an MQTT stop).
+                        log("status reconcile discarded (mqtt advanced during the poll)")
                     elif mqtt is not None:
                         mqtt_snapshots = mqtt.snapshots
                     watchdog.record_success(payload)
-                next_poll = now + (
-                    reconcile_interval if mqtt_connected else interval
-                )
+                next_poll = now + (reconcile_interval if mqtt_ready else interval)
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval if mqtt is None else MQTT_TICK_SEC)
@@ -2232,7 +2281,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     config_event = None
     mqtt_status_args = None
     if mqtt is not None and mqtt.enabled:
-        snapshots = queue.Queue(maxsize=1)
+        snapshots = queue.Queue(maxsize=MQTT_PENDING_SNAPSHOTS)
         config_event = threading.Event()
         source = MqttSource(
             host=mqtt.host,
