@@ -1,12 +1,16 @@
 """Unit tests for pi/bridge.py (stdlib unittest; no charger or Firestore)."""
 
 import sys
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import requests  # noqa: E402
 
 import bridge  # noqa: E402
 from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
@@ -684,10 +688,9 @@ class _StopAfter:
 class CommandLoopTests(unittest.TestCase):
     def run_loop(self, db, polls, on_wait=None):
         session = FakeSession()
-        with mock.patch.object(
-            bridge.requests, "Session", return_value=session
-        ), mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
-            bridge.command_loop(db, "http://charger", None, 0)
+        transport = bridge.ChargerTransport(session)
+        with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
+            bridge.command_loop(db, "http://charger", None, transport, 0)
         return session
 
     def test_stale_command_is_failed_without_contacting_the_charger(self):
@@ -755,6 +758,208 @@ class SyncScheduleTests(unittest.TestCase):
         self.assertEqual(methods, ["get", "post", "delete"])
         self.assertEqual(session.calls[1][2]["json"]["id"], 2)
         self.assertTrue(session.calls[2][1].endswith("/schedule/9"))
+
+
+class ChargerSessionTests(unittest.TestCase):
+    def test_factory_bounds_the_pool(self):
+        session = bridge.make_charger_session()
+        self.addCleanup(session.close)
+        for url in ("http://charger", "https://charger"):
+            adapter = session.get_adapter(url)
+            self.assertEqual(adapter._pool_connections, 1)
+            self.assertEqual(adapter._pool_maxsize, 2)
+            self.assertEqual(adapter.max_retries.total, 0)
+
+    def test_transport_forwards_to_the_given_session(self):
+        session = FakeSession([FakeResponse(200, {"ok": True}) for _ in range(3)])
+        transport = bridge.ChargerTransport(session)
+        for method in ("get", "post", "delete"):
+            with self.subTest(method=method):
+                url = f"http://charger/{method}"
+                kwargs = {"timeout": 5, "auth": ("user", "pass")}
+                resp = getattr(transport, method)(url, **kwargs)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(session.calls[-1], (method, url, kwargs))
+        self.assertEqual(len(session.calls), 3)
+
+
+class _SlowSession:
+    """Session that records whether two calls were ever in flight together."""
+
+    def __init__(self, delay=0.02):
+        self._delay = delay
+        self._guard = threading.Lock()
+        self._in_flight = 0
+        self.overlapped = False
+        self.calls = 0
+
+    def get(self, url, **kwargs):
+        with self._guard:
+            self._in_flight += 1
+            if self._in_flight > 1:
+                self.overlapped = True
+        time.sleep(self._delay)
+        with self._guard:
+            self._in_flight -= 1
+            self.calls += 1
+        return FakeResponse(200)
+
+
+class ChargerTransportTests(unittest.TestCase):
+    def test_serialises_concurrent_calls(self):
+        session = _SlowSession()
+        transport = bridge.ChargerTransport(session)
+        threads = [
+            threading.Thread(target=transport.get, args=("http://charger/status",))
+            for _ in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertFalse(session.overlapped)
+        self.assertEqual(session.calls, 4)
+
+    def test_lock_is_released_when_the_call_raises(self):
+        class _FailOnceSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, url, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise requests.ConnectionError("charger unreachable")
+                return FakeResponse(200)
+
+        transport = bridge.ChargerTransport(_FailOnceSession())
+        with self.assertRaises(requests.ConnectionError):
+            transport.get("http://charger/status", timeout=5)
+
+        finished = threading.Event()
+
+        def follow_up():
+            transport.get("http://charger/status", timeout=5)
+            finished.set()
+
+        # A later call from another thread only runs if the failed call released
+        # the lock; the wait is bounded so a leak fails instead of hanging.
+        worker = threading.Thread(target=follow_up, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertTrue(finished.is_set(), "lock was not released after the raise")
+
+
+class _RecordingStop:
+    """Stop event stand-in: records each wait and sets after `polls` waits."""
+
+    def __init__(self, polls):
+        self._polls = polls
+        self.waits = []
+
+    def is_set(self):
+        return len(self.waits) >= self._polls
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        return self.is_set()
+
+
+class LoopJitterTests(unittest.TestCase):
+    def run_config(self, polls, interval, **kwargs):
+        stop = _RecordingStop(polls)
+        transport = bridge.ChargerTransport(FakeSession())
+        with mock.patch.object(bridge, "_stop", stop):
+            bridge.config_loop(FakeDB(), "http://charger", None, transport, interval, **kwargs)
+        return stop.waits
+
+    def run_schedule(self, polls, interval, **kwargs):
+        stop = _RecordingStop(polls)
+        transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, {})]))
+        with mock.patch.object(bridge, "_stop", stop):
+            bridge.schedule_loop(
+                FakeDB(), "http://charger", None, transport, interval, 300, **kwargs
+            )
+        return stop.waits
+
+    def test_config_offsets_only_the_first_iteration(self):
+        waits = self.run_config(2, 60, initial_delay=bridge.CONFIG_INITIAL_DELAY)
+        self.assertEqual(waits, [bridge.CONFIG_INITIAL_DELAY, 60])
+
+    def test_schedule_offsets_only_the_first_iteration(self):
+        waits = self.run_schedule(2, 60, initial_delay=bridge.SCHEDULE_INITIAL_DELAY)
+        self.assertEqual(waits, [bridge.SCHEDULE_INITIAL_DELAY, 60])
+
+    def test_no_offset_without_an_initial_delay(self):
+        self.assertEqual(self.run_config(1, 60), [60])
+        self.assertEqual(self.run_schedule(1, 60), [60])
+
+    def test_pollers_start_at_different_offsets(self):
+        self.assertTrue(0 < bridge.CONFIG_INITIAL_DELAY < bridge.SCHEDULE_INITIAL_DELAY)
+
+
+class LoopWiringTests(unittest.TestCase):
+    def test_run_gives_every_loop_the_same_transport(self):
+        transport = bridge.ChargerTransport(FakeSession())
+        calls = {}
+        threads = []
+
+        def spy(name):
+            def record(*args, **kwargs):
+                calls[name] = args
+
+            return record
+
+        class _ThreadSpy:
+            def __init__(self, target, args, daemon=None):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+                threads.append(self)
+
+            def start(self):
+                self.target(*self.args)
+
+        with mock.patch.object(bridge, "status_loop", spy("status")), mock.patch.object(
+            bridge, "config_loop", spy("config")
+        ), mock.patch.object(bridge, "schedule_loop", spy("schedule")), mock.patch.object(
+            bridge, "command_loop", spy("command")
+        ), mock.patch.object(
+            bridge.threading, "Thread", _ThreadSpy
+        ), mock.patch.object(
+            bridge, "StatusTracker"
+        ) as tracker, mock.patch.object(
+            bridge, "Notifier"
+        ):
+            bridge.run(FakeDB(), "http://charger", None, (10, 60, 60, 300, 5), transport)
+
+        self.assertEqual(set(calls), {"status", "config", "schedule", "command"})
+        for name, args in calls.items():
+            self.assertIs(args[3], transport, f"{name} loop got another transport")
+        self.assertEqual(len(threads), 3)
+        for thread in threads:
+            self.assertIs(thread.args[3], transport)
+            self.assertTrue(thread.daemon)
+        tracker.return_value.seed.assert_called_once_with()
+
+    def test_run_leaves_shutdown_logging_to_main(self):
+        """main() owns lifecycle logging: run() must not log a second stop line."""
+        transport = bridge.ChargerTransport(FakeSession())
+        with mock.patch.object(bridge, "status_loop"), mock.patch.object(
+            bridge, "config_loop"
+        ), mock.patch.object(bridge, "schedule_loop"), mock.patch.object(
+            bridge, "command_loop"
+        ), mock.patch.object(
+            bridge.threading, "Thread"
+        ), mock.patch.object(
+            bridge, "StatusTracker"
+        ), mock.patch.object(
+            bridge, "Notifier"
+        ), mock.patch.object(
+            bridge, "log"
+        ) as fake_log:
+            bridge.run(FakeDB(), "http://charger", None, (10, 60, 60, 300, 5), transport)
+
+        self.assertEqual([call.args[0] for call in fake_log.call_args_list], [])
 
 
 if __name__ == "__main__":

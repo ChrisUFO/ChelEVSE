@@ -30,6 +30,10 @@ from firebase_admin import credentials, exceptions, firestore, messaging
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HTTP_TIMEOUT = 5  # seconds, per charger request
+# First-iteration offsets so /status, /config and /schedule/plan do not fire
+# together against the gateway.
+CONFIG_INITIAL_DELAY = 3
+SCHEDULE_INITIAL_DELAY = 7
 STATE_LABELS = {
     1: "ready",
     2: "connected",
@@ -519,6 +523,49 @@ def _merge_session(candidate, record, vehicle_connected):
     return merged
 
 
+def make_charger_session():
+    """One keep-alive session for the charger, capped at two pooled sockets."""
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=1, pool_maxsize=2, max_retries=0
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+class ChargerTransport:
+    """The process's one charger Session, serialised by a lock.
+
+    ``requests.Session`` is not documented as thread-safe, and the ESP32 gateway
+    is the constrained side of the link: four loops sharing one session and its
+    keep-alive pool (capped at two sockets) is cheaper than four sessions. The
+    lock is not free: ``HTTP_TIMEOUT`` is the connect/read timeout given to each
+    request, and Requests applies it per socket operation rather than as a
+    deadline for the whole call. Name resolution is not covered by it, and a
+    response that trickles in under the read timeout can keep the call — and the
+    lock — held past that value, so there is no strict total-duration bound.
+    Other loops' charger calls (commands included) wait for the lock rather than
+    fail; Firestore work and the notifier stay outside it.
+    """
+
+    def __init__(self, session):
+        self._session = session
+        self._lock = threading.Lock()
+
+    def get(self, url, **kwargs):
+        with self._lock:
+            return self._session.get(url, **kwargs)
+
+    def post(self, url, **kwargs):
+        with self._lock:
+            return self._session.post(url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        with self._lock:
+            return self._session.delete(url, **kwargs)
+
+
 def _http_reason(resp):
     """Short HTTP failure reason with a bounded body snippet."""
     body = " ".join((resp.text or "").split())[:120]
@@ -549,11 +596,11 @@ def _rapi_result(resp):
     return body.get("ret") if isinstance(body, dict) else None
 
 
-def apply_command(session, base, auth, cmd):
+def apply_command(transport, base, auth, cmd):
     """Apply one command document; return extra fields for the command doc."""
     ctype = cmd.get("type")
     if ctype == "pause":
-        resp = session.post(
+        resp = transport.post(
             f"{base}/override",
             json={"state": "disabled"},
             auth=auth,
@@ -563,13 +610,13 @@ def apply_command(session, base, auth, cmd):
         return {}
     if ctype == "resume":
         # Clear the manual override; the firmware scheduler takes over again.
-        resp = session.delete(f"{base}/override", auth=auth, timeout=HTTP_TIMEOUT)
+        resp = transport.delete(f"{base}/override", auth=auth, timeout=HTTP_TIMEOUT)
         if not 200 <= resp.status_code < 300:
             # v5.1.5 answers 500 "Failed to release manual override" when there
             # is nothing to release. The intended end state already holds, so
             # confirm it rather than reporting a spurious failure.
             try:
-                status = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+                status = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
                 status.raise_for_status()
                 body = status.json()
                 if isinstance(body, dict) and body.get("manual_override") == 0:
@@ -584,7 +631,7 @@ def apply_command(session, base, auth, cmd):
             amps = max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
         except (TypeError, ValueError):
             raise CommandError("missing or invalid amps")
-        resp = session.post(
+        resp = transport.post(
             f"{base}/override",
             json={"state": "active", "charge_current": amps, "max_current": amps},
             auth=auth,
@@ -600,7 +647,7 @@ def apply_command(session, base, auth, cmd):
             or len(command) > 32
         ):
             raise CommandError("invalid rapi")
-        resp = session.post(
+        resp = transport.post(
             f"{base}/rapi",
             data={"rapi": command, "json": 1},
             auth=auth,
@@ -699,14 +746,13 @@ def _transition_body(had_state, was_charging, is_charging):
     return "Charging started" if is_charging else "Charging stopped"
 
 
-def status_loop(db, base, auth, interval, tracker, notifier):
-    session = requests.Session()
+def status_loop(db, base, auth, transport, interval, tracker, notifier):
     status_doc = db.collection("status").document("current")
     while not _stop.is_set():
         try:
             tracker.maybe_seed()
             try:
-                resp = session.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+                resp = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
                 payload = resp.json()
                 if not isinstance(payload, dict):
@@ -744,14 +790,16 @@ def status_loop(db, base, auth, interval, tracker, notifier):
         _stop.wait(interval)
 
 
-def config_loop(db, base, auth, interval):
-    session = requests.Session()
+def config_loop(db, base, auth, transport, interval, initial_delay=0):
     config_doc = db.collection("status").document("config")
     last_synced = None
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
     while not _stop.is_set():
         try:
             try:
-                resp = session.get(f"{base}/config", auth=auth, timeout=HTTP_TIMEOUT)
+                resp = transport.get(f"{base}/config", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
                 data = resp.json()
                 if not isinstance(data, dict):
@@ -832,8 +880,7 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
-def command_loop(db, base, auth, interval):
-    session = requests.Session()
+def command_loop(db, base, auth, transport, interval):
     # Commands applied whose ack write failed. Retry the write rather than the
     # charger request; bounded and process-local, so an apply/ack gap that spans
     # a restart can still re-apply (at-least-once across restarts).
@@ -859,7 +906,7 @@ def command_loop(db, base, auth, interval):
                         log(f"command {doc.id} failed: {reason}")
                         continue
                     try:
-                        extra = apply_command(session, base, auth, cmd)
+                        extra = apply_command(transport, base, auth, cmd)
                     except CommandError as exc:
                         doc.reference.update({"status": "failed", "error": str(exc)})
                         log(f"command {doc.id} failed: {exc}")
@@ -1100,9 +1147,11 @@ def _log_schedule(label, resp):
     log(f"schedule: {label} -> HTTP {resp.status_code}" + (f" {body}" if body else ""))
 
 
-def _schedule_plan(session, base, auth):
+def _schedule_plan(transport, base, auth):
     """GET /schedule/plan as a dict; raises on any failure."""
-    resp = session.get(f"{base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT)
+    resp = transport.get(
+        f"{base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT
+    )
     # Logged only on failure (via the caller): this runs every SCHEDULE_INTERVAL.
     _require_ok(resp)
     plan = resp.json()
@@ -1134,7 +1183,7 @@ def _event_matches(existing, desired):
     )
 
 
-def sync_schedule(session, base, auth, events):
+def sync_schedule(transport, base, auth, events):
     """Upsert changed firmware events and delete stale ones.
 
     The firmware upserts by id and never deletes omitted events, so the current
@@ -1142,7 +1191,7 @@ def sync_schedule(session, base, auth, events):
     reconcile pass is otherwise read-mostly); every surplus id is DELETEd
     explicitly. Any request failure raises; the caller retries on the next tick.
     """
-    resp = session.get(f"{base}/schedule", auth=auth, timeout=HTTP_TIMEOUT)
+    resp = transport.get(f"{base}/schedule", auth=auth, timeout=HTTP_TIMEOUT)
     _log_schedule("GET /schedule", resp)
     _require_ok(resp)
     existing = resp.json()
@@ -1164,7 +1213,7 @@ def sync_schedule(session, base, auth, events):
         if _event_matches(existing_by_id.get(event["id"]), event):
             continue
         # One event per request: the firmware parses POST bodies into 1 KB.
-        resp = session.post(
+        resp = transport.post(
             f"{base}/schedule", json=event, auth=auth, timeout=HTTP_TIMEOUT
         )
         _log_schedule(f"POST /schedule id={event['id']}", resp)
@@ -1175,7 +1224,7 @@ def sync_schedule(session, base, auth, events):
     for event_id in existing_by_id:
         if event_id in desired:
             continue
-        resp = session.delete(
+        resp = transport.delete(
             f"{base}/schedule/{event_id}", auth=auth, timeout=HTTP_TIMEOUT
         )
         _log_schedule(f"DELETE /schedule/{event_id}", resp)
@@ -1187,9 +1236,8 @@ def sync_schedule(session, base, auth, events):
     )
 
 
-def schedule_loop(db, base, auth, interval, reconcile_interval):
+def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initial_delay=0):
     """Mirror schedule/current into the firmware and publish the live window."""
-    session = requests.Session()
     status_doc = db.collection("status").document("current")
     last_hash = None
     synced_event_rules = {}
@@ -1197,6 +1245,9 @@ def schedule_loop(db, base, auth, interval, reconcile_interval):
     missing_logged = False
     malformed_logged = False
     amps_logged_hash = None
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
     while not _stop.is_set():
         try:
             snapshot = db.collection("schedule").document("current").get()
@@ -1239,7 +1290,7 @@ def schedule_loop(db, base, auth, interval, reconcile_interval):
                             )
                             amps_logged_hash = digest
                         try:
-                            sync_schedule(session, base, auth, events)
+                            sync_schedule(transport, base, auth, events)
                         except (
                             CommandError,
                             requests.RequestException,
@@ -1254,7 +1305,7 @@ def schedule_loop(db, base, auth, interval, reconcile_interval):
             # Always publish the firmware's own view of the active window,
             # mapped through the last event set that actually synced.
             try:
-                plan = _schedule_plan(session, base, auth)
+                plan = _schedule_plan(transport, base, auth)
                 status_doc.set(
                     {"schedule": schedule_state(plan, synced_event_rules)}, merge=True
                 )
@@ -1263,6 +1314,40 @@ def schedule_loop(db, base, auth, interval, reconcile_interval):
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"schedule loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)
+
+
+def run(db, base, auth, intervals, transport):
+    """Start the pollers; blocks on the command loop until the stop event.
+
+    Every loop gets the same ``transport``: one Session and one bounded
+    keep-alive pool per process.
+    """
+    (
+        status_interval,
+        config_interval,
+        schedule_interval,
+        reconcile_interval,
+        command_interval,
+    ) = intervals
+    tracker = StatusTracker(db)
+    tracker.seed()
+    notifier = Notifier(db)
+
+    status_args = (db, base, auth, transport, status_interval, tracker, notifier)
+    threading.Thread(target=status_loop, args=status_args, daemon=True).start()
+    config_args = (db, base, auth, transport, config_interval, CONFIG_INITIAL_DELAY)
+    threading.Thread(target=config_loop, args=config_args, daemon=True).start()
+    schedule_args = (
+        db,
+        base,
+        auth,
+        transport,
+        schedule_interval,
+        reconcile_interval,
+        SCHEDULE_INITIAL_DELAY,
+    )
+    threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
+    command_loop(db, base, auth, transport, command_interval)
 
 
 def main():
@@ -1298,17 +1383,14 @@ def main():
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s"
     )
-    tracker = StatusTracker(db)
-    tracker.seed()
-    notifier = Notifier(db)
-
-    status_args = (db, base, auth, status_interval, tracker, notifier)
-    threading.Thread(target=status_loop, args=status_args, daemon=True).start()
-    config_args = (db, base, auth, config_interval)
-    threading.Thread(target=config_loop, args=config_args, daemon=True).start()
-    schedule_args = (db, base, auth, schedule_interval, reconcile_interval)
-    threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
-    command_loop(db, base, auth, command_interval)
+    intervals = (
+        status_interval,
+        config_interval,
+        schedule_interval,
+        reconcile_interval,
+        command_interval,
+    )
+    run(db, base, auth, intervals, ChargerTransport(make_charger_session()))
     log("bridge stopped")
 
 
