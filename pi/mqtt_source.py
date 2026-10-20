@@ -30,8 +30,14 @@ Design notes:
 - **Config is not read from MQTT.** ``<base>/config`` is retained, but the bridge
   keeps ``/config`` as the single redaction/coercion path: a change of
   ``config_version`` only triggers one HTTP sync.
-- **Announce/LWT is not consumed here.** PR-3 adds the announce subscription;
-  this module only exposes the broker connection state.
+- **Announce/LWT is the gateway's own presence.** The firmware publishes a
+  retained ``openevse/announce/<id>`` document (``{"state": "connected"}`` on
+  connect, and the broker publishes ``{"state": "disconnected"}`` as its Last
+  Will). The source subscribes to that filter and exposes the gateway's
+  announced state (``announced``/``last_lwt_at``) beside its own link state, so
+  the watchdog can tell "our broker link is fine but the gateway is gone" from
+  "the broker link dropped". ``ready``/``mqtt_ready`` stay the link facts only;
+  the bridge combines them with the announcement.
 - **Commands are published, acknowledged by the firmware's own topics.** PR-2
   adds ``publish`` plus one waiter each for the retained ``<base>/override``
   document (pause/resume/set-current) and the next ``<base>/rapi/out`` (RAPI).
@@ -45,6 +51,7 @@ import json
 import threading
 import time
 from collections import deque
+from datetime import UTC, datetime
 from typing import NamedTuple
 
 import paho.mqtt.client as mqtt
@@ -52,6 +59,12 @@ import paho.mqtt.client as mqtt
 # The firmware publishes one topic per field in a burst when the EVSE poll
 # changes. Buffer a short window so one change becomes one Firestore write.
 DEBOUNCE_SEC = 0.5
+# Retained announce document carrying the gateway's own presence; the broker
+# publishes ``disconnected`` there as the gateway's Last Will.
+DEFAULT_ANNOUNCE_TOPIC = "openevse/announce/#"
+ANNOUNCE_CONNECTED = "connected"
+ANNOUNCE_DISCONNECTED = "disconnected"
+ANNOUNCE_STATES = frozenset({ANNOUNCE_CONNECTED, ANNOUNCE_DISCONNECTED})
 # MQTT 3.1.1 keepalive; well above the firmware's publish cadence.
 KEEPALIVE_SEC = 60
 # Reconnect backoff bounds (paho retries inside its network loop).
@@ -198,6 +211,7 @@ class MqttSource:
         client_id=None,
         on_status=None,
         on_config_version=None,
+        announce_topic=DEFAULT_ANNOUNCE_TOPIC,
         debounce=DEBOUNCE_SEC,
         client_factory=None,
         log=None,
@@ -205,6 +219,7 @@ class MqttSource:
         self.host = host
         self.port = int(port)
         self.base = (topic or "").strip("/")
+        self.announce_topic = (announce_topic or "").strip()
         self.user = user or None
         self.password = password or None
         self.client_id = client_id or "chelevse-bridge"
@@ -221,6 +236,12 @@ class MqttSource:
         # snapshot a complete observation the state machine may run on.
         self.seeded = False
         self.subscribed = False
+        self.announce_subscribed = False
+        # The gateway's announced presence (None until an announce arrives) and
+        # when the Last Will last fired.
+        self.announce_state = None
+        self.announce_messages = 0
+        self.last_lwt_at = None
         self.connects = 0
         self.disconnects = 0
         self.connect_failures = 0
@@ -237,6 +258,7 @@ class MqttSource:
         self._client_factory = client_factory or _default_client_factory
         self._client = None
         self._pending = {}
+        self._pending_subscriptions = {}
         self._timer = None
         self._lock = threading.Lock()
 
@@ -263,6 +285,7 @@ class MqttSource:
         with self._lock:
             timer, self._timer = self._timer, None
         self.subscribed = False
+        self.announce_subscribed = False
         if timer is not None:
             timer.cancel()
         client, self._client = self._client, None
@@ -289,6 +312,28 @@ class MqttSource:
         when this is false *before* a publish.
         """
         return self.connected and self.subscribed
+
+    @property
+    def mqtt_ready(self):
+        """The same link facts as ``ready``, named for the watchdog/health input.
+
+        It deliberately says nothing about the gateway's own announcement: the
+        bridge combines it with ``announced`` so a Last Will still counts as an
+        unavailable gateway while our broker link stays up.
+        """
+        return self.ready
+
+    @property
+    def announced(self):
+        """Gateway presence from the announce topic: True/False, None unknown.
+
+        ``False`` means the broker published the gateway's Last Will and it has
+        not re-announced since. Unknown is neither: the watchdog must not invent
+        a gateway outage from a message it has not seen.
+        """
+        if self.announce_state is None:
+            return None
+        return self.announce_state == ANNOUNCE_CONNECTED
 
     # -- commands (PR-2) ---------------------------------------------------
 
@@ -491,17 +536,45 @@ class MqttSource:
         self.connects += 1
         # Re-subscribed on every (re)connect: the session is clean, so the
         # broker holds no subscription across a drop.
-        result = client.subscribe(self.subscription, qos=0)
-        if isinstance(result, tuple) and result and result[0] != 0:
-            self.log(f"mqtt subscribe failed ({self.subscription}: rc {result[0]})")
+        self._subscribe(client, self.subscription, "status")
+        if self.announce_topic:
+            self._subscribe(client, self.announce_topic, "announce")
 
-    def _on_subscribe(self, _client, _userdata, _mid, reason_codes, *_):
+    def _subscribe(self, client, topic_filter, kind):
+        """Subscribe one filter and remember which SUBACK belongs to it."""
+        result = client.subscribe(topic_filter, qos=0)
+        if not isinstance(result, tuple) or not result:
+            return
+        rc = result[0]
+        if rc != 0:
+            self.log(f"mqtt subscribe failed ({topic_filter}: rc {rc})")
+            return
+        if len(result) > 1 and result[1] is not None:
+            self._pending_subscriptions[result[1]] = kind
+
+    def _on_subscribe(self, _client, _userdata, mid, reason_codes, *_):
+        kind = self._pending_subscriptions.pop(mid, "status")
         codes = (
             list(reason_codes)
             if isinstance(reason_codes, (list, tuple))
             else [reason_codes]
         )
         denied = [code for code in codes if _is_failure(code)]
+        if kind == "announce":
+            # A denied announce grant only costs the LWT input; the status
+            # source must keep working.
+            if denied:
+                self.announce_subscribed = False
+                detail = ", ".join(_reason_text(code) for code in denied)
+                self.log(
+                    f"mqtt announce subscription denied "
+                    f"({self.announce_topic}: {detail})"
+                )
+                return
+            if not self.announce_subscribed:
+                self.log(f"mqtt announce subscribed ({self.announce_topic})")
+            self.announce_subscribed = True
+            return
         if denied:
             # An ACL/misconfigured topic looks exactly like an idle charger
             # otherwise: connected, no status, no config_version.
@@ -516,6 +589,7 @@ class MqttSource:
     def _on_disconnect(self, _client, _userdata, *args):
         self.disconnects += 1
         self.subscribed = False
+        self.announce_subscribed = False
         reason = _first_reason(args)
         if reason is None or not _is_failure(reason):
             self.log("mqtt disconnected")
@@ -528,6 +602,9 @@ class MqttSource:
 
     def _on_message(self, _client, _userdata, message):
         topic = getattr(message, "topic", "") or ""
+        if self._is_announce(topic):
+            self._announce(_decode(getattr(message, "payload", b"")))
+            return
         prefix = f"{self.base}/" if self.base else ""
         if not topic.startswith(prefix):
             return
@@ -553,6 +630,38 @@ class MqttSource:
                 timer.daemon = True
                 self._timer = timer
                 timer.start()
+
+    def _is_announce(self, topic):
+        """True for a topic the announce filter covers.
+
+        The filter is matched client-side only to classify a delivery: a
+        ``<prefix>/#`` filter (the default) matches everything below it, any
+        other filter is matched exactly. paho already delivers only matching
+        topics, so this never has to reject a real announce.
+        """
+        if not self.announce_topic:
+            return False
+        if self.announce_topic.endswith("/#"):
+            return topic.startswith(self.announce_topic[:-1])
+        return topic == self.announce_topic
+
+    def _announce(self, value):
+        """The gateway's announced presence; ``state`` is the field that counts."""
+        state = value.get("state") if isinstance(value, dict) else value
+        if not isinstance(state, str):
+            return
+        state = state.strip().lower()
+        if state not in ANNOUNCE_STATES:
+            return
+        previous, self.announce_state = self.announce_state, state
+        self.announce_messages += 1
+        if state != previous:
+            # Stamp only on the transition into disconnected: the will is
+            # retained, so every re-subscribe redelivers it, and a redelivery
+            # must not move the time the Last Will actually fired.
+            if state == ANNOUNCE_DISCONNECTED:
+                self.last_lwt_at = datetime.now(UTC)
+            self.log(f"mqtt gateway announced {state}")
 
     def _override(self, value):
         """Retained override document -> confirmation state for override commands.

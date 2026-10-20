@@ -447,6 +447,8 @@ MQTT_PORT=1883
 MQTT_USER=<mqtt-user>
 MQTT_PASS=<broker password>
 MQTT_TOPIC=chelevse
+# Announce/Last Will filter (default shown; change only if the firmware does)
+MQTT_ANNOUNCE_TOPIC="openevse/announce/#"
 ```
 
 **3. Charger.** Point it at the broker over plain MQTT on the LAN. The password
@@ -480,7 +482,9 @@ mosquitto_sub -h <pi-host> -u <mqtt-user> -P "$MQTT_PASS" \
 Expect retained `chelevse/config`, `chelevse/override`, `chelevse/schedule`,
 the per-field status topics (`state`, `amp`, `voltage`, `total_energy`, …), and
 the retained `openevse/announce/<id>` message (`state: connected`; the same
-topic carries `state: disconnected` as the Last Will — #45 consumes it).
+topic carries `state: disconnected` as the Last Will, which the bridge consumes
+as the watchdog's availability input — see
+[VALIDATION M.11–M.13](VALIDATION.md#mqtt-transport-issue-44)).
 
 **4. Enable the bridge.** Set `MQTT_ENABLED=true`, then redeploy the service:
 
