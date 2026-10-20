@@ -161,14 +161,17 @@ export function rateWindowSummary(row) {
   let dayText;
   if (days.length === 0) {
     dayText = 'No days';
+  } else if (days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
+    // Checked before the shorthand labels: seven values that include one outside
+    // 0–6 are not every day, and the summary must not claim coverage the row
+    // does not have.
+    dayText = 'Invalid days';
   } else if (days.length === 7) {
     dayText = 'Every day';
   } else if (days.length === 5 && days.every((day, index) => day === index)) {
     dayText = 'Weekdays';
   } else if (days.length === 2 && days[0] === 5 && days[1] === 6) {
     dayText = 'Weekends';
-  } else if (days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
-    dayText = 'Invalid days';
   } else {
     dayText = days.map((day) => DAY_NAMES[day]).join(', ');
   }

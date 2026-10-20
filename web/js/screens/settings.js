@@ -283,7 +283,6 @@ function createRateRow(row, index) {
     allYearInput: null,
     fromSelect: null,
     toSelect: null,
-    removeButton: null,
     errorEl: null,
   };
 
@@ -296,14 +295,13 @@ function createRateRow(row, index) {
   remove.type = 'button';
   remove.setAttribute('aria-label', `Remove rate window ${index + 1}`);
   remove.addEventListener('click', () => {
-    const removed = rateCards.findIndex((entry) => entry.node === node);
     draftRates = draftRates.filter((value) => value !== row);
     renderRates();
-    const next = rateCards[Math.min(removed, rateCards.length - 1)];
-    if (next) next.removeButton.focus({ preventScroll: true });
-    else $('add-rate').focus({ preventScroll: true });
+    // Focus Add, never another row's Remove: a held or repeated Enter on a
+    // destructive control would otherwise delete window after window with no
+    // undo. Mirrors the schedule editor's remove handler.
+    $('add-rate').focus({ preventScroll: true });
   });
-  card.removeButton = remove;
   head.append(heading, remove);
 
   const rateWrap = el('div', 'input-wrap');

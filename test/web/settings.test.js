@@ -361,6 +361,17 @@ test('a rate window summary stays readable without hiding invalid values', () =>
   );
 });
 
+test('seven day values are only "Every day" when all seven are real weekdays', () => {
+  // The shorthand labels must never mask bad data: a hand-edited set of seven
+  // values that includes something outside 0–6 is not every day.
+  const row = { days: [0, 1, 2, 3, 4, 5, 9], start: '22:00', end: '06:00', months: null };
+  assert.equal(rateWindowSummary(row), 'Invalid days · 22:00–06:00 next day · All year');
+  assert.equal(
+    rateWindowSummary({ ...row, days: [6, 5, 4, 3, 2, 1, 0] }),
+    'Every day · 22:00–06:00 next day · All year',
+  );
+});
+
 test('settingsPayload omits an empty schedule so flat writes stay byte-identical', () => {
   assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [] }), {
     rate: 0.31,
