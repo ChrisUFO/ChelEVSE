@@ -10,6 +10,7 @@ import {
   freezeClock,
   freshnessState,
   holdAfterSnapshot,
+  liveCharging,
   numOrDash,
   relTime,
   stateFor,
@@ -132,7 +133,10 @@ function renderStatus() {
   const theState = stateFor(status && status.state_label);
   document.documentElement.style.setProperty('--state', theState.color);
   setText($('state-label'), theState.label);
-  $('state-badge').classList.toggle('pulse', status && status.state_label === 'charging');
+  // Same liveness gate as the session clock and the live cost: an offline marker
+  // keeps the last known `charging` label, so pulsing there would advertise a
+  // live charge whose clock has already frozen.
+  $('state-badge').classList.toggle('pulse', liveCharging(status));
 
   setText($('power'), status && status.power != null ? fmtK(toNumber(status.power) / 1000) : '—');
   setText($('fig-amp'), status ? numOrDash(status.amp) : '—');

@@ -51,13 +51,15 @@ Costs are calculated whenever a screen is shown, never saved, so editing the sch
 live session and the whole history immediately.
 
 - **Live session** cost covers the snapshot's `updated_at - elapsed` to `updated_at`, and only while
-  the charger reports **charging**. A paused, ready or cached snapshot hides the scheduled figure
-  instead of re-pricing the interval against a later clock, so idle hours that added no energy are
-  never priced. The figure is also hidden while the charger is **offline**: the bridge keeps the last
-  known state and elapsed but refreshes `updated_at` on every failed poll, so under the "Charger
-  offline" banner the last known energy is shown without a scheduled cost. Until it reports a
-  positive elapsed time the scheduled cost stays hidden (there is no interval to price yet). For a
-  flat rate the figure is still `kWh × rate`, exactly as before.
+  the charger reports **charging**. A paused or ready snapshot hides the scheduled figure instead of
+  re-pricing the interval against a later clock, so idle hours that added no energy are never
+  priced. A stale snapshot — a cached read that still says `charging` with `charger_online: true` —
+  keeps the cost frozen at that snapshot's own interval: the figure is anchored to the write, so it
+  does not slide as the clock moves on. The figure is also hidden while the charger is **offline**:
+  the bridge keeps the last known state and elapsed but refreshes `updated_at` on every failed poll,
+  so under the "Charger offline" banner the last known energy is shown without a scheduled cost.
+  Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
+  price yet). For a flat rate the figure is still `kWh × rate`, exactly as before.
 - **History session** costs use the session's own stored start and end.
 - **Uniform pro-rating (approximation).** Sessions store one energy total, not the energy drawn in
   each window. Each slice between rate boundaries is assumed to have drawn energy in proportion to
