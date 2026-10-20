@@ -52,6 +52,18 @@ real environment variables take precedence.
 | `SCHEDULE_RECONCILE_INTERVAL`   | `300`           | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
 | `COMMAND_INTERVAL`              | `5`             | Seconds between command polls                                                             |
 
+### One charger HTTP session
+
+All four loops share one `requests.Session` (`ChargerTransport` in
+`bridge.py`), capped at two pooled sockets (`pool_connections=1`,
+`pool_maxsize=2`). The ESP32 gateway is the constrained side of the link, so
+the bridge holds at most two keep-alive connections instead of one per loop.
+`requests.Session` is not documented as thread-safe, so every call is made
+under a lock; requests are short and low-rate (5 s timeout), so serialising
+them costs nothing. The config and schedule pollers start 3 s and 7 s late so
+`/status`, `/config` and `/schedule/plan` do not hit the charger together.
+Polling intervals, timeouts, auth, payloads and failure logging are unchanged.
+
 ## What the bridge writes
 
 Each loop is failure-isolated: a charger or Firestore error is logged as one
