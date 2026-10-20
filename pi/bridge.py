@@ -199,7 +199,7 @@ def parse_status(data):
     return {
         "state": state,
         "state_label": STATE_LABELS.get(state, "unknown"),
-        "amp": data.get("amp"),
+        "amp": _amps(data.get("amp")),
         "voltage": data.get("voltage"),
         "power": data.get("power"),
         "session_energy": data.get("session_energy"),
@@ -225,6 +225,13 @@ def _sensor_temp(value):
     """Raw tenths-of-°C reading -> °C, or None for absent-sensor sentinels."""
     if _is_number(value) and value > 0:
         return round(value / 10, 1)
+    return None
+
+
+def _amps(value):
+    """OpenEVSE reports charge current in milliamps; the contract is amps."""
+    if _is_number(value) and value >= 0:
+        return round(value / 1000, 2)
     return None
 
 

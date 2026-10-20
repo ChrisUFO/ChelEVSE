@@ -71,7 +71,7 @@ class ParseStatusTests(unittest.TestCase):
         fields = bridge.parse_status(
             {
                 "state": 3,
-                "amp": 16,
+                "amp": 15400,
                 "voltage": 240,
                 "power": 3.8,
                 "session_energy": 100,
@@ -89,6 +89,7 @@ class ParseStatusTests(unittest.TestCase):
         self.assertIsNone(fields["temp2"])
         self.assertIsNone(fields["temp3"])
         self.assertEqual(fields["temp_c"], 25.0)
+        self.assertEqual(fields["amp"], 15.4)
         self.assertEqual(fields["pilot"], 16)
         self.assertEqual(fields["vehicle"], 1)
         self.assertTrue(fields["charger_online"])
@@ -96,6 +97,7 @@ class ParseStatusTests(unittest.TestCase):
     def test_empty_payload_is_unknown_not_an_error(self):
         fields = bridge.parse_status({})
         self.assertIsNone(fields["state"])
+        self.assertIsNone(fields["amp"])
         self.assertEqual(fields["state_label"], "unknown")
         self.assertIsNone(fields["temp_c"])
 
