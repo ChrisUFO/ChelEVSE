@@ -130,8 +130,11 @@ the watchdog cannot recover that remotely. See the bridge README's
 ## 3. Commands
 
 Commands are asynchronous: the app writes `commands/{id}` with
-`status: "pending"`, the bridge applies it, then writes `acked` or `failed`.
-The status screen disables the controls while a command is pending.
+`status: "pending"`, the bridge applies it, then writes `acked` or `failed`
+(with `transport: "mqtt"|"http"`). The status screen disables the controls
+while a command is pending. The checks below describe the HTTP shape; with
+`MQTT_ENABLED=true` and a ready source the same commands travel over MQTT —
+see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 
 ### 3.1 Pause (stop)
 
@@ -188,6 +191,37 @@ The status screen disables the controls while a command is pending.
   This is the query that needs the composite index — while the index builds the
   screen says it is still being built (see DEPLOY.md §8).
 - **Evidence:** screenshot of the scrollback; Firestore index state.
+
+### 3.7 Commands over MQTT (issue #46)
+
+Run these with `MQTT_ENABLED=true` and the bridge's source ready (the charger
+connected to the broker and `<MQTT_TOPIC>/#` granted). The journal records
+`command transport: mqtt (mqtt connected and subscribed)` on the first MQTT
+command and `command transport: http (mqtt unavailable before publish)` after a
+fallback. Each command document carries `transport: "mqtt"|"http"` once it
+settles.
+
+| #   | Check                           | How                                                                                                                                                                       | Expected observation                                                                                                                                                                                                                                                        | Evidence                                                           |
+| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| C.1 | Pause over MQTT                 | With the car charging, tap **Stop**                                                                                                                                       | Journal shows no `POST /override`; `<base>/override/set` carries `{"state":"disabled"}`; the retained `<base>/override` becomes `{"state":"disabled",…}`; the command doc is `acked` with `transport: "mqtt"`; the charger stops within ~5 s                                | Command doc, journal, `mosquitto_sub -t '<topic>/override'`        |
+| C.2 | Resume over MQTT                | Tap **Auto** after a pause                                                                                                                                                | `<base>/override/set` carries `clear`; the retained document returns to `{"state":"null"}`; doc `acked`, `transport: "mqtt"`; the charger returns to its normal behaviour. With no override to clear the command still acks at once (no 500 path needed)                    | Command doc, retained override, journal                            |
+| C.3 | Set current over MQTT           | Tap **Hold**, pick a current (6–48 A), apply                                                                                                                              | `<base>/override/set` carries `{"state":"active","charge_current":N,"max_current":N}`; the retained document shows the same `N`; `pilot` follows; doc `acked` with `amps: N` and `transport: "mqtt"`                                                                        | Command doc, retained override, status screen                      |
+| C.4 | RAPI over MQTT — valid          | **Advanced**, send `$GS` (and `$FS 20` for a command with a parameter)                                                                                                    | Topics are `<base>/rapi/in/$GS` with an empty payload and `<base>/rapi/in/$FS` with payload `20`; the next `<base>/rapi/out` is `$OK…`; doc `acked` with `result` = the reply and `transport: "mqtt"`                                                                       | Command docs, `mosquitto_sub -t '<topic>/rapi/out'`                |
+| C.5 | RAPI over MQTT — `$NK`          | Send an invalid RAPI command the firmware rejects (e.g. `$XX 20`)                                                                                                         | `<base>/rapi/out` is `$NK^…`; doc `failed` with the reply in `error`, `transport: "mqtt"`; no HTTP `/rapi` call                                                                                                                                                             | Command doc, journal                                               |
+| C.6 | Fallback when MQTT is not ready | `sudo systemctl stop mosquitto`, wait until the journal logs `status source: http (mqtt disconnected …)`, then tap **Stop** (or send `$GS`)                               | One `command transport: http (mqtt unavailable before publish)`; the existing HTTP request applies the command; doc `acked`/`failed` as before with `transport: "http"`; no MQTT publish is attempted. Restart mosquitto afterwards                                         | Journal, command doc                                               |
+| C.7 | No double-apply on a drop       | Start a pause and stop mosquitto immediately after the journal logs the `override/set` publish (or after the retained document updates), before the acknowledgement lands | The bridge does **not** send `POST/DELETE /override`: it reads `/status` once, acks if the status already shows the override, otherwise marks the command `failed` with `no confirmation within 5s (…)`. One publish only, one command document — never two charger actions | Journal (`command transport: mqtt`, no HTTP override), command doc |
+| C.8 | Flag off is unchanged           | `MQTT_ENABLED=false`, restart the bridge, apply each command type                                                                                                         | `mqtt: disabled (HTTP status polling)` at startup; commands use HTTP exactly as before and record `transport: "http"`; no MQTT publish                                                                                                                                      | Journal, command docs                                              |
+
+Notes:
+
+- **Override confirmation.** The retained `<base>/override` document is the
+  acknowledgement: `{"state":"null"}` is auto, `"disabled"` is paused and
+  `"active"` carries the held current. The status `manual_override` field is `1`
+  for _either_ override, so a pause that only checks it could accept a hold; the
+  status fallback uses `status: "disabled"` / `state: 255` instead.
+- **RAPI serialisation.** Replies have no correlation id. Only one RAPI command
+  is in flight at a time; a missing reply is `failed (no rapi/out within 5s)`
+  (covered by `pi/tests/test_mqtt_commands.py`), never retried over HTTP.
 
 ## 4. Schedule round-trip
 

@@ -126,9 +126,11 @@ reach it.
 | `<base>/temp1`–`temp3`    | `temp1`–`temp3`        | 10ths of °C; `false` when absent                    |
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
-Everything else on the base topic (retained `config`/`claim`/`override`/
-`schedule`/`limit`/`boost`, the command topics, `rapi/out`, availability
-counters) is ignored: commands and LWT handling are #46/#45.
+Everything else on the base topic (retained `config`/`claim`/`schedule`/
+`limit`/`boost`, availability counters) is ignored by the status path. The
+retained `override` document and `rapi/out` feed the command acknowledgements
+([Commands over MQTT](#commands-over-mqtt-issue-46)); `override/set` and
+`rapi/in` are our own publishes; LWT handling is #45.
 
 **Cadence.** While the broker is connected **and the subscription is granted**,
 `/status` is fetched once every `MQTT_RECONCILE_SEC` (60 s) and merged into the
@@ -605,6 +607,52 @@ re-applied: delivery is **at-least-once across restarts**. `pause`, `resume` and
 `set_current` are idempotent; non-idempotent `rapi` commands remain gated
 client-side.
 
+### Commands over MQTT (issue #46)
+
+With `MQTT_ENABLED=true` **and** the source ready — broker `connected` and
+`<MQTT_TOPIC>/#` `subscribed` — the command loop publishes to the charger's
+native topics instead of calling the HTTP API. Readiness is checked once,
+immediately before the publish. HTTP stays the fallback when MQTT is not ready
+_at that moment_; the flag alone does not switch the command path if the
+subscription was denied or the link is down.
+
+| `type`        | Publish on `<base>/…`                                                                                                                   | Acknowledged by                                                                                                     |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `pause`       | `override/set` `{"state":"disabled"}`                                                                                                   | retained `override` `{"state":"disabled",…}` (or `status: "disabled"` / `state: 255` in a status snapshot)          |
+| `resume`      | `override/set` `clear`                                                                                                                  | retained `override` `{"state":"null"}` (the firmware's auto state) or `manual_override: 0`                          |
+| `set_current` | `override/set` `{"state":"active","charge_current":N,"max_current":N}`                                                                  | retained `override` with `state: "active"` and that current (or `manual_override: 1` with `pilot: N`)               |
+| `rapi`        | `rapi/in/<command>` with the parameters as the payload (`$FS 20` → topic `rapi/in/$FS`, payload `20`; empty payload without parameters) | the next `rapi/out` reply: `$OK…` → `acked` with the reply in `result`; `$NK…` → `failed` with the reply in `error` |
+
+Override commands wait `COMMAND_CONFIRM_SEC` (5 s) for the retained
+`<base>/override` document, which the firmware rewrites on every change — it
+distinguishes `"null"` (auto), `"disabled"` (pause) and `"active"` (hold),
+whereas the status `manual_override` field is `1` for either override. The raw
+status seed is the fallback for the moment before that document lands. A timeout
+does **not** re-apply the command: the bridge reads `/status` once (read-only)
+and accepts it if the status already reflects the target state, otherwise marks
+it `failed` with `no confirmation within 5s (…)`.
+
+RAPI replies carry no correlation id, so RAPI publishes are serialised: one
+lock covers the publish and the wait, making the next `rapi/out` belong to the
+command in flight. The topic is the command itself (`$FS`), the parameters go in
+the payload, and the wait starts from the reply count captured _before_ the
+publish. A reply that is not `$OK…` fails the command with the reply in
+`error`; a missing reply fails with `no rapi/out within 5s`.
+
+**Fallback and double-apply.** HTTP runs only when MQTT was not usable _before_
+a publish (disabled, disconnected, or subscription denied), with identical
+validation, acknowledgement and lifecycle semantics. A publish the client
+refuses (no connection, `rc ≠ 0`) also falls back, because nothing was
+delivered. A publish the client accepted never falls back: if the broker drops
+before the acknowledgement, the command is reconciled from the retained
+override/`rapi/out`/status or marked `failed`, never re-applied. The settled
+memory also covers failed commands whose status write did not land, so a
+published command is not repeated on the next poll. Every command document
+records `transport: "mqtt"` or `"http"` (success and failure), and the journal
+logs `command transport: <transport> (…)` when the path changes. Validation
+(`amps` 6–48, RAPI `$` and ≤32 characters), the 10-minute staleness rule,
+`status` lifecycle and error copy are unchanged.
+
 ## Tests
 
 The bridge and ACL helper have stdlib `unittest` coverage under `pi/tests/`
@@ -614,8 +662,12 @@ debounce/merge, the raw-snapshot → `parse_status` → document path (units,
 derived fields, no uncurated keys), the no-nulling rule, the pre-seed partial
 snapshot (no transition, no session), fallback, the config-version trigger with
 its failure retry, source transitions, the stale-reconcile ordering guard, the
-CONNACK/SUBACK failure logs and the no-duplicate-transition rule. Run it with
-the same venv as the service:
+CONNACK/SUBACK failure logs and the no-duplicate-transition rule.
+`pi/tests/test_mqtt_commands.py` covers the command path: each command type's
+topic/payload, override acknowledgement (success, mismatched current, timeout,
+read-only status reconcile), RAPI `$OK`/`$NK`/timeout and serialisation, HTTP
+fallback when the source is not ready, a refused publish, no double-apply, and
+the recorded `transport`. Run it with the same venv as the service:
 
 ```bash
 pi/.venv/bin/python -m unittest discover -s pi/tests -v
