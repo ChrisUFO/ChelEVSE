@@ -6,15 +6,21 @@ import {
   SAVE_FAILED_FIRST_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
+  defaultRateRow,
   normalizeSettings,
+  rateOverlapMessage,
+  rateRowFields,
+  rateWindowSummary,
   reconcileSettingsSave,
   sameSettingsInput,
   settingsDraftMatches,
   settingsFields,
   settingsPayload,
   settingsSaveState,
+  validateRateEditorRows,
   validateSettings,
 } from '../../web/js/settings.js';
+import { normalizeRateSchedule, validateRateWindows } from '../../web/js/rates.js';
 
 test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
@@ -112,8 +118,240 @@ test('the stored rate schedule survives normalization and reaches the form field
   };
   const stored = { rate: 0.31, currency: 'USD', rates: [night] };
   assert.deepEqual(normalizeSettings(stored), stored);
-  // The form has no rate table yet, but the rows must not be dropped on a save.
   assert.deepEqual(settingsFields(stored).rates, [night]);
+});
+
+test('the editor keeps a malformed stored row that the costing layer drops', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const broken = {
+    id: 'broken',
+    rate: 9,
+    days: [],
+    start: '25:00',
+    end: '06:00',
+    months: [1, 6],
+  };
+  const stored = { rate: 0.31, currency: 'USD', rates: [night, broken] };
+  // The form must show what is stored, not silently delete a row the owner may
+  // still want to fix; costing uses only the usable row.
+  assert.deepEqual(
+    normalizeSettings(stored).rates.map((row) => row.id),
+    ['night', 'broken'],
+  );
+  assert.deepEqual(
+    normalizeRateSchedule(stored).rates.map((row) => row.id),
+    ['night'],
+  );
+  assert.deepEqual(
+    settingsFields(stored).rates.map((row) => row.id),
+    ['night', 'broken'],
+  );
+  // The kept row validates as broken, so it blocks a save until it is fixed or
+  // removed — it is never quietly rewritten by an unrelated rate edit.
+  const result = validateSettings(settingsFields(stored));
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.rates);
+  // Showing the broken row is not an unsaved change: the draft built from the
+  // document matches it exactly.
+  assert.equal(settingsDraftMatches(settingsFields(stored), stored), true);
+});
+
+test('rateRowFields makes stored rows editable without repairing their values', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  assert.deepEqual(rateRowFields(night), { ...night, rate: '0.12' });
+  assert.deepEqual(
+    rateRowFields({
+      id: 'broken',
+      rate: 'abc',
+      days: 'Mon',
+      start: 25,
+      end: null,
+      months: 3,
+    }),
+    { id: 'broken', rate: '', days: [], start: '', end: '', months: 3 },
+  );
+  // Month lists are copied so editing one form cannot mutate a snapshot.
+  const months = [11, 12, 1];
+  const editable = rateRowFields({ ...night, months });
+  months.push(2);
+  assert.deepEqual(editable.months, [11, 12, 1]);
+});
+
+test('a fresh rate row is an overnight window waiting for a price', () => {
+  const row = defaultRateRow('row-1');
+  assert.deepEqual(row, {
+    id: 'row-1',
+    rate: '',
+    days: [0, 1, 2, 3, 4],
+    start: '00:00',
+    end: '07:00',
+    months: null,
+  });
+  // Each call owns its arrays.
+  row.days.push(6);
+  assert.deepEqual(defaultRateRow('row-2').days, [0, 1, 2, 3, 4]);
+});
+
+test('the editor validator adds the one-range month rule on top of the stored rules', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  assert.deepEqual(validateRateEditorRows([]), {
+    valid: true,
+    general: [],
+    rows: [],
+    overlaps: [],
+  });
+  assert.equal(validateRateEditorRows([rateRowFields(night)]).valid, true);
+
+  // A stored list such as January + June is valid data but not one range: the
+  // editor cannot show it, so it says so instead of rewriting it on save.
+  const loose = { ...night, id: 'loose', months: [1, 6] };
+  assert.equal(validateRateWindows([loose]).valid, true);
+  const looseResult = validateRateEditorRows([rateRowFields(loose)]);
+  assert.equal(looseResult.valid, false);
+  assert.match(looseResult.rows[0].months, /month range/);
+
+  const overlap = validateRateEditorRows([
+    rateRowFields(night),
+    rateRowFields({ ...night, id: 'dawn', start: '05:00', end: '07:00' }),
+  ]);
+  assert.equal(overlap.valid, false);
+  assert.deepEqual(overlap.overlaps, [[0, 1]]);
+  assert.deepEqual(overlap.rows, [{}, {}]);
+  assert.match(overlap.general.join(' '), /Rate windows 1 and 2 overlap/);
+  assert.equal(rateOverlapMessage([[0, 1]]), overlap.general[0]);
+  assert.match(
+    rateOverlapMessage([
+      [0, 1],
+      [0, 2],
+    ]),
+    /1 and 2, 1 and 3/,
+  );
+
+  // Per-row errors stay on their row, and the position-based overlap copy does
+  // not fall back to the stored ids.
+  const broken = validateRateEditorRows([
+    rateRowFields({ ...night, id: '', rate: 9 }),
+    rateRowFields(night),
+  ]);
+  assert.equal(broken.valid, false);
+  assert.match(broken.rows[0].id, /id/);
+  assert.match(broken.rows[0].rate, /rate/i);
+});
+
+test('the rate table draft becomes dirty only when a row really changes', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const stored = { rate: 0.25, currency: 'USD', rates: [night] };
+  const base = { rate: '0.25', currency: 'USD', rates: [rateRowFields(night)] };
+  assert.equal(settingsDraftMatches(base, stored), true);
+  // Numeric text is not a change.
+  assert.equal(
+    settingsDraftMatches({ ...base, rates: [rateRowFields({ ...night, rate: '0.120' })] }, stored),
+    true,
+  );
+  // Adding or removing a row is.
+  assert.equal(
+    settingsDraftMatches({ ...base, rates: [...base.rates, defaultRateRow('new')] }, stored),
+    false,
+  );
+  assert.equal(settingsDraftMatches({ ...base, rates: [] }, stored), false);
+  // Editing a row back to the stored value is clean again.
+  assert.equal(
+    settingsDraftMatches(
+      { ...base, rates: [rateRowFields({ ...night, days: [0, 1, 2, 3, 4] })] },
+      stored,
+    ),
+    true,
+  );
+});
+
+test('a rate-table save writes numeric rows, and an empty table stays flat', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const editable = rateRowFields({ ...night, rate: '0.120' });
+  const values = validateSettings({ rate: '0.31', currency: ' USD ', rates: [editable] }).values;
+  assert.deepEqual(values.rates, [night]);
+  assert.deepEqual(settingsPayload(values), { rate: 0.31, currency: 'USD', rates: [night] });
+
+  const flat = validateSettings({ rate: '0.31', currency: 'USD', rates: [] }).values;
+  assert.equal('rates' in settingsPayload(flat), false);
+});
+
+test('a rate window summary stays readable without hiding invalid values', () => {
+  const row = {
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  assert.equal(rateWindowSummary(row), 'Weekdays · 22:00–06:00 next day · All year');
+  assert.equal(
+    rateWindowSummary({ ...row, days: [0, 1, 2, 3, 4, 5, 6] }),
+    'Every day · 22:00–06:00 next day · All year',
+  );
+  assert.equal(
+    rateWindowSummary({ ...row, days: [5, 6] }),
+    'Weekends · 22:00–06:00 next day · All year',
+  );
+  assert.equal(
+    rateWindowSummary({
+      ...row,
+      days: [1, 3],
+      start: '09:00',
+      end: '12:00',
+      months: [11, 12, 1, 2],
+    }),
+    'Tue, Thu · 09:00–12:00 · Nov–Feb',
+  );
+  assert.equal(
+    rateWindowSummary({ ...row, days: [6], start: '00:00', end: '00:00', months: [7] }),
+    'Sun · All day · Jul',
+  );
+  assert.equal(
+    rateWindowSummary({ days: [], start: '', end: '', months: null }),
+    'No days · Times not set · All year',
+  );
+  assert.equal(
+    rateWindowSummary({ ...row, months: [1, 6] }),
+    'Weekdays · 22:00–06:00 next day · Custom months',
+  );
+  assert.equal(
+    rateWindowSummary({ ...row, days: [0, 9] }),
+    'Invalid days · 22:00–06:00 next day · All year',
+  );
 });
 
 test('settingsPayload omits an empty schedule so flat writes stay byte-identical', () => {

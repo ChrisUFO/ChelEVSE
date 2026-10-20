@@ -548,9 +548,29 @@
               <p class="block-sub">Used for the cost estimates on Status and History.</p>
             </div>
             <form id="settings-form" class="settings-form" novalidate>
+              <div class="rate-editor" role="group" aria-labelledby="rates-heading">
+                <div class="rate-head">
+                  <div class="rate-head-copy">
+                    <h3 id="rates-heading">Time-of-use rates</h3>
+                    <p class="block-sub">
+                      Window rates override the fallback for set days, times and months. Times are
+                      local.
+                    </p>
+                  </div>
+                  <span class="section-note" id="rates-count">0 of 24</span>
+                </div>
+                <div class="rate-list" id="rate-list"></div>
+                <p class="rate-empty" id="rates-empty">
+                  No rate windows yet. All other times use the fallback rate below.
+                </p>
+                <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
+                <button class="btn add-rule" id="add-rate" type="button">
+                  <span class="add-plus" aria-hidden="true">+</span><span>Add rate window</span>
+                </button>
+              </div>
               <div class="settings-grid">
                 <div class="field">
-                  <label class="field-label" for="setting-rate">Electricity rate</label>
+                  <label class="field-label" for="setting-rate">Fallback rate</label>
                   <div class="input-wrap">
                     <input
                       id="setting-rate"
@@ -566,7 +586,7 @@
                     />
                     <span class="input-suffix" aria-hidden="true">/ kWh</span>
                   </div>
-                  <span class="field-hint" id="rate-hint">0 to 5</span>
+                  <span class="field-hint" id="rate-hint">0 to 5 · used for all other times</span>
                   <span class="field-error" id="rate-error" hidden></span>
                 </div>
                 <div class="field">
