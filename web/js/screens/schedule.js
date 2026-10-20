@@ -6,9 +6,14 @@
 // a reload travels as `schedule/current` snapshot metadata (`hasPendingWrites`,
 // forwarded by store.js and app.js): the promise from the earlier page is gone,
 // so the acknowledged snapshot is what clears the queued label.
+//
+// The schedule watch requests metadata changes, so one snapshot can repeat the
+// same data for a different write state (queued → acknowledged) or cache state.
+// Those repeats are guarded by transition, never applied as new data, and they
+// never erase a notice that explains the last real change.
 
 import { $, setText } from '../ui.js';
-import { saveSchedule } from '../store.js';
+import { readScheduleBaseline, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
   MAX_AMPS,
@@ -20,6 +25,7 @@ import {
   queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
+  reloadDiscardBaseline,
   reloadQueuedState,
   scheduleKey,
   scheduleSaveValid,
@@ -61,6 +67,12 @@ const REVERTED_NOTICE = 'The queued change was not saved — showing the charger
 // charger's copy.
 const REVERTED_DIRTY_NOTICE = 'The queued change was not saved — your edits are still here.';
 let remoteNotice = '';
+// The server's `schedule/current` fetched for a reload-queued write. The cached
+// document carries the queued payload, so this is the only honest Discard
+// baseline; it never replaces what the form shows.
+let discardBaseline = null;
+let discardBaselineStatus = 'idle'; // idle | loading | ready | failed
+let discardToken = 0;
 let validation = validateSchedule(defaultSchedule());
 let feedbackMode = 'derived'; // derived | saved | discarded | load-error
 // A failed save stays visible through the SDK's revert snapshot (and any later
@@ -125,12 +137,79 @@ function markDirty() {
 function renderRemoteNotice() {
   const notice = $('schedule-remote-notice');
   if (!notice) return;
-  notice.hidden = !remoteNotice;
-  if (remoteNotice) setText(notice, remoteNotice);
+  // A reload-queued write cannot be discarded without its server baseline; the
+  // reason shares the inline notice slot so it is visible and announced, not
+  // only a hover title. "Checking" is transient, so it stays a title only and
+  // does not re-announce on every load.
+  const decision = discardDecision();
+  const hint =
+    decision && decision.status !== 'ready' && decision.status !== 'checking'
+      ? decision.reason
+      : '';
+  const text = remoteNotice || hint;
+  notice.hidden = !text;
+  if (text) setText(notice, text);
+}
+
+// The Discard decision for a write rediscovered after a reload. The pure helper
+// owns the rules; the screen owns the fetched copy and the read's progress.
+// In-session queued writes (from a save this page issued) keep using the
+// confirmed snapshot, exactly as before.
+function discardDecision() {
+  if (!(queued && queuedFromSnapshot)) return null;
+  return reloadDiscardBaseline({
+    baseline: discardBaseline,
+    payloadKey: savingPayloadKey,
+    online: online(),
+    pending: discardBaselineStatus === 'loading',
+    failed: discardBaselineStatus === 'failed',
+  });
+}
+
+function clearDiscardBaseline() {
+  discardToken += 1;
+  discardBaseline = null;
+  discardBaselineStatus = 'idle';
+}
+
+// Read the pre-write schedule from the server. The cached document already
+// contains the queued payload, so this read is what lets Discard compensate
+// against the last saved schedule. It never touches the displayed draft, and a
+// read that is already in flight (or succeeded) is not repeated.
+function startDiscardBaseline() {
+  if (discardBaselineStatus === 'loading' || discardBaselineStatus === 'ready') return;
+  const gen = generation;
+  const token = ++discardToken;
+  discardBaseline = null;
+  if (!online()) {
+    discardBaselineStatus = 'idle';
+    return;
+  }
+  discardBaselineStatus = 'loading';
+  readScheduleBaseline()
+    .then(({ ok, data }) => {
+      if (gen !== generation || token !== discardToken) return;
+      if (!(queued && queuedFromSnapshot)) return;
+      if (!ok) {
+        discardBaselineStatus = 'failed';
+        validateAndPaint();
+        return;
+      }
+      // An absent document is the same schedule the editor shows for it.
+      discardBaseline = normalizeSchedule(data);
+      discardBaselineStatus = 'ready';
+      validateAndPaint();
+    })
+    .catch(() => {
+      if (gen !== generation || token !== discardToken) return;
+      if (!(queued && queuedFromSnapshot)) return;
+      discardBaselineStatus = 'failed';
+      validateAndPaint();
+    });
 }
 
 function saveState() {
-  return queuedSaveState({
+  const state = queuedSaveState({
     online: online(),
     saving,
     queued,
@@ -139,6 +218,15 @@ function saveState() {
     saved: feedbackMode === 'saved',
     error: saveError,
   });
+  const decision = discardDecision();
+  if (decision) {
+    state.canDiscard = decision.status === 'ready';
+    state.discardReason = decision.reason;
+    // Only the server copy can compensate after a reload; the in-session path
+    // keeps the confirmed snapshot (`undefined` here).
+    state.discardBaseline = decision.baseline;
+  }
+  return state;
 }
 
 function renderFeedback() {
@@ -187,11 +275,19 @@ function syncControls() {
   const editor = $('schedule-editor');
   $('panel-schedule').setAttribute('aria-busy', String(saving));
   for (const node of editor.querySelectorAll('input, button')) node.disabled = locked;
-  if (locked) return;
+  const discard = $('discard-schedule');
+  if (locked) {
+    discard.removeAttribute('title');
+    return;
+  }
   const state = saveState();
   $('add-rule').disabled = draft.rules.length >= MAX_RULES;
   $('save-schedule').disabled = !state.canSave || !saveValid();
-  $('discard-schedule').disabled = !state.canDiscard;
+  discard.disabled = !state.canDiscard;
+  // A disabled button is not focusable, so the reason also rides on the title
+  // (and the inline notice above) instead of the control alone.
+  if (state.discardReason) discard.title = state.discardReason;
+  else discard.removeAttribute('title');
 }
 
 function validateAndPaint() {
@@ -483,6 +579,9 @@ async function issueWrite(payload, { discarded = false } = {}) {
   const token = ++saveToken;
   const editGen = editGeneration;
   const payloadKey = scheduleKey(payload);
+  // A write issued here owns the state from now on: the reload baseline is only
+  // meaningful for a write this page never issued.
+  clearDiscardBaseline();
   saving = true;
   savingUnconfirmed = false;
   queued = false;
@@ -523,14 +622,18 @@ function save() {
   return issueWrite(payloadFrom(draft));
 }
 
-// Discard reverts the draft to the confirmed schedule. With a write still
-// queued, dropping the draft alone would let that change commit behind the UI,
-// so the revert is queued too; Firestore replays it after the earlier write.
+// Discard reverts the draft to the schedule the next write should restore. With
+// a write still queued, dropping the draft alone would let that change commit
+// behind the UI, so the revert is queued too; Firestore replays it after the
+// earlier write. After a reload the confirmed snapshot *is* the queued payload,
+// so only the server baseline fetched for this state is a truthful revert.
 function discard() {
   if (saving || loadError || !initialized) return;
-  if (!saveState().canDiscard) return;
+  const state = saveState();
+  if (!state.canDiscard) return;
   const outstanding = queued || savingUnconfirmed;
-  draft = clone(confirmed);
+  const baseline = queuedFromSnapshot && state.discardBaseline ? state.discardBaseline : confirmed;
+  draft = clone(baseline);
   dirty = false;
   saveError = '';
   feedbackMode = 'derived';
@@ -538,7 +641,7 @@ function discard() {
   // reverted schedule (an edit-only repaint would leave the old values there).
   renderRules();
   if (!outstanding) return;
-  return issueWrite(payloadFrom(confirmed), { discarded: true });
+  return issueWrite(payloadFrom(baseline), { discarded: true });
 }
 
 // Connection lost while a write is in flight: the SDK has moved it to its
@@ -560,7 +663,9 @@ function handleOffline() {
 function handleOnline() {
   if (!active || !initialized) return;
   // Stay queued until the write actually settles; this only refreshes copy that
-  // depends on connectivity.
+  // depends on connectivity. A baseline read refused while offline gets its
+  // chance here, which is what re-enables Discard after a reconnect.
+  if (queued && queuedFromSnapshot) startDiscardBaseline();
   validateAndPaint();
 }
 
@@ -616,6 +721,9 @@ function applyQueueTransition(transition, incoming) {
     // against the queued payload unless the user typed something newer.
     dirty = scheduleKey(draft) !== acceptedKey();
     pendingRemote = null;
+    // Discard needs the pre-write server copy; the read starts with the state
+    // and never blocks the paint (it shows "checking" until it answers).
+    startDiscardBaseline();
     validateAndPaint();
     return;
   }
@@ -624,6 +732,7 @@ function applyQueueTransition(transition, incoming) {
   queuedFromSnapshot = false;
   savingPayloadKey = null;
   pendingRemote = null;
+  clearDiscardBaseline();
   if (transition.outcome === 'acked') {
     // The queued write landed: server truth is the payload the draft already
     // shows, so only the label changes. A newer draft is reported as such by
@@ -683,7 +792,12 @@ export function showSchedule(data, meta) {
     // decides whether it becomes the confirmed baseline; the draft is untouched,
     // and a queued echo must not replace the confirmed rollback baseline.
     pendingRemote = incoming;
-    remoteNotice = savingPayloadKey && key !== savingPayloadKey ? REMOTE_NOTICE : '';
+    // A metadata-only repeat while the write is in flight changes nothing; only
+    // a snapshot whose data differs from the last confirmed copy re-evaluates
+    // the overwrite notice.
+    if (key !== scheduleKey(confirmed)) {
+      remoteNotice = savingPayloadKey && key !== savingPayloadKey ? REMOTE_NOTICE : '';
+    }
     validateAndPaint();
     return;
   }
@@ -710,20 +824,19 @@ export function showSchedule(data, meta) {
     const result = reconcileDirtyRemote({ confirmed, draft, incoming });
     confirmed = result.confirmed;
     dirty = result.dirty;
-    remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
+    // A metadata-only repeat (an ack, a fromCache flip) must not erase the
+    // notice explaining the last real change; only a data change re-evaluates it.
+    if (!result.metadataOnly) remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
     pendingRemote = null;
     validateAndPaint();
     return;
   }
   if (key === scheduleKey(confirmed)) {
-    // Data-identical echo: refresh the normalized baseline without rebuilding
-    // the form, and keep "Saved." in place.
+    // Data-identical repeat (a metadata change or a redundant echo): refresh the
+    // normalized baseline without rebuilding the form, and keep both "Saved."
+    // and any notice about the last real change in place.
     confirmed = incoming;
-    if (pendingRemote || remoteNotice) {
-      pendingRemote = null;
-      remoteNotice = '';
-      renderRemoteNotice();
-    }
+    pendingRemote = null;
     return;
   }
   // Clean form and a genuinely new server state: adopt it (and clear "Saved.").
@@ -766,6 +879,7 @@ export function resetSchedule() {
   savingPayloadKey = null;
   pendingRemote = null;
   remoteNotice = '';
+  clearDiscardBaseline();
   validation = validateSchedule(defaultSchedule());
   feedbackMode = 'derived';
   saveError = '';
@@ -789,6 +903,7 @@ export function resetSchedule() {
     setText($('schedule-enabled-sub'), toggleNote(defaultSchedule()));
     $('schedule-enabled').checked = false;
     $('discard-schedule').disabled = true;
+    $('discard-schedule').removeAttribute('title');
     $('save-schedule').disabled = true;
   }
 }

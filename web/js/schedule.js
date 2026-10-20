@@ -239,6 +239,43 @@ export function reloadQueuedState({
   };
 }
 
+// A queued write rediscovered after a reload has no cached pre-write baseline:
+// the local document already carries the mutation, so Discard would re-save the
+// queued change. The previous schedule has to come from the server, and the
+// control is only honest when that read succeeded. `status` is the single
+// decision the screen renders:
+//   ready       – the server copy differs from the queued payload; Discard can
+//                 restore it with the compensating write.
+//   committed   – the server already holds the queued payload: there is nothing
+//                 to discard, and writing again would repeat it.
+//   checking    – the server read is still in flight.
+//   unavailable – offline or the read failed; no baseline can be trusted.
+export const DISCARD_UNAVAILABLE_REASON = 'Discard needs a connection to check the saved schedule.';
+export const DISCARD_CHECKING_REASON = 'Checking the saved schedule before Discard…';
+export const DISCARD_COMMITTED_REASON = 'The queued change is already saved — nothing to discard.';
+
+export function reloadDiscardBaseline({
+  baseline = null,
+  payloadKey = null,
+  online = true,
+  pending = false,
+  failed = false,
+} = {}) {
+  if (!online || failed) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_UNAVAILABLE_REASON };
+  }
+  if (pending) {
+    return { status: 'checking', baseline: null, reason: DISCARD_CHECKING_REASON };
+  }
+  if (baseline == null) {
+    return { status: 'unavailable', baseline: null, reason: DISCARD_UNAVAILABLE_REASON };
+  }
+  if (payloadKey != null && scheduleKey(baseline) === payloadKey) {
+    return { status: 'committed', baseline: null, reason: DISCARD_COMMITTED_REASON };
+  }
+  return { status: 'ready', baseline, reason: '' };
+}
+
 // Stable comparison for "unsaved changes" and for ignoring stale snapshots
 // that arrive after a successful save. Day order is not meaningful. The
 // malformed flag is part of the key: clearing it by editing is a real change
@@ -262,6 +299,9 @@ export function scheduleKey(schedule) {
 // baseline always tracks server truth (the live banner and rollback read it),
 // the draft is never overwritten, and the overwrite notice marks a real remote
 // change. If the remote copy happens to match the draft, nothing is unsaved.
+// `metadataOnly` marks a notification that repeated the data (a metadata change
+// such as an acknowledgment or a fromCache flip): it must not erase the notice
+// explaining the last real change.
 export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
   const incomingKey = scheduleKey(incoming);
   const changed = incomingKey !== scheduleKey(confirmed);
@@ -270,6 +310,7 @@ export function reconcileDirtyRemote({ confirmed, draft, incoming }) {
     confirmed: incoming,
     dirty,
     remoteNotice: changed && dirty,
+    metadataOnly: !changed,
   };
 }
 

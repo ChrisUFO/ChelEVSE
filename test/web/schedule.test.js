@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   DAY_NAMES,
+  DISCARD_CHECKING_REASON,
+  DISCARD_COMMITTED_REASON,
+  DISCARD_UNAVAILABLE_REASON,
   MAX_AMPS,
   MAX_RULES,
   MIN_AMPS,
@@ -12,6 +15,7 @@ import {
   queuedSaveState,
   reconcileAfterSave,
   reconcileDirtyRemote,
+  reloadDiscardBaseline,
   reloadQueuedState,
   scheduleKey,
   scheduleSaveValid,
@@ -386,6 +390,22 @@ test('reconcileDirtyRemote tracks server truth without touching the draft', () =
   assert.equal(matches.remoteNotice, false);
 });
 
+test('reconcileDirtyRemote marks a metadata-only repeat so notices stay sticky', () => {
+  const draft = schedule({ rules: [rule({ amps: 40 })] });
+  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const changed = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: remote });
+  assert.equal(changed.metadataOnly, false);
+  assert.equal(changed.remoteNotice, true);
+
+  // With metadata changes enabled an ack or a fromCache flip repeats the data:
+  // it must not look like a new remote change (that would erase the notice
+  // explaining the last real one).
+  const repeat = reconcileDirtyRemote({ confirmed: remote, draft, incoming: remote });
+  assert.equal(repeat.metadataOnly, true);
+  assert.equal(repeat.remoteNotice, false);
+  assert.equal(repeat.dirty, true);
+});
+
 test('reloadQueuedState labels a pending snapshot with no local save in flight', () => {
   const key = scheduleKey(payload);
   const result = reloadQueuedState({ pendingWrites: true, dataKey: key, draftKey: key });
@@ -450,6 +470,61 @@ test('reloadQueuedState clears the queued state when the payload is acknowledged
   // The draft is untouched; the screen shows "Saved." from queuedSaveState.
   assert.deepEqual(acked, { queued: false, payloadKey: null, outcome: 'acked', adopt: false });
   assert.equal(queuedSaveState({ saved: true }).label, 'Saved.');
+
+  // A repeated metadata-only ack (the same data, metadata already false) has
+  // nothing left to resolve: the label must not be re-fired.
+  const repeat = reloadQueuedState({
+    pendingWrites: false,
+    queued: acked.queued,
+    dataKey: key,
+    payloadKey: acked.payloadKey,
+    draftKey: key,
+  });
+  assert.deepEqual(repeat, { queued: false, payloadKey: null, outcome: 'none', adopt: false });
+});
+
+test('reloadDiscardBaseline enables Discard only with a trustworthy server copy', () => {
+  const server = schedule({ rules: [rule({ amps: 24 })] });
+  const payloadKey = scheduleKey(payload);
+
+  const ready = reloadDiscardBaseline({ baseline: server, payloadKey });
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.reason, '');
+  assert.equal(scheduleKey(ready.baseline), scheduleKey(server));
+
+  // The server already holds the queued payload: writing it again would repeat
+  // the change, so there is nothing to discard.
+  const committed = reloadDiscardBaseline({ baseline: payload, payloadKey });
+  assert.equal(committed.status, 'committed');
+  assert.equal(committed.baseline, null);
+  assert.equal(committed.reason, DISCARD_COMMITTED_REASON);
+  assert.match(committed.reason, /already saved/);
+
+  // The server read is in flight: disabled, but with progress copy.
+  const checking = reloadDiscardBaseline({ baseline: server, payloadKey, pending: true });
+  assert.equal(checking.status, 'checking');
+  assert.equal(checking.baseline, null);
+  assert.equal(checking.reason, DISCARD_CHECKING_REASON);
+
+  // Offline or a failed read: no baseline can be trusted.
+  const offline = reloadDiscardBaseline({ baseline: server, payloadKey, online: false });
+  assert.equal(offline.status, 'unavailable');
+  assert.equal(offline.baseline, null);
+  assert.equal(offline.reason, DISCARD_UNAVAILABLE_REASON);
+
+  const failed = reloadDiscardBaseline({ baseline: null, payloadKey, failed: true });
+  assert.equal(failed.status, 'unavailable');
+  assert.equal(failed.reason, DISCARD_UNAVAILABLE_REASON);
+
+  // Online, no read yet, no data: still unavailable (never a silent enable).
+  const absent = reloadDiscardBaseline({ payloadKey });
+  assert.equal(absent.status, 'unavailable');
+
+  // A missing payload key cannot prove the server is committed, so a fetched
+  // baseline is used.
+  const unknownPayload = reloadDiscardBaseline({ baseline: server });
+  assert.equal(unknownPayload.status, 'ready');
+  assert.equal(scheduleKey(unknownPayload.baseline), scheduleKey(server));
 });
 
 test('reloadQueuedState reports a changed acknowledged snapshot as reverted', () => {
