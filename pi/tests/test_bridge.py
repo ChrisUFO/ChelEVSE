@@ -684,10 +684,9 @@ class _StopAfter:
 class CommandLoopTests(unittest.TestCase):
     def run_loop(self, db, polls, on_wait=None):
         session = FakeSession()
-        with mock.patch.object(
-            bridge.requests, "Session", return_value=session
-        ), mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
-            bridge.command_loop(db, "http://charger", None, 0)
+        transport = bridge.ChargerTransport(session)
+        with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
+            bridge.command_loop(db, "http://charger", None, transport, 0)
         return session
 
     def test_stale_command_is_failed_without_contacting_the_charger(self):
