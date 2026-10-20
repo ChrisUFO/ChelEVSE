@@ -52,6 +52,10 @@ STATE_LABELS = {
     254: "sleeping",
     255: "disabled",
 }
+# EVSE states a paused charger reports: 8.2.3 pauses into 254; 255 is the
+# firmware's own "disabled" code kept for completeness. A held current shows
+# 1/2/3, so this is what separates a pause from a hold.
+PAUSED_STATES = frozenset({254, 255})
 MIN_AMPS, MAX_AMPS = 6, 48
 OFFLINE = {"charger_online": False, "updated_at": firestore.SERVER_TIMESTAMP}
 # Firmware scheduler limits: 2 events per rule, 50 events total.
@@ -707,6 +711,20 @@ def _require_ok(resp):
         raise CommandError(_http_reason(resp))
 
 
+def _require_command_ok(resp):
+    """``_require_ok`` for a command's HTTP reply, labelled with its transport.
+
+    Only called after a request was sent, so ``transport: "http"`` really names
+    the path that carried it. Validation failures are raised before this point
+    and keep ``transport`` unset.
+    """
+    try:
+        _require_ok(resp)
+    except CommandError as exc:
+        exc.transport = "http"
+        raise
+
+
 def _rapi_result(resp):
     """RAPI reply's ret value, or the raw text when the body is not JSON."""
     try:
@@ -716,15 +734,15 @@ def _rapi_result(resp):
     return body.get("ret") if isinstance(body, dict) else None
 
 
-def _command_amps(cmd, transport):
+def _command_amps(cmd):
     """Validated, firmware-clamped amps; CommandError when absent/invalid."""
     try:
         return max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
     except (TypeError, ValueError):
-        raise CommandError("missing or invalid amps", transport)
+        raise CommandError("missing or invalid amps")
 
 
-def _command_rapi(cmd, transport):
+def _command_rapi(cmd):
     """The validated RAPI command string, or CommandError."""
     command = cmd.get("command")
     if (
@@ -732,7 +750,7 @@ def _command_rapi(cmd, transport):
         or not command.startswith("$")
         or len(command) > 32
     ):
-        raise CommandError("invalid rapi", transport)
+        raise CommandError("invalid rapi")
     return command
 
 
@@ -751,7 +769,7 @@ def _apply_command_http(transport, base, auth, cmd):
             auth=auth,
             timeout=HTTP_TIMEOUT,
         )
-        _require_ok(resp)
+        _require_command_ok(resp)
         return {}
     if ctype == "resume":
         # Clear the manual override; the firmware scheduler takes over again.
@@ -769,41 +787,31 @@ def _apply_command_http(transport, base, auth, cmd):
                     return {}
             except (requests.RequestException, ValueError):
                 pass
-        _require_ok(resp)
+        _require_command_ok(resp)
         return {}
     if ctype == "set_current":
-        amps = _command_amps(cmd, "http")
+        amps = _command_amps(cmd)
         resp = transport.post(
             f"{base}/override",
             json={"state": "active", "charge_current": amps, "max_current": amps},
             auth=auth,
             timeout=HTTP_TIMEOUT,
         )
-        _require_ok(resp)
+        _require_command_ok(resp)
         return {}
     if ctype == "rapi":
-        command = _command_rapi(cmd, "http")
+        command = _command_rapi(cmd)
         resp = transport.post(
             f"{base}/rapi",
             data={"rapi": command, "json": 1},
             auth=auth,
             timeout=HTTP_TIMEOUT,
         )
-        _require_ok(resp)
+        _require_command_ok(resp)
         result = _rapi_result(resp)
         log(f"rapi {command}: ret={result!r}")
         return {"result": result}
     raise CommandError("unsupported type")
-
-
-def _http_command(transport, base, auth, cmd):
-    """``_apply_command_http`` with the transport recorded on its failures."""
-    try:
-        return _apply_command_http(transport, base, auth, cmd)
-    except CommandError as exc:
-        if exc.transport is None:
-            exc.transport = "http"
-        raise
 
 
 def _as_int(value):
@@ -816,15 +824,52 @@ def _as_int(value):
         return None
 
 
+def _paused(status):
+    """Does this status view show a paused (disabled) charger?
+
+    Firmware 8.2.3 pauses into EVSE ``state`` 254 and reports ``manual_override``
+    1; it never reports 255 for a pause. ``manual_override`` alone is 1 for
+    *any* override (a hold included), so it only counts together with a
+    non-charging EVSE state: a held current still shows ready/connected/
+    charging, and a sleeping charger with no override reports the same 254 with
+    ``manual_override`` 0. The HTTP ``/status`` reply also carries ``status: "disabled"``, which
+    the MQTT status topics do not, so it is accepted when present.
+    """
+    if not isinstance(status, dict):
+        return False
+    if status.get("status") == "disabled":
+        return True
+    return (
+        _as_int(status.get("manual_override")) == 1
+        and _as_int(status.get("state")) in PAUSED_STATES
+    )
+
+
+def _setpoint_matches(status, amps):
+    """Does a status view show ``manual_override`` holding ``amps``?
+
+    The EVSE clamps above its own configured maximum, so a command beyond it
+    (``amps`` > ``max_current``) is confirmed by ``pilot`` sitting at that
+    maximum rather than at the commanded value.
+    """
+    if _as_int(status.get("manual_override")) != 1:
+        return False
+    pilot = _as_int(status.get("pilot"))
+    if pilot == amps:
+        return True
+    cap = _as_int(status.get("max_current"))
+    return cap is not None and pilot == cap and amps > cap
+
+
 def _override_confirms(ctype, amps, view):
     """Does an acknowledged override view reflect ``ctype`` / ``amps``?
 
     The retained ``<base>/override`` document is authoritative: ``null`` is
     auto, ``disabled`` is paused, ``active`` carries the held current. The raw
     status seed is the fallback for the moment before the retained copy lands
-    (``manual_override`` 0 = auto, 1 = any override, and ``pilot`` is the held
-    setpoint). Firmware v8.2.3 publishes ``manual_override`` but does not
-    distinguish active from disabled with it, hence the override document.
+    (``manual_override`` 0 = auto, 1 = any override, ``pilot`` = held setpoint).
+    Firmware v8.2.3 publishes ``manual_override`` but does not distinguish
+    active from disabled with it, hence the override document and ``_paused``.
     """
     override = view.get("override") or {}
     status = view.get("status") or {}
@@ -834,24 +879,18 @@ def _override_confirms(ctype, amps, view):
     if ctype == "pause":
         if state == "disabled":
             return True
-        return state is None and (
-            status.get("status") == "disabled"
-            or _as_int(status.get("state")) == 255
-        )
+        return state is None and _paused(status)
     if ctype == "resume":
         # "null" is the firmware's auto state (observed on 8.2.3).
         if state in ("null", "auto", "clear"):
             return True
         return state is None and _as_int(status.get("manual_override")) == 0
-    # set_current
+    # set_current: confirm from the commanded field, not `max_current`, so a
+    # firmware that normalises the latter cannot make every hold time out.
     if state == "active":
-        current = override.get("max_current", override.get("charge_current"))
+        current = override.get("charge_current", override.get("max_current"))
         return current is None or _as_int(current) == amps
-    return (
-        state is None
-        and _as_int(status.get("manual_override")) == 1
-        and _as_int(status.get("pilot")) == amps
-    )
+    return state is None and _setpoint_matches(status, amps)
 
 
 def _status_confirms(ctype, amps, status):
@@ -859,13 +898,10 @@ def _status_confirms(ctype, amps, status):
     if not isinstance(status, dict):
         return False
     if ctype == "pause":
-        return status.get("status") == "disabled" or _as_int(status.get("state")) == 255
+        return _paused(status)
     if ctype == "resume":
         return _as_int(status.get("manual_override")) == 0
-    return (
-        _as_int(status.get("manual_override")) == 1
-        and _as_int(status.get("pilot")) == amps
-    )
+    return _setpoint_matches(status, amps)
 
 
 def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec):
@@ -877,7 +913,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
         amps = None
         payload = "clear"
     else:
-        amps = _command_amps(cmd, "mqtt")
+        amps = _command_amps(cmd)
         payload = {"state": "active", "charge_current": amps, "max_current": amps}
     try:
         source.publish(
@@ -887,7 +923,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
         # The client refused the message, so nothing was delivered and the HTTP
         # fallback cannot double-apply. An *accepted* publish never falls back.
         log(f"command transport: http (mqtt publish failed: {exc})")
-        return _http_command(transport, base, auth, cmd)
+        return _apply_command_http(transport, base, auth, cmd)
     try:
         confirmed = source.wait_for_state(
             lambda view: _override_confirms(ctype, amps, view), confirm_sec
@@ -919,7 +955,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
 
 def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
     """Publish one RAPI command and map the next rapi/out reply."""
-    command = _command_rapi(cmd, "mqtt")
+    command = _command_rapi(cmd)
     parts = command.split(None, 1)
     head = parts[0]
     params = parts[1].strip() if len(parts) > 1 else ""
@@ -927,7 +963,7 @@ def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
         reply = source.rapi_transaction(f"rapi/in/{head}", params, confirm_sec)
     except MqttPublishError as exc:
         log(f"command transport: http (mqtt publish failed: {exc})")
-        return _http_command(transport, base, auth, cmd)
+        return _apply_command_http(transport, base, auth, cmd)
     except Exception as exc:  # never re-publish because an ack wait crashed
         raise CommandError(
             f"mqtt rapi failed ({exc.__class__.__name__}: {exc})",
@@ -953,8 +989,10 @@ def apply_command(transport, base, auth, cmd, source=None, confirm_sec=None):
     subscribed) at the moment it is picked up; otherwise the existing HTTP path
     runs unchanged. A command accepted by the MQTT client is never re-applied
     over HTTP — a missing confirmation fails it instead. The returned
-    ``transport`` is recorded on the command document; the HTTP path leaves it
-    out, as it always has, and the loop supplies the default.
+    ``transport`` names the path that carried the command; the HTTP path leaves
+    it out, as it always has, and the loop supplies the default. Failures carry
+    their transport on ``CommandError.transport`` — unset when the command was
+    rejected before anything was sent.
     """
     ctype = cmd.get("type")
     if ctype not in COMMAND_TYPES:
@@ -968,7 +1006,7 @@ def apply_command(transport, base, auth, cmd, source=None, confirm_sec=None):
         return _apply_override_mqtt(
             transport, base, auth, source, ctype, cmd, confirm_sec
         )
-    return _http_command(transport, base, auth, cmd)
+    return _apply_command_http(transport, base, auth, cmd)
 
 
 def notify(db, body):
@@ -2226,6 +2264,9 @@ def command_loop(db, base, auth, transport, interval, source=None):
     # spanning a restart can still re-apply (at-least-once across restarts).
     settled = OrderedDict()
     last_transport = None
+    # Readiness from the last command picked up, used only to word the
+    # transport edge log (a retried settled doc may reuse it).
+    selected = "http"
     while not _stop.is_set():
         try:
             for doc in pending_commands(db):
@@ -2252,16 +2293,18 @@ def command_loop(db, base, auth, transport, interval, source=None):
                             transport, base, auth, cmd, source=source
                         )
                     except CommandError as exc:
-                        fields = {
-                            "status": "failed",
-                            "error": str(exc),
-                            "transport": exc.transport or selected,
-                        }
+                        # `transport` names the path that carried the request;
+                        # a command rejected before any send has none.
+                        fields = {"status": "failed", "error": str(exc)}
+                        if exc.transport is not None:
+                            fields["transport"] = exc.transport
                     except requests.RequestException as exc:
+                        # Only an HTTP command send raises these: the MQTT
+                        # reconcile catches its own request errors.
                         fields = {
                             "status": "failed",
                             "error": f"charger request failed ({exc.__class__.__name__})",
-                            "transport": selected,
+                            "transport": "http",
                         }
                     else:
                         extra.setdefault("transport", "http")
@@ -2271,11 +2314,12 @@ def command_loop(db, base, auth, transport, interval, source=None):
                         settled.popitem(last=False)
                 used = fields.get("transport")
                 if used is not None and used != last_transport:
-                    detail = (
-                        "mqtt connected and subscribed"
-                        if used == "mqtt"
-                        else "mqtt unavailable before publish"
-                    )
+                    if used == "mqtt":
+                        detail = "mqtt connected and subscribed"
+                    elif selected == "mqtt":
+                        detail = "mqtt publish was refused"
+                    else:
+                        detail = "mqtt unavailable before publish"
                     log(f"command transport: {used} ({detail})")
                     last_transport = used
                 try:

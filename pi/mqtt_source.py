@@ -44,6 +44,7 @@ The client is injected (``client_factory``), so the unit tests need no broker.
 import json
 import threading
 import time
+from collections import deque
 from typing import NamedTuple
 
 import paho.mqtt.client as mqtt
@@ -87,6 +88,16 @@ RAPI_OUT_TOPIC = "rapi/out"
 # QoS 1: the bridge waits for the firmware's own acknowledgement anyway, and a
 # dropped command is worse than a duplicate publish.
 COMMAND_QOS = 1
+# How long a timed-out RAPI transaction keeps the RAPI lock after its timeout,
+# so a reply arriving late for the abandoned command is retired before the next
+# command is published. Without a correlation id this is the only way to keep
+# one command's reply from settling another (a bounded residual risk remains for
+# replies arriving after this window).
+RAPI_QUARANTINE_SEC = 2.0
+# Replies kept for matching. Only the first reply after the captured generation
+# is returned; the recent ones are kept so an older reply can never be mistaken
+# for a newer one.
+RAPI_REPLY_MEMORY = 32
 
 
 class MqttPublishError(RuntimeError):
@@ -215,11 +226,12 @@ class MqttSource:
         self.connect_failures = 0
         self.publishes = 0
         # Command acknowledgement state (PR-2): the retained override document,
-        # and the count plus payload of the last rapi/out reply.
+        # and the ordered (generation, payload) rapi/out replies. The count is
+        # the generation captured before a publish.
         self.override = None
         self.override_updates = 0
-        self.rapi_output = None
         self.rapi_messages = 0
+        self._rapi_replies = deque(maxlen=RAPI_REPLY_MEMORY)
         self._command_cv = threading.Condition()
         self._rapi_lock = threading.Lock()
         self._client_factory = client_factory or _default_client_factory
@@ -336,29 +348,63 @@ class MqttSource:
             return self.rapi_messages
 
     def wait_for_rapi(self, expected, timeout):
-        """Payload of the next rapi/out after ``expected``, or None on timeout."""
+        """First rapi/out payload *after* ``expected``, or None on timeout.
+
+        The first reply is the one this command's publish can have caused;
+        returning the newest would silently discard one of two replies that
+        landed inside the window.
+        """
         deadline = time.monotonic() + max(0.0, float(timeout))
         with self._command_cv:
             while True:
                 with self._lock:
-                    if self.rapi_messages > expected:
-                        return self.rapi_output
+                    for generation, payload in self._rapi_replies:
+                        if generation > expected:
+                            return payload
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
+                self._command_cv.wait(remaining)
+
+    def _retire_late_replies(self):
+        """Hold the RAPI lock briefly so a timed-out command's reply is retired.
+
+        ``rapi/out`` carries no correlation id. After a timeout, the abandoned
+        publish may still be answered; publishing the next command right away
+        would let that reply settle it (a false ack, or a failure for a command
+        that applied). Publishing nothing for ``RAPI_QUARANTINE_SEC`` means a
+        late reply lands *before* the next transaction captures its generation,
+        so it can never be returned. A reply that arrives later still cannot be
+        excluded without a correlation id — the residual risk is documented.
+        """
+        deadline = time.monotonic() + RAPI_QUARANTINE_SEC
+        with self._command_cv:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
                 self._command_cv.wait(remaining)
 
     def rapi_transaction(self, topic, payload, timeout):
         """Publish one RAPI command and wait for its reply, serialised.
 
         The firmware answers ``rapi/out`` with no correlation id, so two
-        overlapping commands cannot be matched. The lock covers the publish
-        *and* the wait: the next reply always belongs to this command.
+        overlapping commands cannot be matched. The lock covers the publish,
+        the wait *and* the late-reply quarantine after a timeout, so the next
+        command starts from a generation no earlier reply can cross.
         """
         with self._rapi_lock:
             expected = self.rapi_generation()
             self.publish(topic, payload, qos=COMMAND_QOS)
-            return self.wait_for_rapi(expected, timeout)
+            reply = self.wait_for_rapi(expected, timeout)
+            if reply is None:
+                if RAPI_QUARANTINE_SEC > 0:
+                    self.log(
+                        f"rapi: no reply within {float(timeout):g}s; "
+                        f"retiring a late reply for {RAPI_QUARANTINE_SEC:g}s"
+                    )
+                self._retire_late_replies()
+            return reply
 
     def _notify_command_waiters(self):
         with self._command_cv:
@@ -522,8 +568,8 @@ class MqttSource:
     def _rapi_out(self, value):
         """One RAPI reply; there is no correlation id, so the count orders it."""
         with self._lock:
-            self.rapi_output = value
             self.rapi_messages += 1
+            self._rapi_replies.append((self.rapi_messages, value))
         self._notify_command_waiters()
 
     def _config_version(self, value):

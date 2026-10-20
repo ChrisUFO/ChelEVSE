@@ -15,6 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bridge  # noqa: E402
@@ -156,6 +158,39 @@ class MqttSourceCommandTests(unittest.TestCase):
         client.deliver(f"{TOPIC}/rapi/out", "$OK old")
         self.assertIsNone(source.wait_for_rapi(source.rapi_generation(), CONFIRM))
 
+    def test_wait_for_rapi_returns_the_first_reply_after_the_generation(self):
+        source, client = make_source()
+        expected = source.rapi_generation()
+        client.deliver(f"{TOPIC}/rapi/out", "$OK first")
+        client.deliver(f"{TOPIC}/rapi/out", "$NK second")
+        self.assertEqual(source.wait_for_rapi(expected, CONFIRM), "$OK first")
+
+    def test_a_late_reply_cannot_settle_the_next_command(self):
+        source, client = make_source()
+        first = {}
+        with mock.patch("mqtt_source.RAPI_QUARANTINE_SEC", 0.3):
+
+            def run_first():
+                first["reply"] = source.rapi_transaction("rapi/in/$XX", "20", CONFIRM)
+
+            thread = threading.Thread(target=run_first)
+            thread.start()
+            deadline = time.monotonic() + 2
+            while not client.published and time.monotonic() < deadline:
+                time.sleep(0.005)
+            time.sleep(CONFIRM + 0.02)  # the first command has timed out
+            # Its reply arrives only now, while the quarantine holds the lock.
+            client.deliver(f"{TOPIC}/rapi/out", "$NK^21")
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertIsNone(first["reply"])
+            # The next command is acked by its own reply, not by the late one.
+            ack_rapi(client, "$OK 01 0 01 0200^12")
+            self.assertEqual(
+                source.rapi_transaction("rapi/in/$GS", "", 1),
+                "$OK 01 0 01 0200^12",
+            )
+
     def test_rapi_transaction_returns_the_next_reply(self):
         source, client = make_source()
         ack_rapi(client, "$OK 01 0 01 0200^12")
@@ -270,14 +305,64 @@ class MqttOverrideCommandTests(unittest.TestCase):
         self.assertEqual([call[0] for call in session.calls], ["get"])
 
     def test_the_status_seed_can_confirm_before_the_override_document(self):
+        # The shape firmware 8.2.3 reports after a pause (live smoke).
         source, _client = make_source()
-        source.seed({"state": 254, "status": "disabled", "manual_override": 1})
+        source.seed({"state": 254, "manual_override": 1})
         session = FakeSession()
         extra = bridge.apply_command(
             session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual(session.calls, [])
+
+    def test_a_retained_override_confirms_from_the_commanded_current(self):
+        # `charge_current` is what the bridge commanded; `max_current` is the
+        # field a firmware may normalise, so it must not gate the ack.
+        view = {
+            "override": {"state": "active", "charge_current": 10, "max_current": 16},
+            "status": {},
+        }
+        self.assertTrue(bridge._override_confirms("set_current", 10, view))
+        self.assertFalse(bridge._override_confirms("set_current", 20, view))
+
+    def test_a_hold_above_the_evse_maximum_confirms_at_the_clamp(self):
+        # Live 8.2.3: command 32 A on a 16 A EVSE -> pilot 16, max_current 16.
+        source, client = make_source()
+        source.seed(
+            {"state": 1, "manual_override": 1, "pilot": 16, "max_current": 16}
+        )
+        session = FakeSession()
+        extra = bridge.apply_command(
+            session,
+            BASE,
+            None,
+            {"type": "set_current", "amps": 32},
+            source=source,
+            confirm_sec=CONFIRM,
+        )
+        self.assertEqual(extra, {"transport": "mqtt"})
+        self.assertEqual(session.calls, [])
+        self.assertEqual(len(client.published), 1)
+
+    def test_a_sleeping_auto_charger_does_not_confirm_a_pause(self):
+        # A sleeping charger without an override is also 254; only
+        # manual_override 1 means paused.
+        source, client = make_source()
+        source.seed({"state": 254, "manual_override": 0})
+        session = FakeSession([FakeResponse(200, {"state": 254, "manual_override": 0})])
+        with self.assertRaises(bridge.CommandError) as raised:
+            bridge.apply_command(
+                session,
+                BASE,
+                None,
+                {"type": "pause"},
+                source=source,
+                confirm_sec=CONFIRM,
+            )
+        self.assertIn("no confirmation", str(raised.exception))
+        self.assertEqual(raised.exception.transport, "mqtt")
+        self.assertEqual([call[0] for call in session.calls], ["get"])
+        self.assertEqual(len(client.published), 1)
 
     def test_a_timeout_fails_without_reapplying_over_http(self):
         source, client = make_source()
@@ -303,7 +388,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
 
     def test_a_lost_confirmation_can_be_confirmed_by_a_status_reconcile(self):
         source, _client = make_source()
-        session = FakeSession([FakeResponse(200, {"status": "disabled"})])
+        session = FakeSession([FakeResponse(200, {"state": 254, "manual_override": 1})])
         extra = bridge.apply_command(
             session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
@@ -512,6 +597,22 @@ class CommandLoopTransportTests(unittest.TestCase):
         self.assertEqual(len(client.published), 1)
         self.assertEqual(db.data["commands"]["cmd"]["status"], "acked")
 
+    def test_a_refused_publish_that_falls_back_records_http(self):
+        # Selected MQTT, publish refused, HTTP fallback then fails to connect:
+        # the doc must name the path that carried the request, not the choice.
+        source, client = make_source()
+        client.publish_rc = 4
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        session = self.run_loop(
+            db, source, session=FakeSession([requests.ConnectionError("unreachable")])
+        )
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertEqual(doc["transport"], "http")
+        self.assertIn("ConnectionError", doc["error"])
+        self.assertEqual(len(client.published), 1)
+        self.assertEqual(session.calls[0][0], "post")
+
     def test_a_validation_failure_touches_no_transport(self):
         source, client = make_source()
         db = FakeDB(
@@ -521,7 +622,7 @@ class CommandLoopTransportTests(unittest.TestCase):
         doc = db.data["commands"]["cmd"]
         self.assertEqual(doc["status"], "failed")
         self.assertEqual(doc["error"], "invalid rapi")
-        self.assertEqual(doc["transport"], "mqtt")
+        self.assertNotIn("transport", doc)
         self.assertEqual(client.published, [])
         self.assertEqual(session.calls, [])
 

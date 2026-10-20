@@ -205,7 +205,7 @@ settles.
 | --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | C.1 | Pause over MQTT                 | With the car charging, tap **Stop**                                                                                                                                       | Journal shows no `POST /override`; `<base>/override/set` carries `{"state":"disabled"}`; the retained `<base>/override` becomes `{"state":"disabled",…}`; the command doc is `acked` with `transport: "mqtt"`; the charger stops within ~5 s                                | Command doc, journal, `mosquitto_sub -t '<topic>/override'`        |
 | C.2 | Resume over MQTT                | Tap **Auto** after a pause                                                                                                                                                | `<base>/override/set` carries `clear`; the retained document returns to `{"state":"null"}`; doc `acked`, `transport: "mqtt"`; the charger returns to its normal behaviour. With no override to clear the command still acks at once (no 500 path needed)                    | Command doc, retained override, journal                            |
-| C.3 | Set current over MQTT           | Tap **Hold**, pick a current (6–48 A), apply                                                                                                                              | `<base>/override/set` carries `{"state":"active","charge_current":N,"max_current":N}`; the retained document shows the same `N`; `pilot` follows; doc `acked` with `amps: N` and `transport: "mqtt"`                                                                        | Command doc, retained override, status screen                      |
+| C.3 | Set current over MQTT           | Tap **Hold**, pick a current (6–48 A), apply                                                                                                                              | `<base>/override/set` carries `{"state":"active","charge_current":N,"max_current":N}`; the retained document shows the same `N`; `pilot` follows (clamped to the EVSE maximum); doc `acked` with `transport: "mqtt"`                                                        | Command doc, retained override, status screen                      |
 | C.4 | RAPI over MQTT — valid          | **Advanced**, send `$GS` (and `$FS 20` for a command with a parameter)                                                                                                    | Topics are `<base>/rapi/in/$GS` with an empty payload and `<base>/rapi/in/$FS` with payload `20`; the next `<base>/rapi/out` is `$OK…`; doc `acked` with `result` = the reply and `transport: "mqtt"`                                                                       | Command docs, `mosquitto_sub -t '<topic>/rapi/out'`                |
 | C.5 | RAPI over MQTT — `$NK`          | Send an invalid RAPI command the firmware rejects (e.g. `$XX 20`)                                                                                                         | `<base>/rapi/out` is `$NK^…`; doc `failed` with the reply in `error`, `transport: "mqtt"`; no HTTP `/rapi` call                                                                                                                                                             | Command doc, journal                                               |
 | C.6 | Fallback when MQTT is not ready | `sudo systemctl stop mosquitto`, wait until the journal logs `status source: http (mqtt disconnected …)`, then tap **Stop** (or send `$GS`)                               | One `command transport: http (mqtt unavailable before publish)`; the existing HTTP request applies the command; doc `acked`/`failed` as before with `transport: "http"`; no MQTT publish is attempted. Restart mosquitto afterwards                                         | Journal, command doc                                               |
@@ -218,10 +218,21 @@ Notes:
   acknowledgement: `{"state":"null"}` is auto, `"disabled"` is paused and
   `"active"` carries the held current. The status `manual_override` field is `1`
   for _either_ override, so a pause that only checks it could accept a hold; the
-  status fallback uses `status: "disabled"` / `state: 255` instead.
+  status fallback therefore requires `manual_override: 1` **and** a non-charging
+  EVSE state (`254` sleeping / `255` disabled). Live 8.2.3 pauses into
+  `state 254` with `manual_override 1` (`255` is not observed); a sleeping
+  charger with no override reports the same `254` with `manual_override 0`. The
+  HTTP `/status` reply additionally spells the same state as `status: "disabled"`.
 - **RAPI serialisation.** Replies have no correlation id. Only one RAPI command
-  is in flight at a time; a missing reply is `failed (no rapi/out within 5s)`
-  (covered by `pi/tests/test_mqtt_commands.py`), never retried over HTTP.
+  is in flight at a time and the first reply after its publish is its answer; a
+  missing reply is `failed (no rapi/out within 5s)` (covered by
+  `pi/tests/test_mqtt_commands.py`), never retried over HTTP. A timed-out
+  transaction holds the RAPI lock for a 2 s quarantine so a late reply is
+  retired rather than settling the next command.
+- **Transport field.** `transport` names the path that carried the request, so a
+  refused MQTT publish that falls back and then fails over HTTP records
+  `"http"`. A command rejected before any send (validation, unsupported type)
+  records no transport at all.
 
 ## 4. Schedule round-trip
 

@@ -618,26 +618,39 @@ subscription was denied or the link is down.
 
 | `type`        | Publish on `<base>/…`                                                                                                                   | Acknowledged by                                                                                                     |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `pause`       | `override/set` `{"state":"disabled"}`                                                                                                   | retained `override` `{"state":"disabled",…}` (or `status: "disabled"` / `state: 255` in a status snapshot)          |
+| `pause`       | `override/set` `{"state":"disabled"}`                                                                                                   | retained `override` `{"state":"disabled",…}`, or a status view with `manual_override: 1` and `state: 254/255`       |
 | `resume`      | `override/set` `clear`                                                                                                                  | retained `override` `{"state":"null"}` (the firmware's auto state) or `manual_override: 0`                          |
-| `set_current` | `override/set` `{"state":"active","charge_current":N,"max_current":N}`                                                                  | retained `override` with `state: "active"` and that current (or `manual_override: 1` with `pilot: N`)               |
+| `set_current` | `override/set` `{"state":"active","charge_current":N,"max_current":N}`                                                                  | retained `override` with `state: "active"` and `charge_current: N` (or `manual_override: 1` with `pilot: N`)        |
 | `rapi`        | `rapi/in/<command>` with the parameters as the payload (`$FS 20` → topic `rapi/in/$FS`, payload `20`; empty payload without parameters) | the next `rapi/out` reply: `$OK…` → `acked` with the reply in `result`; `$NK…` → `failed` with the reply in `error` |
 
 Override commands wait `COMMAND_CONFIRM_SEC` (5 s) for the retained
 `<base>/override` document, which the firmware rewrites on every change — it
 distinguishes `"null"` (auto), `"disabled"` (pause) and `"active"` (hold),
 whereas the status `manual_override` field is `1` for either override. The raw
-status seed is the fallback for the moment before that document lands. A timeout
-does **not** re-apply the command: the bridge reads `/status` once (read-only)
-and accepts it if the status already reflects the target state, otherwise marks
-it `failed` with `no confirmation within 5s (…)`.
+status seed is the fallback for the moment before that document lands. Because
+`manual_override` alone cannot separate pause from hold, a pause is confirmed
+from a status view only by `manual_override: 1` **plus** a non-charging EVSE
+state (`254` sleeping or `255` disabled; 8.2.3 pauses into `254` and `255` is
+never observed). A sleeping charger with no override reports the same `254`
+with `manual_override: 0`, so the override flag is what separates the two. A
+hold is confirmed from `pilot`, which tracks the held setpoint up to the EVSE's
+configured maximum, so a command above that maximum is confirmed at the clamp.
+A timeout does **not** re-apply the command: the
+bridge reads `/status` once (read-only) and accepts it if the status already
+reflects the target state, otherwise marks it `failed` with
+`no confirmation within 5s (…)`.
 
 RAPI replies carry no correlation id, so RAPI publishes are serialised: one
 lock covers the publish and the wait, making the next `rapi/out` belong to the
 command in flight. The topic is the command itself (`$FS`), the parameters go in
 the payload, and the wait starts from the reply count captured _before_ the
-publish. A reply that is not `$OK…` fails the command with the reply in
-`error`; a missing reply fails with `no rapi/out within 5s`.
+publish; the _first_ reply after that count is the command's answer (a second
+reply in the same window cannot displace it). A reply that is not `$OK…` fails
+the command with the reply in `error`; a missing reply fails with
+`no rapi/out within 5s` and keeps the lock for `RAPI_QUARANTINE_SEC` (2 s), so a
+reply arriving late for the abandoned command is retired instead of settling the
+next one. A reply arriving after that quarantine still cannot be distinguished —
+the firmware sends no correlation id.
 
 **Fallback and double-apply.** HTTP runs only when MQTT was not usable _before_
 a publish (disabled, disconnected, or subscription denied), with identical
@@ -648,10 +661,13 @@ before the acknowledgement, the command is reconciled from the retained
 override/`rapi/out`/status or marked `failed`, never re-applied. The settled
 memory also covers failed commands whose status write did not land, so a
 published command is not repeated on the next poll. Every command document
-records `transport: "mqtt"` or `"http"` (success and failure), and the journal
-logs `command transport: <transport> (…)` when the path changes. Validation
-(`amps` 6–48, RAPI `$` and ≤32 characters), the 10-minute staleness rule,
-`status` lifecycle and error copy are unchanged.
+records the transport that **carried** the request — `transport: "mqtt"` or
+`"http"` — on success and on any failure after a send (a refused MQTT publish
+that falls back and then fails over HTTP records `"http"`); a command rejected
+before anything was sent (validation, unsupported type, stale) records no
+transport. The journal logs `command transport: <transport> (…)` when the path
+changes. Validation (`amps` 6–48, RAPI `$` and ≤32 characters), the 10-minute
+staleness rule, `status` lifecycle and error copy are unchanged.
 
 ## Tests
 
