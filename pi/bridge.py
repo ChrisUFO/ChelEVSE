@@ -2700,6 +2700,10 @@ def _schedule_plan(transport, base, auth):
     # Logged only on failure (via the caller): this runs every SCHEDULE_INTERVAL.
     _require_ok(resp)
     plan = resp.json()
+    # The firmware answers [] when no events exist; that is an empty plan, not
+    # a malformed one. Anything else that is not an object is still an error.
+    if isinstance(plan, list) and not plan:
+        return {}
     if not isinstance(plan, dict):
         raise ValueError("schedule plan is not a JSON object")
     return plan

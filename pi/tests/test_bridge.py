@@ -761,6 +761,35 @@ class SyncScheduleTests(unittest.TestCase):
         self.assertTrue(session.calls[2][1].endswith("/schedule/9"))
 
 
+class SchedulePlanResponseTests(unittest.TestCase):
+    def test_an_empty_firmware_plan_is_an_empty_object(self):
+        session = FakeSession([FakeResponse(200, [])])
+        self.assertEqual(bridge._schedule_plan(session, "http://charger", None), {})
+
+    def test_a_non_empty_list_is_still_malformed(self):
+        session = FakeSession([FakeResponse(200, [1])])
+        with self.assertRaises(ValueError):
+            bridge._schedule_plan(session, "http://charger", None)
+
+    def test_an_object_is_returned_unchanged(self):
+        plan = {"current_event": {"id": 1}}
+        session = FakeSession([FakeResponse(200, plan)])
+        self.assertEqual(bridge._schedule_plan(session, "http://charger", None), plan)
+
+    def test_the_schedule_loop_publishes_the_empty_state_without_an_error(self):
+        db = FakeDB()
+        stop = _RecordingStop(1)
+        transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [])]))
+        logs = []
+        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
+            bridge, "log", logs.append
+        ):
+            bridge.schedule_loop(db, "http://charger", None, transport, 60, 300)
+        schedule = db.data["status"]["current"].get("schedule")
+        self.assertEqual(schedule, {"in_window": False, "active_rule_id": None})
+        self.assertFalse([line for line in logs if "schedule plan failed" in line])
+
+
 class ChargerSessionTests(unittest.TestCase):
     def test_factory_bounds_the_pool(self):
         session = bridge.make_charger_session()
