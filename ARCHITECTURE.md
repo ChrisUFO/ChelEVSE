@@ -35,9 +35,11 @@ Four loops:
 | Status   | 10 s (HTTP) / 60 s reconciliation while MQTT is healthy | HTTP: `GET http://<charger>/status` → write curated fields to `status/current`; MQTT: subscribed status topics → the same write path; maintain `history/<date>` from `total_energy` deltas; finalize one `sessions/*` doc per plug-in session |
 | Config   | 60 s (HTTP) / on `config_version` change under MQTT     | `GET /config` → write `status/config` with credential fields redacted                                                                                                                                                                         |
 | Schedule | on change + 60 s, reconcile every 300 s                 | Sync `schedule/current` → firmware `POST /schedule` (one event per request; each rule becomes a window-start `active` event and a window-end `disabled` event). Poll `GET /schedule/plan` → `status.current.schedule`                         |
-| Commands | 5 s poll                                                | New pending doc in `commands` → apply to charger → mark acked / failed (stale pending docs are failed without contacting the charger)                                                                                                         |
+| Commands | 5 s poll                                                | New pending doc in `commands` → apply to the charger (MQTT `override/set` / `rapi/in` while the broker is ready, else HTTP) → mark acked / failed with the `transport` used (stale pending docs are failed without contacting the charger)    |
 
-Both status transports feed **one** `parse_status` → `apply_status` path, so an MQTT snapshot gets the same unit conversion (milliamps → amps, 10ths of °C → °C), the same curated field set, and the same history, session and transition logic as an HTTP reply — once per real change. An MQTT snapshot only runs the state machine once it is complete (the source holds a `/status` seed and the snapshot carries a `state`), and a reconcile reply older than an MQTT apply is discarded rather than allowed to rewind the tracker. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan`, OTA and commands. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
+Both status transports feed **one** `parse_status` → `apply_status` path, so an MQTT snapshot gets the same unit conversion (milliamps → amps, 10ths of °C → °C), the same curated field set, and the same history, session and transition logic as an HTTP reply — once per real change. An MQTT snapshot only runs the state machine once it is complete (the source holds a `/status` seed and the snapshot carries a `state`), and a reconcile reply older than an MQTT apply is discarded rather than allowed to rewind the tracker. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan` and OTA. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
+
+**Commands** are MQTT-first too (issue #46) once the broker is connected **and** the `<topic>/#` subscription is granted: pause/resume/set-current publish the firmware's `override/set` payload (`{"state":"disabled"}`, `clear`, `{"state":"active","charge_current":N,"max_current":N}`) and confirm against the retained `override` document (falling back to the status `manual_override` plus a non-charging `state`/`pilot` field) within 5 s; RAPI publishes `rapi/in/<command>` with its parameters as the payload and matches the first `rapi/out` after its publish (`$OK` → acked, `$NK` → failed), serialised because replies carry no correlation id, with a short quarantine retiring the reply of a timed-out transaction. HTTP is used only when MQTT is not ready _before_ a publish (or the client refuses it), with unchanged validation, staleness and lifecycle. A published command is never re-applied over HTTP: a lost acknowledgement is reconciled read-only from `/status` or the command fails. Every command document records the transport that carried the request (`transport: "mqtt"|"http"`), and none when it was rejected before a send. See [pi/README.md](pi/README.md#commands-over-mqtt-issue-46).
 
 The status loop also emits **FCM push notifications** on transitions — charging started, charging stopped, charger offline — sent by a background worker to every registered `fcmTokens` doc via the Admin SDK (invalid tokens are pruned on send error).
 
@@ -49,18 +51,18 @@ Failure handling: connection errors (charger or Firebase) are logged and retried
 
 **Firestore data model (v1):**
 
-| Path                | Writer                                  | Readers               | Content                                                                                                                                                                                                                             |
-| ------------------- | --------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status/current`    | bridge (admin)                          | verified, allowlisted | Curated `/status` fields: `{state, state_label, amp, voltage, power, session_energy (Wh), total_energy (kWh), elapsed (s), vehicle, temp1–temp3, temp_c, pilot, charger_online, schedule: {in_window, active_rule_id}, updated_at}` |
-| `status/config`     | bridge (admin)                          | verified, allowlisted | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings) with credential fields redacted to `"***"`; refreshed ~60 s (or on a `config_version` change with MQTT)                                |
-| `status/health`     | bridge (admin)                          | verified, allowlisted | Watchdog state (`healthy`/`unhealthy`, reason, `http_ok`, `controller_ok`, attempt history) plus the active status transport (`source`, `mqtt_connected`) with merge writes from both writers                                       |
-| `history/{date}`    | bridge (admin)                          | verified, allowlisted | `{kwh}` per local day, derived from `total_energy` deltas                                                                                                                                                                           |
-| `sessions/{id}`     | bridge (admin)                          | verified, allowlisted | One record per completed plug-in session (merged across pause/resume): `{started_at, ended_at, wh, elapsed}`                                                                                                                        |
-| `schedule/current`  | app (write), bridge (syncs to firmware) | allowlisted users     | Owner-defined charge schedule: `{enabled, rules: [{id, days [0–6 Mon=0], start "HH:MM", end "HH:MM", amps}]}`; `end < start` wraps past midnight; bridge mirrors it into the firmware scheduler                                     |
-| `settings/current`  | app (write)                             | allowlisted users     | App settings: `{rate ($/kWh), currency}` — used client-side for cost display                                                                                                                                                        |
-| `fcmTokens/{token}` | app (create own)                        | —                     | Push registration: `{uid, created_at}`; the bridge sends FCM notifications to these tokens                                                                                                                                          |
-| `users/{uid}`       | acl sync (admin)                        | that user (own doc)   | Access grant: `{allowed: bool, email}` — synced from `private/acl.txt` by `pi/acl.py`                                                                                                                                               |
-| `commands/{id}`     | app (create), bridge (ack/fail)         | verified, allowlisted | `{type: pause\|resume\|set_current\|rapi, amps?, command?, created_at, status: pending\|acked\|failed}`; pending older than 10 min is failed                                                                                        |
+| Path                | Writer                                  | Readers               | Content                                                                                                                                                                                                                                      |
+| ------------------- | --------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status/current`    | bridge (admin)                          | verified, allowlisted | Curated `/status` fields: `{state, state_label, amp, voltage, power, session_energy (Wh), total_energy (kWh), elapsed (s), vehicle, temp1–temp3, temp_c, pilot, charger_online, schedule: {in_window, active_rule_id}, updated_at}`          |
+| `status/config`     | bridge (admin)                          | verified, allowlisted | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings) with credential fields redacted to `"***"`; refreshed ~60 s (or on a `config_version` change with MQTT)                                         |
+| `status/health`     | bridge (admin)                          | verified, allowlisted | Watchdog state (`healthy`/`unhealthy`, reason, `http_ok`, `controller_ok`, attempt history) plus the active status transport (`source`, `mqtt_connected`) with merge writes from both writers                                                |
+| `history/{date}`    | bridge (admin)                          | verified, allowlisted | `{kwh}` per local day, derived from `total_energy` deltas                                                                                                                                                                                    |
+| `sessions/{id}`     | bridge (admin)                          | verified, allowlisted | One record per completed plug-in session (merged across pause/resume): `{started_at, ended_at, wh, elapsed}`                                                                                                                                 |
+| `schedule/current`  | app (write), bridge (syncs to firmware) | allowlisted users     | Owner-defined charge schedule: `{enabled, rules: [{id, days [0–6 Mon=0], start "HH:MM", end "HH:MM", amps}]}`; `end < start` wraps past midnight; bridge mirrors it into the firmware scheduler                                              |
+| `settings/current`  | app (write)                             | allowlisted users     | App settings: `{rate ($/kWh), currency}` — used client-side for cost display                                                                                                                                                                 |
+| `fcmTokens/{token}` | app (create own)                        | —                     | Push registration: `{uid, created_at}`; the bridge sends FCM notifications to these tokens                                                                                                                                                   |
+| `users/{uid}`       | acl sync (admin)                        | that user (own doc)   | Access grant: `{allowed: bool, email}` — synced from `private/acl.txt` by `pi/acl.py`                                                                                                                                                        |
+| `commands/{id}`     | app (create), bridge (ack/fail)         | verified, allowlisted | `{type: pause\|resume\|set_current\|rapi, amps?, command?, created_at, status: pending\|acked\|failed}` plus `transport: "mqtt"\|"http"` naming the path that carried the request whenever one was sent; pending older than 10 min is failed |
 
 Commands are typed whitelist entries; `rapi` is the explicit advanced escape hatch (string-validated in rules) for anything the curated types don't cover. Security rules enforce: only verified, allowlisted users can read (each user may read their own grant doc); only whitelisted command types with validated `amps`/`command` on create; status/history writes and command mutations are admin-only. `settings/current` is shape-validated in rules. `schedule/current` is container-validated in rules (exact keys, types, max 20 rules) because per-element validation exceeds Firestore's 1000-expression limit; each rule's shape is re-validated by the bridge, which skips and logs malformed rules (the app validates every rule before writing). Overlapping or touching windows are also skipped by the bridge, because the firmware resolves equal-time events by list order. See `firestore.rules`.
 
@@ -100,11 +102,14 @@ Plain HTTP on the trusted home LAN (HTTP Basic auth if an admin password is set 
 **HTTP polling vs MQTT**: status is MQTT-first when `MQTT_ENABLED=true` — the
 firmware publishes one topic per value as its EVSE poll changes, so Firestore
 updates arrive in seconds and the HTTP `/status` poll drops to a 60 s
-reconciliation. HTTP stays authoritative for `/config` (redaction/coercion in one
-place), `/schedule/plan` (the firmware computes the plan), OTA, commissioning
+reconciliation. Commands use the same transport when it is ready: `override/set`
+for pause/resume/set-current and `rapi/in`/`rapi/out` for RAPI, acknowledged by
+the charger's own retained `override` document or RAPI reply. HTTP stays
+authoritative for `/config` (redaction/coercion in one place),
+`/schedule/plan` (the firmware computes the plan), OTA, commissioning
 and the controller counters (`comm_sent`/`comm_success`/`rapi_connected`) that
 the watchdog reads from the HTTP reply and that MQTT does not publish (they stay
-out of `status/current`) — and it remains the fallback
+out of `status/current`) — and it remains the fallback for status and commands
 and the rollback. The broker (Mosquitto) runs on the Pi: LAN-only, authenticated,
 no cloud dependency, and a flag flip back to polling.
 
@@ -150,12 +155,14 @@ Each row is triggered and checked in [docs/VALIDATION.md](docs/VALIDATION.md).
 - **Firmware-native scheduling**: the app edits `schedule/current` in Firestore; the bridge pushes it to the charger's own scheduler (`POST /schedule`; v5.1.5 events are flat `{id, state, time, days}` with no per-event current, so `amps` is stored but not applied). Windows are enforced by the charger itself and survive a Pi outage; a periodic reconcile re-posts them after a firmware reset. `/override` remains the dynamic manual path. (Research confirmed the v5.x scheduler API — bridge-side window evaluation was considered and rejected.)
 - **Deferred from the built-in UI**: session limits are reachable via the RAPI console in v1; a curated screen can follow if wanted.
 - **MQTT-first status, HTTP for the rest**: the charger publishes per-field
-  status topics, so the bridge subscribes instead of polling and keeps HTTP for
-  `/config`, `/schedule/plan`, OTA, commands and as the automatic fallback
-  (`MQTT_ENABLED=false` reverts to 10 s polling). The broker lives on the Pi —
-  the existing always-on host on the charger's LAN — so the design stays
-  serverless from the internet's point of view and adds no cloud service.
+  status topics and accepts commands on native topics, so the bridge subscribes
+  and publishes instead of polling, keeping HTTP for `/config`,
+  `/schedule/plan`, OTA and as the automatic fallback
+  (`MQTT_ENABLED=false` reverts to 10 s polling and HTTP commands). The broker
+  lives on the Pi — the existing always-on host on the charger's LAN — so the
+  design stays serverless from the internet's point of view and adds no cloud
+  service.
 - **FCM in v1**: push for charging started/stopped and offline events — the PWA self-registers its token, the bridge sends via the Admin SDK. Costs are computed client-side from the stored rate.
-- Future candidates: native Android app, commands over MQTT (#46), LWT-driven
-  availability and MQTT restarts (#45), per-event notification preferences,
-  firmware's built-in Emoncms posting as a zero-code telemetry fallback.
+- Future candidates: native Android app, LWT-driven availability and MQTT
+  restarts (#45), per-event notification preferences, the firmware's built-in
+  Emoncms posting as a zero-code telemetry fallback.

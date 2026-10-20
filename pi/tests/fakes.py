@@ -218,12 +218,20 @@ class FakeMessage:
             self.payload = str(payload).encode()
 
 
+class FakeMqttPublishInfo:
+    """paho's MQTTMessageInfo surface: the bridge only reads ``rc``."""
+
+    def __init__(self, rc=0):
+        self.rc = rc
+
+
 class FakeMqttClient:
     """Stand-in for paho's Client: no broker, callbacks are called by hand.
 
     ``connect()``/``drop()`` simulate the network loop's connection callbacks;
     ``ack_subscribe()`` simulates a SUBACK and ``deliver()`` feeds one message
-    as the broker would.
+    as the broker would. ``publish()`` records the call and returns rc 0 unless
+    ``publish_rc`` is set (which simulates a client that refuses the send).
     """
 
     def __init__(self, client_id=None):
@@ -235,6 +243,9 @@ class FakeMqttClient:
         self.connect_args = None
         self.looping = False
         self.disconnected = False
+        self.published = []
+        self.publish_rc = 0
+        self.on_publish = None
         self.on_connect = None
         self.on_disconnect = None
         self.on_subscribe = None
@@ -259,6 +270,12 @@ class FakeMqttClient:
     def subscribe(self, topic, qos=0):
         self.subscriptions.append((topic, qos))
         return (0, 1)
+
+    def publish(self, topic, payload=None, qos=0, retain=False):
+        self.published.append((topic, payload, qos))
+        if self.on_publish is not None:
+            self.on_publish(topic, payload)
+        return FakeMqttPublishInfo(self.publish_rc)
 
     def is_connected(self):
         return self.connected
