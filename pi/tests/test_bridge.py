@@ -10,6 +10,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import requests  # noqa: E402
+
 import bridge  # noqa: E402
 from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
 
@@ -769,13 +771,16 @@ class ChargerSessionTests(unittest.TestCase):
             self.assertEqual(adapter.max_retries.total, 0)
 
     def test_transport_forwards_to_the_given_session(self):
-        session = FakeSession([FakeResponse(200, {"ok": True})])
+        session = FakeSession([FakeResponse(200, {"ok": True}) for _ in range(3)])
         transport = bridge.ChargerTransport(session)
-        resp = transport.get("http://charger/status", timeout=5)
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(
-            session.calls, [("get", "http://charger/status", {"timeout": 5})]
-        )
+        for method in ("get", "post", "delete"):
+            with self.subTest(method=method):
+                url = f"http://charger/{method}"
+                kwargs = {"timeout": 5, "auth": ("user", "pass")}
+                resp = getattr(transport, method)(url, **kwargs)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(session.calls[-1], (method, url, kwargs))
+        self.assertEqual(len(session.calls), 3)
 
 
 class _SlowSession:
@@ -814,6 +819,34 @@ class ChargerTransportTests(unittest.TestCase):
             thread.join()
         self.assertFalse(session.overlapped)
         self.assertEqual(session.calls, 4)
+
+    def test_lock_is_released_when_the_call_raises(self):
+        class _FailOnceSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, url, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise requests.ConnectionError("charger unreachable")
+                return FakeResponse(200)
+
+        transport = bridge.ChargerTransport(_FailOnceSession())
+        with self.assertRaises(requests.ConnectionError):
+            transport.get("http://charger/status", timeout=5)
+
+        finished = threading.Event()
+
+        def follow_up():
+            transport.get("http://charger/status", timeout=5)
+            finished.set()
+
+        # A later call from another thread only runs if the failed call released
+        # the lock; the wait is bounded so a leak fails instead of hanging.
+        worker = threading.Thread(target=follow_up, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertTrue(finished.is_set(), "lock was not released after the raise")
 
 
 class _RecordingStop:
