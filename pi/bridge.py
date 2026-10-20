@@ -540,9 +540,13 @@ class ChargerTransport:
     ``requests.Session`` is not documented as thread-safe, and the ESP32 gateway
     is the constrained side of the link: four loops sharing one session and its
     keep-alive pool (capped at two sockets) is cheaper than four sessions. The
-    lock is not free: a request can hold it up to ``HTTP_TIMEOUT`` per call, so
-    other loops' charger calls (commands included) may be delayed by that bound,
-    not failed; Firestore work and the notifier stay outside the lock.
+    lock is not free: ``HTTP_TIMEOUT`` is the connect/read timeout given to each
+    request, and Requests applies it per socket operation rather than as a
+    deadline for the whole call. Name resolution is not covered by it, and a
+    response that trickles in under the read timeout can keep the call — and the
+    lock — held past that value, so there is no strict total-duration bound.
+    Other loops' charger calls (commands included) wait for the lock rather than
+    fail; Firestore work and the notifier stay outside it.
     """
 
     def __init__(self, session):

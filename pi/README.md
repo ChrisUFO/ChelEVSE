@@ -59,10 +59,13 @@ All four loops share one `requests.Session` (`ChargerTransport` in
 `pool_maxsize=2`). The ESP32 gateway is the constrained side of the link, so
 the bridge holds at most two keep-alive connections instead of one per loop.
 `requests.Session` is not documented as thread-safe, so every call is made
-under a lock. The lock is not free: a request that stalls holds it for up to
-`HTTP_TIMEOUT` (5 s per call, so ~10 s worst case with DNS), and another
-loop's charger call — including a command — can be delayed by up to that
-bound. The command still applies when it lands; only its arrival is late.
+under a lock. The lock is not free: `HTTP_TIMEOUT` (5 s) is the connect/read
+timeout passed to each request, and Requests applies it per socket operation
+rather than as a deadline for the whole call. DNS resolution is not covered by
+it, and a slow or trickling response can keep the call — and the lock — held
+longer than that value, so there is no strict total-duration bound. Another
+loop's charger call — including a command — waits for the lock rather than
+failing; the command still applies when it lands, only its arrival is late.
 Accepted because polls are low-rate. Firestore work and the notifier run
 outside the lock. The config and schedule pollers start 3 s and 7 s late so
 `/status`, `/config` and `/schedule/plan` do not hit the charger together.
