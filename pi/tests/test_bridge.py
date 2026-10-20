@@ -1168,6 +1168,50 @@ class RecoveryDecisionTests(unittest.TestCase):
         decision = self.decide(charging=True, restart_while_charging=True)
         self.assertEqual(decision["action"], "restart_gateway")
 
+    def test_guard_precedence_is_charging_then_cap_then_cooldown(self):
+        """All guards satisfied at once: the earlier guard owns the push body."""
+        cap_spent = (self.NOW - timedelta(minutes=5),) * 3
+        recent_attempt = self.NOW - timedelta(seconds=60)
+        cases = (
+            (
+                "charging",
+                {
+                    "charging": True,
+                    "attempts_in_window": cap_spent,
+                    "last_attempt_at": recent_attempt,
+                },
+                "charging in progress; WATCHDOG_RESTART_WHILE_CHARGING is off",
+                bridge.WATCHDOG_ALERT_BLOCKED_CHARGING,
+            ),
+            (
+                "cap",
+                {
+                    "charging": True,
+                    "restart_while_charging": True,
+                    "attempts_in_window": cap_spent,
+                    "last_attempt_at": recent_attempt,
+                },
+                "hourly cap reached (3/3 attempts)",
+                bridge.WATCHDOG_ALERT_BLOCKED_CAP,
+            ),
+            (
+                "cooldown",
+                {
+                    "charging": True,
+                    "restart_while_charging": True,
+                    "last_attempt_at": recent_attempt,
+                },
+                "cooldown after the last attempt (600s)",
+                bridge.WATCHDOG_ALERT_BLOCKED_COOLDOWN,
+            ),
+        )
+        for guard, overrides, reason, alert in cases:
+            with self.subTest(guard=guard):
+                decision = self.decide(**overrides)
+                self.assertEqual(decision["action"], "none")
+                self.assertEqual(decision["reason"], reason)
+                self.assertEqual(decision["alert"], alert)
+
     def test_disabled_watchdog_does_nothing(self):
         decision = self.decide(enabled=False, http_reachable=False)
         self.assertEqual(decision["action"], "none")
@@ -1564,9 +1608,21 @@ class WatchdogLoopTests(unittest.TestCase):
         )
         self.assertEqual(self.posts(session), [])
         health = self.health(db)
-        self.assertIn("charging", health["reason"])
+        self.assertEqual(
+            health["reason"],
+            "charging in progress; WATCHDOG_RESTART_WHILE_CHARGING is off",
+        )
+        self.assertEqual(health["state"], "unhealthy")
+        self.assertTrue(health["http_ok"])
+        # Nothing was attempted, so the guard's reason is the last result and no
+        # attempt fields are claimed.
+        self.assertEqual(health["last_result"], health["reason"])
+        self.assertIsNone(health["last_attempt_at"])
+        self.assertEqual(health["attempts_last_hour"], 0)
         # A guard block is not a failed recovery: no "power cycle" advice.
-        self.assertEqual(notifier.bodies, ["Charger offline", bridge.WATCHDOG_ALERT_BLOCKED_CHARGING])
+        self.assertEqual(
+            notifier.bodies, ["Charger offline", bridge.WATCHDOG_ALERT_BLOCKED_CHARGING]
+        )
         self.assertNotIn(bridge.WATCHDOG_ALERT_FAILED, notifier.bodies)
         self.assertEqual(health["last_action"], "none")
         self.assertIn("WATCHDOG_RESTART_WHILE_CHARGING", notifier.bodies[-1])
