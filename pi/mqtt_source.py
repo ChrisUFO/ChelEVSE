@@ -655,9 +655,12 @@ class MqttSource:
             return
         previous, self.announce_state = self.announce_state, state
         self.announce_messages += 1
-        if state == ANNOUNCE_DISCONNECTED:
-            self.last_lwt_at = datetime.now(UTC)
         if state != previous:
+            # Stamp only on the transition into disconnected: the will is
+            # retained, so every re-subscribe redelivers it, and a redelivery
+            # must not move the time the Last Will actually fired.
+            if state == ANNOUNCE_DISCONNECTED:
+                self.last_lwt_at = datetime.now(UTC)
             self.log(f"mqtt gateway announced {state}")
 
     def _override(self, value):

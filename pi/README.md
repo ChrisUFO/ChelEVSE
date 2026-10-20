@@ -322,7 +322,10 @@ HTTP poll, and an HTTP outage in that state is **alert-only** — publishing a
 restart to a gateway that is not on the broker would not reach it. The first
 `{"state": "connected"}` after a reconnect clears the flag and MQTT becomes a
 restart transport again. Unknown is not disconnected: until an announcement
-arrives the watchdog assumes nothing and only the HTTP path counts.
+arrives the watchdog infers no outage, and a ready MQTT link (connected, status
+subscription granted) remains a restart transport — only `mqtt_announced: false`
+withdraws it. A denied or mis-set announce filter therefore still allows MQTT
+restarts; it is the outage inference that stays on HTTP.
 
 While unhealthy the bridge makes one probe per tick in addition to the failed
 poll; a restart attempt is recorded only when the probe (and the guards) allow

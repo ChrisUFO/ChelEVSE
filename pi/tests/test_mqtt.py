@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -306,6 +307,28 @@ class MqttSourceTests(MqttSourceBase):
         # A reconnect re-announces and clears the Last Will state.
         client.deliver("openevse/announce/3988", '{"state":"connected"}')
         self.assertTrue(self.source.announced)
+
+    def test_a_redelivered_retained_will_does_not_move_last_lwt_at(self):
+        # The will is retained, so a re-subscribe (our own broker link blipping)
+        # redelivers it while the gateway is still gone. The timestamp must keep
+        # saying when the Last Will fired, not when we reconnected.
+        client = self.connect()
+        client.ack_subscribe([0])
+        client.deliver("openevse/announce/3988", '{"state":"disconnected"}')
+        self.assertIsNotNone(self.source.last_lwt_at)
+        fired = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+        self.source.last_lwt_at = fired
+        client.drop()
+        client.connect()
+        client.ack_subscribe([0])
+        client.deliver("openevse/announce/3988", '{"state":"disconnected"}')
+        self.assertIs(self.source.last_lwt_at, fired)
+        self.assertFalse(self.source.announced)
+        self.assertEqual(self.source.announce_messages, 2)
+        # A later, genuinely new will is still stamped.
+        client.deliver("openevse/announce/3988", '{"state":"connected"}')
+        client.deliver("openevse/announce/3988", '{"state":"disconnected"}')
+        self.assertNotEqual(self.source.last_lwt_at, fired)
 
     def test_an_announce_without_a_known_state_is_ignored(self):
         client = self.connect()
