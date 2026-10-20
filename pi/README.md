@@ -143,8 +143,10 @@ the process — later probe results are carried by `http_ok` and `reason`.
 answering HTTP at all cannot be restarted from the Pi, and a controller that does
 not come back after `{"device": "evse"}` needs hands-on attention. If
 `status/health.http_ok` stays `false`, check the charger's power and its LAN
-association before assuming a firmware problem; the hourly cap is what stops the
-bridge from looping on a device that is simply switched off.
+association before assuming a firmware problem. The hourly cap bounds restart
+attempts only when the probe reaches the gateway; an unreachable device gets the
+edge alert and is probed once per status tick until it recovers or the watchdog
+is disabled, so no restart allowance is consumed.
 
 **Disabling.** `WATCHDOG_ENABLED=false` stops all probes, restarts, health writes
 and watchdog pushes, and the failure counter is not kept; `status/health` is then
