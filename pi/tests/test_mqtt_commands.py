@@ -324,12 +324,29 @@ class MqttOverrideCommandTests(unittest.TestCase):
         }
         self.assertTrue(bridge._override_confirms("set_current", 10, view))
         self.assertFalse(bridge._override_confirms("set_current", 20, view))
+        # A document that names no current confirms no setpoint: it cannot
+        # distinguish an applied hold from a lost publish.
+        for bare in ({"state": "active"}, {"state": "active", "charge_current": None}):
+            self.assertFalse(
+                bridge._override_confirms(
+                    "set_current", 10, {"override": bare, "status": {}}
+                )
+            )
 
     def test_a_hold_above_the_evse_maximum_confirms_at_the_clamp(self):
         # Live 8.2.3: command 32 A on a 16 A EVSE -> pilot 16, max_current 16.
         source, client = make_source()
         source.seed(
-            {"state": 1, "manual_override": 1, "pilot": 16, "max_current": 16}
+            {
+                "state": 1,
+                "status": "active",
+                "amp": 0,
+                "voltage": 240,
+                "pilot": 16,
+                "max_current": 16,
+                "vehicle": 0,
+                "manual_override": 1,
+            }
         )
         session = FakeSession()
         extra = bridge.apply_command(
@@ -342,6 +359,112 @@ class MqttOverrideCommandTests(unittest.TestCase):
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual(session.calls, [])
+        self.assertEqual(len(client.published), 1)
+
+    def test_a_clamped_hold_reconciles_from_the_live_status_shape(self):
+        # The clamp branch must be reachable from the shape a real /status
+        # reply carries: `max_current` is present there (live: 16 A soft limit
+        # while /config spells max_current_soft 16 / max_current_hard 24). A
+        # lost retained-document broadcast still confirms instead of failing.
+        source, client = make_source()
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "state": 1,
+                        "status": "active",
+                        "amp": 0,
+                        "voltage": 240,
+                        "pilot": 16,
+                        "max_current": 16,
+                        "vehicle": 0,
+                        "manual_override": 1,
+                    },
+                )
+            ]
+        )
+        extra = bridge.apply_command(
+            session,
+            BASE,
+            None,
+            {"type": "set_current", "amps": 32},
+            source=source,
+            confirm_sec=CONFIRM,
+        )
+        self.assertEqual(extra, {"transport": "mqtt"})
+        self.assertEqual([call[0] for call in session.calls], ["get"])
+        self.assertEqual(len(client.published), 1)
+
+    def test_an_active_document_without_a_current_confirms_by_status(self):
+        # `{"state":"active"}` alone cannot tell an applied hold from a lost
+        # publish, so it never acks on its own; the read-only /status reconcile
+        # is what confirms.
+        source, client = make_source()
+        ack_override(client, {"state": "active"})
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "state": 1,
+                        "status": "active",
+                        "amp": 0,
+                        "voltage": 240,
+                        "pilot": 10,
+                        "max_current": 16,
+                        "vehicle": 0,
+                        "manual_override": 1,
+                    },
+                )
+            ]
+        )
+        extra = bridge.apply_command(
+            session,
+            BASE,
+            None,
+            {"type": "set_current", "amps": 10},
+            source=source,
+            confirm_sec=CONFIRM,
+        )
+        self.assertEqual(extra, {"transport": "mqtt"})
+        self.assertEqual([call[0] for call in session.calls], ["get"])
+        self.assertEqual(len(client.published), 1)
+
+    def test_an_active_document_without_a_current_never_acks_an_unapplied_hold(self):
+        # Same document, but the charger never applied the hold: the command
+        # fails instead of acking on the bare `{"state":"active"}` document.
+        source, client = make_source()
+        ack_override(client, {"state": "active"})
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {
+                        "state": 1,
+                        "status": "active",
+                        "amp": 0,
+                        "voltage": 240,
+                        "pilot": 0,
+                        "max_current": 16,
+                        "vehicle": 0,
+                        "manual_override": 0,
+                    },
+                )
+            ]
+        )
+        with self.assertRaises(bridge.CommandError) as raised:
+            bridge.apply_command(
+                session,
+                BASE,
+                None,
+                {"type": "set_current", "amps": 10},
+                source=source,
+                confirm_sec=CONFIRM,
+            )
+        self.assertIn("no confirmation", str(raised.exception))
+        self.assertEqual(raised.exception.transport, "mqtt")
+        self.assertEqual([call[0] for call in session.calls], ["get"])
         self.assertEqual(len(client.published), 1)
 
     def test_a_sleeping_auto_charger_does_not_confirm_a_pause(self):

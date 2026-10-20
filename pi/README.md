@@ -616,12 +616,12 @@ immediately before the publish. HTTP stays the fallback when MQTT is not ready
 _at that moment_; the flag alone does not switch the command path if the
 subscription was denied or the link is down.
 
-| `type`        | Publish on `<base>/…`                                                                                                                   | Acknowledged by                                                                                                     |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `pause`       | `override/set` `{"state":"disabled"}`                                                                                                   | retained `override` `{"state":"disabled",…}`, or a status view with `manual_override: 1` and `state: 254/255`       |
-| `resume`      | `override/set` `clear`                                                                                                                  | retained `override` `{"state":"null"}` (the firmware's auto state) or `manual_override: 0`                          |
-| `set_current` | `override/set` `{"state":"active","charge_current":N,"max_current":N}`                                                                  | retained `override` with `state: "active"` and `charge_current: N` (or `manual_override: 1` with `pilot: N`)        |
-| `rapi`        | `rapi/in/<command>` with the parameters as the payload (`$FS 20` → topic `rapi/in/$FS`, payload `20`; empty payload without parameters) | the next `rapi/out` reply: `$OK…` → `acked` with the reply in `result`; `$NK…` → `failed` with the reply in `error` |
+| `type`        | Publish on `<base>/…`                                                                                                                   | Acknowledged by                                                                                                                                             |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pause`       | `override/set` `{"state":"disabled"}`                                                                                                   | retained `override` `{"state":"disabled",…}`, or a status view with `manual_override: 1` and `state: 254/255`                                               |
+| `resume`      | `override/set` `clear`                                                                                                                  | retained `override` `{"state":"null"}` (the firmware's auto state) or `manual_override: 0`                                                                  |
+| `set_current` | `override/set` `{"state":"active","charge_current":N,"max_current":N}`                                                                  | retained `override` with `state: "active"` and `charge_current: N` (or `manual_override: 1` with `pilot: N`; clamped holds confirm at `pilot: max_current`) |
+| `rapi`        | `rapi/in/<command>` with the parameters as the payload (`$FS 20` → topic `rapi/in/$FS`, payload `20`; empty payload without parameters) | the next `rapi/out` reply: `$OK…` → `acked` with the reply in `result`; `$NK…` → `failed` with the reply in `error`                                         |
 
 Override commands wait `COMMAND_CONFIRM_SEC` (5 s) for the retained
 `<base>/override` document, which the firmware rewrites on every change — it
@@ -634,8 +634,11 @@ state (`254` sleeping or `255` disabled; 8.2.3 pauses into `254` and `255` is
 never observed). A sleeping charger with no override reports the same `254`
 with `manual_override: 0`, so the override flag is what separates the two. A
 hold is confirmed from `pilot`, which tracks the held setpoint up to the EVSE's
-configured maximum, so a command above that maximum is confirmed at the clamp.
-A timeout does **not** re-apply the command: the
+configured maximum, so a command above that maximum is confirmed at the clamp
+(`pilot` == the `/status` `max_current`). A retained document that is
+`"active"` but names no current confirms nothing — it cannot distinguish an
+applied hold from a lost publish — and falls through to the `/status`
+reconcile. A timeout does **not** re-apply the command: the
 bridge reads `/status` once (read-only) and accepts it if the status already
 reflects the target state, otherwise marks it `failed` with
 `no confirmation within 5s (…)`.

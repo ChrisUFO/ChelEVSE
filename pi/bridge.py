@@ -850,7 +850,11 @@ def _setpoint_matches(status, amps):
 
     The EVSE clamps above its own configured maximum, so a command beyond it
     (``amps`` > ``max_current``) is confirmed by ``pilot`` sitting at that
-    maximum rather than at the commanded value.
+    maximum rather than at the commanded value. ``max_current`` comes from the
+    raw ``/status`` reply: firmware 8.2.3 carries it there (live on the test
+    charger: ``pilot`` 16 with ``max_current`` 16, the soft limit), while
+    ``/config`` spells the pair ``max_current_soft``/``max_current_hard`` and
+    never a bare ``max_current``.
     """
     if _as_int(status.get("manual_override")) != 1:
         return False
@@ -887,9 +891,12 @@ def _override_confirms(ctype, amps, view):
         return state is None and _as_int(status.get("manual_override")) == 0
     # set_current: confirm from the commanded field, not `max_current`, so a
     # firmware that normalises the latter cannot make every hold time out.
+    # A document that names no current at all confirms nothing: it cannot tell
+    # an applied hold from a lost publish. The read-only /status reconcile in
+    # `_apply_override_mqtt` is the second opinion for that shape.
     if state == "active":
         current = override.get("charge_current", override.get("max_current"))
-        return current is None or _as_int(current) == amps
+        return current is not None and _as_int(current) == amps
     return state is None and _setpoint_matches(status, amps)
 
 
