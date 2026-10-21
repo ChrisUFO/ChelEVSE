@@ -15,6 +15,7 @@ import {
   CHECK_CONFLICT_MESSAGE,
   CHECK_RATE_MESSAGE,
   applyPeriodDates,
+  applyPeriodDatesInPlace,
   applyPeriodMonths,
   baseRateRow,
   canDuplicatePeriod,
@@ -33,6 +34,7 @@ import {
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
+  isLeapYear,
   largestDateScope,
   mergeDateRanges,
   minutesToClock,
@@ -92,7 +94,13 @@ import {
   validationProblemCount,
   windowLabel,
 } from '../../web/js/settings.js';
-import { applySubmitFocus } from '../../web/js/screens/settings.js';
+import {
+  applySubmitFocus,
+  boundFromDateInput,
+  dateInputBounds,
+  dateInputForBound,
+  referenceStartYear,
+} from '../../web/js/screens/settings.js';
 import {
   isBaseWindow,
   normalizeRateSchedule,
@@ -130,6 +138,59 @@ test('validateSettings mirrors the rules shape', () => {
   assert.equal(empty.valid, false);
   assert.ok(empty.errors.rate);
   assert.ok(empty.errors.currency);
+});
+
+test('a rate with more than three decimals is a valid 0–5 price end to end', () => {
+  // Owner report: 0.11270 (11.27p/kWh) was rejected with the empty-field
+  // message. The contract is only "a number from 0 to 5", so five decimals are
+  // a price, not a typo, and the field must not narrow precision to a step.
+  const flat = validateSettings({ rate: '0.11270', currency: 'USD' });
+  assert.equal(flat.valid, true);
+  assert.deepEqual(flat.errors, {});
+  assert.equal(flat.values.rate, 0.1127);
+
+  const row = {
+    id: 'night',
+    rate: '0.11270',
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const windows = validateRateWindows([row]);
+  assert.equal(windows.valid, true);
+  assert.equal(windows.values[0].rate, 0.1127);
+  assert.equal(validateRateEditorRows([row], '0.1127').valid, true);
+
+  // The saved document carries the parsed number, never the typed string.
+  const values = validateSettings({ rate: '0.11270', currency: 'USD', rates: [row] }).values;
+  const payload = settingsPayload(values);
+  assert.equal(payload.rate, 0.1127);
+  assert.equal(typeof payload.rate, 'number');
+  assert.equal(payload.rates[0].rate, 0.1127);
+  assert.equal(typeof payload.rates[0].rate, 'number');
+
+  // The single 0–5 rule still bounds the value, whatever the precision.
+  assert.equal(
+    validateSettings({ rate: '5.11270', currency: 'USD' }).errors.rate,
+    'Rate must be between 0 and 5.',
+  );
+  assert.equal(
+    validateSettings({ rate: '-0.00001', currency: 'USD' }).errors.rate,
+    'Rate must be between 0 and 5.',
+  );
+  // Empty and non-numeric input keep the existing message.
+  for (const rate of ['', '   ', 'abc', '0.11270e']) {
+    assert.equal(
+      validateSettings({ rate, currency: 'USD' }).errors.rate,
+      'Enter a rate between 0 and 5.',
+      rate,
+    );
+  }
+  assert.equal(
+    validateRateWindows([{ ...row, rate: 'abc' }]).errors.rows[0].rate,
+    'Enter a rate between 0 and 5.',
+  );
 });
 
 test('validateSettings carries and validates the optional rate windows', () => {
@@ -1467,6 +1528,60 @@ test('the checker fields parse local dates by parts and format for people', () =
   assert.equal(minutesToClock(-1), '');
 });
 
+test('the season date picker opens on the current year and runs four years forward', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(referenceStartYear(now), 2026);
+  assert.deepEqual(dateInputBounds(now), { min: '2026-01-01', max: '2029-12-31' });
+  // A leap-year start uses the same four-year span.
+  assert.deepEqual(dateInputBounds(new Date(2028, 0, 1)), {
+    min: '2028-01-01',
+    max: '2031-12-31',
+  });
+  // Every span contains a leap year, so 29 February is reachable and the
+  // reference no longer has to pin a past one. Four years normally hold exactly
+  // one; the century window 2097–2100 holds none, so the span reaches to 2104.
+  for (let year = 2024; year <= 2100; year += 1) {
+    const bounds = dateInputBounds(new Date(year, 0, 1));
+    const last = Number(bounds.max.slice(0, 4));
+    const leaps = [];
+    for (let candidate = year; candidate <= last; candidate += 1) {
+      if (isLeapYear(candidate)) leaps.push(candidate);
+    }
+    assert.ok(leaps.length >= 1, `span starting ${year}`);
+  }
+  assert.deepEqual(dateInputBounds(new Date(2097, 0, 1)), {
+    min: '2097-01-01',
+    max: '2104-12-31',
+  });
+  assert.equal(dateInputForBound('02-29', new Date(2097, 0, 1)), '2104-02-29');
+});
+
+test('a stored 29 February renders in the span leap year, not as a blank field', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(dateInputForBound('02-29', now), '2028-02-29');
+  assert.equal(dateInputForBound('02-29', new Date(2028, 0, 1)), '2028-02-29');
+  assert.equal(dateInputForBound('02-29', new Date(2024, 0, 1)), '2024-02-29');
+  // Every other day renders in the current year: the year is a reference only.
+  assert.equal(dateInputForBound('10-15', now), '2026-10-15');
+  assert.equal(dateInputForBound('01-01', now), '2026-01-01');
+  assert.equal(dateInputForBound('', now), '');
+  assert.equal(dateInputForBound('02-30', now), '');
+  assert.equal(dateInputForBound('2026-10-15', now), '');
+});
+
+test('a picked date stores its month and day and round-trips through the picker', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(boundFromDateInput('2026-10-15'), '10-15');
+  assert.equal(boundFromDateInput('2028-02-29'), '02-29');
+  assert.equal(boundFromDateInput('2029-12-31'), '12-31');
+  assert.equal(boundFromDateInput(dateInputForBound('02-29', now)), '02-29');
+  assert.equal(boundFromDateInput(dateInputForBound('10-15', now)), '10-15');
+  // A blank or impossible pick keeps date mode with the sentinel so validation
+  // can explain the missing half instead of dropping the bound.
+  assert.equal(boundFromDateInput(''), '00-00');
+  assert.equal(boundFromDateInput('2026-02-30'), '00-00');
+});
+
 test('the save row and plan summary count affected rows, not collisions', () => {
   assert.equal(validationProblemCount(validateRateEditorRows([]), 0), 0);
   const oneBad = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), rate: '' }]);
@@ -1869,6 +1984,44 @@ test('month and date edits convert explicitly, and a month edit clears dates', (
   assert.equal(monthly[0].to, null);
   assert.deepEqual(monthly[0].months, [11, 12]);
   assert.equal(monthly[1], rows[1]);
+});
+
+test('a date edit keeps the row objects the rate controls write to', () => {
+  // A shape-preserving date edit repaints the season's cards in place, and the
+  // Base rate and window controls hold the row objects themselves. Owner report:
+  // add a season, adjust its dates, type 1 in Base rate — the field showed 1
+  // while the card kept saying "Enter a rate between 0 and 5.". The typed rate
+  // was written to a copy the draft no longer contained, so validation still saw
+  // an empty rate. The in-place edit must preserve identity.
+  const rows = [
+    baseRateRow('oct', '0.3', [10], { from: '10-01', to: '10-31' }),
+    baseRateRow('rest', '', [11], { from: '11-01', to: '09-30' }),
+  ];
+  const october = rows[0];
+  const rest = rows[1];
+  const result = applyPeriodDatesInPlace(rows, [1], '11-01', '09-29');
+
+  // Same list, same objects: the controls' captured rows are still in the draft.
+  assert.equal(result, rows);
+  assert.equal(rows[0], october);
+  assert.equal(rows[1], rest);
+  assert.equal(rows[0].from, '10-01');
+  assert.equal(rows[1].from, '11-01');
+  assert.equal(rows[1].to, '09-29');
+  assert.deepEqual(rows[1].months, [11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+  // A rate typed after the edit lands on the row validation reads.
+  rest.rate = '1';
+  const validation = validateRateEditorRows(rows);
+  assert.equal(validation.valid, true);
+  assert.deepEqual(validation.rows[1], {});
+
+  // An empty rate on its own row still reports the message the owner saw.
+  rest.rate = '';
+  assert.equal(validateRateEditorRows(rows).rows[1].rate, 'Enter a rate between 0 and 5.');
+
+  // `applyPeriodDates` itself stays copy-on-write for callers that rebuild.
+  assert.notEqual(applyPeriodDates(rows, [1], '11-01', '09-29')[1], rest);
 });
 
 test('a date row saves its derived months and appends from/to after them', () => {
