@@ -467,6 +467,17 @@ function recheckWindow() {
   if (!loading) loadAll();
 }
 
+// Every one-shot read ends here: a read that was in flight across local midnight
+// has painted yesterday's window under today's labels, so re-enter it once with
+// today's ids instead of leaving "Today · <yesterday>" on screen. Re-entry
+// captures a fresh `today`, so this check can only fire again at the next local
+// midnight, never in a loop.
+function reloadIfWindowStale() {
+  if (!active || !windowStale()) return;
+  loaded = false;
+  loadAll();
+}
+
 // The range read for the selected period. `today` is captured once per read so
 // the bounds and the points are derived from the same local date.
 function periodRange(descriptor, today = new Date()) {
@@ -511,6 +522,7 @@ async function readHistory() {
   if (gen !== generation || seq !== historySeq) return;
   applyHistory(descriptor, result, today);
   renderHistory();
+  reloadIfWindowStale();
 }
 
 async function switchPeriod(id) {
@@ -566,12 +578,7 @@ async function loadAll() {
   renderSessions();
   renderLoadFeedback();
 
-  // A read that was in flight across local midnight leaves yesterday's window
-  // on screen; reload once with today's ids.
-  if (active && windowStale()) {
-    loaded = false;
-    loadAll();
-  }
+  reloadIfWindowStale();
 }
 
 // ---------- screen lifecycle ----------

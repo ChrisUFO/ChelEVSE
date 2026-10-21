@@ -1,6 +1,7 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 import {
   CHART_VIEW_W,
@@ -501,4 +502,61 @@ test('the plan banner appears exactly when a saved plan has an unpriced instant'
   assert.equal(showPlanBanner(settings([peak])), true);
   // A date season leaves the rest of the year uncovered.
   assert.equal(showPlanBanner(settings([summer])), true);
+});
+
+// ---------- screen read paths ----------
+
+test('a read that straddles local midnight leaves a stale window to re-check', () => {
+  // The screen captures `today` once per read and stores its day as `todayId`,
+  // so its midnight check is exactly `dayId(new Date()) !== bounds.endId`. Pin
+  // the clock either side of midnight and assert what the guard must answer:
+  // true once the day has moved (re-enter the read), false while it has not (so
+  // the re-read cannot fire, or loop, without a day change).
+  const before = new Date(2026, 9, 18, 23, 59, 30).getTime();
+  mock.timers.enable({ apis: ['Date'], now: before });
+  try {
+    for (const period of PERIODS) {
+      mock.timers.setTime(before);
+      const bounds = periodBounds(period);
+      const points = periodSeries(period, []);
+      // The window and its current-slot flag come from the captured date: at
+      // 23:59:30 on 18 Oct the last point is the current one, built for that day
+      // (the year's last point is its month, Oct 2026).
+      assert.equal(bounds.endId, '2026-10-18', period.id);
+      const last = points[points.length - 1];
+      assert.equal(last.isCurrent, true, period.id);
+      assert.equal(last.id, period.bucket === 'month' ? '2026-10' : '2026-10-18', period.id);
+      // Settled 20 s later, still on 18 Oct: the window is current, no re-read.
+      mock.timers.setTime(before + 20_000);
+      assert.equal(bounds.endId, dayId(new Date()), period.id);
+      // Settled after midnight: the same window now ends yesterday, so the
+      // guard must fire rather than leave yesterday's bars under a "Today" label.
+      mock.timers.setTime(before + 60_000);
+      assert.equal(dayId(new Date()), '2026-10-19', period.id);
+      assert.notEqual(bounds.endId, dayId(new Date()), period.id);
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('both history read paths end with the midnight re-check', () => {
+  // A period switch reads through readHistory; Refresh and activation read
+  // through loadAll. Both must end with the same guard, but the guard needs a
+  // DOM and a Firebase read, so the wiring is held statically (the sw-shell
+  // pattern) rather than through a browser harness this repo does not have.
+  const source = readFileSync(new URL('../../web/js/screens/history.js', import.meta.url), 'utf8');
+  const body = (name) => {
+    const start = source.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `screens/history.js declares ${name}`);
+    const end = source.indexOf('\n}\n', start);
+    assert.ok(end > start, `screens/history.js closes ${name}`);
+    return source.slice(start, end + 2);
+  };
+  for (const name of ['readHistory', 'loadAll']) {
+    // The guard is the last statement of the read, not a conditional aside.
+    assert.match(body(name), /\n\s*reloadIfWindowStale\(\);\n}$/, name);
+  }
+  // One mechanism for both: the shared guard owns the staleness check.
+  assert.match(body('reloadIfWindowStale'), /windowStale\(\)/);
 });
