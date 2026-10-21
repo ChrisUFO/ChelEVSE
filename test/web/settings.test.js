@@ -4,12 +4,15 @@ import assert from 'node:assert/strict';
 import {
   DAY_PRESETS,
   OFFLINE_MESSAGE,
+  RATE_CAP_MESSAGE,
   SAVE_FAILED_FIRST_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
   CHECK_BLOCKED_MESSAGE,
+  CHECK_CAP_MESSAGE,
   CHECK_CONFLICT_MESSAGE,
   applyPeriodMonths,
+  canDuplicatePeriod,
   complementMonths,
   copyPeriodRows,
   dateInputValue,
@@ -48,7 +51,9 @@ import {
   settingsPayload,
   settingsSaveState,
   siblingNote,
+  timeFieldsVisible,
   timeInputValue,
+  toggledMonthScope,
   uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
@@ -267,6 +272,7 @@ test('the editor accepts every valid stored month set, including non-contiguous 
     general: [],
     rows: [],
     overlaps: [],
+    capped: false,
   });
   assert.equal(validateRateEditorRows([rateRowFields(night)]).valid, true);
 
@@ -450,6 +456,51 @@ test('settingsPayload omits an empty schedule so flat writes stay byte-identical
     currency: 'USD',
     rates: [night],
   });
+});
+
+test('the payload preserves the draft row order, grouped or not', () => {
+  // Row order is the last-match tie-break for legacy/overlapping documents, so
+  // the editor must never reorder the stored list while it groups it.
+  const rows = [rateRowFields(summerFlat), rateRowFields(nightEveryDay), rateRowFields(winterPeak)];
+  const ids = (list) =>
+    settingsPayload({ rate: 0.31, currency: 'USD', rates: list }).rates.map((row) => row.id);
+  assert.deepEqual(ids([rows[2], rows[0]]), ['winter-peak', 'summer']);
+
+  // Grouping by month scope is presentation only: a month edit keeps every
+  // untouched row in place (and by identity) and the payload order with it.
+  const periods = ratePeriods(rows);
+  const summer = periods.find((period) => period.title === 'Summer');
+  const edited = applyPeriodMonths(
+    rows,
+    summer.rows.map((entry) => entry.index),
+    [3, 4, 5, 6, 7, 8, 9, 10],
+  );
+  assert.deepEqual(ids(edited), ['summer', 'night', 'winter-peak']);
+
+  // A duplicated season appends its rows after the existing plan.
+  const copied = copyPeriodRows(
+    edited,
+    [2],
+    complementMonths(winterPeak.months),
+    (() => {
+      let next = 0;
+      return () => `copy-${(next += 1)}`;
+    })(),
+  );
+  assert.deepEqual(ids(copied), ['summer', 'night', 'winter-peak', 'copy-1']);
+
+  // A non-contiguous stored list keeps its own month order and its position.
+  const loose = rateRowFields({ ...nightEveryDay, id: 'loose', months: [6, 1] });
+  assert.deepEqual(
+    settingsPayload({ rate: 0.31, currency: 'USD', rates: [loose, rows[0]] }).rates.map((row) => [
+      row.id,
+      row.months,
+    ]),
+    [
+      ['loose', [6, 1]],
+      ['summer', [3, 4, 5, 6, 7, 8, 9, 10]],
+    ],
+  );
 });
 
 test('the draft comparison uses parsed values, not raw text', () => {
@@ -957,6 +1008,59 @@ test('a season can be duplicated into the months it does not cover', () => {
   copied[1].days.push(5);
   assert.deepEqual(rows[0].days, [0, 1, 2, 3, 4]);
   assert.deepEqual(copied[0].days, [0, 1, 2, 3, 4]);
+});
+
+test('a month chip toggles the pressed state it announces, in both directions', () => {
+  // On an all-year scope every chip is pressed; a click removes that month and
+  // leaves the other eleven instead of discarding them.
+  const eleven = toggledMonthScope({ kind: 'all', months: null }, 7);
+  assert.deepEqual(eleven, [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]);
+  assert.equal(rateMonthScope({ months: eleven }).kind, 'months');
+  // Re-adding the last missing month is the inverse: back to All year.
+  const twelve = toggledMonthScope({ kind: 'months', months: eleven }, 7);
+  assert.deepEqual(twelve, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.equal(rateMonthScope({ months: twelve }).kind, 'all');
+  // A custom scope adds a missing month and removes a pressed one.
+  assert.deepEqual(toggledMonthScope({ kind: 'months', months: [1, 6] }, 3), [1, 3, 6]);
+  assert.deepEqual(toggledMonthScope({ kind: 'months', months: [1, 6] }, 1), [6]);
+  // The final month is kept: an empty scope is not a useful edit.
+  assert.equal(toggledMonthScope({ kind: 'months', months: [3] }, 3), null);
+  // A malformed scope starts from the clicked month; a non-month changes nothing.
+  assert.deepEqual(toggledMonthScope({ kind: 'invalid', months: null }, 4), [4]);
+  assert.equal(toggledMonthScope({ kind: 'months', months: [1] }, 13), null);
+  assert.equal(toggledMonthScope(null, 1), null);
+});
+
+test('duplicating a season respects the 24-window cap', () => {
+  assert.equal(canDuplicatePeriod(0, 2), true);
+  assert.equal(canDuplicatePeriod(22, 2), true);
+  assert.equal(canDuplicatePeriod(23, 2), false);
+  assert.equal(canDuplicatePeriod(24, 1), false);
+  // A period with no windows has nothing to copy.
+  assert.equal(canDuplicatePeriod(3, 0), false);
+
+  // A plan the editor refuses to grow past the cap reports the cap, and the
+  // checker names the cap rather than pretending there is an overlap.
+  const rows = Array.from({ length: 25 }, (_, index) =>
+    rateRowFields({ ...nightEveryDay, id: `w${index}` }),
+  );
+  const validation = validateRateEditorRows(rows);
+  assert.equal(validation.capped, true);
+  assert.equal(validation.valid, false);
+  assert.ok(validation.general.includes(RATE_CAP_MESSAGE));
+  assert.equal(previewBlocker(validation), CHECK_CAP_MESSAGE);
+  assert.equal(RATE_CAP_MESSAGE, 'A rate schedule can hold at most 24 windows.');
+});
+
+test('an all-day row keeps its time fields while focus moves inside it', () => {
+  // Closed until asked for.
+  assert.equal(timeFieldsVisible({ allDay: true, timesOpen: false, focusWithin: false }), false);
+  // "Set times" opened them.
+  assert.equal(timeFieldsVisible({ allDay: true, timesOpen: true, focusWithin: false }), true);
+  // Start blurred but End now has focus: the row must still be open.
+  assert.equal(timeFieldsVisible({ allDay: true, timesOpen: false, focusWithin: true }), true);
+  // A real start/end pair is always shown, whatever the flags say.
+  assert.equal(timeFieldsVisible({ allDay: false, timesOpen: false, focusWithin: false }), true);
 });
 
 test('day presets are shortcuts over the same days array', () => {

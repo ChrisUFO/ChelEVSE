@@ -2055,11 +2055,19 @@ input[aria-invalid='true'] {
   width: 30%;
 }
 .coverage-table td.band {
-  white-space: nowrap;
+  /* A custom-months sibling (e.g. "Jan–Feb, Jun–Jul · Off-peak") is longer than
+     the 32% column at 320 px; wrap inside the cell instead of running under the
+     price. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .sibling-band {
   color: var(--muted);
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.sibling-owner {
+  color: var(--text);
 }
 .coverage-table caption {
   padding-bottom: 4px;

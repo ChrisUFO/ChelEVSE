@@ -34,20 +34,27 @@ and daily **windows**:
 - A **season** owns a month scope: all year, a contiguous range such as November → February, or any
   custom set such as January + June. There is one month editor per season; the windows inside it
   inherit those months and show no month control of their own. Month chips apply immediately to
-  every window in the season.
+  every window in the season, and each chip is a toggle: on an **All year** season every month is
+  pressed, so clicking one removes that month and leaves the other eleven (the last remaining month
+  is kept). Clicking a missing month adds it back.
 - A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
   windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
   Custom reveals the individual day chips for an exact choice. A window whose start equals its end
   is **All day**; the editor shows that instead of `00:00 → 00:00`, and the table shows 00:00–24:00.
+  **Set times** reveals the stored start and end without inventing hours, and the fields stay open
+  while focus moves between them.
 - **Layering, not a partition.** A month can carry windows from more than one season (for example an
   every-month overnight window plus a November–February peak). The plan is their union. Each season
-  header shows its **own** window count and the **effective** price range for a representative month
-  in its own scope (including the fallback and any season that also applies), plus a coverage strip
-  and any error even when collapsed. Expanding shows the month chips, one complete 24-hour table per
-  day pattern for a representative month, and the windows themselves. The table highlights that
-  season's own rows and labels a row from another season by name (for example “Winter”) instead of
-  calling it the fallback. A sibling note names the other seasons that also apply there (for example
-  “Winter also applies in Nov–Feb”), and the checker shows the combined price.
+  header shows its **own** window count and the **effective** price range, labelled with the
+  representative month it describes (for example `Jan example USD 0.10–0.32 effective`; January for
+  an all-year season, otherwise the first month of its scope) — the range includes the fallback and
+  any season that also applies in that month. The header keeps a coverage strip and any error even
+  when collapsed. Expanding shows the month chips, one complete 24-hour table per day pattern for
+  that same month, and the windows themselves. The table highlights that season's own rows and
+  labels a row from another season by season and band (for example “Winter · Peak”), keeping its
+  band dot so the legend still matches, instead of calling it the fallback. A sibling note names the
+  other seasons that also apply there (for example “Winter also applies in Nov–Feb”), and the
+  checker shows the combined price.
 - **No window — other times** is a line under the seasons for months no window covers. It is where the
   all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
   summary.
@@ -58,14 +65,20 @@ and daily **windows**:
   definitive answer is withheld while a window is incomplete or two windows collide: the checker
   says so and points back to the blocking fields.
 - **Duplicate** copies a season's windows into the months it does not cover, a quick start for the
-  other half of the year.
+  other half of the year. It is not offered when the copy would take the plan past the 24-window
+  limit; a stored plan already over that limit names the cap in the plan error and the checker
+  instead of accusing its windows of overlapping.
 
 The stored document is unchanged: one flat `rates` list. Seasons are a presentation over each
 window's stored `months` value, so the editor never adds fields, reorders rows, or rewrites a month
 list it did not edit.
 
-The plan summary names the number of seasons, windows and other-times rate; the save row carries
-`N to fix` whenever validation has blockers.
+The plan summary names the number of seasons, windows, the window-price range (`windows USD …`) and
+the other-times rate. The card header's range is labelled with its example month, so the summary's
+windows-only range and the card's effective range cannot read as two answers to one question. An
+unset fallback rate shows `—` (the fallback line omits it) rather than a made-up `USD 0.00`. The save
+row carries `N to fix` whenever validation has blockers, and Save is disabled and relabelled
+`Fix N to save` while they remain.
 
 Technical rules:
 

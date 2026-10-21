@@ -311,6 +311,11 @@ test('fmtMoney respects symbols vs currency codes', () => {
 test('fmtRate keeps the precision a per-kWh price allows', () => {
   assert.equal(fmtRate(null), '—');
   assert.equal(fmtRate(Number.NaN), '—');
+  // An empty input is "no price yet", not a free rate (Number('') is 0).
+  assert.equal(fmtRate(''), '—');
+  assert.equal(fmtRate('   '), '—');
+  assert.equal(fmtRate('0.1'), '0.10');
+  assert.equal(fmtRate(0, 'USD'), 'USD 0.00');
   assert.equal(fmtRate(0.1), '0.10');
   assert.equal(fmtRate(0.245, '$'), '$0.245');
   assert.equal(fmtRate(0.31, 'USD'), 'USD 0.31');

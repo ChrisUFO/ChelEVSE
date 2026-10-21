@@ -69,64 +69,6 @@ function toMillis(value) {
   return null;
 }
 
-// ---------- month ranges ----------
-
-// The editor's From/To pair is an inclusive range that may wrap the year
-// (November → February is [11, 12, 1, 2]). The stored shape stays a list, so
-// these two helpers are the only place the range is translated.
-export function rangeToMonths(from, to) {
-  const valid = (month) => Number.isInteger(month) && month >= 1 && month <= 12;
-  if (!valid(from) || !valid(to)) return [];
-  const months = [];
-  let month = from;
-  for (let i = 0; i < 12; i += 1) {
-    months.push(month);
-    if (month === to) break;
-    month = month === 12 ? 1 : month + 1;
-  }
-  return months;
-}
-
-// A month list as the editor's {from, to}, or null when it is not one
-// contiguous range (a hand-edited list such as January + June).
-export function monthsToRange(months) {
-  if (!Array.isArray(months) || months.length === 0) return null;
-  const unique = new Set(months);
-  if (unique.size !== months.length) return null;
-  if ([...unique].some((month) => !Number.isInteger(month) || month < 1 || month > 12)) return null;
-  if (unique.size === 12) {
-    // Every month is one range from any start. Keep the stored anchor (the
-    // editor writes the list in range order) so a chosen November → October
-    // does not jump back to January → December; a shuffled list gets the
-    // canonical pair.
-    const from = months[0];
-    const to = months[months.length - 1];
-    const ordered = rangeToMonths(from, to);
-    const anchored = ordered.length === 12 && ordered.every((month, i) => month === months[i]);
-    return anchored ? { from, to } : { from: 1, to: 12 };
-  }
-  // The run starts at the month whose predecessor is not in the set; walking
-  // forward from there must cover the whole set.
-  let from = null;
-  for (const month of unique) {
-    const previous = month === 1 ? 12 : month - 1;
-    if (!unique.has(previous)) {
-      from = month;
-      break;
-    }
-  }
-  if (from == null) return null;
-  let to = from;
-  let seen = 1;
-  let next = from === 12 ? 1 : from + 1;
-  while (unique.has(next)) {
-    to = next;
-    seen += 1;
-    next = next === 12 ? 1 : next + 1;
-  }
-  return seen === unique.size ? { from, to } : null;
-}
-
 // ---------- row shape ----------
 
 // The stored row shape is fixed: {id, rate, days, start, end, months}. Values

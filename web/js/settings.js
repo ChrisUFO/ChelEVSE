@@ -385,6 +385,25 @@ export function complementMonths(months) {
   return ALL_MONTHS.filter((month) => !set.has(month));
 }
 
+// One month chip's activation is the inverse of the pressed state it announces:
+// on an all-year scope every chip is pressed, so activating one removes that
+// month and leaves the other eleven. The last month cannot be removed (an empty
+// scope is not a useful edit), and a malformed scope starts from the click.
+export function toggledMonthScope(period, month) {
+  if (!period || !Number.isInteger(month) || month < 1 || month > 12) return null;
+  const current =
+    period.kind === 'all' ? ALL_MONTHS : Array.isArray(period.months) ? period.months : [];
+  const set = new Set(current);
+  if (set.size === 0) return [month];
+  if (set.has(month)) {
+    if (set.size === 1) return null;
+    set.delete(month);
+  } else {
+    set.add(month);
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
 // Clone one period's rows into a new month scope, with fresh ids. Every array
 // is copied so editing the copy cannot mutate the original.
 export function copyPeriodRows(rows, indices, months, makeId) {
@@ -403,6 +422,17 @@ export function copyPeriodRows(rows, indices, months, makeId) {
     months: next ? [...next] : null,
   }));
   return [...list, ...copies];
+}
+
+// Duplicating a period appends one row per window it owns, so the same
+// 24-window cap that guards Add season/Add window has to guard the copy: the UI
+// must never build an unsaveable plan out of its own action.
+export function canDuplicatePeriod(rowCount, periodRowCount) {
+  return (
+    Number.isInteger(periodRowCount) &&
+    periodRowCount > 0 &&
+    rowCount + periodRowCount <= MAX_RATE_WINDOWS
+  );
 }
 
 // ---------- day presets ----------
@@ -517,18 +547,19 @@ export function windowLabel(row, windowRates, fallbackRate, { months = true } = 
 // The rate table's validation. The old editor could only express one month
 // range, so a valid non-contiguous list was flagged; the month chips can now
 // show any set, so the shared window rules are the whole rulebook again.
+export const RATE_CAP_MESSAGE = `A rate schedule can hold at most ${MAX_RATE_WINDOWS} windows.`;
+
 export function validateRateEditorRows(rows, fallbackRate) {
   const base = validateRateWindows(rows);
   const list = Array.isArray(rows) ? rows : [];
   const rowErrors = base.errors.rows.map((errors) => ({ ...errors }));
   const overlaps = overlappingWindowPairs(list);
+  const capped = list.length > MAX_RATE_WINDOWS;
   const general = [];
-  if (list.length > MAX_RATE_WINDOWS) {
-    general.push(`A rate schedule can hold at most ${MAX_RATE_WINDOWS} windows.`);
-  }
+  if (capped) general.push(RATE_CAP_MESSAGE);
   if (overlaps.length > 0) general.push(rateOverlapMessage(overlaps, list, fallbackRate));
   const valid = rowErrors.every((errors) => Object.keys(errors).length === 0);
-  return { valid: valid && general.length === 0, general, rows: rowErrors, overlaps };
+  return { valid: valid && general.length === 0, general, rows: rowErrors, overlaps, capped };
 }
 
 // One document-level sentence naming both rows in every collision. Months are
@@ -575,13 +606,18 @@ export function validationProblemCount(validation, rowCount = 0) {
 // moment it may actually price.
 export const CHECK_BLOCKED_MESSAGE = 'Fix the incomplete windows to check this moment.';
 export const CHECK_CONFLICT_MESSAGE = 'Fix the overlapping windows to check this moment.';
+export const CHECK_CAP_MESSAGE = `Reduce the plan to ${MAX_RATE_WINDOWS} windows to check this moment.`;
 
 export function previewBlocker(validation) {
   if (!validation || validation.valid !== false) return '';
   const incomplete = (validation.rows || []).some(
     (errors) => errors && Object.keys(errors).length > 0,
   );
-  return incomplete ? CHECK_BLOCKED_MESSAGE : CHECK_CONFLICT_MESSAGE;
+  if (incomplete) return CHECK_BLOCKED_MESSAGE;
+  // A plan over the cap has no overlap to fix: naming the cap keeps the
+  // checker from accusing windows that are fine.
+  if (validation.capped) return CHECK_CAP_MESSAGE;
+  return CHECK_CONFLICT_MESSAGE;
 }
 
 // A window whose stored start equals its end covers the whole day. The editor
@@ -595,6 +631,15 @@ export function isAllDayWindow(row) {
     ALL_DAY_TIME_RE.test(row.start) &&
     row.start === row.end,
   );
+}
+
+// Whether an all-day window's time fields are showing. "Set times" opens them,
+// and they must stay open while focus moves from Start to End — a blur on Start
+// fires before End takes focus, so a snapshot of `activeElement` at that moment
+// would hide the row the owner is still using. `focusWithin` is the block's own
+// focus state, kept current by focusout/relatedTarget.
+export function timeFieldsVisible({ allDay, timesOpen, focusWithin }) {
+  return !allDay || Boolean(timesOpen) || Boolean(focusWithin);
 }
 
 // ---------- coverage and preview ----------

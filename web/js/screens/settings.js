@@ -16,6 +16,7 @@ import {
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   applyPeriodMonths,
+  canDuplicatePeriod,
   complementMonths,
   copyPeriodRows,
   dateInputValue,
@@ -44,14 +45,16 @@ import {
   settingsFields,
   settingsSaveState,
   siblingNote,
+  timeFieldsVisible,
   timeInputValue,
+  toggledMonthScope,
   uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
   validationProblemCount,
   windowLabel,
 } from '../settings.js';
-import { MAX_RATE_WINDOWS } from '../rates.js';
+import { MAX_RATE_WINDOWS, parseRateValue } from '../rates.js';
 import { saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 
@@ -212,12 +215,12 @@ function paintDayControl(card) {
 
 function paintTimeControl(card) {
   // A stored all-day window reads "All day". "Set times" only reveals the
-  // fields (it never invents a start/end), and a field that still has focus
-  // keeps them visible; once focus leaves an unchanged all-day window, the
-  // compact line returns.
+  // fields (it never invents a start/end), and the fields stay visible while
+  // focus is anywhere in the time row; once focus leaves an unchanged all-day
+  // window, the compact line returns.
   const allDay = isAllDayWindow(card.row);
-  const show =
-    !allDay || card.timesOpen || (card.timeRow && card.timeRow.contains(document.activeElement));
+  const focusWithin = Boolean(card.timeRow && card.timeRow.contains(document.activeElement));
+  const show = timeFieldsVisible({ allDay, timesOpen: card.timesOpen, focusWithin });
   card.timeRow.hidden = !show;
   card.allDayRow.hidden = show;
 }
@@ -381,13 +384,19 @@ function createWindowCard(entry, periodCard) {
   };
   startInput.addEventListener('input', onTime);
   endInput.addEventListener('input', onTime);
-  // The compact line appears once the fields lose focus, not while typing.
-  const onTimeBlur = () => {
-    if (isAllDayWindow(row)) card.timesOpen = false;
-    paintWindowCard(card);
+  // The compact line appears once focus leaves the whole time block, not on
+  // Start's blur: blur fires before End receives focus, so collapsing there hid
+  // the row mid-move and made an End-led edit unreachable. `relatedTarget` names
+  // where focus is going; when it is missing, re-check after the move settles.
+  const onTimeExit = (event) => {
+    if (card.timeRow.contains(event.relatedTarget)) return;
+    requestAnimationFrame(() => {
+      if (card.timeRow.contains(document.activeElement)) return;
+      if (isAllDayWindow(row)) card.timesOpen = false;
+      paintWindowCard(card);
+    });
   };
-  startInput.addEventListener('blur', onTimeBlur);
-  endInput.addEventListener('blur', onTimeBlur);
+  timeBlock.addEventListener('focusout', onTimeExit);
 
   const allDayRow = el('div', 'all-day-row');
   allDayRow.append(el('span', 'all-day-text', 'All day'));
@@ -445,11 +454,16 @@ function paintPeriodHeader(card) {
   const range = periodEffectiveRange(draftRates, readFields().rate, period);
   const count = period.rows.length;
   const countText = `${count} ${count === 1 ? 'window' : 'windows'}`;
+  // The range covers one representative month (January for an all-year scope,
+  // otherwise the first month of the scope). Naming it keeps an All-year header
+  // from advertising a range that a July sibling changes; the table caption
+  // repeats the same month.
+  const example = range ? `${MONTH_NAMES[range.month - 1].slice(0, 3)} example ` : '';
   const price =
     period.kind === 'invalid'
       ? 'needs months'
       : range
-        ? `${nowrap(priceRangeText(range))} effective`
+        ? `${example}${nowrap(priceRangeText(range))} effective`
         : 'rate not set';
   setText(card.meta, `${countText} · ${price}`);
   paintMonthEditor(card);
@@ -466,10 +480,14 @@ function paintPeriodActions(card) {
   const confirming = removeConfirmKey === card.key;
   const count = card.period.rows.length;
   const complement = complementMonths(card.period.months);
-  // A duplicate with nowhere to go (all year, or an invalid scope) is not
-  // offered at all: a permanently disabled button reads as a broken action.
+  // A duplicate with nowhere to go (all year, invalid scope, or a copy that
+  // would exceed the 24-window cap) is not offered at all: a permanently
+  // disabled button reads as a broken action.
   const canDuplicate =
-    card.period.kind !== 'invalid' && count > 0 && complement.length > 0 && !settingsSaving;
+    card.period.kind !== 'invalid' &&
+    complement.length > 0 &&
+    canDuplicatePeriod(draftRates.length, count) &&
+    !settingsSaving;
   card.duplicateButton.hidden = !canDuplicate || confirming;
   card.removeButton.hidden = confirming;
   card.confirm.hidden = !confirming;
@@ -596,7 +614,9 @@ function paintCoverage(card) {
     const headRow = el('tr');
     for (const [label, className] of [
       ['Time', null],
-      ['Band', null],
+      // Own rows show a band; inherited rows name their season as well, so the
+      // heading has to cover both.
+      ['Season · band', null],
       ['Price', 'price'],
     ]) {
       const th = el('th', className, label);
@@ -618,7 +638,17 @@ function paintCoverage(card) {
         const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
         band.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'));
       } else if (segment.window) {
-        band.append(el('span', 'sibling-band', owner ? periodName(owner) : 'Other season'));
+        // An inherited row keeps the band dot (so the legend still matches the
+        // row) and names the season it came from; the column heading covers
+        // "Season · band".
+        const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
+        const label = el('span', 'sibling-band');
+        label.append(
+          el('span', 'sibling-owner', owner ? periodName(owner) : 'Other season'),
+          el('span', 'sibling-sep', ' · '),
+          el('span', `tier ${tierClass(tier)}`, tier || 'Window'),
+        );
+        band.append(label);
       } else {
         band.textContent = 'Other times';
       }
@@ -729,22 +759,10 @@ function createPeriodCard(period, index) {
     chip.setAttribute('aria-label', name);
     chip.addEventListener('click', () => {
       if (settingsSaving) return;
-      let months;
-      if (period.kind === 'all') {
-        // Narrowing an all-year period starts from the clicked month.
-        months = [month];
-      } else {
-        const set = new Set(period.months || []);
-        if (set.has(month)) {
-          // Keep at least one month: an empty scope is not a useful edit and
-          // would move the row into the malformed group.
-          if (set.size === 1) return;
-          set.delete(month);
-        } else {
-          set.add(month);
-        }
-        months = [...set].sort((a, b) => a - b);
-      }
+      // The chip is a toggle: on an all-year scope every chip is pressed, so a
+      // click removes that month instead of discarding the other eleven.
+      const months = toggledMonthScope(period, month);
+      if (!months) return;
       applyMonths(card, months, { focusMonth: month });
     });
     monthChips.append(chip);
@@ -933,6 +951,11 @@ function duplicatePeriod(card) {
   const months = complementMonths(card.period.months);
   if (months.length === 0 || card.period.rows.length === 0) return;
   const indices = card.period.rows.map((entry) => entry.index);
+  // The copy appends one row per window; refuse before it can build a plan the
+  // editor itself would reject. The button is not offered in this state, so the
+  // guard is the backstop, not the only explanation: an over-cap plan still
+  // reports the cap through validation and the checker.
+  if (!canDuplicatePeriod(draftRates.length, indices.length)) return;
   const start = draftRates.length;
   draftRates = copyPeriodRows(draftRates, indices, months, () => crypto.randomUUID());
   planPeriods = ratePeriodsForDraft();
@@ -1017,23 +1040,29 @@ function paintPlan() {
     `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'}`,
     `${draftRates.length} ${draftRates.length === 1 ? 'window' : 'windows'}`,
   ];
-  if (range) parts.push(nowrap(priceRangeText(range)));
+  if (range) parts.push(nowrap(`windows ${priceRangeText(range)}`));
   parts.push(nowrap(`other times ${priceText(readFields().rate)}`));
   setText($('plan-summary-text'), parts.join(' · '));
   const problem = $('plan-problem');
   problem.hidden = problems === 0;
   setText(problem, `${problems} to fix`);
 
-  // The fallback is a line, not a season: name the months nothing covers.
+  // The fallback is a line, not a season: name the months nothing covers. With
+  // no usable all-other-times rate there is no price to show, so the line omits
+  // it rather than advertising USD 0.00; the summary and the table show "—".
   const uncovered = uncoveredMonths(draftRates);
   const otherTimes = $('other-times-line');
   otherTimes.hidden = uncovered.length === 0;
   if (uncovered.length > 0) {
-    otherTimes.replaceChildren(
+    const nodes = [
       el('span', 'other-times-title', 'No window — other times'),
       el('span', 'other-times-months', ` · ${rateMonthsText(uncovered)}`),
-      el('span', 'other-times-price', ` · ${priceText(readFields().rate)}`),
-    );
+    ];
+    const fallback = readFields().rate;
+    if (Number.isFinite(parseRateValue(fallback))) {
+      nodes.push(el('span', 'other-times-price', ` · ${priceText(fallback)}`));
+    }
+    otherTimes.replaceChildren(...nodes);
   }
 
   for (const card of periodCards) {
@@ -1238,9 +1267,18 @@ function paintFeedback() {
   feedback.className = `feedback${view.busy ? ' busy' : ''}${view.kind ? ` ${view.kind}` : ''}`;
   setText(feedback, view.text);
 
+  // Save is not the brightest, most clickable thing on a plan that cannot be
+  // saved: the same count as the save-row chip relabels the button, and the
+  // existing submit validation/state machine is untouched (Enter in a field
+  // still explains what to fix).
+  const problems = validationProblemCount(rateValidation, draftRates.length);
   const save = $('save-settings');
-  save.disabled = !view.canSave;
-  setText(save, settingsSaving ? 'Saving…' : 'Save settings');
+  save.disabled = !view.canSave || problems > 0;
+  if (settingsSaving) setText(save, 'Saving…');
+  else if (problems > 0) setText(save, `Fix ${problems} to save`);
+  else setText(save, 'Save settings');
+  if (problems > 0) save.setAttribute('aria-describedby', 'save-blockers');
+  else save.removeAttribute('aria-describedby');
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;

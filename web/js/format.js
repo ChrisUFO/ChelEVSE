@@ -198,6 +198,9 @@ const RATE = new Intl.NumberFormat('en-US', {
 });
 
 export function fmtRate(value, currency) {
+  // An empty input is "no price yet", not a free rate: Number('') is 0, which
+  // used to print USD 0.00 on the first-run path. An explicit 0 still formats.
+  if (typeof value === 'string' && value.trim() === '') return '—';
   if (value == null || !Number.isFinite(Number(value))) return '—';
   const amount = RATE.format(Number(value));
   const code = typeof currency === 'string' ? currency.trim() : '';
