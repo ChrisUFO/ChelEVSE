@@ -988,6 +988,41 @@ input[type='range']::-moz-range-thumb {
   border-radius: 16px;
   background: var(--surface);
 }
+/* Chart period — the same segmented-control language as the rate mode: a
+   recessed track, one tinted selected option, 44 px touch targets. A flex row
+   (not fixed columns) lets a fourth short label (Day, #61) share the width
+   without a layout change; at 320 px four labels still clear ~60 px each. */
+.period-switch {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg);
+}
+.period-option {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.period-option:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+}
+.period-option[aria-checked='true'] {
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
 .chart-head {
   display: flex;
   align-items: flex-start;

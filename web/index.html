@@ -392,7 +392,7 @@
             aria-label="Last 30 days summary"
           >
             <div class="summary-cell">
-              <span class="summary-label">Last 30 days</span>
+              <span class="summary-label" id="history-total-label">Last 30 days</span>
               <span class="summary-value"><span id="history-total">—</span><em>kWh</em></span>
             </div>
             <div class="summary-cell" id="history-cost-cell" hidden>
@@ -402,7 +402,7 @@
           </section>
 
           <p class="summary-note" id="history-cost-note" hidden>
-            Time-of-use pricing hides the daily and 30-day cost — costs are shown per session.
+            Time-of-use pricing hides the daily and period-total cost — costs are shown per session.
           </p>
           <p class="plan-banner" id="history-plan-banner" hidden>
             Some dates or hours have no price and are shown at 0.00.
@@ -411,6 +411,43 @@
 
           <section class="chart-card" style="--i: 2" aria-labelledby="chart-heading">
             <h2 class="sr-only" id="chart-heading">Daily energy</h2>
+            <div
+              class="period-switch"
+              id="period-switch"
+              role="radiogroup"
+              aria-label="Chart period"
+            >
+              <button
+                class="period-option"
+                type="button"
+                role="radio"
+                aria-checked="false"
+                tabindex="-1"
+                data-period="week"
+              >
+                Week
+              </button>
+              <button
+                class="period-option"
+                type="button"
+                role="radio"
+                aria-checked="true"
+                tabindex="0"
+                data-period="month"
+              >
+                Month
+              </button>
+              <button
+                class="period-option"
+                type="button"
+                role="radio"
+                aria-checked="false"
+                tabindex="-1"
+                data-period="year"
+              >
+                Year
+              </button>
+            </div>
             <div class="chart-head" id="chart-head">
               <div class="chart-readout">
                 <p class="chart-day" id="chart-day">—</p>
