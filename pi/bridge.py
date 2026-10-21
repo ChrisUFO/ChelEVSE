@@ -559,11 +559,14 @@ class StatusTracker:
         with no measurable gap — the first reading after a seed, where the
         baseline predates the tracker — is attributed, because it is real
         counter growth and there is nothing to judge it against. A non-positive
-        step is a counter reset (a new plug-in, or a firmware restart
-        mid-session), never negative energy: it is dropped and the tick's
-        reading becomes the next baseline. Every dropped step is logged once
-        with its size, gap and reason — a session priced from a short list is
-        otherwise undiagnosable.
+        step is never negative energy: it is dropped and the tick's reading
+        becomes the next baseline. Inside an open interval a negative step is a
+        mid-session counter reset (a firmware restart) and is logged with its
+        size and gap; the first reading of a fresh interval is only a baseline —
+        a new plug-in legitimately starts its counter at zero — so it stays
+        silent and the opening is logged instead. Every dropped step is logged
+        once with its size, gap and reason — a session priced from a short list
+        is otherwise undiagnosable.
         """
         if not charging:
             return
@@ -572,10 +575,15 @@ class StatusTracker:
         if _is_number(current) and _is_number(previous_energy):
             step = float(current) - float(previous_energy)
             if step <= 0:
-                if step < 0:
+                # A reset is a counter that went backwards *inside* an interval.
+                # A first reading has no interval open yet and no earlier
+                # baseline it could contradict: a new plug-in's cleared counter
+                # is a fresh start, not an incident worth chasing in the journal.
+                if step < 0 and self.open_interval is not None:
                     log(
-                        f"interval step skipped: counter reset "
-                        f"({step:.0f} Wh, {_gap_seconds(gap)}); rebaselining"
+                        f"interval step skipped: counter reset inside the open "
+                        f"interval ({step:.0f} Wh, {_gap_seconds(gap)}); "
+                        f"rebaselining"
                     )
             else:
                 # An unmeasurable gap has no allowance to compare against.
@@ -590,6 +598,8 @@ class StatusTracker:
                     )
         if self.open_interval is None:
             self.open_interval = {"started_at": _utcnow(), "wh": 0.0}
+            baseline = f"{float(current):.0f} Wh" if _is_number(current) else "unknown"
+            log(f"interval opened: baseline {baseline}")
         self.open_interval["wh"] += delta
 
     def _close_interval(self):
