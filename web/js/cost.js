@@ -17,7 +17,7 @@
 // the pro-rating is over the plug-in span, not the charging intervals.
 //
 // A day's history document stores one kWh total, not the shape of the intervals
-// behind it, so a daily/30-day cost cannot be re-costed under a schedule.
+// behind it, so a daily/period cost cannot be re-costed under a schedule.
 // `aggregateCostLabel` therefore returns null whenever a schedule exists and the
 // history screen shows kWh only; per-session costs are still shown.
 //
@@ -125,7 +125,7 @@ export function sessionCostLabel(session, settings) {
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Aggregate daily/30-day cost from a kWh total. Null whenever a schedule exists:
+// Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:
 // one kWh figure cannot be split across the windows it was drawn in, so the
 // screens keep the energy figure and drop the cost instead of mispricing it.
 export function aggregateCostLabel(kwh, settings) {
