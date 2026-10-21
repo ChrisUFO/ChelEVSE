@@ -687,15 +687,20 @@ class IntervalTests(unittest.TestCase):
         self.db = FakeDB()
         self.tracker = bridge.StatusTracker(self.db)
         self.now = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+        self.mono = 1000.0
 
-    def tick(self, state, energy, elapsed, vehicle=1, step=timedelta(minutes=5), tracker=None):
-        """One status tick at a later instant; returns that instant.
+    def tick(self, state, energy, elapsed, vehicle=1, step=timedelta(minutes=20), tracker=None):
+        """One status tick ``step`` later; returns that instant.
 
-        ``elapsed`` is the charger's cumulative plug-in timer, so callers keep it
-        growing with the clock exactly as the charger does.
+        Both clocks move with the step: ``_utcnow`` stamps the interval bounds and
+        the monotonic clock measures the gap the step allowance is derived from.
+        A 20 min default keeps a 2–3 kWh step at ~7 kW, i.e. a plausible charger.
         """
         self.now += step
-        with mock.patch.object(bridge, "_utcnow", return_value=self.now):
+        self.mono += step.total_seconds()
+        with mock.patch.object(bridge, "_utcnow", return_value=self.now), mock.patch.object(
+            bridge.time, "monotonic", return_value=self.mono
+        ):
             (tracker or self.tracker).observe(
                 {
                     "state": state,
@@ -711,16 +716,15 @@ class IntervalTests(unittest.TestCase):
 
     def test_an_uninterrupted_session_is_one_interval_equal_to_wh(self):
         started = self.tick(3, 0, 0)
-        self.tick(3, 3000, 300)
-        self.tick(3, 6000, 600)
-        ended = self.tick(1, 6000, 900)
+        self.tick(3, 3000, 1200)
+        self.tick(3, 6000, 2400)
+        ended = self.tick(1, 6000, 3600)
         (record,) = self.sessions().values()
         # Aggregates are untouched: the charger's own counters and plug-in span.
         self.assertEqual(record["wh"], 6000.0)
         # elapsed is the last charging tick's timer, as before intervals existed.
-        self.assertEqual(record["elapsed"], 600)
-        self.assertEqual(record["started_at"], ended - timedelta(seconds=600))
-        self.assertEqual(record["ended_at"], ended)
+        self.assertEqual(record["elapsed"], 2400)
+        self.assertEqual(record["started_at"], ended - timedelta(seconds=2400))
         self.assertEqual(record["ended_at"], ended)
         (interval,) = record["intervals"]
         self.assertEqual(interval["started_at"], started)
@@ -729,16 +733,16 @@ class IntervalTests(unittest.TestCase):
 
     def test_a_pause_and_resume_records_two_intervals_that_sum_to_wh(self):
         block1 = self.tick(3, 0, 0)
-        self.tick(3, 2000, 300)
-        paused = self.tick(1, 2000, 600)
-        block2 = self.tick(3, 5000, 900)
-        self.tick(3, 7000, 1200)
-        stopped = self.tick(1, 7000, 1500)
+        self.tick(3, 2000, 1200)
+        paused = self.tick(1, 2000, 2400)
+        block2 = self.tick(3, 5000, 3600)
+        self.tick(3, 7000, 4800)
+        stopped = self.tick(1, 7000, 6000)
 
         self.assertEqual(len(self.sessions()), 1)
         (record,) = self.sessions().values()
         self.assertEqual(record["wh"], 7000.0)
-        self.assertEqual(record["elapsed"], 1200)
+        self.assertEqual(record["elapsed"], 4800)
         first, second = record["intervals"]
         # The pause closed the first interval; the resume opened a second one
         # and its energy is measured from where the counters stood at the pause.
@@ -764,8 +768,8 @@ class IntervalTests(unittest.TestCase):
         tracker = bridge.StatusTracker(self.db)
         self.assertTrue(tracker.seed())
         self.tick(3, 4000, 2700, tracker=tracker)
-        self.tick(3, 6000, 3000, tracker=tracker)
-        self.tick(1, 6000, 3300, tracker=tracker)
+        self.tick(3, 6000, 3900, tracker=tracker)
+        self.tick(1, 6000, 5100, tracker=tracker)
 
         (record,) = self.sessions().values()
         self.assertEqual(record["wh"], 6000.0)
@@ -777,16 +781,78 @@ class IntervalTests(unittest.TestCase):
 
     def test_a_counter_reset_is_dropped_instead_of_written_as_negative(self):
         self.tick(3, 1000, 600)
-        self.tick(3, 3000, 900)
-        self.tick(3, 100, 1200)  # firmware reset mid-session
-        self.tick(3, 900, 1500)
-        self.tick(1, 900, 1800)
+        self.tick(3, 3000, 1800)
+        self.tick(3, 100, 3000)  # firmware reset mid-session
+        self.tick(3, 900, 4200)
+        self.tick(1, 900, 5400)
         (record,) = self.sessions().values()
         (interval,) = record["intervals"]
         self.assertGreater(interval["wh"], 0)
         # 3000-1000 growth, then nothing for the reset tick, then 800 from the
         # reset baseline. The first tick only supplies the baseline.
         self.assertAlmostEqual(interval["wh"], 2800.0)
+
+    def test_a_seeded_session_attributes_its_first_step_without_a_gap(self):
+        # The seeded baseline predates the tracker (the bridge was down), so the
+        # first step has no measurable gap and must not be judged impossible:
+        # dropping it would orphan that energy from the intervals as well.
+        self.db.data["status"] = {
+            "current": {"state": 3, "session_energy": 4000, "elapsed": 2400}
+        }
+        tracker = bridge.StatusTracker(self.db)
+        self.assertTrue(tracker.seed())
+        self.tick(3, 5000, 3600, tracker=tracker)
+        self.tick(3, 6000, 4800, tracker=tracker)
+        self.tick(1, 6000, 6000, tracker=tracker)
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        # Both steps count: 1000 from the seeded baseline, then 1000 more.
+        self.assertAlmostEqual(interval["wh"], 2000.0)
+
+    def test_a_reset_step_is_logged_with_its_size_and_gap(self):
+        with mock.patch.object(bridge, "log") as log:
+            self.tick(3, 1000, 600)
+            self.tick(3, 3000, 1800)
+            self.tick(3, 100, 3000)  # reset: -2900 Wh
+            self.tick(1, 100, 3000)
+        messages = [call.args[0] for call in log.call_args_list]
+        reset = [line for line in messages if "counter reset" in line]
+        self.assertEqual(len(reset), 1, messages)
+        self.assertIn("-2900 Wh", reset[0])
+        self.assertIn("1200 s", reset[0])
+
+    def test_a_long_outage_step_is_kept(self):
+        # 20 kWh across a 2 h stall is ~10 kW, well inside what the charger could
+        # have delivered — the allowance is time-aware, not a fixed 20 kWh cap.
+        started = self.tick(3, 0, 0)
+        self.tick(3, 20000, 7200, step=timedelta(hours=2))
+        ended = self.tick(1, 20000, 7200, step=timedelta(minutes=20))
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        self.assertAlmostEqual(interval["wh"], 20000.0)
+        self.assertEqual((interval["started_at"], interval["ended_at"]), (started, ended))
+
+    def test_an_impossible_step_is_dropped_logged_and_the_next_tick_attributed(self):
+        # 20 kWh in ten seconds would need 7 MW. It is dropped and logged, and the
+        # following plausible tick is still attributed (the incident does not
+        # poison the rest of the interval).
+        with mock.patch.object(bridge, "log") as log:
+            self.tick(3, 0, 0)
+            self.tick(3, 20000, 10, step=timedelta(seconds=10))
+            self.tick(3, 20100, 20, step=timedelta(seconds=10))
+            self.tick(1, 20100, 30, step=timedelta(seconds=10))
+        messages = [call.args[0] for call in log.call_args_list]
+        dropped = [line for line in messages if "interval step dropped" in line]
+        self.assertEqual(len(dropped), 1, messages)
+        self.assertIn("20000 Wh", dropped[0])
+        self.assertIn("10 s", dropped[0])
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        # Only the plausible 100 Wh step landed; the aggregate keeps all 20.1 kWh,
+        # which is exactly the divergence the web layer falls back on.
+        self.assertAlmostEqual(interval["wh"], 100.0)
+        self.assertEqual(record["wh"], 20100.0)
+        self.assertEqual(self.tracker.interval_energy, 20100.0)
 
     def test_no_intervals_beside_a_skipped_zero_wh_session(self):
         self.tick(3, 0, 0)
@@ -853,8 +919,13 @@ class MergeIntervalTests(unittest.TestCase):
             "junk",
         ]
         record = self.record(start + timedelta(hours=1), [self.interval(start, 30, 500)], 2500)
-        merged = bridge._merge_session(candidate, record, vehicle_connected=True)
+        with mock.patch.object(bridge, "log") as log:
+            merged = bridge._merge_session(candidate, record, vehicle_connected=True)
+        # Per entry, not per list: the good block survives, the corrupt ones go.
         self.assertEqual(merged["intervals"], record["intervals"])
+        messages = [call.args[0] for call in log.call_args_list]
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("4 unusable interval(s) dropped", messages[0])
 
     def test_the_cap_keeps_the_most_recent_intervals_and_folds_the_oldest(self):
         start = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
@@ -882,6 +953,25 @@ class MergeIntervalTests(unittest.TestCase):
         # Aggregates still cover the whole session.
         self.assertEqual(merged["wh"], 1207.0)
         self.assertEqual(merged["started_at"], start)
+
+    def test_a_cap_fold_is_logged_with_the_session_and_the_dropped_count(self):
+        start = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
+        stored = [
+            self.interval(start + timedelta(minutes=10 * index), 5, 10.0)
+            for index in range(bridge.MAX_SESSION_INTERVALS + 20)
+        ]
+        candidate = self.record(start, stored, 1200)
+        candidate["_id"] = "1792345678"
+        newest = self.interval(start + timedelta(hours=30), 5, 7.0)
+        record = self.record(start + timedelta(hours=29), [newest], 1207.0)
+        with mock.patch.object(bridge, "log") as log:
+            bridge._merge_session(candidate, record, vehicle_connected=True)
+        messages = [call.args[0] for call in log.call_args_list]
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("session 1792345678", messages[0])
+        # 121 entries, 100 kept: 22 oldest fold into the head.
+        self.assertIn("22 oldest intervals folded", messages[0])
+        self.assertIn("220 Wh", messages[0])
 
     def test_one_hundred_intervals_are_kept_as_they_are(self):
         start = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)

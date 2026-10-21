@@ -118,10 +118,16 @@ SESSION_MERGE_MAX_GAP = 48 * 3600
 # retained list still accounts for the session's whole energy while the document
 # stays small (a record is one Firestore document).
 MAX_SESSION_INTERVALS = 100
-# One tick of session_energy growth above this is not energy: a poll is at most
-# a minute apart, so 20 kWh in one step would need more than 1 MW. A larger jump
-# is a corrupt counter reading and is dropped rather than attributed.
-MAX_INTERVAL_STEP_WH = 20000.0
+# Plausibility ceiling for one interval-attribution step, as a power: a step can
+# only carry the energy the charger could have delivered in the time that passed
+# between the two readings. The charger's own ceiling is 48 A (MAX_AMPS) at ~240 V
+# ≈ 11.5 kW, so 25 kW is more than twice what it can draw and still rejects a
+# corrupt counter jump; using power × elapsed time (rather than a fixed Wh cap)
+# keeps a legitimate step after a long outage — 20 kWh is ~1.7 h of full-power
+# charging, not an impossible instant jump. The floor absorbs sub-second gaps and
+# clock resolution so two ticks that land together cannot reject a real step.
+MAX_INTERVAL_POWER_W = 25000.0
+INTERVAL_STEP_FLOOR_WH = 50.0
 # --- Watchdog (issue #39) ---------------------------------------------------
 # A restart of the ESP32 gateway or the EVSE controller is bounded: at most this
 # many attempts per trailing hour and at least a cooldown after each one, so a
@@ -388,6 +394,27 @@ def _pilot(value):
     return None
 
 
+def _interval_step_allowance(gap):
+    """Energy one attribution step may carry, given seconds since the last one.
+
+    A step is measured between two charging readings, so the charger could have
+    delivered ``MAX_INTERVAL_POWER_W × gap`` in between; the floor covers clock
+    resolution and sub-second gaps, so two ticks that land together cannot
+    reject a real step. Callers pass only a measured gap: an unknown one has
+    nothing to judge (see ``_track_interval``).
+    """
+    if not _is_number(gap) or gap <= 0:
+        return INTERVAL_STEP_FLOOR_WH
+    return MAX_INTERVAL_POWER_W * float(gap) / 3600.0 + INTERVAL_STEP_FLOOR_WH
+
+
+def _gap_seconds(gap):
+    """The observation gap for a journal line."""
+    if not _is_number(gap) or gap < 0:
+        return "no earlier reading"
+    return f"{float(gap):.0f} s"
+
+
 class StatusTracker:
     """Status-derived state carried across ticks and bridge restarts."""
 
@@ -410,6 +437,7 @@ class StatusTracker:
         # baseline the next tick's grown-by delta is measured from.
         self.open_interval = None
         self.interval_energy = None
+        self.interval_seen_at = None
 
     def seed(self):
         """Seed state from status/current; return True when the read worked.
@@ -470,6 +498,12 @@ class StatusTracker:
         self._flush_pending_session()
         state = data.get("state")
         previous_energy = self.interval_energy
+        # Seconds between the two charging readings a step is measured across.
+        # A monotonic clock, so a wall-clock jump cannot inflate the allowance;
+        # it spans an outage on purpose, because the energy drawn during one
+        # legitimately lands in the recovering tick.
+        now = time.monotonic()
+        gap = None if self.interval_seen_at is None else now - self.interval_seen_at
         if state == 3:
             energy = data.get("session_energy")
             if _is_number(energy) and energy >= 0:
@@ -478,7 +512,8 @@ class StatusTracker:
             elapsed = data.get("elapsed")
             if _is_number(elapsed) and elapsed >= 0:
                 self.last_charging_elapsed = elapsed
-        self._track_interval(state == 3, previous_energy)
+            self.interval_seen_at = now
+        self._track_interval(state == 3, previous_energy, gap)
         if self.has_state and self.previous_state == 3 and state != 3:
             # A seeded state lets the first tick after a restart close a
             # session that ended while the bridge was down; with no seed the
@@ -490,7 +525,7 @@ class StatusTracker:
         self.session_energy = data.get("session_energy")
         self.elapsed = data.get("elapsed")
 
-    def _track_interval(self, charging, previous_energy):
+    def _track_interval(self, charging, previous_energy, gap):
         """Open a charging interval on the edge and attribute this tick to it.
 
         An interval starts when the bridge first sees state 3 (the charger's
@@ -498,12 +533,20 @@ class StatusTracker:
         time, not the aggregate's charger-timer start) and ends when it first
         sees the state leave 3. Each charging tick adds its session_energy
         growth, which is cumulative per plug-in and cleared at unplug, so the
-        intervals of one session sum toward its ``wh``.
+        intervals of one session account for its ``wh`` except where a restart,
+        a counter reset or a dropped impossible step intervened.
 
-        A non-positive step is a counter reset (a new plug-in, or a firmware
-        restart mid-session), never negative energy, so it is dropped and the
-        tick's own reading becomes the next baseline. A step beyond
-        ``MAX_INTERVAL_STEP_WH`` is a corrupt jump and is dropped too.
+        A step is only attributed when the charger could have delivered it in
+        ``gap`` seconds (``MAX_INTERVAL_POWER_W`` plus a small floor), so an
+        outage's legitimate energy is kept while a corrupt jump is not. A step
+        with no measurable gap — the first reading after a seed, where the
+        baseline predates the tracker — is attributed, because it is real
+        counter growth and there is nothing to judge it against. A non-positive
+        step is a counter reset (a new plug-in, or a firmware restart
+        mid-session), never negative energy: it is dropped and the tick's
+        reading becomes the next baseline. Every dropped step is logged once
+        with its size, gap and reason — a session priced from a short list is
+        otherwise undiagnosable.
         """
         if not charging:
             return
@@ -511,8 +554,23 @@ class StatusTracker:
         delta = 0.0
         if _is_number(current) and _is_number(previous_energy):
             step = float(current) - float(previous_energy)
-            if 0 < step <= MAX_INTERVAL_STEP_WH:
-                delta = step
+            if step <= 0:
+                if step < 0:
+                    log(
+                        f"interval step skipped: counter reset "
+                        f"({step:.0f} Wh, {_gap_seconds(gap)}); rebaselining"
+                    )
+            else:
+                # An unmeasurable gap has no allowance to compare against.
+                allowed = _interval_step_allowance(gap) if _is_number(gap) else None
+                if allowed is None or step <= allowed:
+                    delta = step
+                else:
+                    log(
+                        f"interval step dropped: {step:.0f} Wh in "
+                        f"{_gap_seconds(gap)} exceeds the {allowed:.0f} Wh the "
+                        f"charger could deliver; energy stays in the aggregate"
+                    )
         if self.open_interval is None:
             self.open_interval = {"started_at": _utcnow(), "wh": 0.0}
         self.open_interval["wh"] += delta
@@ -744,7 +802,11 @@ def _merge_session(candidate, record, vehicle_connected):
     merged["ended_at"] = max(existing_end, record["ended_at"])
     merged["wh"] = max(existing_wh, record["wh"])
     merged["elapsed"] = int(max(existing_elapsed, record["elapsed"]))
-    intervals = _merge_intervals(candidate.get("intervals"), record.get("intervals"))
+    intervals = _merge_intervals(
+        candidate.get("intervals"),
+        record.get("intervals"),
+        session_id=candidate.get("_id"),
+    )
     if intervals:
         merged["intervals"] = intervals
     else:
@@ -772,7 +834,7 @@ def _usable_interval(entry):
     return {"started_at": started_at, "ended_at": ended_at, "wh": float(wh)}
 
 
-def _merge_intervals(*groups):
+def _merge_intervals(*groups, session_id=None):
     """Concatenate interval lists oldest-first, capped at MAX_SESSION_INTERVALS.
 
     A merged record's aggregates cover the whole plug-in, so the interval list
@@ -782,17 +844,25 @@ def _merge_intervals(*groups):
     recent MAX_SESSION_INTERVALS intervals in start order, no energy is lost,
     and only that folded head is pro-rated over the idle stretch it spans — the
     same approximation a legacy record gets. Entries that are not usable
-    intervals (a hand-edited document, a half-written one) are dropped, so a
-    corrupt record cannot leak into a priced session.
+    intervals (a hand-edited document, a half-written one) are dropped
+    individually, so one corrupt entry cannot discard a session's good blocks;
+    a fold and any dropped entries are logged, because both change what the
+    session can be priced from.
     """
     entries = []
+    unusable = 0
     for group in groups:
         if not isinstance(group, (list, tuple)):
             continue
         for entry in group:
             interval = _usable_interval(entry)
-            if interval is not None:
+            if interval is None:
+                unusable += 1
+            else:
                 entries.append(interval)
+    label = session_id or "pending"
+    if unusable:
+        log(f"session {label}: {unusable} unusable interval(s) dropped")
     if not entries:
         return []
     entries.sort(key=lambda item: item["started_at"])
@@ -805,6 +875,11 @@ def _merge_intervals(*groups):
         "ended_at": head[-1]["ended_at"],
         "wh": sum(interval["wh"] for interval in head),
     }
+    log(
+        f"session {label}: {len(head)} oldest intervals folded into "
+        f"{folded['started_at'].isoformat()}–{folded['ended_at'].isoformat()} "
+        f"({folded['wh']:.0f} Wh); {len(tail)} kept"
+    )
     return [folded] + tail
 
 
