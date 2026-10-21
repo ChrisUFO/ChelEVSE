@@ -15,6 +15,7 @@ import {
   CHECK_CONFLICT_MESSAGE,
   CHECK_RATE_MESSAGE,
   applyPeriodDates,
+  applyPeriodDatesInPlace,
   applyPeriodMonths,
   baseRateRow,
   canDuplicatePeriod,
@@ -1983,6 +1984,44 @@ test('month and date edits convert explicitly, and a month edit clears dates', (
   assert.equal(monthly[0].to, null);
   assert.deepEqual(monthly[0].months, [11, 12]);
   assert.equal(monthly[1], rows[1]);
+});
+
+test('a date edit keeps the row objects the rate controls write to', () => {
+  // A shape-preserving date edit repaints the season's cards in place, and the
+  // Base rate and window controls hold the row objects themselves. Owner report:
+  // add a season, adjust its dates, type 1 in Base rate — the field showed 1
+  // while the card kept saying "Enter a rate between 0 and 5.". The typed rate
+  // was written to a copy the draft no longer contained, so validation still saw
+  // an empty rate. The in-place edit must preserve identity.
+  const rows = [
+    baseRateRow('oct', '0.3', [10], { from: '10-01', to: '10-31' }),
+    baseRateRow('rest', '', [11], { from: '11-01', to: '09-30' }),
+  ];
+  const october = rows[0];
+  const rest = rows[1];
+  const result = applyPeriodDatesInPlace(rows, [1], '11-01', '09-29');
+
+  // Same list, same objects: the controls' captured rows are still in the draft.
+  assert.equal(result, rows);
+  assert.equal(rows[0], october);
+  assert.equal(rows[1], rest);
+  assert.equal(rows[0].from, '10-01');
+  assert.equal(rows[1].from, '11-01');
+  assert.equal(rows[1].to, '09-29');
+  assert.deepEqual(rows[1].months, [11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+  // A rate typed after the edit lands on the row validation reads.
+  rest.rate = '1';
+  const validation = validateRateEditorRows(rows);
+  assert.equal(validation.valid, true);
+  assert.deepEqual(validation.rows[1], {});
+
+  // An empty rate on its own row still reports the message the owner saw.
+  rest.rate = '';
+  assert.equal(validateRateEditorRows(rows).rows[1].rate, 'Enter a rate between 0 and 5.');
+
+  // `applyPeriodDates` itself stays copy-on-write for callers that rebuild.
+  assert.notEqual(applyPeriodDates(rows, [1], '11-01', '09-29')[1], rest);
 });
 
 test('a date row saves its derived months and appends from/to after them', () => {

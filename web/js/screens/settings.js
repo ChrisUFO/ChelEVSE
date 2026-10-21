@@ -16,7 +16,7 @@ import {
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   RATE_CAP_REMEDY,
-  applyPeriodDates,
+  applyPeriodDatesInPlace,
   applyPeriodMonths,
   baseRateRow,
   canDuplicatePeriod,
@@ -1829,7 +1829,12 @@ function applyDates(card, from, to) {
   const first = indices[0];
   if (first == null) return;
   const before = periodShape(planPeriods);
-  draftRates = applyPeriodDates(draftRates, indices, from, to);
+  // In place: the shape-preserving branch below repaints the existing cards, and
+  // their rate/time/day controls hold these row objects. Replacing them with
+  // copies left every control in the period writing to a row the draft no longer
+  // contained, so a typed rate never reached validation (the field showed the
+  // new price while the card kept saying "Enter a rate between 0 and 5.").
+  draftRates = applyPeriodDatesInPlace(draftRates, indices, from, to);
   markEdited();
   planPeriods = ratePeriodsForDraft();
   const target = planPeriods.find((period) => period.rows.some((entry) => entry.index === first));
@@ -2772,10 +2777,6 @@ function setPreviewNow() {
 
 export function initSettings() {
   $('settings-form').addEventListener('submit', submit);
-  // The One-rate field carries the same price contract as an editor row — any
-  // number from 0 to 5 — so it must not narrow precision with a fixed step
-  // either. `step = 'any'` replaces the markup's 0.001 before the owner types.
-  $('setting-rate').step = 'any';
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
   $('rate-mode-flat').addEventListener('click', requestOneRate);

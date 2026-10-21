@@ -950,6 +950,23 @@ export function applyPeriodDates(rows, indices, from, to) {
   );
 }
 
+// `applyPeriodDates` as a draft edit. The editor's base and window controls hold
+// the row objects themselves, and a date edit that keeps the period shape
+// repaints the cards in place instead of rebuilding them. Writing the new bounds
+// onto those same objects keeps every control bound to a row the draft still
+// contains; a copy would orphan them, so the next typed rate would land on a row
+// validation never sees and the field would keep reporting the old, empty value.
+// The list is returned for convenience.
+export function applyPeriodDatesInPlace(rows, indices, from, to) {
+  const list = Array.isArray(rows) ? rows : [];
+  const updated = applyPeriodDates(list, indices, from, to);
+  const targets = new Set(Array.isArray(indices) ? indices : [...(indices || [])]);
+  list.forEach((row, index) => {
+    if (targets.has(index) && row && typeof row === 'object') Object.assign(row, updated[index]);
+  });
+  return list;
+}
+
 // Every month the period's rows do not already cover. Duplicating a winter
 // period into "the rest of the year" is the one-click variant the owner needs;
 // an all-year period has no complement, so there is nothing to duplicate into.
