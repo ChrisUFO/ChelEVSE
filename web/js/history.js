@@ -43,18 +43,78 @@ export function monthLabel(id) {
 // fixed; every visible point owns an equal share of it.
 export const CHART_VIEW_W = 300;
 
+// One bucket per local hour of the day; the bridge keys them with strftime's
+// zero-padded "%H" ('00'–'23').
+export const HOURS_PER_DAY = 24;
+
+// '05' for hour 5. The stored keys are zero-padded in the document, not just in
+// the UI, so the same helper serves both.
+export function hourId(hour) {
+  return String(hour).padStart(2, '0');
+}
+
+// The bucket values for a day, midnight first, in the order the chart draws
+// them. A missing, malformed or empty map is 24 zeros: whether those zeros may
+// be painted is the read state's decision, never this function's.
+function hourValues(hours) {
+  const map = hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : {};
+  return Array.from({ length: HOURS_PER_DAY }, (_, hour) => {
+    const kwh = Number(map[hourId(hour)]);
+    return Number.isFinite(kwh) && kwh > 0 ? kwh : 0;
+  });
+}
+
+// 24 hourly points in the same shape every period's series uses:
+// { id, kwh, label, isCurrent }. `isCurrent` marks the hour in progress (the
+// bar shows what is recorded so far — nothing is padded or extrapolated).
+export function hourSeries(hours, today = new Date()) {
+  const currentHour = hourId(today.getHours());
+  return hourValues(hours).map((kwh, hour) => {
+    const id = hourId(hour);
+    return { id, kwh, label: `${id}:00`, isCurrent: id === currentHour };
+  });
+}
+
+// "21:00–22:00" for the selected hour; the last hour closes at midnight rather
+// than wrapping to 00:00 of a day the period does not cover.
+export function hourRange(id) {
+  const hour = Number(id);
+  if (!Number.isInteger(hour) || hour < 0 || hour >= HOURS_PER_DAY) return String(id);
+  const end = hour + 1 === HOURS_PER_DAY ? '24:00' : `${hourId(hour + 1)}:00`;
+  return `${hourId(hour)}:00–${end}`;
+}
+
 // One descriptor per selectable chart range. A period is data, not a branch:
-// `bucket` decides how bounds and series are derived ('day' points or 'month'
-// points) and `slots` is the number of points the chart draws. The screen reads
-// the series length for its bar geometry, so a fourth period (#61's 24 hourly
-// points) needs a descriptor and a segment button — no geometry or hit-test
+// `bucket` decides how series points are derived ('hour', 'day' or 'month'),
+// `source` decides which read supplies them (one day document or a contiguous
+// day-id range) and `slots` is the number of points the chart draws. The screen
+// reads the series length for its bar geometry, so the Day period's 24 hourly
+// points need a descriptor and a segment button — no geometry or hit-test
 // change.
 export const PERIODS = [
+  {
+    id: 'day',
+    label: 'Day',
+    slots: HOURS_PER_DAY,
+    bucket: 'hour',
+    source: 'day',
+    prefixToday: false,
+    summaryLabel: 'Today',
+    noun: 'hourly energy',
+    chartLabel: 'Hourly energy for today. Use the left and right arrow keys to move between hours.',
+    emptyTitle: 'No energy recorded today.',
+    emptyLine: 'Hours appear as charging is recorded.',
+    noIntradayTitle: 'No hourly detail for today.',
+    noIntradayLine: 'Hourly capture began recently, so today has a total but no hours behind it.',
+    loadingLine: 'Reading today.',
+    offlineLine: "Reconnect, then tap Refresh to load today's hours.",
+  },
   {
     id: 'week',
     label: 'Week',
     slots: 7,
     bucket: 'day',
+    source: 'range',
     prefixToday: true,
     summaryLabel: 'Last 7 days',
     noun: 'daily energy',
@@ -70,6 +130,7 @@ export const PERIODS = [
     label: 'Month',
     slots: 30,
     bucket: 'day',
+    source: 'range',
     prefixToday: true,
     summaryLabel: 'Last 30 days',
     noun: 'daily energy',
@@ -85,6 +146,7 @@ export const PERIODS = [
     label: 'Year',
     slots: 12,
     bucket: 'month',
+    source: 'range',
     prefixToday: false,
     summaryLabel: 'Last 12 months',
     noun: 'monthly energy',
@@ -111,11 +173,17 @@ function periodFor(period) {
   return typeof period === 'string' ? periodById(period) : periodById(period && period.id);
 }
 
-// Inclusive document-id range for one period, oldest first. Both day periods and
-// the year resolve to a contiguous day-id range, so the store needs one
-// documentId() query and no period-specific read.
+// Inclusive document-id range for one period, oldest first. Week, Month and
+// Year resolve to a contiguous day-id range, so the store needs one
+// documentId() query. The Day period has no range: it names exactly today, which
+// is also the day its single-document read targets and the day the screen's
+// midnight guard compares against.
 export function periodBounds(period, today = new Date()) {
   const descriptor = periodFor(period);
+  if (descriptor.source === 'day') {
+    const id = dayId(today);
+    return { startId: id, endId: id };
+  }
   if (descriptor.bucket === 'month') {
     const start = new Date(today.getFullYear(), today.getMonth() - (descriptor.slots - 1), 1, 12);
     return { startId: dayId(start), endId: dayId(today) };
@@ -125,11 +193,16 @@ export function periodBounds(period, today = new Date()) {
 }
 
 // One point per rendered slot, oldest first, in one shape for every period:
-// { id, kwh, label, isCurrent }. A month bucket sums its daily documents by the
-// local YYYY-MM prefix; days without a document are genuine zero points, not
-// gaps, and the current month is partial because only recorded days exist.
-export function periodSeries(period, docs, today = new Date()) {
+// { id, kwh, label, isCurrent }. The Day period's data is the single day
+// document (`{ kwh, hours }`) rather than a list, so its series is the hours map
+// itself; every range period aligns an array of daily documents to its slots.
+// A month bucket sums its daily documents by the local YYYY-MM prefix; days
+// without a document are genuine zero points, not gaps, and the current month is
+// partial because only recorded days exist.
+export function periodSeries(period, data, today = new Date()) {
   const descriptor = periodFor(period);
+  if (descriptor.source === 'day') return hourSeries(data && data.hours, today);
+  const docs = data;
   if (descriptor.bucket === 'month') {
     const months = [];
     const end = new Date(today.getFullYear(), today.getMonth(), 1, 12);
@@ -212,11 +285,44 @@ export function historyReadState(result) {
   return cached ? 'offline' : 'empty';
 }
 
+// Classification for the Day period's single-document read. The rule the issue
+// turns on: hours recorded before hourly capture existed do not exist, so they
+// must never be drawn as zero. 'no-intraday' marks a day whose document has a
+// real daily total but no usable hourly buckets — including a cached copy, whose
+// honest reading is still "no hours here" rather than 24 empty bars. A missing
+// document is 'empty' only when the server answered; a cached read with no
+// usable data is 'offline', because "nothing recorded today" would be a claim
+// this device cannot make.
+export function hourReadState(result) {
+  if (!result) return 'empty';
+  const fromCache = Boolean(result.fromCache);
+  // `exists` is explicit in the store's shape; a bare { kwh, hours } fixture is
+  // treated as a document that exists.
+  const exists = result.exists !== false;
+  const values = exists ? hourValues(result.hours) : [];
+  if (values.some((kwh) => kwh > 0)) return fromCache ? 'cached' : 'fresh';
+  const kwh = Number(result.kwh);
+  if (exists && Number.isFinite(kwh) && kwh > 0) return 'no-intraday';
+  return fromCache ? 'offline' : 'empty';
+}
+
+// A rejected single-document read is the Day period's cache miss: getDoc cannot
+// resolve an empty snapshot for a document the cache never held, so it rejects
+// with a transport code instead (a range query resolves an empty list). Only a
+// transport failure is 'offline'; a permission or backend error keeps the error
+// copy, which says to check the connection and refresh without claiming the
+// device is offline.
+export function hourReadFailure(error) {
+  const code = error && error.code;
+  return code === 'unavailable' || code === 'deadline-exceeded' ? 'offline' : 'error';
+}
+
 // Presentation for one settled section read (`fresh`, `empty`, `cached`,
-// `offline`, `error`). Only a read the server answered may be presented as
-// current, and only 'empty' may claim nothing was recorded: a cache miss or a
-// failed read either shows a previously loaded payload as stale or shows the
-// section message, never zeroed data.
+// `offline`, `error`, `no-intraday`). Only a read the server answered may be
+// presented as current, and only 'empty' may claim nothing was recorded: a cache
+// miss or a failed read either shows a previously loaded payload as stale or
+// shows the section message, never zeroed data. 'no-intraday' is a message too,
+// not data: the period has points it must not paint.
 export function sectionView(state, hasPreviousData) {
   if (state === 'fresh' || state === 'empty') {
     return { showData: true, stale: false, claimEmpty: state === 'empty' };
