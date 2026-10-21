@@ -52,6 +52,7 @@ import {
   planProblemText,
   previewRate,
   largestMonthRun,
+  rateIsUsable,
   rateMonthsText,
   rateMonthScope,
   ratePlanRange,
@@ -1670,6 +1671,17 @@ test('the longest uncovered run seeds a new season, and the plan range ignores b
     max: 0.32,
   });
   assert.equal(ratePlanRange([]), null);
+});
+
+test('a usable rate is finite and inside the accepted bounds', () => {
+  // The coverage table asks this question to decide whether an own row keeps a
+  // price or shows "needs attention", so it must agree with the validators.
+  for (const value of ['0.2', '0', 0, 0.2, '5', 5]) assert.equal(rateIsUsable(value), true);
+  for (const value of ['', '   ', 6, -1]) assert.equal(rateIsUsable(value), false);
+  // Non-numeric input is unusable rather than a parse accident.
+  for (const value of ['six', null, undefined, Number.NaN, Infinity]) {
+    assert.equal(rateIsUsable(value), false);
+  }
 });
 
 // ---------- date-precision seasons ----------

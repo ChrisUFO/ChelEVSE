@@ -48,6 +48,7 @@ import {
   planProblemText,
   previewBlocker,
   previewRate,
+  rateIsUsable,
   ratePeriods,
   ratePlanRange,
   rateRowFields,
@@ -799,16 +800,14 @@ function paintCoverage(card) {
     );
     return;
   }
-  // A row whose price is still empty is rejected by the validator, so the
-  // resolved week drops it: its hours fall back to "Other times" and the table
-  // would quote a resolved price the plan, the card meta and the checker all
-  // deny. Resolve a copy with a stand-in price so the row keeps its place and
-  // its band, then put the real (unusable) price back and let the table say the
-  // price is missing.
+  // A row whose price is not usable (empty, or finite but outside the accepted
+  // range) is rejected by the validator, so the resolved week drops it: its
+  // hours fall back to "Other times" and the table would quote a resolved price
+  // the plan, the card meta and the checker all deny. Resolve a copy with a
+  // stand-in price so the row keeps its place and its band, then put the real
+  // (unusable) price back and let the table say the price is missing.
   const unpriced = new Set(
-    period.rows
-      .filter((entry) => !Number.isFinite(parseRateValue(entry.row.rate)))
-      .map((entry) => entry.row.id),
+    period.rows.filter((entry) => !rateIsUsable(entry.row.rate)).map((entry) => entry.row.id),
   );
   const coverage = periodCoverage(
     draftRates.map((row) => (row && unpriced.has(row.id) ? { ...row, rate: '0' } : row)),
@@ -866,10 +865,11 @@ function paintCoverage(card) {
     if (coverage.ownIds.has(segment.window.id)) return period;
     return planPeriods.find((entry) => entry.rows.some((row) => row.row.id === segment.window.id));
   };
-  // A resolved row whose own price is still missing. Its band stays the row's
+  // A resolved row whose own price is still unusable. Its band stays the row's
   // (or the season's) name; only the price and the hidden description change.
-  const needsRate = (segment) =>
-    Boolean(segment.window) && !Number.isFinite(parseRateValue(segment.window.rate));
+  // The id set is read rather than the segment's rate, which the stand-in pass
+  // above has already replaced with a placeholder.
+  const needsRate = (segment) => Boolean(segment.window) && unpriced.has(segment.window.id);
   const described = coverage.types
     .map(
       (type) =>
