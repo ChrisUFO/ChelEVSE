@@ -269,3 +269,39 @@ test('aggregate cost is hidden exactly when a schedule exists', () => {
   // Zero energy still formats under the flat rate, as before.
   assert.equal(aggregateCostLabel(0, FLAT), 'GBP 0.00');
 });
+
+test('a date-season rate prices the edge days, and a season rate every hour', () => {
+  const summer = {
+    rate: 0.3,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [6, 7, 8, 9],
+        from: '06-15',
+        to: '09-15',
+      },
+    ],
+  };
+  // The day before the season pays the fallback; the first day pays the season.
+  assert.equal(
+    sessionCostLabel(session(date(2026, 6, 14, 12, 0), date(2026, 6, 14, 13, 0), 1000), summer),
+    'GBP 0.30',
+  );
+  assert.equal(
+    sessionCostLabel(session(date(2026, 6, 15, 12, 0), date(2026, 6, 15, 13, 0), 1000), summer),
+    'GBP 0.20',
+  );
+  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge.
+  assert.equal(
+    sessionCostLabel(session(date(2026, 9, 15, 23, 0), date(2026, 9, 16, 1, 0), 2000), summer),
+    'GBP 0.50',
+  );
+  // The season rate prices any hour, live included.
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.30');
+});

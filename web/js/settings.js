@@ -2,16 +2,24 @@
 // test/web.
 
 import {
+  ANNUAL_DAYS,
   MAX_RATE_WINDOWS,
   RATE_MAX,
   RATE_MIN,
+  annualDayIndex,
+  annualMonthDay,
+  monthsCovering,
   normalizeRateSchedule,
   normalizeWindow,
   overlappingWindowPairs,
+  parseMonthDay,
   parseRateValue,
   rateDayPartition,
   rateEntryAt,
   rateWindowsKey,
+  scopeMatches,
+  seasonDateSet,
+  seasonScope,
   validateRateWindows,
 } from './rates.js';
 import { DAY_NAMES } from './schedule.js';
@@ -102,7 +110,8 @@ const MONTH_SHORT = MONTH_NAMES.map((name) => name.slice(0, 3));
 
 // One rate-table row as the form holds it: the rate is text because it feeds a
 // number input, and every other field keeps the stored value (invalid ones too)
-// so validation can point at it.
+// so validation can point at it. The optional season bounds travel with the row
+// so an unrelated edit (or an old month-only control) never drops them.
 export function rateRowFields(raw) {
   const window = normalizeWindow(raw);
   return {
@@ -112,14 +121,17 @@ export function rateRowFields(raw) {
     start: window.start,
     end: window.end,
     months: Array.isArray(window.months) ? [...window.months] : window.months,
+    from: window.from,
+    to: window.to,
   };
 }
 
 // A fresh row is the everyday overnight preset with no price filled in: a
 // made-up rate would be easy to save by accident, so the empty field keeps the
 // row visibly incomplete until the owner enters their own. `months` is the
-// period's scope, never a per-row choice.
-export function defaultRateRow(id, months = null) {
+// period's scope, never a per-row choice; `dates` (optional `{from, to}`)
+// carries a day-precision scope the same way.
+export function defaultRateRow(id, months = null, dates = null) {
   return {
     id,
     rate: '',
@@ -127,6 +139,8 @@ export function defaultRateRow(id, months = null) {
     start: '00:00',
     end: '07:00',
     months: Array.isArray(months) ? [...months] : months,
+    from: dates && dates.from != null ? dates.from : null,
+    to: dates && dates.to != null ? dates.to : null,
   };
 }
 
@@ -162,6 +176,181 @@ function sameMonthSet(left, right) {
   if (left.length !== right.length) return false;
   const a = new Set(left);
   return a.size === right.length && right.every((month) => a.has(month));
+}
+
+// The stored season scope as the editor projects it. Date mode outranks months
+// whenever both bounds are valid; `months` is then the derived compatibility
+// hint, never what decides matching. An unusable pair is `invalid`, so a typo
+// never silently falls back to stale months.
+export function rateScope(row) {
+  const scope = seasonScope(row);
+  if (scope.kind === 'dates') {
+    return { ...scope, months: monthsCovering(scope.from, scope.to) };
+  }
+  return scope;
+}
+
+function scopeOf(value) {
+  if (!value) return { kind: 'invalid', months: [] };
+  if (value.kind === 'dates' && value.fromKey != null) return value;
+  if (value.kind === 'dates') return seasonScope({ from: value.from, to: value.to });
+  if (value.kind === 'months' || value.kind === 'all' || value.kind === 'invalid') return value;
+  return rateScope(value);
+}
+
+// A stored or draft season bound in owner language: "Jun 15–Sep 15", or one day.
+export function dateRangeText(from, to) {
+  const start = parseMonthDay(from);
+  const end = parseMonthDay(to);
+  if (!start || !end) return '';
+  const startText = `${MONTH_SHORT[start.month - 1]} ${start.day}`;
+  if (start.month === end.month && start.day === end.day) return startText;
+  return `${startText}–${MONTH_SHORT[end.month - 1]} ${end.day}`;
+}
+
+// "MM-DD" from a leap-ring slot, for a computed complement.
+function monthDayText({ month, day }) {
+  return `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+// The number of days in an inclusive, possibly wrapping annual range.
+function dateRangeLength(from, to) {
+  const start = annualDayIndex(from.month, from.day);
+  const end = annualDayIndex(to.month, to.day);
+  return ((end - start + ANNUAL_DAYS) % ANNUAL_DAYS) + 1;
+}
+
+// The sample dates a period is inspected at. A range of a week or less is shown
+// whole; a longer one is sampled at seven dates around its centre, which keeps
+// the coverage table and the effective range anchored inside the season instead
+// of at an arbitrary edge.
+export function representativeDates(period) {
+  if (!period || period.kind !== 'dates') return [];
+  const start = parseMonthDay(period.from);
+  const end = parseMonthDay(period.to);
+  if (!start || !end) return [];
+  const startIndex = annualDayIndex(start.month, start.day);
+  const length = dateRangeLength(start, end);
+  const first = length <= 7 ? 0 : Math.floor((length - 1) / 2) - 3;
+  const count = length <= 7 ? length : 7;
+  const dates = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    dates.push(annualMonthDay((startIndex + first + offset) % ANNUAL_DAYS));
+  }
+  return dates;
+}
+
+// Merge touching/overlapping annual ranges and fold a range that touches both
+// ends of the ring into one wrapping range, so a complement reads as a single
+// "Sep 16–Jun 14" instead of two fragments.
+export function mergeDateRanges(ranges) {
+  const sorted = (Array.isArray(ranges) ? ranges : [])
+    .filter((range) => Array.isArray(range) && range.length === 2)
+    .map(([start, end]) => [start, end])
+    .sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1] + 1) last[1] = Math.max(last[1], range[1]);
+    else merged.push(range);
+  }
+  if (merged.length > 1 && merged[0][0] === 0 && merged[merged.length - 1][1] === ANNUAL_DAYS - 1) {
+    const first = merged.shift();
+    const last = merged.pop();
+    merged.unshift([last[0], first[1]]);
+  }
+  return merged;
+}
+
+// The days a set of annual ranges does not cover, as leap-ring intervals.
+function complementDateRanges(ranges) {
+  const covered = new Array(ANNUAL_DAYS).fill(false);
+  for (const [start, end] of Array.isArray(ranges) ? ranges : []) {
+    covered.fill(true, start, end + 1);
+  }
+  const gaps = [];
+  let start = -1;
+  for (let day = 0; day < ANNUAL_DAYS; day += 1) {
+    if (!covered[day] && start < 0) start = day;
+    else if (covered[day] && start >= 0) {
+      gaps.push([start, day - 1]);
+      start = -1;
+    }
+  }
+  if (start >= 0) gaps.push([start, ANNUAL_DAYS - 1]);
+  return gaps;
+}
+
+function isMonthStart(index) {
+  return annualMonthDay(index).day === 1;
+}
+
+function isMonthEnd(index) {
+  return index === ANNUAL_DAYS - 1 || isMonthStart(index + 1);
+}
+
+// Owner language for a set of annual ranges. Whole months collapse to
+// "Mar–Oct", partial months stay "Apr 16–Jun 14", and a range that wraps the
+// year reads as one run. An empty set is an empty line.
+export function dateSetText(ranges) {
+  const merged = mergeDateRanges(ranges);
+  if (merged.length === 0) return '';
+  if (merged.length === 1 && merged[0][0] === 0 && merged[0][1] === ANNUAL_DAYS - 1) {
+    return 'All year';
+  }
+  return merged
+    .map(([start, end]) => {
+      const a = annualMonthDay(start);
+      const b = annualMonthDay(end);
+      if (isMonthStart(start) && isMonthEnd(end)) {
+        return a.month === b.month
+          ? MONTH_SHORT[a.month - 1]
+          : `${MONTH_SHORT[a.month - 1]}–${MONTH_SHORT[b.month - 1]}`;
+      }
+      const startText = `${MONTH_SHORT[a.month - 1]} ${a.day}`;
+      if (a.month === b.month && a.day === b.day) return startText;
+      return `${startText}–${MONTH_SHORT[b.month - 1]} ${b.day}`;
+    })
+    .join(', ');
+}
+
+// The days no stored season covers, as leap-ring intervals. "No window" means
+// days with no season, not hours: hourly gaps are shown by the tables and the
+// checker. This is the date-mode counterpart of `uncoveredMonths`.
+export function uncoveredDateRanges(rows) {
+  const covered = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    covered.push(...seasonDateSet(rateScope(row)));
+  }
+  return complementDateRanges(covered);
+}
+
+// The complement a duplicate should use: the months a month scope does not
+// cover, or the single wrapping date range a date scope leaves. An all-year or
+// unusable scope has no complement, so there is nothing to duplicate into.
+export function complementScope(value) {
+  const scope = scopeOf(value);
+  if (scope.kind === 'all' || scope.kind === 'invalid') return null;
+  if (scope.kind === 'months') {
+    const months = complementMonths(scope.months);
+    return months.length > 0 ? { kind: 'months', months } : null;
+  }
+  const gaps = mergeDateRanges(complementDateRanges(seasonDateSet(scope)));
+  if (gaps.length !== 1) return null;
+  const from = monthDayText(annualMonthDay(gaps[0][0]));
+  const to = monthDayText(annualMonthDay(gaps[0][1]));
+  return { kind: 'dates', from, to, months: monthsCovering(from, to) };
+}
+
+// A season rate is an ordinary all-day, every-day row: one price for every hour
+// of the season, with no new stored field.
+export function isSeasonRateRow(row) {
+  return isAllDayWindow(row) && dayPresetFor(row && row.days) === 'every';
+}
+
+export function isSeasonRatePeriod(period) {
+  const entries = (period && period.rows) || [];
+  return entries.length > 0 && entries.every((entry) => isSeasonRateRow(entry.row));
 }
 
 function monthRuns(months) {
@@ -249,43 +438,65 @@ export function largestMonthRun(months) {
 function periodOrder(period) {
   if (period.kind === 'invalid') return -1;
   if (period.kind === 'all') return 0;
+  if (period.kind === 'dates') {
+    const start = parseMonthDay(period.from);
+    return start ? start.month * 100 + start.day : 1;
+  }
   return Math.min(...period.months);
 }
 
 // Group the flat draft into the periods the owner sees. Grouping is by stored
-// month scope only: it is stable while prices, days and times are edited, and
-// each row belongs to exactly one period, so a month edit can never move a row
-// the owner did not touch. Rows are kept in their original positions (the
-// stored order is the last-match-wins tie-break), with `index` pointing back
-// into the draft array for editing.
+// season scope only: it is stable while prices, days and times are edited, and
+// each row belongs to exactly one period, so a season edit can never move a row
+// the owner did not touch. Date rows group by their dates, not by the stale
+// `months` hint. Rows are kept in their original positions (the stored order is
+// the last-match-wins tie-break), with `index` pointing back into the draft
+// array for editing.
 export function ratePeriods(rows) {
   const list = Array.isArray(rows) ? rows : [];
   const groups = new Map();
   list.forEach((row, index) => {
-    const scope = rateMonthScope(row);
+    const scope = rateScope(row);
     const key =
       scope.kind === 'invalid'
         ? 'invalid'
         : scope.kind === 'all'
           ? 'all'
-          : `months:${scope.months.join(',')}`;
+          : scope.kind === 'dates'
+            ? `dates:${scope.from}-${scope.to}`
+            : `months:${scope.months.join(',')}`;
     if (!groups.has(key)) {
       groups.set(key, {
         key,
         kind: scope.kind,
-        months: scope.kind === 'months' ? scope.months : null,
+        months: scope.kind === 'months' || scope.kind === 'dates' ? scope.months : null,
+        from: scope.kind === 'dates' ? scope.from : null,
+        to: scope.kind === 'dates' ? scope.to : null,
         rows: [],
       });
     }
     groups.get(key).rows.push({ row, index });
   });
-  const periods = [...groups.values()].map((period) => ({
-    ...period,
-    // `all` months are represented as null everywhere else in the form.
-    months: period.kind === 'all' ? null : period.months,
-    title: ratePeriodTitle(period.months, period.kind),
-    monthText: rateMonthsText(period.months, period.kind),
-  }));
+  const periods = [...groups.values()].map((period) => {
+    const dateText = period.kind === 'dates' ? dateRangeText(period.from, period.to) : '';
+    const seasonRate = isSeasonRatePeriod(period);
+    return {
+      ...period,
+      // `all` months are represented as null everywhere else in the form.
+      months: period.kind === 'all' ? null : period.months,
+      dateText,
+      // The band reads as dates for a date period and as months otherwise; the
+      // old month-only view renders this same field.
+      monthText: period.kind === 'dates' ? dateText : rateMonthsText(period.months, period.kind),
+      title:
+        period.kind === 'dates'
+          ? seasonRate
+            ? 'Season rate'
+            : 'Season'
+          : ratePeriodTitle(period.months, period.kind),
+      seasonRate,
+    };
+  });
 
   periods.sort(
     (a, b) =>
@@ -315,6 +526,28 @@ function periodAppliesInMonth(period, month) {
   return Array.isArray(period.months) && period.months.includes(month);
 }
 
+function sampleDate(month, day, year) {
+  const date = new Date(year, month - 1, day, 12, 0, 0, 0);
+  // A sample year that is not a leap year has no 29 February; anchor it on the
+  // leap day rather than silently sliding into March.
+  if (date.getMonth() !== month - 1 || date.getDate() !== day) {
+    return new Date(2024, month - 1, day, 12, 0, 0, 0);
+  }
+  return date;
+}
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+// Whether a period's own season covers one date. Months still answer by month;
+// a date period answers exactly, so a sibling season is named only where it
+// actually applies.
+function periodAppliesOn(period, date) {
+  if (!period) return false;
+  return scopeMatches(scopeOf(period), date);
+}
+
 // Months no stored window covers: the line where nothing but the all-other-times
 // rate applies. This is not a period and is never counted as one.
 export function uncoveredMonths(rows) {
@@ -328,16 +561,21 @@ export function uncoveredMonths(rows) {
 }
 
 // The effective price range a period header should advertise for its
-// representative month: every window that can apply in that month (own,
-// inherited and all-year) plus the all-other-times fallback. It answers "what
-// could this month cost", while the window count stays the period's own.
+// representative sample (a month, or the dates of a date season): every window
+// that can apply there (own, inherited and all-year) plus the all-other-times
+// fallback. It answers "what could this season cost", while the window count
+// stays the period's own.
 export function periodEffectiveRange(rows, fallbackRate, period, year = new Date().getFullYear()) {
-  const month = representativeMonth(period);
-  // Resolve the representative week from the whole plan, so a sibling window
-  // that also prices this month is included. The fallback only appears when
-  // some hour of that week is genuinely uncovered (an all-day window can cover
-  // the month completely, in which case advertising the fallback would lie).
-  const week = rateWeek(rows, fallbackRate, month, year);
+  const dated = Boolean(period && period.kind === 'dates');
+  const dates = dated ? representativeDates(period) : [];
+  const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
+  // Resolve the representative sample from the whole plan, so a sibling window
+  // that also prices these dates is included. The fallback only appears when
+  // some hour of the sample is genuinely uncovered (an all-day window can cover
+  // the season completely, in which case advertising the fallback would lie).
+  const week = dated
+    ? rateWeekForDates(rows, fallbackRate, dates, year)
+    : rateWeek(rows, fallbackRate, month, year);
   const values = [];
   for (const entry of Array.isArray(week) ? week : []) {
     if (!entry) continue;
@@ -360,7 +598,9 @@ export function siblingNote(sibling) {
 
 // Change one period's months, in one edit, for every row it owns. Other rows are
 // returned untouched (same array values, including order) so a legacy
-// non-contiguous scope elsewhere is never rewritten as a side effect.
+// non-contiguous scope elsewhere is never rewritten as a side effect. A month
+// edit is a month-mode edit, so it clears any day-precision bounds: leaving them
+// would silently outrank the months just chosen.
 export function applyPeriodMonths(rows, indices, months) {
   const list = Array.isArray(rows) ? rows : [];
   const targets = new Set(Array.isArray(indices) ? indices : [...(indices || [])]);
@@ -371,7 +611,27 @@ export function applyPeriodMonths(rows, indices, months) {
           .filter((month) => Number.isInteger(month) && month >= 1 && month <= 12)
           .sort((a, b) => a - b);
   return list.map((row, index) =>
-    targets.has(index) ? { ...row, months: next ? [...next] : null } : row,
+    targets.has(index) ? { ...row, months: next ? [...next] : null, from: null, to: null } : row,
+  );
+}
+
+// Change one period's day-precision bounds, in one edit, for every row it owns.
+// Values are stored as typed so an invalid date stays visible and validation
+// blocks the save; `months` is kept as the derived compatibility hint when both
+// bounds are real. Other rows are returned untouched.
+export function applyPeriodDates(rows, indices, from, to) {
+  const list = Array.isArray(rows) ? rows : [];
+  const targets = new Set(Array.isArray(indices) ? indices : [...(indices || [])]);
+  const months = monthsCovering(from, to);
+  return list.map((row, index) =>
+    targets.has(index)
+      ? {
+          ...row,
+          from: from == null ? null : from,
+          to: to == null ? null : to,
+          ...(months.length > 0 ? { months } : {}),
+        }
+      : row,
   );
 }
 
@@ -404,9 +664,12 @@ export function toggledMonthScope(period, month) {
   return [...set].sort((a, b) => a - b);
 }
 
-// Clone one period's rows into a new month scope, with fresh ids. Every array
-// is copied so editing the copy cannot mutate the original.
-export function copyPeriodRows(rows, indices, months, makeId) {
+// Clone one period's rows into a new scope, with fresh ids. `months` is the
+// month scope (or the derived hint for a date scope); `dates` optionally carries
+// `{from, to}` for a day-precision copy. Every array is copied so editing the
+// copy cannot mutate the original, and a month copy never inherits stale dates
+// that would outrank it.
+export function copyPeriodRows(rows, indices, months, makeId, dates = null) {
   const list = Array.isArray(rows) ? rows : [];
   const targets = Array.isArray(indices) ? indices : [...(indices || [])];
   const next =
@@ -420,6 +683,8 @@ export function copyPeriodRows(rows, indices, months, makeId) {
     id: makeId(),
     days: Array.isArray(list[index].days) ? [...list[index].days] : [],
     months: next ? [...next] : null,
+    from: dates && dates.from != null ? dates.from : null,
+    to: dates && dates.to != null ? dates.to : null,
   }));
   return [...list, ...copies];
 }
@@ -532,16 +797,26 @@ export function rateWindowSummary(row) {
   return `${dayText} · ${timeText}`;
 }
 
+// The season in owner language, dates first: a date row reads as its dates and
+// a month row as its months.
+export function rateScopeText(row) {
+  const scope = rateScope(row);
+  return scope.kind === 'dates'
+    ? dateRangeText(scope.from, scope.to)
+    : rateMonthsText(scope.months, scope.kind);
+}
+
 // A full name for an error that has to distinguish two rows ("Off-peak Weekdays
-// · 16:00–19:00 · Nov–Feb"). The period months are included because that is
-// what decides whether two rows can actually collide.
+// · 16:00–19:00 · Nov–Feb"). The season is included because that is what
+// decides whether two rows can actually collide; a date season reads as its
+// dates.
 export function windowLabel(row, windowRates, fallbackRate, { months = true } = {}) {
   const tier = rateTierFor(row && row.rate, windowRates, fallbackRate);
   const price = parseRateValue(row && row.rate);
   const head = [tier, Number.isFinite(price) ? String(price) : ''].filter(Boolean).join(' ');
   const summary = rateWindowSummary(row);
-  const monthText = months ? ` · ${rateMonthsText(row && row.months)}` : '';
-  return `${head ? `${head} · ` : ''}${summary}${monthText}`;
+  const scopeText = months ? ` · ${rateScopeText(row)}` : '';
+  return `${head ? `${head} · ` : ''}${summary}${scopeText}`;
 }
 
 // The rate table's validation. The old editor could only express one month
@@ -577,13 +852,13 @@ export function validateRateEditorRows(rows, fallbackRate) {
 export function rateOverlapMessage(pairs, rows, fallbackRate) {
   const list = Array.isArray(rows) ? rows : [];
   const rates = list.map((row) => row && row.rate);
-  const monthText = list.map((row) => rateMonthsText(row && row.months));
+  const scopeText = list.map((row) => rateScopeText(row));
   const clauses = [];
   for (const [a, b] of Array.isArray(pairs) ? pairs : []) {
-    const sameMonths = monthText[a] === monthText[b];
+    const sameScope = scopeText[a] === scopeText[b];
     const label = (index) =>
       list[index]
-        ? windowLabel(list[index], rates, fallbackRate, { months: !sameMonths })
+        ? windowLabel(list[index], rates, fallbackRate, { months: !sameScope })
         : `Window ${index + 1}`;
     const left = label(a);
     const right = label(b);
@@ -654,17 +929,20 @@ export function submitFocusTarget({ errors = {}, rateValidation } = {}) {
   const index = rows.findIndex((row) => row && Object.keys(row).length > 0);
   if (index >= 0) {
     const row = rows[index];
-    const focus = row.months
-      ? 'months'
-      : row.rate
-        ? 'rate'
-        : row.days
-          ? 'days'
-          : row.start
-            ? 'start'
-            : row.end
-              ? 'end'
-              : 'rate';
+    const focus =
+      row.from || row.to
+        ? 'dates'
+        : row.months
+          ? 'months'
+          : row.rate
+            ? 'rate'
+            : row.days
+              ? 'days'
+              : row.start
+                ? 'start'
+                : row.end
+                  ? 'end'
+                  : 'rate';
     return { kind: 'row', index, focus };
   }
   const overlaps = (rateValidation && rateValidation.overlaps) || [];
@@ -778,6 +1056,27 @@ export function rateWeek(rows, fallbackRate, month, year = new Date().getFullYea
   return week;
 }
 
+// The same sample for a date season: one entry per representative date, keyed by
+// its weekday. A range of seven or fewer days (or a centred seven-day sample)
+// covers every weekday, and a shorter one leaves the other weekdays absent —
+// they genuinely are not part of the season. A sample that includes 29 February
+// moves to a leap year as a whole, so its weekdays stay consecutive.
+export function rateWeekForDates(rows, fallbackRate, dates, year = new Date().getFullYear()) {
+  const base = parseRateValue(fallbackRate);
+  const schedule = { rate: Number.isFinite(base) ? base : null, rates: rows };
+  const list = Array.isArray(dates) ? dates : [];
+  const needsLeap = list.some((entry) => entry && entry.month === 2 && entry.day === 29);
+  const sampleYear = needsLeap && !isLeapYear(year) ? 2024 : year;
+  const week = [];
+  for (const entry of list) {
+    if (!entry) continue;
+    const date = sampleDate(entry.month, entry.day, sampleYear);
+    const day = (date.getDay() + 6) % 7;
+    week[day] = { day, segments: rateDayPartition(schedule, date) };
+  }
+  return week;
+}
+
 function segmentSignature(segment) {
   const window = segment.window;
   const source = window
@@ -808,12 +1107,13 @@ export function dayTypesForWeek(week) {
     }));
 }
 
-// One period's own layer for a representative month in its own scope. The table
+// One period's own layer for a representative sample in its own scope. The table
 // is deliberately not the union: it shows this period's windows and the
-// fallback, and names the sibling periods that also apply in that month. The
+// fallback, and names the sibling periods that also apply in that sample. The
 // checker is the place that resolves the union. For an all-year period the
 // representative month is January; otherwise it is the first month of the
-// scope, so the caption can never disagree with the chips.
+// scope; a date period is sampled at its own dates, so the caption can never
+// disagree with the season.
 export function periodCoverage(
   rows,
   fallbackRate,
@@ -821,24 +1121,43 @@ export function periodCoverage(
   periods,
   year = new Date().getFullYear(),
 ) {
-  const month = representativeMonth(period);
-  // The table is the effective week for this month, but every segment keeps its
-  // owner: own rows are the period's windows, sibling rows are named in the
-  // band column instead of being mislabelled as the fallback.
-  const week = rateWeek(rows, fallbackRate, month, year);
+  const dated = Boolean(period && period.kind === 'dates');
+  const dates = dated ? representativeDates(period) : [];
+  const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
+  // The table is the effective sample, but every segment keeps its owner: own
+  // rows are the period's windows, sibling rows are named in the band column
+  // instead of being mislabelled as the fallback.
+  const week = dated
+    ? rateWeekForDates(rows, fallbackRate, dates, year)
+    : rateWeek(rows, fallbackRate, month, year);
   const ownIds = new Set(
     (period && period.rows ? period.rows : [])
       .map((entry) => entry.row && entry.row.id)
       .filter(Boolean),
   );
+  const samples = dated ? dates.map((entry) => sampleDate(entry.month, entry.day, year)) : [];
   const siblings = (Array.isArray(periods) ? periods : []).filter(
-    (other) => other && other.key !== (period && period.key) && periodAppliesInMonth(other, month),
+    (other) =>
+      other &&
+      other.key !== (period && period.key) &&
+      (dated
+        ? samples.some((date) => periodAppliesOn(other, date))
+        : periodAppliesInMonth(other, month)),
   );
+  // A season rate is one price for every day and hour of the season: it is
+  // shown as one Every day type and one 00:00–24:00 row, however short the
+  // representative sample is.
+  let types = dayTypesForWeek(week);
+  if (period && period.seasonRate && types.length > 0) {
+    types = [{ days: [0, 1, 2, 3, 4, 5, 6], label: 'Every day', segments: types[0].segments }];
+  }
   return {
     month,
-    monthName: MONTH_NAMES[month - 1],
+    monthName: dated ? period.dateText : MONTH_NAMES[month - 1],
+    dateText: dated ? period.dateText : '',
+    dates,
     week: Array.isArray(week) ? week : [],
-    types: dayTypesForWeek(week),
+    types,
     siblings,
     ownIds,
   };
@@ -866,7 +1185,9 @@ export function segmentNote(segment) {
 
 // The exact-date checker: the winning row for one local instant, with the
 // derived band and the row's own name. It reads the same draft array the editor
-// shows, so unsaved edits are checked without a save.
+// shows, so unsaved edits are checked without a save. `scopeText` is the season
+// in owner language and `seasonRate` says whether the winning row is one
+// all-day, every-day price.
 export function previewRate(rows, fallbackRate, date) {
   const base = parseRateValue(fallbackRate);
   const entry = rateEntryAt(date, {
@@ -875,6 +1196,8 @@ export function previewRate(rows, fallbackRate, date) {
   });
   if (!entry) return null;
   const rates = (Array.isArray(rows) ? rows : []).map((row) => row && row.rate);
+  const scope = entry.window ? rateScope(entry.window) : null;
+  const dateText = scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '';
   return {
     rate: entry.rate,
     window: entry.window,
@@ -882,6 +1205,9 @@ export function previewRate(rows, fallbackRate, date) {
     tier: entry.window ? rateTierFor(entry.window.rate, rates, base) : '',
     summary: entry.window ? rateWindowSummary(entry.window) : '',
     monthsText: entry.window ? rateMonthsText(entry.window.months) : '',
+    dateText,
+    scopeText: entry.window ? rateScopeText(entry.window) : '',
+    seasonRate: entry.window ? isSeasonRateRow(entry.window) : false,
   };
 }
 
@@ -937,7 +1263,8 @@ export function formatPreviewWhen(date, now = new Date()) {
 
 // The exact Firestore payload for a validated settings save. `rates` is omitted
 // when empty, so a flat configuration writes byte-for-byte the two fields it
-// always has.
+// always has. A month row keeps its stored key order; a date row appends
+// `from`/`to` after `months`, whose value is the derived compatibility hint.
 export function settingsPayload(values) {
   const source = values || {};
   const payload = { rate: source.rate, currency: source.currency };
@@ -945,6 +1272,19 @@ export function settingsPayload(values) {
   if (rates.length > 0) {
     payload.rates = rates.map((row) => {
       const window = normalizeWindow(row);
+      const scope = seasonScope(window);
+      if (scope.kind === 'dates') {
+        return {
+          id: window.id,
+          rate: window.rate,
+          days: window.days,
+          start: window.start,
+          end: window.end,
+          months: monthsCovering(scope.from, scope.to),
+          from: scope.from,
+          to: scope.to,
+        };
+      }
       return {
         id: window.id,
         rate: window.rate,
