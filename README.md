@@ -157,19 +157,24 @@ live session and the whole history immediately.
   price yet). For a flat rate the figure is still `kWh × rate`, exactly as before. When any slice
   of the live interval has no base/window price, that slice costs 0.00 and the figure gains a
   warning-coloured **understates cost** line (tooltip: the 0.00 slices); the figure is not hidden.
-- **History session** costs use the session's own stored start and end. A schedule with any
+- **History session** costs use the session's own charging intervals when it has them: each
+  contiguous charging block is priced over its own start and end, so a top-up at 03:00 stays at the
+  off-peak price even though the plug-in began the previous evening. A record without intervals —
+  everything recorded before the bridge started writing them, and a bridge restart that measured no
+  growth — falls back to the whole stored span below. When an interval cannot be priced (a malformed
+  timestamp or an unreadable rate), the figure is hidden rather than guessed. A schedule with any
   unpriced dates or base-less hours also shows a plan banner above history saying those moments are
   shown at 0.00, with a link back to settings.
-- **Uniform pro-rating (approximation).** Sessions store one energy total, not the energy drawn in
-  each window. Each slice between rate boundaries is assumed to have drawn energy in proportion to
-  its share of the session's duration. A charge that ramps up inside one window is therefore priced
-  slightly off; the alternative would require per-window energy from the bridge.
-- **Paused sessions: cost is pro-rated over the plug-in span, not the charging intervals.** The
-  bridge keeps one record per plug-in, so a session that paused and resumed stores a span that
-  includes the idle gap while `wh` and `elapsed` describe charging only. The pro-rating above cannot
-  separate the two, so such a session can read under or over its true cost (the error is bounded by
-  the rate difference across the gap). Issue #37 accepts this as the best available signal until the
-  bridge stores the real charging intervals.
+- **Uniform pro-rating (fallback, an approximation).** A session's energy is one total, not the energy
+  drawn in each window, so each slice between rate boundaries is assumed to have drawn energy in
+  proportion to its share of the span it is priced over. A charge that ramps up inside one window is
+  therefore priced slightly off. This path only applies to records without charging intervals; a
+  session with intervals is priced per interval, and the only assumption left inside one interval is
+  constant power.
+- **Paused sessions** are priced by their intervals, not over the plug-in span: the idle gap between a
+  pause and a resume carries no energy and no cost. Legacy records (no intervals) still pro-rate over
+  the plug-in span, so a paused-then-resumed one can read under or over its true cost by the rate
+  difference across the gap.
 - **The period total and the selected bar's cost are hidden when a rate plan exists**, because a history
   document holds a single kWh figure per day and it cannot be split across the windows it was drawn
   in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary

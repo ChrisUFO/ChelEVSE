@@ -390,7 +390,7 @@ timestamped line and the loop carries on at its next interval.
 | -------- | ------------------ | -------------------------------------------------------------------------------------------------- |
 | Status   | `status/current`   | Curated `/status` fields, merged on every poll                                                     |
 | Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas      |
-| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` per completed plug-in session                                |
+| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                    |
 | Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                            |
 | Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                        |
 | Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged) |
@@ -518,12 +518,47 @@ session. The bridge therefore treats a session as one plug-in event and writes
 one document:
 
 ```
-sessions/1792345678   { started_at, ended_at, wh, elapsed }
+sessions/1792345678   { started_at, ended_at, wh, elapsed, intervals? }
 ```
 
 `wh` is the charger's `session_energy` and `elapsed` is seconds. `ended_at` is
 the stop time and `started_at` comes from the charger's own timer
 (`ended_at - elapsed`), never from when the bridge booted.
+
+`intervals` records **when** that energy was actually drawn: one entry per
+contiguous charging block, `{started_at, ended_at, wh}`, in start order. The
+bridge opens an interval when it first sees `state: 3`, adds each charging
+tick's `session_energy` growth to it, and closes it when the state leaves 3 (or
+at finalisation). The bounds are observation times — the charger's transition
+happened between two polls, so an interval starts at the first tick that saw it
+rather than at the aggregate's charger-timer start. The energy is attributed
+from the cumulative counter, so the intervals of one session sum to its `wh`
+(a tick before the session's first charging reading only supplies the
+baseline). A non-positive step is a counter reset, not negative energy, so it
+is dropped and the tick's reading becomes the next baseline; a step above 20 kWh
+in one poll is a corrupt jump and is dropped too. The web app prices each
+interval over its own start and end, which is what makes a paused session
+accurate.
+
+The aggregates are unchanged and still describe the whole plug-in: `wh`,
+`elapsed`, `started_at` and `ended_at` mean exactly what they meant before
+intervals existed, so an older reader (and a session with no intervals, see
+below) is unaffected. `intervals` is absent when no interval had positive
+energy — a zero-wh plug-in is skipped entirely, and a bridge restart that never
+saw the counters grow writes the aggregates alone rather than inventing a
+block. Such a record is priced by the old uniform pro-rating.
+
+`intervals` is capped at 100 per record (`MAX_SESSION_INTERVALS`). Past that the
+oldest entries are folded into the oldest retained interval — its start becomes
+the earliest dropped start and its energy their sum — so the list keeps the most
+recent 100 blocks in start order without losing energy; only that folded head is
+pro-rated over the idle stretch it spans.
+
+A restart mid-charge does not fabricate intervals. `status/current` seeds
+`session_energy`, so the first tick after the restart opens one interval whose
+energy is the growth from that baseline: **the block that spans the restart is
+one interval**, and the energy drawn while the bridge was down is included in
+it. Nothing is written for the part of the session the bridge never observed.
 
 On every `state 3 → non-3` edge the bridge looks up the most recent session. It
 **merges** the new record into it (keeping the earlier `started_at`, the later
@@ -534,7 +569,9 @@ than 48 hours old). This is what makes pause/resume and
 back-to-back scheduled windows one record instead of two documents that
 double-count the same cumulative energy. The merged write keeps the previous
 document id; a brand-new session uses the Unix timestamp of `started_at`.
-`wh` is never negative and never lowered by a merge.
+`wh` is never negative and never lowered by a merge. A merged record's
+intervals are concatenated in start order, and the aggregates still cover the
+whole session even when the cap has folded the oldest blocks.
 
 The last charging tick's `session_energy` / `elapsed` are used (some firmware
 zeros them on the end tick), falling back to the transition tick's values if
