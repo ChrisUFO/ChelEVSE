@@ -57,10 +57,14 @@ let selectedId = null;
 let todayId = null;
 let sessions = [];
 // Latest settled read per section: idle | loading | fresh | empty | cached |
-// offline | error. Tracked separately so one section's outcome never speaks for
-// the other, and so freshness is never inferred from how much data is on screen.
+// offline | error | no-intraday. Tracked separately so one section's outcome
+// never speaks for the other, and so freshness is never inferred from how much
+// data is on screen.
 let historyState = 'idle';
 let sessionsState = 'idle';
+// Today's daily total, kept separately because a day with no hourly buckets has
+// a real total the series cannot carry (the chart refuses to draw it as zeros).
+let dayTotal = null;
 // Whether the payload currently on screen came from an answer the server gave
 // (fresh/empty). Cached, offline, and failed reads never set it.
 let historyServer = false;
@@ -148,14 +152,22 @@ function paintPeriodSwitch() {
 
 function renderSummary() {
   renderPlanBanner();
-  if (!series.length) {
+  // The summary total is the series sum, except for a day whose hours were never
+  // recorded: its daily total is real, so the copy and the number agree instead
+  // of showing "—" beside "today has a total".
+  const total =
+    historyState === 'no-intraday' && dayTotal != null
+      ? dayTotal
+      : series.length
+        ? sumSeries(series)
+        : null;
+  if (total == null) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setCostNote(false);
     return;
   }
-  const total = sumSeries(series);
   setText($('history-total'), fmtK(total));
   const cost = seriesCost(total);
   $('history-cost-cell').hidden = !cost;
@@ -311,6 +323,14 @@ function renderHistory() {
   if (historyState === 'loading' && !series.length) {
     renderSummary();
     showChartEmpty(`Loading ${descriptor.noun}…`, descriptor.loadingLine);
+    setHistoryNote('');
+    return;
+  }
+  if (historyState === 'no-intraday') {
+    // The chart has nothing it may draw, but the day's total is a real record:
+    // the summary keeps it and the panel names why the hours are missing.
+    renderSummary();
+    showChartEmpty(descriptor.noIntradayTitle, descriptor.noIntradayLine);
     setHistoryNote('');
     return;
   }
@@ -518,6 +538,8 @@ function applyHistory(descriptor, result, failure, today) {
   // A Day read's payload is the day document itself; a range read's is its list
   // of daily documents.
   series = periodSeries(descriptor, day ? result : result.docs, today);
+  const kwh = Number(result.kwh);
+  dayTotal = day && Number.isFinite(kwh) && kwh > 0 ? kwh : null;
   historyServer = historyState === 'fresh' || historyState === 'empty';
   if (!series.some((point) => point.id === selectedId)) {
     // Prefer the slot the series marks as current (today, this month, the hour
@@ -538,6 +560,7 @@ async function readHistory() {
   const bounds = periodRange(descriptor, today);
   series = [];
   selectedId = null;
+  dayTotal = null;
   historyServer = false;
   historyState = 'loading';
   renderHistory();
@@ -742,6 +765,7 @@ export function resetHistory() {
   if (planBanner) planBanner.hidden = true;
   series = [];
   selectedId = null;
+  dayTotal = null;
   todayId = null;
   sessions = [];
   historyState = 'idle';
