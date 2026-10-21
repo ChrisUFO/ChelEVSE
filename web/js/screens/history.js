@@ -192,12 +192,13 @@ function buildBar(point, index, slot, barW) {
   const descriptor = currentPeriod();
   const cost = seriesCost(point.kwh);
   const suffix = point.isCurrent ? PARTIAL_SUFFIX[descriptor.bucket] || '' : '';
+  const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
   const group = svgEl('g', {
     class: 'bar',
     role: 'button',
     tabindex: '-1',
     'data-index': String(index),
-    'aria-label': `${point.label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
+    'aria-label': `${label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
   });
   const hit = svgEl('rect', {
     class: 'bar-hit',
