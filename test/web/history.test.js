@@ -12,6 +12,11 @@ import {
   dayLabel,
   historyReadState,
   historySeries,
+  hourId,
+  hourRange,
+  hourReadFailure,
+  hourReadState,
+  hourSeries,
   lastDayIds,
   maxSeries,
   monthId,
@@ -149,6 +154,12 @@ test('PERIODS describes every chart range as data', () => {
 
 test('periodBounds returns one contiguous local range for each period', () => {
   const today = new Date(2026, 9, 18, 12);
+  // The Day period has no range: its window is exactly today, which is also the
+  // document its single read targets and the day the midnight guard compares.
+  assert.deepEqual(periodBounds('day', today), {
+    startId: '2026-10-18',
+    endId: '2026-10-18',
+  });
   assert.deepEqual(periodBounds('week', today), {
     startId: '2026-10-12',
     endId: '2026-10-18',
@@ -166,7 +177,12 @@ test('periodBounds returns one contiguous local range for each period', () => {
 });
 
 test('periodBounds crosses month and year boundaries', () => {
-  // A month boundary: the 30-day window still reads as one day-id range.
+  // A month boundary: the 30-day window still reads as one day-id range, and
+  // the day period never leaves its own calendar day.
+  assert.deepEqual(periodBounds('day', new Date(2026, 2, 1, 12)), {
+    startId: '2026-03-01',
+    endId: '2026-03-01',
+  });
   assert.deepEqual(periodBounds('month', new Date(2026, 2, 1, 12)), {
     startId: '2026-01-31',
     endId: '2026-03-01',
@@ -184,6 +200,11 @@ test('periodBounds crosses month and year boundaries', () => {
 
 test('periodBounds keeps 29 February inside a leap-year range', () => {
   const today = new Date(2028, 2, 1, 12);
+  // The day period is the leap day itself when it is today.
+  assert.deepEqual(periodBounds('day', new Date(2028, 1, 29, 8)), {
+    startId: '2028-02-29',
+    endId: '2028-02-29',
+  });
   // The 30-day window that ends on 1 March covers all 29 February days.
   assert.deepEqual(periodBounds('month', today), {
     startId: '2028-02-01',
@@ -207,6 +228,7 @@ test('periodBounds stays on local calendar days across a DST change (fixed Ameri
     }
     const today = new Date(2026, 2, 9, 0, 30);
     const expected = {
+      day: { startId: '2026-03-09', endId: '2026-03-09' },
       week: { startId: '2026-03-03', endId: '2026-03-09' },
       month: { startId: '2026-02-08', endId: '2026-03-09' },
       year: { startId: '2025-04-01', endId: '2026-03-09' },
@@ -393,6 +415,139 @@ test('chartIndexAt maps a pointer to exactly the visible slots', () => {
   assert.equal(chartIndexAt(20, rect, 0), null);
 });
 
+test('chartIndexAt maps 24 hourly bars to exactly their own slots', () => {
+  const rect = { left: 20, width: CHART_VIEW_W };
+  // 24 slots across VIEW_W are 12.5 view units each, and every edge belongs to
+  // the slot it starts: no dead gaps, no shared boundaries.
+  assert.equal(chartIndexAt(20, rect, 24), 0);
+  assert.equal(chartIndexAt(32.4, rect, 24), 0);
+  assert.equal(chartIndexAt(32.5, rect, 24), 1);
+  assert.equal(chartIndexAt(157.5, rect, 24), 11);
+  assert.equal(chartIndexAt(170, rect, 24), 12);
+  assert.equal(chartIndexAt(182.5, rect, 24), 13);
+  assert.equal(chartIndexAt(319.9, rect, 24), 23);
+  assert.equal(chartIndexAt(19.9, rect, 24), null);
+  assert.equal(chartIndexAt(320, rect, 24), null);
+  // The same mapping scales with the rendered width.
+  assert.equal(chartIndexAt(160, { left: 0, width: 600 }, 24), 6);
+});
+
+test('hourId and hourRange use the stored zero-padded hour keys', () => {
+  assert.equal(hourId(0), '00');
+  assert.equal(hourId(9), '09');
+  assert.equal(hourId(23), '23');
+  assert.equal(hourRange('00'), '00:00–01:00');
+  assert.equal(hourRange('09'), '09:00–10:00');
+  assert.equal(hourRange('21'), '21:00–22:00');
+  // The last hour closes at midnight rather than wrapping to a new day.
+  assert.equal(hourRange('23'), '23:00–24:00');
+  assert.equal(hourRange('nope'), 'nope');
+});
+
+test('hourSeries renders 24 buckets in order with only what was recorded', () => {
+  const today = new Date(2026, 9, 18, 21, 30);
+  const points = hourSeries(
+    {
+      '00': 2.4,
+      '05': '1.25',
+      '06': 0,
+      '07': -2,
+      '08': 'nope',
+      9: 4,
+      21: 0.35,
+    },
+    today,
+  );
+  assert.equal(points.length, 24);
+  assert.deepEqual(
+    points.map((point) => point.id),
+    Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, '0')),
+  );
+  assert.equal(points[0].label, '00:00');
+  assert.equal(points[23].label, '23:00');
+  assert.equal(points[0].kwh, 2.4);
+  assert.equal(points[5].kwh, 1.25);
+  // Zero, negative, non-numeric and unpadded keys are not recorded hours.
+  assert.equal(points[6].kwh, 0);
+  assert.equal(points[7].kwh, 0);
+  assert.equal(points[8].kwh, 0);
+  assert.equal(points[9].kwh, 0);
+  // The hour in progress is what has been recorded so far, unchanged.
+  assert.equal(points[21].kwh, 0.35);
+  assert.equal(sumSeries(points), 4);
+  // Only the hour in progress is marked current; the day itself is not a slot.
+  assert.deepEqual(
+    points.filter((point) => point.isCurrent).map((point) => point.id),
+    ['21'],
+  );
+});
+
+test('hourSeries turns an absent or malformed map into zero points', () => {
+  // The read state, not this function, decides whether zero points may be
+  // painted; the series itself must stay total and never throw.
+  const midnight = new Date(2026, 9, 18, 0, 5);
+  for (const value of [undefined, null, {}, 'nope', [], 42]) {
+    const points = hourSeries(value, midnight);
+    assert.equal(points.length, 24, String(value));
+    assert.equal(sumSeries(points), 0, String(value));
+    assert.equal(maxSeries(points), 0, String(value));
+    assert.equal(points.filter((point) => point.isCurrent).length, 1, String(value));
+    assert.equal(points[0].isCurrent, true, String(value));
+  }
+});
+
+test('periodSeries renders the day period from its single document', () => {
+  const today = new Date(2026, 9, 18, 12, 40);
+  const points = periodSeries('day', { kwh: 3.75, hours: { 11: 2, 12: 1.75 } }, today);
+  assert.equal(points.length, 24);
+  assert.equal(sumSeries(points), 3.75);
+  assert.equal(points[12].kwh, 1.75);
+  assert.deepEqual(
+    points.filter((point) => point.isCurrent).map((point) => point.id),
+    ['12'],
+  );
+  // A document with no hours is still 24 points; hourReadState is what stops the
+  // Day path from drawing them.
+  assert.equal(sumSeries(periodSeries('day', { kwh: 4.2 }, today)), 0);
+});
+
+test('hourReadState never reads missing hours as zero energy', () => {
+  // Hours recorded before hourly capture existed are absent, not zero.
+  assert.equal(hourReadState({ exists: true, kwh: 4.2, hours: null }), 'no-intraday');
+  assert.equal(hourReadState({ exists: true, kwh: 4.2, hours: {} }), 'no-intraday');
+  assert.equal(hourReadState({ exists: true, kwh: 4.2, hours: { '00': 0 } }), 'no-intraday');
+  // A cached copy of such a day is still a day without hours.
+  assert.equal(
+    hourReadState({ exists: true, kwh: 4.2, hours: null, fromCache: true }),
+    'no-intraday',
+  );
+  // Buckets with energy are the only data the Day chart may draw.
+  assert.equal(hourReadState({ exists: true, kwh: 1, hours: { '01': 1 } }), 'fresh');
+  assert.equal(
+    hourReadState({ exists: true, kwh: 1, hours: { '01': 0.35 }, fromCache: true }),
+    'cached',
+  );
+  // A zero-kWh day is empty whether the map is absent or present.
+  assert.equal(hourReadState({ exists: true, kwh: 0, hours: null }), 'empty');
+  assert.equal(hourReadState({ exists: true, kwh: 0, hours: {} }), 'empty');
+  // A missing document is 'empty' only when the read reached the server.
+  assert.equal(hourReadState({ exists: false, kwh: 0, hours: null }), 'empty');
+  assert.equal(hourReadState({ exists: false, kwh: 0, hours: null, fromCache: true }), 'offline');
+  // A cached zero day is a cache miss, not evidence that nothing was recorded.
+  assert.equal(hourReadState({ exists: true, kwh: 0, hours: null, fromCache: true }), 'offline');
+  assert.equal(hourReadState(null), 'empty');
+});
+
+test('hourReadFailure separates a transport failure from a real error', () => {
+  // getDoc rejects instead of resolving an empty snapshot when the device is
+  // offline and the day is not cached; only that becomes the offline copy.
+  assert.equal(hourReadFailure({ code: 'unavailable' }), 'offline');
+  assert.equal(hourReadFailure({ code: 'deadline-exceeded' }), 'offline');
+  assert.equal(hourReadFailure({ code: 'permission-denied' }), 'error');
+  assert.equal(hourReadFailure(new Error('boom')), 'error');
+  assert.equal(hourReadFailure(null), 'error');
+});
+
 test('dayLabel is stable and rejects malformed ids', () => {
   assert.equal(dayLabel('2026-10-18'), 'Sun 18 Oct');
   assert.equal(dayLabel('2026-01-01'), 'Thu 1 Jan');
@@ -479,6 +634,14 @@ test('sectionView never presents an unreached read as current data', () => {
     stale: true,
     claimEmpty: false,
   });
+  // A day with a total but no hourly buckets is a message, not data: the Day
+  // path must draw neither 24 zero bars nor a claim that nothing was recorded.
+  assert.deepEqual(sectionView('no-intraday', false), {
+    showData: false,
+    stale: false,
+    claimEmpty: false,
+  });
+  assert.equal(sectionView('no-intraday', true).showData, false);
   // Nothing is shown for a section that has neither data nor a result yet.
   for (const state of ['idle', 'loading', 'nonsense']) {
     assert.equal(sectionView(state, true).showData, false, state);
@@ -585,7 +748,15 @@ test('both history read paths end with the midnight re-check', () => {
   for (const name of ['readHistory', 'loadAll']) {
     // The guard is the last statement of the read, not a conditional aside.
     assert.match(body(name), /\n\s*reloadIfWindowStale\(\);\n}$/, name);
+    // The Day period is read inside these same two functions, so its read gets
+    // the guard too; a forked Day read would fail this pin.
+    assert.match(body(name), /fetchPeriod\(descriptor/, name);
   }
+  // One read chooser, branching on the descriptor's source rather than a period
+  // id: the Day document read cannot acquire a tail of its own.
+  assert.match(body('fetchPeriod'), /descriptor\.source === 'day'/);
+  assert.match(body('fetchPeriod'), /fetchHistoryDay\(/);
+  assert.match(body('fetchPeriod'), /fetchHistory\(/);
   // One mechanism for both: the shared guard owns the staleness check.
   assert.match(body('reloadIfWindowStale'), /windowStale\(\)/);
 });
