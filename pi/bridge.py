@@ -113,6 +113,15 @@ SESSION_MERGE_TOLERANCE = 120
 # scheduled charging); beyond this the previous record is too old to assume the
 # same plug-in event and is left as its own session.
 SESSION_MERGE_MAX_GAP = 48 * 3600
+# Charging intervals kept per session record. A merge appends the newly closed
+# interval and folds anything past this many into the oldest retained one, so the
+# retained list still accounts for the session's whole energy while the document
+# stays small (a record is one Firestore document).
+MAX_SESSION_INTERVALS = 100
+# One tick of session_energy growth above this is not energy: a poll is at most
+# a minute apart, so 20 kWh in one step would need more than 1 MW. A larger jump
+# is a corrupt counter reading and is dropped rather than attributed.
+MAX_INTERVAL_STEP_WH = 20000.0
 # --- Watchdog (issue #39) ---------------------------------------------------
 # A restart of the ESP32 gateway or the EVSE controller is bounded: at most this
 # many attempts per trailing hour and at least a cooldown after each one, so a
@@ -397,6 +406,10 @@ class StatusTracker:
         self.seed_retry_at = 0.0
         self.pending_session = None
         self._history_paused_logged = False
+        # Charging intervals: the open one while state 3 and the session_energy
+        # baseline the next tick's grown-by delta is measured from.
+        self.open_interval = None
+        self.interval_energy = None
 
     def seed(self):
         """Seed state from status/current; return True when the read worked.
@@ -432,6 +445,11 @@ class StatusTracker:
                     self.last_charging_energy = self.session_energy
                 if _is_number(self.elapsed) and self.elapsed >= 0:
                     self.last_charging_elapsed = self.elapsed
+                # A restart mid-charge must not fold the whole session's energy
+                # into the interval it opens on the first tick: the stored
+                # session_energy is the baseline that tick's delta grows from.
+                if _is_number(self.session_energy) and self.session_energy >= 0:
+                    self.interval_energy = self.session_energy
         self.seeded = True
         self._history_paused_logged = False
         log(f"status seeded: state={state} total_energy={self.total_energy}")
@@ -451,13 +469,16 @@ class StatusTracker:
         """Track charging state from a successful tick; finalize ended sessions."""
         self._flush_pending_session()
         state = data.get("state")
+        previous_energy = self.interval_energy
         if state == 3:
             energy = data.get("session_energy")
             if _is_number(energy) and energy >= 0:
                 self.last_charging_energy = energy
+                self.interval_energy = energy
             elapsed = data.get("elapsed")
             if _is_number(elapsed) and elapsed >= 0:
                 self.last_charging_elapsed = elapsed
+        self._track_interval(state == 3, previous_energy)
         if self.has_state and self.previous_state == 3 and state != 3:
             # A seeded state lets the first tick after a restart close a
             # session that ended while the bridge was down; with no seed the
@@ -468,6 +489,54 @@ class StatusTracker:
         self.state = state
         self.session_energy = data.get("session_energy")
         self.elapsed = data.get("elapsed")
+
+    def _track_interval(self, charging, previous_energy):
+        """Open a charging interval on the edge and attribute this tick to it.
+
+        An interval starts when the bridge first sees state 3 (the charger's
+        transition happened between two polls, so its start is observation
+        time, not the aggregate's charger-timer start) and ends when it first
+        sees the state leave 3. Each charging tick adds its session_energy
+        growth, which is cumulative per plug-in and cleared at unplug, so the
+        intervals of one session sum toward its ``wh``.
+
+        A non-positive step is a counter reset (a new plug-in, or a firmware
+        restart mid-session), never negative energy, so it is dropped and the
+        tick's own reading becomes the next baseline. A step beyond
+        ``MAX_INTERVAL_STEP_WH`` is a corrupt jump and is dropped too.
+        """
+        if not charging:
+            return
+        current = self.interval_energy
+        delta = 0.0
+        if _is_number(current) and _is_number(previous_energy):
+            step = float(current) - float(previous_energy)
+            if 0 < step <= MAX_INTERVAL_STEP_WH:
+                delta = step
+        if self.open_interval is None:
+            self.open_interval = {"started_at": _utcnow(), "wh": 0.0}
+        self.open_interval["wh"] += delta
+
+    def _close_interval(self):
+        """Detach the open interval for the record being written, ending now.
+
+        Returns the just-closed interval as a one-item list, or an empty list
+        when there is nothing trustworthy to store: an interval with no energy
+        (a zero-wh plug-in, or a restart whose counters never grew) and one
+        whose endpoints do not span time are dropped rather than fabricated.
+        """
+        interval = self.open_interval
+        self.open_interval = None
+        if interval is None:
+            return []
+        wh = interval.get("wh")
+        started_at = interval.get("started_at")
+        if not (_is_number(wh) and wh > 0):
+            return []
+        ended_at = _utcnow()
+        if not isinstance(started_at, datetime) or ended_at <= started_at:
+            return []
+        return [{"started_at": started_at, "ended_at": ended_at, "wh": float(wh)}]
 
     def _latest_session(self):
         """Most recent session record (a pending write wins), or None."""
@@ -504,7 +573,14 @@ class StatusTracker:
         *state* but not the session, so a second record would double-count the
         same Wh. Merge into the previous record while the counters keep growing
         (vehicle still connected / intervals overlap) and write one document.
+
+        The just-closed charging interval is written beside the aggregates. The
+        aggregates keep their meaning exactly: ``wh`` stays the charger's
+        cumulative session_energy, ``elapsed`` its own timer, and
+        ``started_at``/``ended_at`` the plug-in span — so an older reader, or a
+        session with no interval (a restart that never saw growth), still works.
         """
+        intervals = self._close_interval()
         energy = self.last_charging_energy
         if not (_is_number(energy) and energy > 0):
             # Firmware may zero session_energy on the end tick; use it if the
@@ -532,6 +608,8 @@ class StatusTracker:
             "wh": float(energy),
             "elapsed": int(elapsed),
         }
+        if intervals:
+            record["intervals"] = intervals
         try:
             merged = _merge_session(
                 self._latest_session(), record, _vehicle_connected(data)
@@ -666,9 +744,68 @@ def _merge_session(candidate, record, vehicle_connected):
     merged["ended_at"] = max(existing_end, record["ended_at"])
     merged["wh"] = max(existing_wh, record["wh"])
     merged["elapsed"] = int(max(existing_elapsed, record["elapsed"]))
+    intervals = _merge_intervals(candidate.get("intervals"), record.get("intervals"))
+    if intervals:
+        merged["intervals"] = intervals
+    else:
+        # Never carry an empty list: a session with no measured interval stays
+        # shaped like a legacy record and is priced by the fallback.
+        merged.pop("intervals", None)
     if candidate.get("_id") is not None:
         merged["_id"] = candidate["_id"]
     return merged
+
+
+def _usable_interval(entry):
+    """One stored interval as {started_at, ended_at, wh}, or None if unusable."""
+    if not isinstance(entry, dict):
+        return None
+    started_at = entry.get("started_at")
+    ended_at = entry.get("ended_at")
+    wh = entry.get("wh")
+    if not isinstance(started_at, datetime) or not isinstance(ended_at, datetime):
+        return None
+    if ended_at <= started_at:
+        return None
+    if not _is_number(wh) or wh <= 0:
+        return None
+    return {"started_at": started_at, "ended_at": ended_at, "wh": float(wh)}
+
+
+def _merge_intervals(*groups):
+    """Concatenate interval lists oldest-first, capped at MAX_SESSION_INTERVALS.
+
+    A merged record's aggregates cover the whole plug-in, so the interval list
+    has to as well without growing without bound. Past the cap the oldest
+    entries are folded into the oldest retained interval (its start becomes the
+    earliest dropped start and its energy their sum): the list keeps the most
+    recent MAX_SESSION_INTERVALS intervals in start order, no energy is lost,
+    and only that folded head is pro-rated over the idle stretch it spans — the
+    same approximation a legacy record gets. Entries that are not usable
+    intervals (a hand-edited document, a half-written one) are dropped, so a
+    corrupt record cannot leak into a priced session.
+    """
+    entries = []
+    for group in groups:
+        if not isinstance(group, (list, tuple)):
+            continue
+        for entry in group:
+            interval = _usable_interval(entry)
+            if interval is not None:
+                entries.append(interval)
+    if not entries:
+        return []
+    entries.sort(key=lambda item: item["started_at"])
+    if len(entries) <= MAX_SESSION_INTERVALS:
+        return entries
+    head = entries[: len(entries) - MAX_SESSION_INTERVALS + 1]
+    tail = entries[len(entries) - MAX_SESSION_INTERVALS + 1 :]
+    folded = {
+        "started_at": head[0]["started_at"],
+        "ended_at": head[-1]["ended_at"],
+        "wh": sum(interval["wh"] for interval in head),
+    }
+    return [folded] + tail
 
 
 def make_charger_session():
