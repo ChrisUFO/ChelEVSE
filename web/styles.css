@@ -2025,7 +2025,7 @@ input[aria-invalid='true'] {
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--muted);
 }
 .coverage-table tbody th {
   font-family: var(--mono);
