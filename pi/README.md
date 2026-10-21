@@ -474,20 +474,25 @@ one hour and its document to another. Both counters use
 overwriting.
 
 The write is a **field-path merge**,
-`doc.set({…}, merge=["kwh", "hours.<HH>", "updated_at"])`. Two simpler forms do
-not work. `merge=True` merges top-level keys only, so a dotted `"hours.21"` key
-is stored as a literal field name rather than a bucket — the SDK expands dotted
-keys in `update()` only. `update()` cannot create the document: it defaults to
-`exists=True` and raises `NotFound` on the first write of a new day. The merge
-list emits one write whose mask and transforms touch exactly `kwh`, that one
-hour bucket and `updated_at`, so sibling hours and every other field in the
-document survive. `Increment` on a missing field creates it, so no
-read-before-write or transaction is needed.
+``doc.set({…}, merge=["kwh", f"hours.`{hour}`", "updated_at"])``: the hour
+segment is backtick-quoted (``hours.`<HH>` ``) because the SDK's field-path
+parser rejects a bare numeric segment (`hours.21` is a syntax error, not a nested
+path), and `pi/tests/fakes.py` enforces the same rule so a regression fails in
+tests. Two simpler forms do not work. `merge=True` merges top-level keys only, so
+a dotted `"hours.21"` key is stored as a literal field name rather than a bucket —
+the SDK expands dotted keys in `update()` only. `update()` cannot create the
+document: it defaults to `exists=True` and raises `NotFound` on the first write
+of a new day. The merge list emits one write whose mask and transforms touch
+exactly `kwh`, that one hour bucket and `updated_at`, so sibling hours and every
+other field in the document survive. `Increment` on a missing field creates it,
+so no read-before-write or transaction is needed. Elsewhere in these notes a stored
+map key is written `hours["<HH>"]`, while the backticked dotted form
+``hours.`<HH>` `` is reserved for the Firestore field path in a merge mask.
 
 **Daylight saving.** Buckets are local wall-clock hours. On a fall-back day the
 repeated hour merges into one bucket (both `01` hours accumulate under
-`hours.01`, so that bucket can hold two hours of energy); on a spring-forward
-day `hours.02` is absent. `kwh` stays the day's true total either way, so for a
+`hours["01"]`, so that bucket can hold two hours of energy); on a spring-forward
+day `hours["02"]` is absent. `kwh` stays the day's true total either way, so for a
 day recorded since hourly capture began `sum(hours) == kwh`.
 
 **Accuracy.** A delta lands in the hour the bridge observed it in, so it can be
