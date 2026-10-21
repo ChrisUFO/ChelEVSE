@@ -1397,6 +1397,22 @@ test('the exact-date checker names the winning window, fallback and boundaries',
   assert.equal(previewRate(rows, '', new Date(2026, 0, 15, 12, 0)).rate, null);
 });
 
+test('the checker tells a day with no season apart from an hour no window covers', () => {
+  // The fallback wins for two different reasons; the checker has to name the
+  // right one, so the day-level miss is flagged and the hourly gap is not.
+  const rows = [rateRowFields(winterPeak)];
+  const noSeason = previewRate(rows, '0.31', new Date(2026, 6, 15, 12, 0));
+  assert.equal(noSeason.fallback, true);
+  assert.equal(noSeason.noSeason, true);
+  const hourGap = previewRate(rows, '0.31', new Date(2026, 0, 15, 12, 0));
+  assert.equal(hourGap.fallback, true);
+  assert.equal(hourGap.noSeason, false);
+  // A winning season rate is never reported as a day with no season.
+  const priced = previewRate(rows, '0.31', new Date(2026, 0, 15, 17, 0));
+  assert.equal(priced.fallback, false);
+  assert.equal(priced.noSeason, false);
+});
+
 test('the checker fields parse local dates by parts and format for people', () => {
   const date = parseLocalDateTime('2026-12-15', '18:30');
   assert.ok(date instanceof Date);
