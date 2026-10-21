@@ -417,54 +417,139 @@ class ScheduleStateTests(unittest.TestCase):
 
 
 class HistoryTests(unittest.TestCase):
+    """history/<local date>: one masked merge write per positive delta.
+
+    The local clock is patched so the document id and the hour bucket are
+    deterministic; every case goes through ``record`` for that reason.
+    """
+
     def setUp(self):
         self.db = FakeDB()
         self.tracker = bridge.StatusTracker(self.db)
         self.tracker.seeded = True
 
+    def record(self, total, when=None):
+        when = when or datetime(2026, 10, 21, 21, 30, tzinfo=UTC)
+        with mock.patch.object(bridge, "_localnow", return_value=when):
+            self.tracker.record_history(total)
+
     def history(self):
         return self.db.data.get("history", {})
 
     def test_first_observation_is_only_a_baseline(self):
-        self.tracker.record_history(100.0)
+        self.record(100.0)
         self.assertEqual(self.history(), {})
+        self.assertEqual(self.db.writes, [])
         self.assertEqual(self.tracker.total_energy, 100.0)
 
-    def test_delta_is_written_as_an_increment(self):
-        self.tracker.record_history(100.0)
-        self.tracker.record_history(112.5)
+    def test_delta_accumulates_the_daily_total_and_its_hour_bucket(self):
+        self.record(100.0)
+        self.record(112.5)
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 12.5)
+        self.assertEqual(day, "2026-10-21")
+        self.assertAlmostEqual(self.history()[day]["kwh"], 12.5)
+        self.assertAlmostEqual(self.history()[day]["hours"]["21"], 12.5)
+        # One write carries both counters, and the raw payload is the nested
+        # shape the SDK transforms: kwh plus hours.<HH>.
+        (write,) = self.db.writes
+        self.assertEqual(write[:3], ("set", "history", "2026-10-21"))
+        payload, merge = write[3], write[4]
+        self.assertIsInstance(payload["kwh"], bridge.firestore.Increment)
+        self.assertEqual(list(payload["hours"]), ["21"])
+        self.assertIsInstance(payload["hours"]["21"], bridge.firestore.Increment)
+        # The field-path merge list (not dotted keys with merge=True, not
+        # update()) is what keeps sibling hours and every other field alive.
+        self.assertEqual(merge, ["kwh", "hours.`21`", "updated_at"])
 
-    def test_failed_write_keeps_the_baseline_for_retry(self):
-        self.tracker.record_history(100.0)
+    def test_hours_stay_separate_and_kwh_carries_their_sum(self):
+        self.record(100.0)
+        self.record(112.5, datetime(2026, 10, 21, 21, 30, tzinfo=UTC))
+        self.record(118.0, datetime(2026, 10, 21, 22, 10, tzinfo=UTC))
+        (day,) = self.history()
+        self.assertAlmostEqual(self.history()[day]["kwh"], 18.0)
+        self.assertEqual(sorted(self.history()[day]["hours"]), ["21", "22"])
+        self.assertAlmostEqual(self.history()[day]["hours"]["21"], 12.5)
+        self.assertAlmostEqual(self.history()[day]["hours"]["22"], 5.5)
+
+    def test_local_midnight_rolls_to_the_new_day_and_leaves_the_old_one_alone(self):
+        self.record(100.0)
+        self.record(103.0, datetime(2026, 10, 21, 23, 59, 50, tzinfo=UTC))
+        self.record(105.0, datetime(2026, 10, 22, 0, 0, 10, tzinfo=UTC))
+        self.assertEqual(sorted(self.history()), ["2026-10-21", "2026-10-22"])
+        first = self.history()["2026-10-21"]
+        self.assertAlmostEqual(first["kwh"], 3.0)
+        self.assertEqual(list(first["hours"]), ["23"])
+        self.assertAlmostEqual(first["hours"]["23"], 3.0)
+        second = self.history()["2026-10-22"]
+        self.assertAlmostEqual(second["kwh"], 2.0)
+        self.assertEqual(list(second["hours"]), ["00"])
+        self.assertAlmostEqual(second["hours"]["00"], 2.0)
+
+    def test_failed_write_keeps_the_delta_for_a_later_retry_hour(self):
+        self.record(100.0)
         self.db.fail_writes = True
-        self.tracker.record_history(110.0)
+        self.record(110.0, datetime(2026, 10, 21, 21, 55, tzinfo=UTC))
+        # The baseline did not advance, so the whole delta is still owed.
         self.assertEqual(self.tracker.total_energy, 100.0)
-        self.db.fail_writes = False
-        self.tracker.record_history(120.0)
-        (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 20.0)
-
-    def test_meter_reset_rebaselines_without_a_negative_write(self):
-        self.tracker.record_history(100.0)
-        self.tracker.record_history(90.0)
         self.assertEqual(self.history(), {})
-        self.tracker.record_history(95.0)
+        self.db.fail_writes = False
+        self.record(110.0, datetime(2026, 10, 21, 22, 5, tzinfo=UTC))
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 5.0)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 10.0)
+        # The retry lands in the hour the bridge observed the energy in.
+        self.assertEqual(list(self.history()[day]["hours"]), ["22"])
+        self.assertAlmostEqual(self.history()[day]["hours"]["22"], 10.0)
+        self.assertEqual(self.tracker.total_energy, 110.0)
+        self.assertEqual(self.db.writes[-1][4], ["kwh", "hours.`22`", "updated_at"])
+
+    def test_meter_reset_writes_neither_counter_and_rebaselines(self):
+        self.record(100.0)
+        self.record(90.0)
+        self.assertEqual(self.history(), {})
+        self.assertEqual(self.db.writes, [])
+        self.assertEqual(self.tracker.total_energy, 90.0)
+        self.record(95.0)
+        (day,) = self.history()
+        self.assertAlmostEqual(self.history()[day]["kwh"], 5.0)
+        self.assertEqual(list(self.history()[day]["hours"]), ["21"])
+        self.assertAlmostEqual(self.history()[day]["hours"]["21"], 5.0)
+
+    def test_existing_document_without_hours_gains_a_bucket_and_keeps_its_fields(self):
+        self.db.data["history"] = {
+            "2026-10-21": {
+                "kwh": 40.0,
+                "updated_at": "2026-10-20T23:00:00Z",
+                "source": "manual-backfill",
+            }
+        }
+        self.record(100.0)
+        self.record(110.0)
+        doc = self.history()["2026-10-21"]
+        self.assertAlmostEqual(doc["kwh"], 50.0)
+        self.assertAlmostEqual(doc["hours"]["21"], 10.0)
+        # Fields outside the mask survive the merge untouched.
+        self.assertEqual(doc["source"], "manual-backfill")
+        self.assertIs(doc["updated_at"], bridge.firestore.SERVER_TIMESTAMP)
+
+    def test_unchanged_tick_performs_no_write(self):
+        self.record(100.0)
+        self.record(100.0)
+        self.record(100.0)
+        self.assertEqual(self.history(), {})
+        self.assertEqual(self.db.writes, [])
 
     def test_unseeded_history_waits_for_the_stored_baseline(self):
         self.tracker.seeded = False
-        self.tracker.record_history(100.0)
-        self.tracker.record_history(110.0)
+        self.record(100.0)
+        self.record(110.0)
         self.assertEqual(self.history(), {})
         self.db.data["status"] = {"current": {"total_energy": 90.0, "state": 1}}
         self.assertTrue(self.tracker.seed())
-        self.tracker.record_history(120.0)
+        self.record(120.0)
         (day,) = self.history()
         # 120 - 90, i.e. everything since the last stored reading.
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 30.0)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 30.0)
+        self.assertAlmostEqual(self.history()[day]["hours"]["21"], 30.0)
 
 
 class SeedTests(unittest.TestCase):

@@ -178,6 +178,15 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
+def _localnow():
+    """Current aware local time; the seam the day/hour attribution reads.
+
+    Pi-local wall clock is authoritative for ``history/<date>``: one read per
+    tick keeps the document id and its hour bucket on the same instant.
+    """
+    return datetime.now().astimezone()
+
+
 def load_env_file(path):
     """Parse KEY=VALUE lines; skip blanks, comments, and lines without '='."""
     values = {}
@@ -558,7 +567,11 @@ class StatusTracker:
         self._write_session(record.get("_id"), record)
 
     def record_history(self, total):
-        """Accumulate the total_energy delta into history/<local date>."""
+        """Accumulate the total_energy delta into history/<local date>.
+
+        One write moves both counters: the daily ``kwh`` total and the
+        ``hours.<HH>`` bucket for the hour the delta was observed in.
+        """
         if not _is_number(total):
             return
         total = float(total)
@@ -582,14 +595,25 @@ class StatusTracker:
         if delta <= 0:
             self.total_energy = total
             return
-        day = datetime.now().astimezone().date().isoformat()
+        moment = _localnow()
+        day = moment.date().isoformat()
+        hour = moment.strftime("%H")
         try:
             self.db.collection("history").document(day).set(
                 {
                     "kwh": firestore.Increment(delta),
+                    "hours": {hour: firestore.Increment(delta)},
                     "updated_at": firestore.SERVER_TIMESTAMP,
                 },
-                merge=True,
+                # A field-path merge list, not dotted keys with merge=True and
+                # not update(): merge=True merges top-level keys only and would
+                # store a literal "hours.21" field, while update() cannot create
+                # a missing document (it defaults to exists=True). This single
+                # write increments kwh and exactly one hours.<HH> leaf, leaving
+                # sibling hours and every other field untouched. The hour
+                # segment is backtick-quoted because a Firestore field path
+                # cannot carry a bare numeric segment.
+                merge=["kwh", f"hours.`{hour}`", "updated_at"],
             )
         except Exception as exc:
             # Keep the old baseline so the same delta is retried next tick.

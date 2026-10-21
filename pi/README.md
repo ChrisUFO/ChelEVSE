@@ -389,7 +389,7 @@ timestamped line and the loop carries on at its next interval.
 | Loop     | Firestore document | Content                                                                                            |
 | -------- | ------------------ | -------------------------------------------------------------------------------------------------- |
 | Status   | `status/current`   | Curated `/status` fields, merged on every poll                                                     |
-| Status   | `history/<date>`   | `{kwh, updated_at}`, accumulated from `total_energy` deltas                                        |
+| Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas      |
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed}` per completed plug-in session                                |
 | Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                            |
 | Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                        |
@@ -451,29 +451,63 @@ so revocation also stops push notifications, and the summary reports the count.
 ### Energy history
 
 Each successful status tick compares `total_energy` (kWh) with the previous
-reading and increments `history/<YYYY-MM-DD>` by the difference:
+reading and increments `history/<YYYY-MM-DD>` by the difference. One write
+moves both counters: the day's total and the bucket for the local hour the
+bridge observed the delta in.
 
+```js
+history/2026-10-18 {
+  kwh: 12.34,                        // the whole local day
+  hours: { "19": 5.1, "20": 7.24 },  // Pi-local hour buckets (keys 00–23)
+  updated_at: <server timestamp>
+}
 ```
-history/2026-10-18   { kwh: 12.34, updated_at: <server timestamp> }
-```
 
-The document id is the **local** date (`datetime.now().astimezone()`), so the
-day rolls over at the Pi's local midnight. Uses `firestore.Increment` with
-`merge=True`, so ticks and concurrent writes accumulate instead of overwriting.
+`hours` carries only the hours that recorded energy; a day written before
+hourly capture existed has `kwh` and no `hours`.
 
-`history/<date>` — not `history/daily/<date>` — because Firestore document
-paths must have an even number of segments, and `firestore.rules` exposes
-exactly `/history/{day}`. The first observation after boot is a baseline and is
-never written (otherwise the all-time `total_energy` would count as today's
-usage); at startup that baseline is seeded from the existing `status/current`
-document. If the seed read fails (e.g. the Pi booted before the network), the
-bridge retries it on later status ticks (at most every 30 s) and pauses history
-until it succeeds, so the eventual first delta still starts at the last stored
-reading instead of dropping the downtime energy. If `total_energy` drops
-(firmware reset), the bridge logs `total_energy reset; rebaselining history` and
-starts a new baseline without writing a negative delta. A failed history write
-does not advance the in-memory baseline: the same delta is retried on the next
-tick.
+The document id is the **local** date and the bucket key the **local** hour
+(`datetime.now().astimezone()`), both taken from one clock read, so the day
+rolls over at the Pi's local midnight and a tick cannot attribute its delta to
+one hour and its document to another. Both counters use
+`firestore.Increment`, so ticks and concurrent writes accumulate instead of
+overwriting.
+
+The write is a **field-path merge**,
+`doc.set({…}, merge=["kwh", "hours.<HH>", "updated_at"])`. Two simpler forms do
+not work. `merge=True` merges top-level keys only, so a dotted `"hours.21"` key
+is stored as a literal field name rather than a bucket — the SDK expands dotted
+keys in `update()` only. `update()` cannot create the document: it defaults to
+`exists=True` and raises `NotFound` on the first write of a new day. The merge
+list emits one write whose mask and transforms touch exactly `kwh`, that one
+hour bucket and `updated_at`, so sibling hours and every other field in the
+document survive. `Increment` on a missing field creates it, so no
+read-before-write or transaction is needed.
+
+**Daylight saving.** Buckets are local wall-clock hours. On a fall-back day the
+repeated hour merges into one bucket (both `01` hours accumulate under
+`hours.01`, so that bucket can hold two hours of energy); on a spring-forward
+day `hours.02` is absent. `kwh` stays the day's true total either way, so for a
+day recorded since hourly capture began `sum(hours) == kwh`.
+
+**Accuracy.** A delta lands in the hour the bridge observed it in, so it can be
+misattributed by at most one status interval: 10 s over HTTP, or the reconcile
+interval under MQTT.
+
+`history/<date>` — not `history/daily/<date>` — because
+Firestore document paths must have an even number of segments, and
+`firestore.rules` exposes exactly `/history/{day}`. The first observation after
+boot is a baseline and is never written (otherwise the all-time `total_energy`
+would count as today's usage); at startup that baseline is seeded from the
+existing `status/current` document. If the seed read fails (e.g. the Pi booted
+before the network), the bridge retries it on later status ticks (at most every
+30 s) and pauses history until it succeeds, so the eventual first delta still
+starts at the last stored reading instead of dropping the downtime energy. If
+`total_energy` drops (firmware reset), the bridge logs
+`total_energy reset; rebaselining history` and starts a new baseline without
+writing a negative delta. A failed history write does not advance the in-memory
+baseline: the same delta is retried on the next tick, and lands in the bucket
+for the hour that retry happens in.
 
 ### Charging sessions
 

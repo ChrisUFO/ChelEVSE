@@ -514,7 +514,7 @@ class StatusSinkTests(unittest.TestCase):
         self.apply(status_payload(total_energy=110), "mqtt")
         self.apply(status_payload(total_energy=110), "http")
         (day,) = self.db.data["history"]
-        self.assertAlmostEqual(self.db.data["history"][day]["kwh"]._value, 10.0)
+        self.assertAlmostEqual(self.db.data["history"][day]["kwh"], 10.0)
 
     def test_a_stale_http_response_cannot_reopen_a_closed_session(self):
         # The exact race: charging, an MQTT stop, then the reconcile reply that
