@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   DAY_PRESETS,
@@ -2040,6 +2041,119 @@ test('a date edit keeps the row objects the rate controls write to', () => {
 
   // `applyPeriodDates` itself stays copy-on-write for callers that rebuild.
   assert.notEqual(applyPeriodDates(rows, [1], '11-01', '09-29')[1], rest);
+});
+
+// A season with one all-day base and one evening window (both on the same dates,
+// so one period), plus a second season: enough for a base block, a window list
+// and a period the edit must leave alone.
+function staleRowDraft() {
+  return [
+    baseRateRow('summer-base', '0.3', [6, 7, 8, 9], { from: '06-15', to: '09-15' }),
+    {
+      id: 'summer-peak',
+      rate: '0.4',
+      days: [0, 1, 2, 3, 4, 5, 6],
+      start: '16:00',
+      end: '19:00',
+      months: [6, 7, 8, 9],
+      from: '06-15',
+      to: '09-15',
+    },
+    baseRateRow('winter', '0.2', [11], { from: '11-01', to: '03-31' }),
+  ];
+}
+
+test('ratePeriods exposes the draft row objects the rendered controls hold', () => {
+  // The editor's base and window controls receive `entry.row` and later write a
+  // typed rate back onto that object. If grouping handed out copies, every edit
+  // would land on an orphan. Assert identity against the draft itself, not just
+  // a shape check.
+  const draft = staleRowDraft();
+  const periods = ratePeriods(draft);
+  const summer = periods.find((period) => period.key === 'dates:06-15-09-15');
+  assert.ok(summer, 'the summer dates form one period');
+
+  // A real base plus a real window, so both branches are exercised.
+  assert.equal(summer.mode, 'base+windows');
+  assert.equal(summer.base.index, 0);
+  assert.equal(summer.base.row, draft[summer.base.index]);
+  assert.equal(summer.base.row.id, 'summer-base');
+  assert.deepEqual(
+    summer.rows.map((entry) => entry.index),
+    [0, 1],
+  );
+  summer.rows.forEach((entry) => assert.equal(entry.row, draft[entry.index]));
+  // The window list is the same objects too, not a re-wrapped copy.
+  assert.equal(summer.windows.length, 1);
+  assert.equal(summer.windows[0].row, draft[1]);
+  assert.equal(summer.windows[0].row.id, 'summer-peak');
+
+  // The other period's base is the draft's own row as well.
+  const winter = periods.find((period) => period.key === 'dates:11-01-03-31');
+  assert.ok(winter, 'the winter dates form a second period');
+  assert.equal(winter.base.row, draft[winter.base.index]);
+  assert.equal(winter.base.row, draft[2]);
+});
+
+test('an in-place date edit keeps the draft array and every row identity', () => {
+  // `applyPeriodDatesInPlace` is what the screen calls, and the property that
+  // makes it safe is exactly the identity: same list, same row objects, new
+  // values. Its values must still equal the copy-on-write variant's for the same
+  // input — including the branch where `monthsCovering` returns nothing (an
+  // invalid or absent date pair), which is the one most likely to diverge.
+  const cases = [
+    ['derived months', '11-01', '09-29'],
+    ['invalid pair', '02-30', '03-01'],
+    ['absent pair', null, null],
+  ];
+  for (const [name, from, to] of cases) {
+    const rows = staleRowDraft();
+    const before = [...rows];
+    const expected = applyPeriodDates(structuredClone(rows), [0, 1], from, to);
+    const returned = applyPeriodDatesInPlace(rows, [0, 1], from, to);
+
+    assert.equal(returned, rows, name);
+    rows.forEach((row, index) => assert.equal(row, before[index], `${name}: row ${index}`));
+    // Same values as the copy-on-write edit for the same input.
+    assert.deepEqual(rows, expected, name);
+    // The untouched season is unchanged and still in the draft.
+    assert.equal(rows[2], before[2], name);
+    assert.deepEqual(rows[2], before[2], name);
+  }
+});
+
+test('the copy-on-write date edit replaces exactly the rows it targets', () => {
+  // The property the in-place variant exists to avoid: `applyPeriodDates` builds
+  // a new row object for every target and leaves the others identical. Callers
+  // that rebuild need that; the editor must not take this path.
+  const rows = staleRowDraft();
+  const result = applyPeriodDates(rows, [1], '11-01', '09-29');
+  assert.notEqual(result, rows);
+  assert.equal(result[0], rows[0]);
+  assert.equal(result[2], rows[2]);
+  assert.notEqual(result[1], rows[1]);
+  // The draft row itself keeps the old values — it was replaced, not mutated.
+  assert.equal(rows[1].from, '06-15');
+  assert.equal(rows[1].to, '09-15');
+  assert.deepEqual(rows[1].months, [6, 7, 8, 9]);
+  assert.equal(result[1].from, '11-01');
+  assert.equal(result[1].to, '09-29');
+});
+
+test('the settings screen applies a date edit in place (source tripwire)', () => {
+  // Deliberate tripwire, not a behaviour test. The screen has no DOM harness, so
+  // the call site is read from source the way test/web/sw-shell.test.js reads
+  // web/sw.js. The pure tests above prove the in-place edit preserves identity;
+  // this pins the screen to calling it. Reverting `applyDates` to the
+  // copy-on-write `applyPeriodDates(` (the PR #78 regression) must fail here.
+  const source = readFileSync(new URL('../../web/js/screens/settings.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function applyDates(');
+  assert.ok(start >= 0, 'screens/settings.js declares applyDates');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'screens/settings.js closes applyDates');
+  const body = source.slice(start, end + 2);
+  assert.match(body, /draftRates = applyPeriodDatesInPlace\(/);
+  assert.doesNotMatch(body, /applyPeriodDates\(/);
 });
 
 test('a date row saves its derived months and appends from/to after them', () => {
