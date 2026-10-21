@@ -434,7 +434,7 @@ class HistoryTests(unittest.TestCase):
         self.tracker.record_history(100.0)
         self.tracker.record_history(112.5)
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 12.5)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 12.5)
 
     def test_failed_write_keeps_the_baseline_for_retry(self):
         self.tracker.record_history(100.0)
@@ -444,7 +444,7 @@ class HistoryTests(unittest.TestCase):
         self.db.fail_writes = False
         self.tracker.record_history(120.0)
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 20.0)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 20.0)
 
     def test_meter_reset_rebaselines_without_a_negative_write(self):
         self.tracker.record_history(100.0)
@@ -452,7 +452,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.history(), {})
         self.tracker.record_history(95.0)
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 5.0)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 5.0)
 
     def test_unseeded_history_waits_for_the_stored_baseline(self):
         self.tracker.seeded = False
@@ -464,7 +464,7 @@ class HistoryTests(unittest.TestCase):
         self.tracker.record_history(120.0)
         (day,) = self.history()
         # 120 - 90, i.e. everything since the last stored reading.
-        self.assertAlmostEqual(self.history()[day]["kwh"]._value, 30.0)
+        self.assertAlmostEqual(self.history()[day]["kwh"], 30.0)
 
 
 class SeedTests(unittest.TestCase):

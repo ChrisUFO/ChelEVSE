@@ -7,6 +7,100 @@ the small surface bridge.py and acl.py use.
 import json
 
 import requests
+from firebase_admin import firestore
+
+
+def _is_number(value):
+    """True for int/float but not bool (bool is a subclass of int)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _field_path_segments(path):
+    """Split ``a.b`` or ``a.`21`.c`` into segments (backticks quote a segment).
+
+    Firestore field paths cannot carry a bare numeric segment -- the SDK's
+    parser rejects ``hours.21`` -- so a write mask names the hour bucket as
+    ``hours.`21```. The fake enforces the same rule, so a mask that only works
+    on the fake cannot pass here.
+    """
+    segments = []
+    current = []
+    in_quotes = False
+    was_quoted = False
+    for char in path:
+        if char == "`":
+            in_quotes = not in_quotes
+            was_quoted = True
+        elif char == "." and not in_quotes:
+            segments.append(("".join(current), was_quoted))
+            current = []
+            was_quoted = False
+        else:
+            current.append(char)
+    segments.append(("".join(current), was_quoted))
+    if in_quotes:
+        raise ValueError(f"unterminated quote in field path {path!r}")
+    for name, quoted in segments:
+        if not name:
+            raise ValueError(f"empty segment in field path {path!r}")
+        if not quoted and name.isdigit():
+            raise ValueError(f"numeric segment must be quoted in {path!r}")
+    return [name for name, _ in segments]
+
+
+def _leaf_write(existing, value, field):
+    """One leaf of a write: an Increment accumulates, a plain value replaces."""
+    if isinstance(value, firestore.Increment):
+        if existing is None:
+            return value._value
+        if not _is_number(existing):
+            raise TypeError(f"Increment on non-numeric field {field!r}")
+        return existing + value._value
+    return value
+
+
+def _merge_top_level(existing, data):
+    """``set(..., merge=True)``: merge top-level keys; nested maps replace."""
+    merged = dict(existing)
+    for key, value in data.items():
+        merged[key] = _leaf_write(merged.get(key), value, key)
+    return merged
+
+
+def _write_path(target, segments, value):
+    """Write one masked field path, copying each map so siblings survive."""
+    head = segments[0]
+    existing = target.get(head)
+    if len(segments) == 1:
+        target[head] = _leaf_write(existing, value, ".".join(segments))
+        return
+    if existing is None:
+        child = {}
+    elif isinstance(existing, dict):
+        child = dict(existing)
+    else:
+        # The server rejects creating a nested field under a non-map value.
+        raise TypeError(f"cannot write {'.'.join(segments)!r} under a non-map field")
+    _write_path(child, segments[1:], value)
+    target[head] = child
+
+
+def _merge_field_paths(existing, data, field_paths):
+    """``set(..., merge=[paths])``: write exactly the named leaves.
+
+    The payload is addressed by the same nested shape the caller sent (the hour
+    bucket lives under ``hours``), and only the masked leaf is written, so
+    sibling leaves and every unmasked field stay exactly as they were. A mask
+    naming a field the payload does not carry raises, as the server would.
+    """
+    merged = dict(existing)
+    for path in field_paths:
+        segments = _field_path_segments(path)
+        value = data
+        for segment in segments:
+            value = value[segment]
+        _write_path(merged, segments, value)
+    return merged
 
 
 class FakeSnapshot:
@@ -45,19 +139,33 @@ class FakeDocument:
         return FakeSnapshot(self._db, self.collection, self.id, store[self.id])
 
     def set(self, data, merge=False):
+        """Model ``DocumentReference.set``, including the three merge forms.
+
+        ``merge=False`` replaces the document, ``merge=True`` merges top-level
+        keys only, and a list of field paths merges exactly those leaves
+        (creating the document when absent, with no existence precondition).
+        ``Increment`` transforms resolve to numbers here, so ``db.data`` reads
+        like a stored document; ``db.writes`` keeps the raw payload and the
+        merge argument the caller passed, for payload/mask assertions.
+        """
         if self._db.fail_writes:
             raise RuntimeError("write failed")
-        self._db.writes.append(("set", self.collection, self.id, data))
+        self._db.writes.append(("set", self.collection, self.id, data, merge))
         store = self._db.data.setdefault(self.collection, {})
-        if merge and self.id in store:
-            store[self.id].update(data)
+        existing = store.get(self.id)
+        if merge is True:
+            store[self.id] = _merge_top_level(existing or {}, data)
+        elif isinstance(merge, (list, tuple)):
+            store[self.id] = _merge_field_paths(existing or {}, data, merge)
+        elif merge:
+            raise TypeError(f"unsupported merge argument {merge!r}")
         else:
-            store[self.id] = dict(data)
+            store[self.id] = _merge_top_level({}, data)
 
     def update(self, data):
         if self._db.fail_writes:
             raise RuntimeError("write failed")
-        self._db.writes.append(("update", self.collection, self.id, data))
+        self._db.writes.append(("update", self.collection, self.id, data, None))
         store = self._db.data.setdefault(self.collection, {})
         if self.id not in store:
             raise KeyError(self.id)
@@ -66,7 +174,7 @@ class FakeDocument:
     def delete(self):
         if self._db.fail_deletes:
             raise RuntimeError("delete failed")
-        self._db.writes.append(("delete", self.collection, self.id, None))
+        self._db.writes.append(("delete", self.collection, self.id, None, None))
         self._db.data.get(self.collection, {}).pop(self.id, None)
 
 
