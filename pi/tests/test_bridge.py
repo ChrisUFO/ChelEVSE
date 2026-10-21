@@ -688,19 +688,33 @@ class IntervalTests(unittest.TestCase):
         self.tracker = bridge.StatusTracker(self.db)
         self.now = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
         self.mono = 1000.0
+        self.boot = 5000.0
 
-    def tick(self, state, energy, elapsed, vehicle=1, step=timedelta(minutes=20), tracker=None):
+    def tick(
+        self,
+        state,
+        energy,
+        elapsed,
+        vehicle=1,
+        step=timedelta(minutes=20),
+        tracker=None,
+        mono_step=None,
+    ):
         """One status tick ``step`` later; returns that instant.
 
-        Both clocks move with the step: ``_utcnow`` stamps the interval bounds and
-        the monotonic clock measures the gap the step allowance is derived from.
-        A 20 min default keeps a 2–3 kWh step at ~7 kW, i.e. a plausible charger.
+        Both clocks move with the step: ``_utcnow`` stamps the interval bounds
+        and the interval clock (``CLOCK_BOOTTIME`` here) measures the gap the
+        step allowance is derived from. ``mono_step`` advances the plain
+        monotonic clock by something else, to reproduce a suspend — where
+        monotonic stops but boottime keeps counting. A 20 min default keeps a
+        2–3 kWh step at ~7 kW, i.e. a plausible charger.
         """
         self.now += step
-        self.mono += step.total_seconds()
+        self.mono += (mono_step if mono_step is not None else step).total_seconds()
+        self.boot += step.total_seconds()
         with mock.patch.object(bridge, "_utcnow", return_value=self.now), mock.patch.object(
             bridge.time, "monotonic", return_value=self.mono
-        ):
+        ), mock.patch.object(bridge.time, "clock_gettime", return_value=self.boot):
             (tracker or self.tracker).observe(
                 {
                     "state": state,
@@ -820,6 +834,59 @@ class IntervalTests(unittest.TestCase):
         self.assertEqual(len(reset), 1, messages)
         self.assertIn("-2900 Wh", reset[0])
         self.assertIn("1200 s", reset[0])
+
+    def test_a_suspend_sized_gap_keeps_a_legitimate_step(self):
+        # Two hours of suspend mid-charge: `time.monotonic()` slept through it
+        # (60 s of awake time), so a monotonic gap would call 6 kWh impossible.
+        # The interval clock includes suspend, so the step is attributed.
+        with mock.patch.object(bridge, "log") as log:
+            started = self.tick(3, 0, 0)
+            self.tick(
+                3,
+                6000,
+                7200,
+                step=timedelta(hours=2),
+                mono_step=timedelta(seconds=60),
+            )
+            ended = self.tick(1, 6000, 7260)
+        messages = [call.args[0] for call in log.call_args_list]
+        self.assertEqual(
+            [line for line in messages if "interval step dropped" in line], [], messages
+        )
+        self.assertEqual(
+            [line for line in messages if "counter reset" in line], [], messages
+        )
+        # The presumption behind the test: the awake-time gap could not have
+        # carried the step, so the boottime gap is what kept it.
+        self.assertLess(bridge._interval_step_allowance(60), 6000)
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        self.assertAlmostEqual(interval["wh"], 6000.0)
+        self.assertEqual((interval["started_at"], interval["ended_at"]), (started, ended))
+
+    def test_a_new_plug_in_counter_is_not_logged_as_a_reset(self):
+        # The firmware clears session_energy at unplug, so the next plug-in's
+        # first reading is a fresh baseline — not a counter that went backwards.
+        with mock.patch.object(bridge, "log") as log:
+            self.tick(3, 0, 0)
+            self.tick(3, 4000, 1200)
+            self.tick(1, 0, 0)  # unplug clears the counters
+            self.tick(3, 0, 0)  # new plug-in: counter starts at zero
+            self.tick(3, 3000, 1200)
+            self.tick(1, 3000, 2400)
+        messages = [call.args[0] for call in log.call_args_list]
+        self.assertEqual(
+            [line for line in messages if "counter reset" in line], [], messages
+        )
+        opened = [line for line in messages if "interval opened" in line]
+        self.assertEqual(len(opened), 2, messages)
+        # Nothing but the log changed: each plug-in still carries its own growth.
+        stored = sum(
+            entry["wh"]
+            for record in self.sessions().values()
+            for entry in record.get("intervals", [])
+        )
+        self.assertAlmostEqual(stored, 7000.0)
 
     def test_a_long_outage_step_is_kept(self):
         # 20 kWh across a 2 h stall is ~10 kW, well inside what the charger could
