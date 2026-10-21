@@ -18,6 +18,7 @@ import {
   sumSeries,
 } from '../history.js';
 import { aggregateCostLabel, costSettings, hasRateSchedule, sessionCostLabel } from '../cost.js';
+import { planHasUnpriced } from '../settings.js';
 import { fmtK, formatDuration, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -83,7 +84,22 @@ function setCostNote(visible) {
   if (note) note.hidden = !visible;
 }
 
+// A saved plan with any unpriced instant advertises it on History: with a
+// schedule, some sessions can be priced at 0.00 without any other signal. Kept as
+// a pure predicate so the wiring is testable without a DOM.
+export function showPlanBanner(data) {
+  const normalized = costSettings(data);
+  return hasRateSchedule(normalized) && planHasUnpriced(normalized.rates);
+}
+
+function renderPlanBanner() {
+  const banner = $('history-plan-banner');
+  if (!banner) return;
+  banner.hidden = !showPlanBanner(settings);
+}
+
 function renderSummary() {
+  renderPlanBanner();
   if (!series.length) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
@@ -536,6 +552,7 @@ export function activateHistory() {
 // decides that the aggregate cost is hidden.
 export function showHistorySettings(data) {
   settings = costSettings(data);
+  renderPlanBanner();
   if (series.length) {
     const hadFocus = $('history-chart').contains(document.activeElement);
     renderHistory();
@@ -553,6 +570,8 @@ export function resetHistory() {
   loaded = false;
   loading = false;
   settings = null;
+  const planBanner = $('history-plan-banner');
+  if (planBanner) planBanner.hidden = true;
   series = [];
   selectedId = null;
   todayId = null;

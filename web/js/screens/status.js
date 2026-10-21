@@ -16,7 +16,7 @@ import {
   stateFor,
   toNumber,
 } from '../format.js';
-import { costSettings, statusCostLabel } from '../cost.js';
+import { costSettings, statusCostLabel, statusCostUncovered } from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -35,7 +35,8 @@ const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 let status = null;
 let schedule = null;
 // Full cost settings ({rate, currency, rates}); the schedule prices a session
-// over its elapsed interval and the flat rate is the fallback.
+// over its elapsed interval, and the stored flat rate applies only when no row
+// exists at all.
 let settings = null;
 let active = false;
 let ampsTouched = false;
@@ -103,7 +104,21 @@ function renderCost() {
   const cost = statusCostLabel(status, settings);
   const el = $('session-cost');
   el.hidden = !cost;
-  setText(el, cost || '');
+  el.replaceChildren();
+  if (cost) {
+    el.append(document.createTextNode(cost));
+    if (statusCostUncovered(status, settings)) {
+      // Its own line under the figure, in the warning colour: "includes unpriced
+      // time" was a 10.5 px footnote that wrapped mid-phrase under a green zero.
+      // "Understates cost" says what the caveat does to the number.
+      const marker = document.createElement('span');
+      marker.className = 'cost-unpriced';
+      marker.textContent = 'understates cost';
+      marker.title =
+        'Some hours in this session have no price and count as 0.00, so this cost is lower than the real one.';
+      el.append(marker);
+    }
+  }
   // The tile is half-width: the cost replaces the caption rather than wrapping.
   $('session-sub').hidden = Boolean(cost);
 }
@@ -363,8 +378,8 @@ export function showCommands(cmds) {
 }
 
 // settings/current — null until an owner saves a rate. The whole document is
-// kept so the live cost can use the optional schedule; the flat rate remains the
-// fallback for any moment no window covers.
+// kept so the live cost can use the optional schedule; once it holds any row the
+// stored flat rate is ignored and an uncovered moment prices at 0.00.
 export function showSettings(data) {
   settings = costSettings(data);
   renderCost();

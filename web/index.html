@@ -404,6 +404,10 @@
           <p class="summary-note" id="history-cost-note" hidden>
             Time-of-use pricing hides the daily and 30-day cost — costs are shown per session.
           </p>
+          <p class="plan-banner" id="history-plan-banner" hidden>
+            Some dates or hours have no price and are shown at 0.00.
+            <a href="#config">Open settings</a>
+          </p>
 
           <section class="chart-card" style="--i: 2" aria-labelledby="chart-heading">
             <h2 class="sr-only" id="chart-heading">Daily energy</h2>
@@ -556,18 +560,60 @@
               <div class="rate-editor" role="group" aria-labelledby="rates-heading">
                 <div class="rate-head">
                   <div class="rate-head-copy">
-                    <h3 id="rates-heading">Time-of-use &amp; seasonal rates</h3>
+                    <h3 id="rates-heading">Electricity price</h3>
                     <p class="block-sub">Times are local, and every price is per kWh.</p>
                   </div>
                 </div>
 
-                <div class="fallback-card">
-                  <div class="fallback-head">
-                    <h4 class="fallback-title">All other times</h4>
-                    <p class="fallback-note">The price for every other hour.</p>
+                <div class="rate-mode" id="rate-mode" role="radiogroup" aria-label="Rate mode">
+                  <button
+                    class="rate-mode-option"
+                    id="rate-mode-flat"
+                    type="button"
+                    role="radio"
+                    aria-checked="true"
+                    data-mode="flat"
+                  >
+                    One rate
+                  </button>
+                  <button
+                    class="rate-mode-option"
+                    id="rate-mode-seasons"
+                    type="button"
+                    role="radio"
+                    aria-checked="false"
+                    data-mode="seasons"
+                  >
+                    Seasons &amp; time-of-use
+                  </button>
+                </div>
+                <div
+                  class="rate-mode-confirm"
+                  id="rate-mode-confirm"
+                  role="alertdialog"
+                  aria-labelledby="rate-mode-confirm-text"
+                  hidden
+                >
+                  <p id="rate-mode-confirm-text">
+                    One rate will apply everywhere. Seasons and daily windows will be removed.
+                  </p>
+                  <div class="rate-mode-confirm-actions">
+                    <button class="btn small solid" id="cancel-one-rate" type="button">
+                      Cancel
+                    </button>
+                    <button class="btn small danger" id="confirm-one-rate" type="button">
+                      Switch to one rate
+                    </button>
+                  </div>
+                </div>
+
+                <div class="fallback-card" id="fallback-card">
+                  <div class="fallback-head" id="fallback-head">
+                    <h4 class="fallback-title">One rate</h4>
+                    <p class="fallback-note">The price for every hour.</p>
                   </div>
                   <div class="settings-grid">
-                    <div class="field">
+                    <div class="field" id="fallback-rate-field">
                       <label class="field-label" for="setting-rate">Rate</label>
                       <div class="input-wrap">
                         <input
@@ -578,7 +624,6 @@
                           max="5"
                           step="0.001"
                           inputmode="decimal"
-                          placeholder="0.000"
                           autocomplete="off"
                           aria-describedby="rate-hint rate-error"
                         />
@@ -605,30 +650,6 @@
                   </div>
                 </div>
 
-                <div class="flat-state" id="rates-flat">
-                  <p class="flat-hint">
-                    Set one price for a season, or add daily windows when the price changes by time
-                    of day.
-                  </p>
-                  <button class="btn add-rule" id="add-rate-plan" type="button">
-                    <span class="add-plus" aria-hidden="true">+</span
-                    ><span>Add season or time-of-use</span>
-                  </button>
-                  <div class="plan-choices" id="rate-plan-choices" hidden>
-                    <button class="plan-choice" id="add-season-rate" type="button">
-                      <span class="plan-choice-title">Season rate</span>
-                      <span class="plan-choice-note">One price for every hour in the season.</span>
-                    </button>
-                    <button class="plan-choice" id="add-tou" type="button">
-                      <span class="plan-choice-title">Time-of-use windows</span>
-                      <span class="plan-choice-note">Different prices by day and time.</span>
-                    </button>
-                    <button class="link-btn plan-cancel" id="cancel-rate-plan" type="button">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-
                 <div class="rate-plan" id="rates-plan" hidden>
                   <div class="plan-head">
                     <div class="plan-head-copy">
@@ -640,17 +661,35 @@
                     </div>
                   </div>
                   <p class="plan-help" id="plan-help">
-                    Seasons can cover months or specific dates, and they can overlap. Each table
-                    shows this season's own windows and names any other season that applies; the
-                    checker shows the combined price.
+                    A season repeats every year. Give each season a base rate, then add daily
+                    windows where the price changes. Dates outside every season cost 0.00.
                   </p>
+                  <div class="plan-seed" id="plan-seed" hidden>
+                    <p class="plan-seed-note" id="plan-seed-note" role="status"></p>
+                    <button class="btn small solid" id="seed-cover" type="button">
+                      Cover the rest of the year
+                    </button>
+                  </div>
                   <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
                   <div class="rate-periods" id="rate-periods"></div>
-                  <p class="other-times-line" id="other-times-line" hidden></p>
+                  <div
+                    class="uncovered-line"
+                    id="uncovered-line"
+                    role="status"
+                    aria-live="polite"
+                    hidden
+                  >
+                    <span class="uncovered-copy">
+                      <span><strong>Uncovered dates</strong> — priced at 0.00</span>
+                      <span class="uncovered-dates" id="uncovered-dates"></span>
+                    </span>
+                    <button class="btn small" id="fill-gaps" type="button">Fill gaps</button>
+                  </div>
                   <div class="plan-actions">
                     <button class="btn small" id="add-season" type="button">
                       <span class="add-plus" aria-hidden="true">+</span><span>Add a season</span>
                     </button>
+                    <p class="plan-action-note" id="add-season-note" role="status" hidden></p>
                   </div>
 
                   <section class="preview-card" id="preview-card" aria-labelledby="preview-heading">

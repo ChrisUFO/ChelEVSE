@@ -29,7 +29,12 @@
 // Anchoring to the write freezes the figure until a new write arrives.
 
 import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
-import { costForInterval, costForSession, normalizeRateSchedule } from './rates.js';
+import {
+  costForInterval,
+  costForSession,
+  intervalUncovered,
+  normalizeRateSchedule,
+} from './rates.js';
 
 // Stored settings as a usable schedule: {rate, currency, rates}. Invalid rows are
 // dropped by the shared normalizer, so a corrupt list falls back to the flat rate.
@@ -93,6 +98,22 @@ export function statusCostLabel(status, settings) {
     settings,
     liveCharging(status),
   );
+}
+
+// Whether the live cost interval includes a slice with no base/window price.
+// Only a non-empty schedule can have such a slice; the status screen adds the
+// marker beside the cost, not a second number.
+export function statusCostUncovered(status, settings) {
+  if (!status) return false;
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return false;
+  const updated = status.updated_at;
+  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
+  const seconds = toNumber(status.elapsed);
+  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
+    return false;
+  }
+  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
 }
 
 // Finished session cost: its own stored interval under the schedule, or the flat

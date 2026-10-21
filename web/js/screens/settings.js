@@ -1,5 +1,5 @@
-// App-settings card: the all-other-times rate first, then an optional plan of
-// month or date seasons with daily windows, and a checker that reads the draft.
+// App-settings card: one rate, or a plan of date/month seasons each with a base
+// rate and optional daily windows, plus a checker that reads the draft.
 //
 // The stored document keeps one flat `rates` list; periods are a presentation
 // over each row's shared scope (`months`, or `from`/`to`), so grouping never
@@ -13,13 +13,12 @@ import { DAY_NAMES } from '../schedule.js';
 import { $, setText } from '../ui.js';
 import {
   DAY_PRESETS,
-  MIX_COVERAGE_MESSAGE,
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   RATE_CAP_REMEDY,
-  SEASON_RATE_MIX_MESSAGE,
   applyPeriodDates,
   applyPeriodMonths,
+  baseRateRow,
   canDuplicatePeriod,
   complementScope,
   copyPeriodRows,
@@ -29,26 +28,31 @@ import {
   dateSetText,
   dayPresetFor,
   defaultRateRow,
+  flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
-  isSeasonRateRow,
   largestDateScope,
-  largestMonthRun,
+  mergeDateRanges,
   minutesToClock,
+  monthEditorIsLegacy,
   nextWindowPreset,
   normalizeSettings,
   parseLocalDateTime,
+  periodBaseRate,
   periodCoverage,
   periodDateBounds,
   periodDateSeed,
   periodEffectiveRange,
+  periodHasBaseOverlap,
   periodHasDates,
-  periodRateMode,
   periodRowScope,
+  planHasUnpriced,
   planProblemText,
   previewBlocker,
   previewRate,
+  rateEditorMode,
   rateIsUsable,
+  rateMonthsText,
   ratePeriods,
   ratePlanRange,
   rateRowFields,
@@ -58,6 +62,7 @@ import {
   rateWindowSummary,
   reconcileSettingsSave,
   saveButtonState,
+  scheduleToFlatRate,
   scopesOverlap,
   segmentNote,
   settingsDraftMatches,
@@ -69,13 +74,19 @@ import {
   timeInputValue,
   toggledMonthScope,
   uncoveredDateRanges,
-  uncoveredMonths,
+  uncoveredGapScopes,
   validateRateEditorRows,
   validateSettings,
   validationProblemCount,
   windowLabel,
 } from '../settings.js';
-import { MAX_RATE_WINDOWS, monthsCovering, parseRateValue } from '../rates.js';
+import {
+  MAX_RATE_WINDOWS,
+  isBaseWindow,
+  monthsCovering,
+  parseMonthDay,
+  parseRateValue,
+} from '../rates.js';
 import { saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 
@@ -105,6 +116,12 @@ let windowCards = [];
 let expandedPeriods = new Set();
 // The period whose destructive confirmation is showing.
 let removeConfirmKey = null;
+// The period key of the season the mode switch seeded, while the plan note that
+// explains the seed still applies. Empty when there is nothing to explain.
+let seedNoticeKey = '';
+// Whether the draft leaves any instant with no price. Recomputed once per paint
+// so every card's base block can describe the same plan without re-walking it.
+let planUnpriced = false;
 let rateValidation = validateRateEditorRows([]);
 
 function readFields() {
@@ -113,6 +130,129 @@ function readFields() {
     currency: $('setting-currency').value,
     rates: draftRates,
   };
+}
+
+function currentRateMode() {
+  return rateEditorMode(draftRates);
+}
+
+// The mode is derived from the draft rows, never stored. One rate is the flat
+// pair; Seasons hides the unused fallback rate (the shared currency remains).
+function paintRateMode() {
+  const mode = currentRateMode();
+  const seasons = mode === 'seasons';
+  // While the switch-to-One-rate panel is open the owner is being asked to
+  // accept a price: the RATE field it would apply stays visible, so the decision
+  // is made on the number, not on the season's summary.
+  const confirming = !$('rate-mode-confirm').hidden;
+  const hiddenOnSeasons = seasons && !confirming;
+  const flatUsable = rateIsUsable($('setting-rate').value);
+  const flatButton = $('rate-mode-flat');
+  const seasonsButton = $('rate-mode-seasons');
+  flatButton.setAttribute('aria-checked', String(!seasons));
+  seasonsButton.setAttribute('aria-checked', String(seasons));
+  flatButton.tabIndex = seasons ? -1 : 0;
+  seasonsButton.tabIndex = seasons ? 0 : -1;
+  flatButton.disabled = settingsSaving;
+  seasonsButton.disabled = settingsSaving || (!seasons && !flatUsable);
+  seasonsButton.title =
+    !seasons && !flatUsable ? 'Enter the one rate before switching to seasons.' : '';
+  $('fallback-card').classList.toggle('is-season', hiddenOnSeasons);
+  $('fallback-head').hidden = hiddenOnSeasons;
+  $('fallback-rate-field').hidden = hiddenOnSeasons;
+  $('rates-plan').hidden = !seasons;
+  if (!seasons) $('rate-mode-confirm').hidden = true;
+  // The panel names the price it would apply, and RATE/CURRENCY stay editable
+  // while it is open, so the sentence is rewritten from the current draft on
+  // every repaint: the price the owner reads is the price confirm applies.
+  if (!$('rate-mode-confirm').hidden) {
+    setText($('rate-mode-confirm-text'), oneRateConfirmText());
+  }
+}
+
+function focusBaseRate() {
+  const period = periodCards[0];
+  if (period && period.baseInput) {
+    period.baseInput.focus({ preventScroll: true });
+    scrollToNode(period.node);
+  }
+}
+
+// Flat -> Seasons seeds the current month at the flat rate, not an All-year
+// base: an All-year base covers every date, so the next "Add a season" has
+// nowhere non-overlapping to go and is disabled the moment the mode switch
+// finishes. The rest of the year stays an uncovered gap (the plan says so and
+// offers Fill gaps) and Add a season stays live.
+function switchToSeasons() {
+  if (settingsSaving || currentRateMode() === 'seasons') return;
+  const flat = $('setting-rate').value;
+  if (!rateIsUsable(flat)) {
+    $('setting-rate').focus({ preventScroll: true });
+    return;
+  }
+  $('rate-mode-confirm').hidden = true;
+  draftRates = [flatToScheduleRow(crypto.randomUUID(), flat)];
+  planPeriods = ratePeriodsForDraft();
+  expandedPeriods = new Set(planPeriods.map((period) => period.key));
+  seedNoticeKey = planPeriods.length === 1 ? planPeriods[0].key : '';
+  markEdited();
+  renderPlan();
+  paintRateMode();
+  focusBaseRate();
+}
+
+// The confirmation has to name the price it would apply: Seasons mode hides the
+// RATE field and the plan summary quotes the season's range, so without the
+// number the owner consents to a price they cannot see. `paintRateMode` rewrites
+// it while the panel is open, so an edit made during the confirmation cannot
+// leave a stale number on screen.
+function oneRateConfirmText() {
+  const flat = scheduleToFlatRate(draftRates, $('setting-rate').value);
+  const price = rateIsUsable(flat) ? priceText(flat) : '';
+  return price
+    ? `One rate of ${price} will apply everywhere. Seasons and daily windows will be removed.`
+    : 'One rate will apply everywhere. Seasons and daily windows will be removed.';
+}
+
+function requestOneRate() {
+  if (settingsSaving || currentRateMode() === 'flat') return;
+  const confirm = $('rate-mode-confirm');
+  confirm.hidden = false;
+  paintRateMode();
+  $('cancel-one-rate').focus({ preventScroll: true });
+}
+
+function cancelOneRate() {
+  $('rate-mode-confirm').hidden = true;
+  paintRateMode();
+  $('rate-mode-seasons').focus({ preventScroll: true });
+}
+
+function confirmOneRate() {
+  if (settingsSaving || currentRateMode() === 'flat') return;
+  const flat = scheduleToFlatRate(draftRates, $('setting-rate').value);
+  if (typeof flat === 'number') $('setting-rate').value = String(flat);
+  draftRates = [];
+  planPeriods = [];
+  expandedPeriods.clear();
+  removeConfirmKey = null;
+  seedNoticeKey = '';
+  $('rate-mode-confirm').hidden = true;
+  markEdited();
+  renderPlan();
+  paintRateMode();
+  $('setting-rate').focus({ preventScroll: true });
+}
+
+function paintModeKeyboard(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const next = event.currentTarget.dataset.mode === 'flat' ? 'seasons' : 'flat';
+  const button = next === 'seasons' ? $('rate-mode-seasons') : $('rate-mode-flat');
+  if (button.disabled) return;
+  button.focus({ preventScroll: true });
+  if (next === 'seasons') switchToSeasons();
+  else requestOneRate();
 }
 
 function currency() {
@@ -152,37 +292,49 @@ function windowRates() {
 }
 
 function tierClass(tier) {
-  // A season rate is its own band: it is not a relative tier, so it gets its own
-  // name and dot wherever a band is drawn.
-  if (tier === 'Season rate') return 'season';
+  if (tier === 'Base') return 'base';
+  if (tier === 'Uncovered') return 'uncovered';
   if (tier === 'Off-peak') return 'off';
   if (tier === 'Peak') return 'peak';
   if (tier === 'Shoulder') return 'shoulder';
+  // A priced window in a season with no base has no relative tier, but it is
+  // still a priced band of its own, not the "Same price" grey.
+  if (tier === 'Window') return 'window';
   return 'same';
 }
 
-// The legend's order, cheap to expensive with the fallback last. The labels are
-// never listed here: they come from the same resolved segments the table names,
-// so a band cannot be "Off-peak" in the legend and "Season rate" in the row.
-const LEGEND_ORDER = ['season', 'off', 'shoulder', 'peak', 'same', 'base'];
+// The legend's order: base first, then the relative override tiers, then the
+// uncovered 0.00 slice.
+const LEGEND_ORDER = ['base', 'window', 'off', 'shoulder', 'peak', 'same', 'uncovered'];
 
 function segmentClass(segment) {
-  if (!segment || !segment.window) return 'base';
-  return tierClass(rateSegmentLabel(segment, windowRates(), readFields().rate));
+  if (!segment || !segment.window) return 'uncovered';
+  const owner = planPeriods.find((period) =>
+    period.rows.some((entry) => entry.row && entry.row.id === segment.window.id),
+  );
+  const base = owner ? periodBaseRate(owner) : null;
+  const rates = owner ? owner.rows.map((entry) => entry.row.rate) : windowRates();
+  return tierClass(rateSegmentLabel(segment, rates, base));
 }
 
-function windowName(row) {
-  const tier = bandName(row);
+function windowName(row, period = null) {
+  const tier = bandName(row, period);
   return `${tier ? `${tier} ` : ''}${rateWindowSummary(row)}`;
 }
 
-// A row's visible band. A season rate is named for what it is: the price tier a
-// relative comparison invents ("Off-peak", "Same price") would title a
-// whole-season price with a band the owner never chose, contradicting the
-// "one price for every hour" note on the same card.
-function bandName(row) {
-  if (isSeasonRateRow(row)) return 'Season rate';
-  return rateTierFor(row && row.rate, windowRates(), readFields().rate);
+// A daily window's visible band, relative to its season's base. A base row is
+// handled by the Base rate block and the coverage label, not this tier name.
+//
+// The ranking uses the season's own rows, which is what the coverage table and
+// the legend rank against, so a card can never say "Peak" where its row says
+// "Window". A season with no base has no reference price at all: its windows are
+// "Window" everywhere instead of being ranked against another season's base.
+function bandName(row, period = null) {
+  if (isBaseWindow(row)) return 'Base';
+  const base = period ? periodBaseRate(period) : null;
+  if (period && base == null) return 'Window';
+  const rates = period ? period.rows.map((entry) => entry.row.rate) : windowRates();
+  return rateTierFor(row && row.rate, rates, period ? base : readFields().rate);
 }
 
 // A new window is the everyday overnight preset for a first window, and the
@@ -201,39 +353,28 @@ function newWindowRow(months, preset, dates = null) {
   return row;
 }
 
-// A season rate is the everyday all-day window: one price for every hour in the
-// season. The empty price keeps it visibly incomplete until the owner sets it.
-function seasonRateRow(months, dates = null) {
-  const row = defaultRateRow(crypto.randomUUID(), months, dates);
-  row.days = [0, 1, 2, 3, 4, 5, 6];
-  row.start = '00:00';
-  row.end = '00:00';
-  return row;
+// The date inputs are real date pickers, but only a month and day are stored.
+// 2024 is a leap reference year so 29 February is representable; any year the
+// owner picks is discarded, and the visible hint says the year is a reference.
+const DATE_REFERENCE_YEAR = 2024;
+
+function dateInputForBound(value) {
+  const parsed = parseMonthDay(value);
+  if (!parsed) return '';
+  return `${DATE_REFERENCE_YEAR}-${String(parsed.month).padStart(2, '0')}-${String(
+    parsed.day,
+  ).padStart(2, '0')}`;
 }
 
-// The stored date spelling split back into the two controls. Invalid values
-// stay visible: a day of 30 in February must not silently become a blank field
-// or a different day.
-function splitMonthDay(value) {
-  const text = typeof value === 'string' ? value : '';
-  const [monthText = '', dayText = ''] = text.split('-');
-  const month = /^\d{1,2}$/.test(monthText) ? Number(monthText) : 0;
-  const day = /^\d{1,2}$/.test(dayText) ? Number(dayText) : 0;
-  return {
-    month: month >= 1 && month <= 12 ? month : 0,
-    // Keep an out-of-range day visible (February 30, a hand-edited 32) rather
-    // than blanking the value the owner needs to see and fix.
-    day: Number.isInteger(day) && day > 0 ? day : 0,
-  };
-}
-
-// Build the MM-DD spelling from the controls. A missing half becomes 00, which
-// the engine rejects and the field error names; returning null instead would
-// drop date mode and silently fall back to the old month scope.
-function dateControlValue(monthValue, dayValue) {
-  const month = Number(monthValue) || 0;
-  const day = Number(dayValue) || 0;
-  return `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+// A native date value is YYYY-MM-DD. The year is deliberately discarded: the
+// season repeats annually. A blank value becomes the 00-00 sentinel so date
+// mode survives until validation explains the missing half, instead of the
+// period silently falling back to an old month scope.
+function boundFromDateInput(value) {
+  const match = /^\d{4}-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
+  if (!match) return '00-00';
+  const monthDay = `${match[1]}-${match[2]}`;
+  return parseMonthDay(monthDay) ? monthDay : '00-00';
 }
 
 function priceText(rate) {
@@ -274,7 +415,7 @@ function priceRangeText(range) {
   return `${priceText(range.min)}–${fmtRate(range.max, '')}`;
 }
 
-// Keep "other times USD 0.31" and "USD 0.10–0.32" together when a summary
+// Keep "USD 0.10–0.32" and the plan's other price runs together when a summary
 // wraps; breaking inside a price reads as two different numbers. A class, not an
 // NBSP substitution, so a break after the en dash is prevented too.
 function nowrapEl(text) {
@@ -303,6 +444,60 @@ function refresh() {
 
 // ---------- window rows ----------
 
+// Which row each season's Base rate block presents. A time or day edit can turn
+// a window into the base (start === end and every day) or repair a malformed base
+// back into a window; the base block, the window list and the coverage table all
+// describe a different plan afterwards, so that edit is structural. Everything
+// else about a row edit is painted in place, which keeps the focused input alive
+// mid-typing.
+function baseShapeKey(periods) {
+  return (Array.isArray(periods) ? periods : [])
+    .map((period) => `${period.key}:${period.base ? period.base.index : '-'}`)
+    .join('|');
+}
+
+// Commit a time/day edit: repaint in place unless the edit changed which row is
+// the base.
+function commitRowShape(card) {
+  const before = baseShapeKey(planPeriods);
+  markEdited();
+  if (baseShapeKey(ratePeriodsForDraft()) === before) {
+    refresh();
+    return;
+  }
+  deferShapeRebuild(card.index, card.row.id);
+}
+
+// Rebuild after the interaction that changed the shape has been delivered, then
+// land focus on the control that now represents the edited row: its Base rate
+// field when it became the base, otherwise its own window again. A rebuild
+// during `input` would swallow the keystroke that caused it.
+function deferShapeRebuild(anchorIndex, rowId) {
+  cancelPlanRebuild();
+  const token = planRenderToken;
+  planRenderTimer = setTimeout(() => {
+    if (token !== planRenderToken) return;
+    planRenderTimer = 0;
+    const active = document.activeElement;
+    renderPlan();
+    // Focus already moved somewhere the rebuild left alone (a button outside the
+    // plan): that is where the owner is, so it is not stolen back.
+    if (document.contains(active) && active !== document.body) return;
+    const card = periodCards.find((entry) =>
+      entry.period.rows.some((row) => row.index === anchorIndex),
+    );
+    if (!card) return;
+    const isBase = Boolean(card.period.base && card.period.base.row.id === rowId);
+    const windowCard = windowCards[anchorIndex];
+    const control = isBase
+      ? card.baseInput
+      : windowCard && (windowCard.startInput || windowCard.rateInput);
+    if (control) control.focus({ preventScroll: true });
+    else if (card.addButton) card.addButton.focus({ preventScroll: true });
+    scrollToNode(card.node);
+  }, 0);
+}
+
 function paintDayControl(card) {
   const derived = dayPresetFor(card.row.days);
   if (derived === 'custom') card.customDays = true;
@@ -330,8 +525,9 @@ function paintTimeControl(card) {
 
 function paintWindowCard(card) {
   const row = card.row;
-  const name = windowName(row);
-  const band = bandName(row);
+  const period = card.periodCard ? card.periodCard.period : null;
+  const name = windowName(row, period);
+  const band = bandName(row, period);
   setText(card.title, band || (String(row.rate ?? '').trim() === '' ? 'New window' : 'Window'));
   setText(card.summary, rateWindowSummary(row));
   card.rateInput.setAttribute('aria-label', `Rate for ${rateWindowSummary(row)}`);
@@ -343,20 +539,6 @@ function paintWindowCard(card) {
   card.title.title = name;
   paintDayControl(card);
   paintTimeControl(card);
-  // A season rate has no day or time choice: the period's note explains the
-  // single price, and the conversion button is the way back to daily windows.
-  // A malformed all-day time (25:00–25:00) still counts as the all-day shape, so
-  // keep its controls visible until the time error is fixed.
-  const rowErrors = rateValidation.rows[card.index] || {};
-  const seasonRate = Boolean(
-    card.periodCard &&
-    card.periodCard.period &&
-    card.periodCard.period.seasonRate &&
-    !rowErrors.start &&
-    !rowErrors.end,
-  );
-  if (card.dayControl) card.dayControl.hidden = seasonRate;
-  if (card.timeBlock) card.timeBlock.hidden = seasonRate;
 }
 
 function createDayControl(card) {
@@ -372,8 +554,7 @@ function createDayControl(card) {
       if (preset.days) {
         card.row.days = [...preset.days];
         card.customDays = false;
-        markEdited();
-        refresh();
+        commitRowShape(card);
         return;
       }
       // Custom only reveals the chips; it never changes the days by itself.
@@ -398,8 +579,7 @@ function createDayControl(card) {
         card.row.days = [...card.row.days, day].sort((a, b) => a - b);
       }
       card.customDays = true;
-      markEdited();
-      refresh();
+      commitRowShape(card);
     });
     days.append(chip);
   });
@@ -501,8 +681,7 @@ function createWindowCard(entry, periodCard) {
   const onTime = () => {
     row.start = startInput.value;
     row.end = endInput.value;
-    markEdited();
-    refresh();
+    commitRowShape(card);
   };
   startInput.addEventListener('input', onTime);
   endInput.addEventListener('input', onTime);
@@ -554,112 +733,174 @@ function createWindowCard(entry, periodCard) {
 
 function paintMonthEditor(card) {
   const all = card.period.kind === 'all';
-  const months = card.period.kind === 'months' ? card.period.months : [];
-  card.allYear.checked = all;
+  const months =
+    (card.period.kind === 'months' || card.period.kind === 'dates') &&
+    Array.isArray(card.period.months)
+      ? card.period.months
+      : [];
   for (const chip of card.monthChips.querySelectorAll('[data-month]')) {
     chip.setAttribute('aria-pressed', String(all || months.includes(Number(chip.dataset.month))));
   }
 }
 
-// A date commit can be repainted in place (see applyDates), which does not
-// rebuild the date panel: sync the controls from the model so the bound the
-// owner did not type still follows the commit. The focused control is left
-// exactly as typed.
-function syncDateControls(card, bounds) {
-  const from = splitMonthDay(bounds.from);
-  const to = splitMonthDay(bounds.to);
-  const set = (control, value) => {
-    if (!control || control === document.activeElement) return;
-    if (control.value !== value) control.value = value;
+// The scope in the terms the date block needs: the canonical All-year state,
+// raw date bounds, and the derived first/last date a legacy month range can
+// show. A non-contiguous or invalid month scope has no single date range.
+function seasonDateState(period) {
+  const allYear = period.kind === 'all';
+  const dateMode = periodHasDates(period);
+  const raw = periodDateBounds(period);
+  const seed = !allYear && !dateMode ? periodDateSeed(period) : null;
+  const values = allYear
+    ? { from: null, to: null }
+    : dateMode
+      ? raw
+      : seed || { from: null, to: null };
+  return {
+    allYear,
+    dateMode,
+    raw,
+    seed,
+    values,
+    canPick: !allYear && (dateMode || Boolean(seed)),
+    monthStored: !allYear && !dateMode,
   };
-  set(card.fromMonth, from.month ? String(from.month) : '');
-  set(card.fromDay, from.day ? String(from.day) : '');
-  set(card.toMonth, to.month ? String(to.month) : '');
-  set(card.toDay, to.day ? String(to.day) : '');
 }
 
-// The scope controls are derived from the rows, not a stored mode: dates when
-// either bound is present (even a broken one, so it stays visible), months
-// otherwise. The disabled reason is visible next to the segmented control, not
-// only in a title.
+// The visible season dates. Dates are the first decision; the month chips are a
+// secondary, advanced route for the legacy month-only scopes. The mode is
+// derived from the rows, never stored.
 function paintScopeEditor(card) {
   const period = card.period;
-  const dateMode = periodHasDates(period);
-  const bounds = periodDateBounds(period);
-  const seed = dateMode ? null : periodDateSeed(period);
-  const monthsFromDates = dateMode ? monthsCovering(bounds.from, bounds.to) : [];
-  const canDates = dateMode || Boolean(seed);
-  const canMonths = !dateMode || monthsFromDates.length > 0;
-  const hint =
-    !dateMode && !canDates
-      ? period.kind === 'invalid'
-        ? 'Fix the months to use specific dates.'
-        : 'Specific dates need one continuous range.'
-      : '';
+  const state = seasonDateState(period);
+  const values = state.values;
+  card.allYear.checked = state.allYear;
 
-  card.monthsMode.setAttribute('aria-pressed', String(!dateMode));
-  card.datesMode.setAttribute('aria-pressed', String(dateMode));
-  card.monthsMode.disabled = settingsSaving || (dateMode && !canMonths);
-  card.datesMode.disabled = settingsSaving || (!dateMode && !canDates);
-  card.monthsMode.title = dateMode && !canMonths ? 'Fix the From and To dates first.' : '';
-  card.datesMode.title = hint;
-  card.scopeHint.hidden = !hint;
-  setText(card.scopeHint, hint);
-  card.monthPanel.hidden = dateMode;
-  card.datePanel.hidden = !dateMode;
-  paintMonthEditor(card);
+  // Always normalize the visible year back to the reference year. A native
+  // picker may have produced 2025; only its month and day are kept.
+  const fromValue = dateInputForBound(values.from);
+  const toValue = dateInputForBound(values.to);
+  if (card.fromDate.value !== fromValue) card.fromDate.value = fromValue;
+  if (card.toDate.value !== toValue) card.toDate.value = toValue;
 
-  if (!dateMode) {
-    card.dateError.hidden = true;
-    card.dateFocus = null;
-    return;
+  const dateDisabled = settingsSaving || !state.canPick;
+  card.fromDate.disabled = dateDisabled;
+  card.toDate.disabled = dateDisabled;
+  // The year reference (and its leap-day sentence) says nothing while the whole
+  // year is the scope: there is no date to pick. It costs four lines on the most
+  // common season shape.
+  card.dateReference.hidden = state.allYear;
+
+  // Do not leave two empty pickers looking like required fields when the scope
+  // has no single start/end (All year or separate month ranges). A read-only
+  // value takes their place and the real control is the checkbox or the month
+  // editor below.
+  const showFallback = state.allYear || !state.canPick;
+  card.dateFields.hidden = showFallback;
+  card.dateFallback.hidden = !showFallback;
+  card.dateFallback.classList.toggle('unavailable', !state.allYear);
+  if (state.allYear) {
+    setText(card.dateFallback, 'All year — every day of the year.');
+  } else if (!state.canPick) {
+    setText(card.dateFallback, 'No single start and end for this month range.');
   }
-
-  syncDateControls(card, bounds);
 
   const rowErrors = period.rows.map((entry) => rateValidation.rows[entry.index] || {});
   const fromError = rowErrors.map((errors) => errors.from).find(Boolean) || '';
   const toError = rowErrors.map((errors) => errors.to).find(Boolean) || '';
-  const messages = [fromError ? `From: ${fromError}` : '', toError ? `To: ${toError}` : ''].filter(
-    Boolean,
-  );
+  const dateErrors = Boolean(fromError || toError);
+  card.fromDate.setAttribute('aria-invalid', String(Boolean(fromError)));
+  card.toDate.setAttribute('aria-invalid', String(Boolean(toError)));
+  const messages = [
+    fromError ? `Starts: ${fromError}` : '',
+    toError ? `Ends: ${toError}` : '',
+  ].filter(Boolean);
   card.dateError.hidden = messages.length === 0;
   setText(card.dateError, messages.join(' '));
-  card.fromMonth.setAttribute('aria-invalid', String(Boolean(fromError)));
-  card.fromDay.setAttribute('aria-invalid', String(Boolean(fromError)));
-  card.toMonth.setAttribute('aria-invalid', String(Boolean(toError)));
-  card.toDay.setAttribute('aria-invalid', String(Boolean(toError)));
-  card.dateFocus = fromError ? card.fromDay : toError ? card.toDay : card.fromDay;
+  card.dateFocus = fromError ? card.fromDate : toError ? card.toDate : card.fromDate;
 
-  const base = canMonths
-    ? 'Dates are inclusive and repeat every year. Switching to Months rounds them to whole months.'
-    : 'Fix the From and To dates before switching to Months.';
-  const wrapHint = dateRangeHint(bounds.from, bounds.to);
-  setText(card.dateHint, wrapHint ? `${base} ${wrapHint}` : base);
+  // A native date input cannot show 30 February. Keep the stored spelling
+  // visible in words, so a malformed row is still diagnosable rather than just
+  // a blank picker.
+  const stored = [];
+  for (const [label, rawValue] of [
+    ['Starts', state.raw.from],
+    ['Ends', state.raw.to],
+  ]) {
+    if (rawValue != null && rawValue !== '' && rawValue !== '00-00' && !parseMonthDay(rawValue)) {
+      stored.push(`${label} ${rawValue}`);
+    }
+  }
+  card.dateStored.hidden = stored.length === 0;
+  setText(card.dateStored, stored.length ? `Stored: ${stored.join(' · ')}.` : '');
+
+  let status = '';
+  if (state.allYear) {
+    status = 'Uncheck All year to choose a start and end.';
+  } else if (state.dateMode) {
+    status = dateErrors
+      ? 'Choose real start and end dates to keep this season day-precise.'
+      : 'Starts and ends are inclusive.';
+  } else if (state.seed) {
+    // Owner language, not storage language: the month range is what is priced,
+    // and the dates above are how to make it exact.
+    status = `Month range · ${rateMonthsText(period.months)}. Edit the dates to make this exact.`;
+  } else if (period.kind === 'invalid') {
+    status = 'Fix this season with the month ranges below.';
+  } else {
+    status = 'This season is stored as separate months. Pick the months it covers.';
+  }
+  const wrapHint = !state.allYear && !dateDisabled ? dateRangeHint(values.from, values.to) : '';
+  setText(card.dateStatus, wrapHint ? `${status} ${wrapHint}` : status);
+
+  // Dates are the only normal scope editor. The month chips are the
+  // compatibility path: offered only for a legacy non-contiguous month list or a
+  // month scope that has to be repaired, never for a date-precise season.
+  const hideAdvanced = !monthEditorIsLegacy(period);
+  card.advancedMonths.hidden = hideAdvanced;
+  let monthSummary = '';
+  if (!hideAdvanced) {
+    monthSummary =
+      period.kind === 'invalid' ? 'needs attention' : rateMonthsText(period.months, period.kind);
+  }
+  setText(card.advancedSummary, monthSummary ? ` · ${monthSummary}` : '');
+  setText(
+    card.advancedHint,
+    period.kind === 'invalid'
+      ? 'Pick the months this season covers; dates need one continuous range.'
+      : 'Editing a month chip keeps this season on month precision.',
+  );
+  paintMonthEditor(card);
 }
 
 function paintPeriodMode(card) {
-  const mode = periodRateMode(card.period);
-  const oneRow = card.period.rows.length === 1;
-  const usable = card.period.kind !== 'invalid';
-  card.addButton.hidden = mode !== 'tou' || !usable;
-  card.seasonNote.hidden = mode !== 'season';
-  card.mixNote.hidden = mode !== 'mixed';
-  card.useTou.hidden = mode !== 'season' || !oneRow || !usable;
-  card.useSeason.hidden = mode !== 'tou' || !oneRow || !usable;
-  card.useTou.disabled = settingsSaving;
-  card.useSeason.disabled = settingsSaving;
+  const windows = card.period.windows ? card.period.windows.length : 0;
+  card.addButton.disabled = settingsSaving || draftRates.length >= MAX_RATE_WINDOWS;
+  card.addButton.hidden = false;
+  if (card.windowsEmpty) {
+    card.windowsEmpty.hidden = !card.period.base || windows > 0;
+  }
 }
 
+// The period's name as a control needs it. A date season is always titled
+// "Season", so the scope is appended: otherwise both seasons of a Summer/Winter
+// split offer "Edit season dates for Season" to a screen-reader owner. The
+// visible title is unchanged.
 function periodName(period) {
-  return period.title === 'Custom months' ? period.monthText : period.title;
+  const base = period.title === 'Custom months' ? period.monthText : period.title;
+  const scope = period.monthText || '';
+  return period.kind === 'dates' && scope ? `${base} ${scope}` : base;
 }
 
 // The header tells the truth for the representative month: the price range
-// includes the fallback and any sibling windows that apply there, while the
-// count stays the period's own windows.
+// includes the effective bases/windows and sibling rows that apply there, while
+// the count stays the period's own rows. Unpriced hours show as 0.00.
 function paintPeriodHeader(card) {
   const period = card.period;
+  setText(card.title, period.title);
+  card.list.setAttribute('aria-label', `Windows in ${periodName(period)}`);
+  card.addButton.setAttribute('aria-label', `Add a window to ${periodName(period)}`);
+  card.editDates.setAttribute('aria-label', `Edit season dates for ${periodName(period)}`);
   const dateMode = periodHasDates(period);
   const dateBounds = periodDateBounds(period);
   const dateText =
@@ -676,37 +917,35 @@ function paintPeriodHeader(card) {
 
   const range = periodEffectiveRange(draftRates, readFields().rate, period);
   const count = period.rows.length;
-  // A season rate is one price, not a window: naming it a window contradicts the
-  // row title and the plan summary.
-  const noun = period.seasonRate
-    ? count === 1
-      ? 'rate'
-      : 'rates'
-    : count === 1
-      ? 'window'
-      : 'windows';
+  const noun = period.base ? (count === 1 ? 'rate' : 'rates') : count === 1 ? 'window' : 'windows';
   const countText = `${count} ${noun}`;
   // The range covers one representative month (January for an all-year scope,
   // otherwise the first month of the scope). Naming it keeps an All-year header
   // from advertising a range that a July sibling changes; the table caption
   // repeats the same month.
   const example = range && !dateMode ? `${MONTH_NAMES[range.month - 1].slice(0, 3)} example` : '';
-  // A row with no usable price contributes nothing to the range, so a range that
-  // only the fallback fills would advertise a price this season does not charge.
-  // The plan summary and the checker say the same thing at the same moment.
+  // A row with no usable price contributes nothing to the range. A range held up
+  // only by uncovered hours must not advertise a price this season does not
+  // charge; the plan summary and the checker say the same thing at the same
+  // moment.
   const ownPriced = period.rows.some((entry) => {
     const price = parseRateValue(entry.row.rate);
     return (
       Number.isFinite(price) && Object.keys(rateValidation.rows[entry.index] || {}).length === 0
     );
   });
-  const meta = [el('span', null, `${countText} · ${example ? `${example} ` : ''}`)];
+  // Every part carries a `·` suffix bound to its own words with a no-break
+  // space, so a wrapped line never starts with punctuation and the price is
+  // never a bare run beside the count (the flex gap supplies the spacing).
+  const meta = [el('span', null, `${countText}\u00a0·`)];
+  if (example) meta.push(el('span', null, `${example}\u00a0·`));
   if (period.kind === 'invalid')
     meta.push(el('span', null, dateMode ? 'needs dates' : 'needs months'));
   else if (!ownPriced || !range) meta.push(nowrapEl('— needs attention'));
   else meta.push(nowrapEl(priceRangeText(range)));
   card.meta.replaceChildren(...meta);
   paintScopeEditor(card);
+  paintBaseBlock(card);
   paintPeriodMode(card);
 }
 
@@ -714,6 +953,7 @@ function setExpanded(card, expanded) {
   if (expanded) expandedPeriods.add(card.key);
   else expandedPeriods.delete(card.key);
   card.toggle.setAttribute('aria-expanded', String(expanded));
+  if (card.editDates) card.editDates.setAttribute('aria-expanded', String(expanded));
   card.body.hidden = !expanded;
 }
 
@@ -731,16 +971,12 @@ function paintPeriodActions(card) {
   const canDuplicate =
     complement != null &&
     !occupied &&
-    periodRateMode(card.period) !== 'mixed' &&
     canDuplicatePeriod(draftRates.length, count) &&
     !settingsSaving;
   card.duplicateButton.hidden = !canDuplicate || confirming;
   card.removeButton.hidden = confirming;
   card.confirm.hidden = !confirming;
-  setText(
-    card.confirmText,
-    `Remove the season and ${count} ${count === 1 ? 'window' : 'windows'}?`,
-  );
+  setText(card.confirmText, `Remove the season and ${count} ${count === 1 ? 'rate' : 'rates'}?`);
   card.duplicateButton.disabled = !canDuplicate;
   card.duplicateButton.title =
     complement && complement.kind === 'dates'
@@ -748,14 +984,11 @@ function paintPeriodActions(card) {
       : 'Copy this season into the months it does not cover.';
 }
 
-// A period's visible name. A month scope reads as its months; a date season adds
-// its dates, so two overlapping date seasons are never both just "Season" in the
-// band column of a sibling row.
+// A period's visible name in another season's band column. It is the same name
+// the card's own controls use, so a sibling row and the season it names can never
+// disagree: a date season reads as "Season Jun 15–Sep 15", never two date runs.
 function periodBandLabel(period) {
-  const name = periodName(period);
-  if (!period || period.kind !== 'dates') return name;
-  const dates = period.monthText || '';
-  return dates ? `${name} ${dates}` : name;
+  return periodName(period);
 }
 
 // The 7-day strip is a quiet shape cue in the collapsed header; the tables and
@@ -786,23 +1019,9 @@ function paintCoverage(card) {
     );
     return;
   }
-  // A hand-edited mix of a season rate and daily windows is rejected by the
-  // validator. Drawing the resolver's schedule here would show a base plus
-  // override result the editor refuses to save, so the tables are withheld.
-  if (periodRateMode(period) === 'mixed') {
-    card.strip.replaceChildren();
-    card.axis.hidden = true;
-    card.legend.replaceChildren();
-    card.coverage.replaceChildren(el('p', 'coverage-empty', MIX_COVERAGE_MESSAGE));
-    setText(
-      card.desc,
-      'This season mixes a season rate with daily windows. Fix the mix to see coverage.',
-    );
-    return;
-  }
   // A row whose price is not usable (empty, or finite but outside the accepted
   // range) is rejected by the validator, so the resolved week drops it: its
-  // hours fall back to "Other times" and the table would quote a resolved price
+  // hours fall back to Uncovered and the table would quote a resolved price
   // the plan, the card meta and the checker all deny. Resolve a copy with a
   // stand-in price so the row keeps its place and its band, then put the real
   // (unusable) price back and let the table say the price is missing.
@@ -824,10 +1043,22 @@ function paintCoverage(card) {
     }
   }
 
+  const ownerOf = (segment) => {
+    if (!segment.window) return null;
+    if (coverage.ownIds.has(segment.window.id)) return period;
+    return planPeriods.find((entry) => entry.rows.some((row) => row.row.id === segment.window.id));
+  };
+  // A segment's band: Base for a base row, a relative tier for an override (only
+  // when its season has a base), and Uncovered for an hour no row prices.
+  const labelFor = (segment) => {
+    const owner = ownerOf(segment);
+    const base = owner ? periodBaseRate(owner) : null;
+    const rates = owner ? owner.rows.map((entry) => entry.row.rate) : windowRates();
+    return rateSegmentLabel(segment, rates, base);
+  };
+
   // The legend is collected from the same resolved segments the strip and the
-  // table draw, so every dot carries the name of the row it stands for. A
-  // season rate is "Season rate" here, as in its card title, its table band and
-  // the plan — never the relative tier its single price happens to sit at.
+  // table draw, so every dot carries the name of the row it stands for.
   const legend = new Map();
   const strip = [];
   for (const type of coverage.types) {
@@ -842,7 +1073,7 @@ function paintCoverage(card) {
       const piece = el('span', `strip-seg ${key}`);
       piece.style.flexGrow = String(segment.to - segment.from);
       if (!legend.has(key)) {
-        legend.set(key, rateSegmentLabel(segment, windowRates(), readFields().rate));
+        legend.set(key, labelFor(segment));
       }
       track.append(piece);
     }
@@ -860,11 +1091,6 @@ function paintCoverage(card) {
   card.legend.replaceChildren(...items);
 
   const siblingLines = coverage.siblings.map((sibling) => siblingNote(sibling)).filter(Boolean);
-  const ownerOf = (segment) => {
-    if (!segment.window) return null;
-    if (coverage.ownIds.has(segment.window.id)) return period;
-    return planPeriods.find((entry) => entry.rows.some((row) => row.row.id === segment.window.id));
-  };
   // A resolved row whose own price is still unusable. Its band stays the row's
   // (or the season's) name; only the price and the hidden description change.
   // The id set is read rather than the segment's rate, which the stand-in pass
@@ -877,16 +1103,12 @@ function paintCoverage(card) {
           .map((segment) => {
             const owner = ownerOf(segment);
             const label = !segment.window
-              ? 'Other times'
+              ? 'Uncovered'
               : needsRate(segment)
                 ? 'Needs a rate'
                 : owner === period
-                  ? rateSegmentLabel(segment, windowRates(), readFields().rate)
-                  : `${periodBandLabel(owner)} ${rateSegmentLabel(
-                      segment,
-                      windowRates(),
-                      readFields().rate,
-                    )}`;
+                  ? labelFor(segment)
+                  : `${periodBandLabel(owner)} ${labelFor(segment)}`;
             return `${minutesToClock(segment.from)}–${minutesToClock(segment.to)} ${label}`;
           })
           .join(', ')}`,
@@ -911,7 +1133,7 @@ function paintCoverage(card) {
     );
   }
   if (coverage.types.length === 0) {
-    content.push(el('p', 'coverage-empty', 'No usable windows yet.'));
+    content.push(el('p', 'coverage-empty', 'No usable rates yet.'));
   }
   for (const type of coverage.types) {
     const table = el('table', 'coverage-table');
@@ -923,9 +1145,10 @@ function paintCoverage(card) {
     const headRow = el('tr');
     for (const [label, className] of [
       ['Time', null],
-      // Own rows show a band; inherited rows name their season as well, so the
-      // heading has to cover both.
-      ['Season · band', null],
+      // Own rows show a band; an inherited row names its season after the band,
+      // but the column is a band column: "Season · band" made every row read as
+      // jargon for the one thing it does not contain.
+      ['Band', null],
       ['Price', 'price'],
     ]) {
       const th = el('th', className, label);
@@ -937,14 +1160,14 @@ function paintCoverage(card) {
     for (const segment of type.segments) {
       const owner = ownerOf(segment);
       const own = Boolean(segment.window) && owner === period;
-      const tr = el('tr', segment.window ? (own ? '' : 'sibling') : 'other-times');
+      const tr = el('tr', segment.window ? (own ? '' : 'sibling') : 'uncovered');
       const time = el('th', null, `${minutesToClock(segment.from)}–${minutesToClock(segment.to)}`);
       time.scope = 'row';
       const note = segmentNote(segment);
       if (note) time.append(el('span', 'segment-note', note));
       const band = el('td', 'band');
       if (own) {
-        const tier = bandName(segment.window);
+        const tier = labelFor(segment);
         band.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'));
       } else if (segment.window) {
         // An inherited row keeps the band dot (so the legend still matches the
@@ -955,7 +1178,7 @@ function paintCoverage(card) {
         // 320 px, so the two are only separated by a break opportunity. Each
         // month or date range is its own nowrap run — `Jan–Feb` must not split at
         // the en dash when the cell is narrow.
-        const tier = bandName(segment.window);
+        const tier = labelFor(segment);
         const label = el('span', 'sibling-band');
         label.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'), ' ');
         const ownerLabel = el('span', 'sibling-owner');
@@ -967,10 +1190,10 @@ function paintCoverage(card) {
         label.append(ownerLabel);
         band.append(label);
       } else {
-        band.textContent = 'Other times';
+        band.textContent = 'Uncovered';
       }
-      // An own row with no usable price names the gap: quoting the resolver's
-      // fallback here would assert a price the rest of the screen denies.
+      // An own row with no usable price names the gap: quoting a price here
+      // would assert something the rest of the screen denies.
       const price = needsRate(segment) ? needsAttentionCell() : priceCell(segment.rate);
       tr.append(time, band, price);
       tbody.append(tr);
@@ -981,6 +1204,136 @@ function paintCoverage(card) {
   card.coverage.replaceChildren(...content);
 }
 
+// The base rate block: one price for every hour not covered by a daily window.
+// A malformed all-day row is kept in the daily-window list instead, where its
+// time controls can repair it.
+function createBaseBlock(card, period, index) {
+  const block = el('section', 'base-block');
+  const head = el('div', 'base-head');
+  const title = el('h6', 'base-title', 'Base rate');
+  head.append(title);
+  const baseEntry = period.base;
+  const baseErrorId = `period-${index}-base-error`;
+  const noteId = `period-${index}-base-note`;
+  let baseInput = null;
+  let baseError = null;
+  let addBaseButton = null;
+  let removeBaseButton = null;
+  let baseCard = null;
+
+  if (baseEntry) {
+    const note = el('p', 'base-note', 'One price for every hour not covered by a window.');
+    note.id = noteId;
+    const field = el('div', 'field base-field');
+    const label = el('label', 'field-label', 'Rate');
+    label.htmlFor = `period-${index}-base-rate`;
+    const wrap = el('div', 'input-wrap');
+    baseInput = el('input', 'text-input base-rate-input rate-input');
+    baseInput.type = 'number';
+    baseInput.min = '0';
+    baseInput.max = '5';
+    baseInput.step = '0.001';
+    baseInput.inputMode = 'decimal';
+    // No placeholder: a `0.000` in an empty field reads as a planted price
+    // beside the "Enter a rate between 0 and 5." rule, the same reason the
+    // window field has none. The label, the `/ kWh` suffix and the error carry
+    // the rule; the field stays visibly empty until the owner types a price.
+    baseInput.autocomplete = 'off';
+    baseInput.id = `period-${index}-base-rate`;
+    baseInput.value = baseEntry.row.rate;
+    baseInput.dataset.field = 'base-rate';
+    baseInput.setAttribute('aria-label', 'Base rate');
+    baseInput.setAttribute('aria-describedby', `${noteId} ${baseErrorId}`);
+    const suffix = el('span', 'input-suffix', '/ kWh');
+    suffix.setAttribute('aria-hidden', 'true');
+    wrap.append(baseInput, suffix);
+    field.append(label, wrap);
+    baseError = el('p', 'rule-error base-error');
+    baseError.id = baseErrorId;
+    baseError.hidden = true;
+    baseInput.addEventListener('input', () => {
+      baseEntry.row.rate = baseInput.value;
+      markEdited();
+      refresh();
+    });
+    removeBaseButton = el('button', 'btn small danger', 'Remove base rate');
+    removeBaseButton.type = 'button';
+    removeBaseButton.dataset.action = 'remove-base-rate';
+    removeBaseButton.addEventListener('click', () => removeBaseRate(card));
+    head.append(removeBaseButton);
+    block.append(head, note, field, baseError);
+    baseCard = {
+      row: baseEntry.row,
+      index: baseEntry.index,
+      node: block,
+      periodCard: card,
+      isBase: true,
+      errorId: baseErrorId,
+      errorEl: baseError,
+      rateInput: baseInput,
+    };
+    windowCards[baseEntry.index] = baseCard;
+    card.baseCard = baseCard;
+    card.baseInput = baseInput;
+    card.baseError = baseError;
+    card.removeBaseButton = removeBaseButton;
+  } else {
+    const warning = el(
+      'p',
+      'base-warning',
+      'No base rate — hours outside the windows have no price unless another season’s base covers them.',
+    );
+    card.baseWarning = warning;
+    addBaseButton = el('button', 'btn small', 'Add base rate');
+    addBaseButton.type = 'button';
+    addBaseButton.dataset.action = 'add-base-rate';
+    addBaseButton.addEventListener('click', () => addBaseRate(card));
+    block.append(head, warning, addBaseButton);
+    card.addBaseButton = addBaseButton;
+  }
+  card.baseBlock = block;
+  return block;
+}
+
+// The add action follows the stored One-rate value, but never silently prices a
+// season: the owner sees the number and can change it in the base field.
+function paintBaseBlock(card) {
+  const flat = $('setting-rate').value;
+  const usable = rateIsUsable(flat);
+  if (card.addBaseButton) {
+    const covered = periodHasBaseOverlap(card.period, draftRates);
+    card.addBaseButton.hidden = covered;
+    if (card.baseWarning) {
+      // The base-less warning is about a plan that leaves hours at 0.00. A plan
+      // whose windows between them price the whole year has nothing to warn
+      // about, so the sentence states that instead of promising a gap that the
+      // strip, the table and History all deny.
+      setText(
+        card.baseWarning,
+        covered
+          ? 'No base rate in this season — another season’s base prices these hours.'
+          : planUnpriced
+            ? 'No base rate — hours outside the windows have no price unless another season’s base covers them.'
+            : 'No base rate — every hour of these dates has a price.',
+      );
+    }
+    // Short visible label: `Add base rate (CAD 0.31 from One rate)` wrapped
+    // mid-phrase at 390 px. The accessible name keeps the provenance.
+    setText(card.addBaseButton, usable ? `Add base rate · ${priceText(flat)}` : 'Add base rate');
+    card.addBaseButton.setAttribute(
+      'aria-label',
+      usable ? `Add a base rate using ${priceText(flat)} from One rate` : 'Add a base rate',
+    );
+    card.addBaseButton.disabled = settingsSaving || draftRates.length >= MAX_RATE_WINDOWS;
+  }
+  if (card.removeBaseButton) {
+    card.removeBaseButton.hidden = !card.period.base || card.period.windows.length === 0;
+  }
+  if (card.windowsEmpty) {
+    card.windowsEmpty.hidden = !card.period.base || card.period.windows.length > 0;
+  }
+}
+
 function createPeriodCard(period, index) {
   const node = el('article', 'rate-period');
   node.dataset.key = period.key;
@@ -989,6 +1342,7 @@ function createPeriodCard(period, index) {
     period,
     node,
     toggle: null,
+    title: null,
     band: null,
     meta: null,
     flag: null,
@@ -997,27 +1351,30 @@ function createPeriodCard(period, index) {
     legend: null,
     desc: null,
     body: null,
-    monthEditor: null,
-    scopeEditor: null,
-    scopeModes: null,
-    monthsMode: null,
-    datesMode: null,
-    scopeHint: null,
-    monthPanel: null,
-    datePanel: null,
-    fromMonth: null,
-    fromDay: null,
-    toMonth: null,
-    toDay: null,
-    dateHint: null,
+    seasonDates: null,
+    editDates: null,
+    allYear: null,
+    fromDate: null,
+    dateFields: null,
+    dateFallback: null,
+    toDate: null,
+    dateReference: null,
+    dateStatus: null,
+    dateStored: null,
     dateError: null,
     dateFocus: null,
-    seasonNote: null,
-    mixNote: null,
-    useTou: null,
-    useSeason: null,
-    allYear: null,
+    advancedMonths: null,
+    advancedSummary: null,
+    advancedHint: null,
     monthChips: null,
+    baseBlock: null,
+    baseInput: null,
+    baseError: null,
+    addBaseButton: null,
+    removeBaseButton: null,
+    baseCard: null,
+    windowsSection: null,
+    windowsEmpty: null,
     coverage: null,
     list: null,
     addButton: null,
@@ -1046,7 +1403,7 @@ function createPeriodCard(period, index) {
   flag.hidden = true;
   const caret = el('span', 'period-caret');
   caret.setAttribute('aria-hidden', 'true');
-  titleRow.append(title, band, flag, caret);
+  titleRow.append(title, band, caret, flag);
   const meta = el('span', 'period-meta');
   const strip = el('span', 'period-strip');
   strip.setAttribute('aria-hidden', 'true');
@@ -1057,9 +1414,19 @@ function createPeriodCard(period, index) {
   const legend = el('span', 'strip-legend');
   legend.setAttribute('aria-hidden', 'true');
   toggle.append(titleRow, meta, strip, axis, legend);
-  heading.append(toggle);
+  const headRow = el('div', 'period-head-row');
+  const editDates = el('button', 'period-edit-dates', 'Edit dates');
+  editDates.type = 'button';
+  editDates.dataset.action = 'edit-dates';
+  editDates.setAttribute('aria-controls', bodyId);
+  editDates.setAttribute('aria-expanded', String(expanded));
+  editDates.setAttribute('aria-label', `Edit season dates for ${periodName(period)}`);
+  headRow.append(toggle, editDates);
+  heading.append(headRow);
   node.append(heading);
   card.toggle = toggle;
+  card.editDates = editDates;
+  card.title = title;
   card.band = band;
   card.meta = meta;
   card.flag = flag;
@@ -1076,33 +1443,78 @@ function createPeriodCard(period, index) {
   body.hidden = !expanded;
   card.body = body;
 
-  const scopeEditor = el('div', 'scope-editor');
-  const modeRow = el('div', 'scope-modes');
-  modeRow.setAttribute('role', 'group');
-  modeRow.setAttribute('aria-label', `Season scope for ${periodName(period)}`);
-  const monthsMode = el('button', 'scope-mode', 'Months');
-  monthsMode.type = 'button';
-  monthsMode.dataset.scope = 'months';
-  const datesMode = el('button', 'scope-mode', 'Specific dates');
-  datesMode.type = 'button';
-  datesMode.dataset.scope = 'dates';
-  modeRow.append(monthsMode, datesMode);
-  const scopeHint = el('p', 'scope-hint');
-  scopeHint.id = `period-${index}-scope-hint`;
-  scopeHint.hidden = true;
-  datesMode.setAttribute('aria-describedby', scopeHint.id);
+  const scopeEditor = el('section', 'season-dates');
+  const seasonDatesTitleId = `period-${index}-season-dates`;
+  scopeEditor.setAttribute('aria-labelledby', seasonDatesTitleId);
 
-  const monthPanel = el('div', 'month-panel scope-panel');
-  const monthHead = el('div', 'month-editor-head');
-  // The segmented control names the mode; this label names what the chips are
-  // and keeps All year from reading as a stray checkbox above the grid.
-  monthHead.append(el('span', 'field-label', 'Pick months'));
-  const toggleLabel = el('label', 'months-toggle');
+  const datesHead = el('div', 'season-dates-head');
+  const datesTitle = el('h6', 'season-dates-title', 'Season dates');
+  datesTitle.id = seasonDatesTitleId;
+  const allYearLabel = el('label', 'months-toggle season-all-year');
   const allYear = el('input');
   allYear.type = 'checkbox';
   allYear.id = `period-${index}-all-year`;
-  toggleLabel.append(allYear, el('span', null, 'All year'));
-  monthHead.append(toggleLabel);
+  allYearLabel.append(allYear, el('span', null, 'All year'));
+  datesHead.append(datesTitle, allYearLabel);
+
+  const referenceId = `period-${index}-date-reference`;
+  const reference = el(
+    'p',
+    'season-dates-reference',
+    'Repeats every year. The year is only a reference — 2024 is a leap year, so 29 February is available.',
+  );
+  reference.id = referenceId;
+
+  const dateField = (labelText, id, input) => {
+    const field = el('div', 'season-date-field');
+    const label = el('label', 'field-label', labelText);
+    label.htmlFor = id;
+    field.append(label, input);
+    return field;
+  };
+  const fromDateId = `period-${index}-starts`;
+  const toDateId = `period-${index}-ends`;
+  const statusId = `period-${index}-date-status`;
+  const storedId = `period-${index}-date-stored`;
+  const errorId = `period-${index}-date-error`;
+  const fromDate = el('input', 'season-date-input');
+  fromDate.type = 'date';
+  fromDate.id = fromDateId;
+  fromDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
+  fromDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
+  fromDate.dataset.field = 'from-date';
+  fromDate.setAttribute('aria-label', 'Season start date');
+  fromDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
+  const toDate = el('input', 'season-date-input');
+  toDate.type = 'date';
+  toDate.id = toDateId;
+  toDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
+  toDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
+  toDate.dataset.field = 'to-date';
+  toDate.setAttribute('aria-label', 'Season end date');
+  toDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
+
+  const dateFields = el('div', 'season-date-fields');
+  const arrow = el('span', 'season-date-arrow', '→');
+  arrow.setAttribute('aria-hidden', 'true');
+  dateFields.append(
+    dateField('Starts', fromDateId, fromDate),
+    arrow,
+    dateField('Ends', toDateId, toDate),
+  );
+  const dateFallback = el('p', 'season-dates-fallback');
+  dateFallback.hidden = true;
+
+  const status = el('p', 'season-dates-status');
+  status.id = statusId;
+  allYear.setAttribute('aria-describedby', `${referenceId} ${statusId}`);
+  const stored = el('p', 'season-dates-stored');
+  stored.id = storedId;
+  stored.hidden = true;
+  const dateError = el('p', 'rule-error season-dates-error');
+  dateError.id = errorId;
+  dateError.hidden = true;
+
   const monthChips = el('div', 'month-chips');
   monthChips.setAttribute('role', 'group');
   monthChips.setAttribute('aria-label', `Months for ${periodName(period)}`);
@@ -1122,181 +1534,110 @@ function createPeriodCard(period, index) {
     });
     monthChips.append(chip);
   });
-  monthPanel.append(monthHead, monthChips);
 
-  const datePanel = el('div', 'date-panel scope-panel');
-  const dateBounds = periodDateBounds(period);
-  const fromParts = splitMonthDay(dateBounds.from);
-  const toParts = splitMonthDay(dateBounds.to);
-  const dateHintId = `period-${index}-date-hint`;
-  const dateErrorId = `period-${index}-date-error`;
-  const monthOptions = (select, selected, label) => {
-    const placeholder = el('option', null, 'Month');
-    placeholder.value = '';
-    select.append(placeholder);
-    MONTH_NAMES.forEach((name, monthIndex) => {
-      // The two bounds share a row at 390 px; a full month name clips inside
-      // the native select, so the option uses the same three-letter form as the
-      // month chips and the date band.
-      const option = el('option', null, name.slice(0, 3));
-      option.value = String(monthIndex + 1);
-      if (monthIndex + 1 === selected) option.selected = true;
-      select.append(option);
-    });
-    select.setAttribute('aria-label', label);
-    return select;
-  };
-  const fromMonth = monthOptions(el('select', 'date-select'), fromParts.month, 'From month');
-  fromMonth.dataset.field = 'from-month';
-  const fromDay = el('input', 'date-day');
-  fromDay.dataset.field = 'from-day';
-  fromDay.type = 'number';
-  fromDay.min = '1';
-  fromDay.max = '31';
-  fromDay.step = '1';
-  fromDay.inputMode = 'numeric';
-  fromDay.placeholder = 'Day';
-  fromDay.value = fromParts.day ? String(fromParts.day) : '';
-  fromDay.setAttribute('aria-label', 'From day');
-  const toMonth = monthOptions(el('select', 'date-select'), toParts.month, 'To month');
-  toMonth.dataset.field = 'to-month';
-  const toDay = el('input', 'date-day');
-  toDay.dataset.field = 'to-day';
-  toDay.type = 'number';
-  toDay.min = '1';
-  toDay.max = '31';
-  toDay.step = '1';
-  toDay.inputMode = 'numeric';
-  toDay.placeholder = 'Day';
-  toDay.value = toParts.day ? String(toParts.day) : '';
-  toDay.setAttribute('aria-label', 'To day');
+  const advanced = el('details', 'advanced-months');
+  const advancedSummaryRow = el('summary', 'advanced-summary-row');
+  const advancedSummary = el('span', 'advanced-summary');
+  advancedSummaryRow.append(el('span', null, 'Advanced: month ranges'), advancedSummary);
+  const advancedHint = el('p', 'advanced-hint');
+  advanced.append(advancedSummaryRow, advancedHint, monthChips);
+  // A legacy non-contiguous or malformed month scope has no single date range;
+  // open its month editor so it remains editable without making months the
+  // first decision for normal seasons.
+  advanced.open = monthEditorIsLegacy(period);
 
-  const dateBound = (labelText, monthSelect, dayInput) => {
-    const group = el('div', 'date-bound');
-    group.setAttribute('role', 'group');
-    group.setAttribute('aria-label', labelText);
-    const label = el('span', 'field-label', labelText);
-    group.append(label);
-    const controls = el('div', 'date-controls');
-    controls.append(monthSelect, dayInput);
-    group.append(controls);
-    return group;
-  };
-  const dateRow = el('div', 'date-row');
-  dateRow.append(
-    dateBound('From', fromMonth, fromDay),
-    (() => {
-      const arrow = el('span', 'date-arrow', '→');
-      arrow.setAttribute('aria-hidden', 'true');
-      return arrow;
-    })(),
-    dateBound('To', toMonth, toDay),
+  scopeEditor.append(
+    datesHead,
+    reference,
+    dateFields,
+    dateFallback,
+    status,
+    stored,
+    dateError,
+    advanced,
   );
-  const dateHint = el('p', 'scope-date-hint');
-  dateHint.id = dateHintId;
-  const dateError = el('p', 'rule-error date-error');
-  dateError.id = dateErrorId;
-  dateError.hidden = true;
-  // A direct route from day precision to All year: it clears both bounds and
-  // sets months:null without first rounding through the month editor.
-  const allYearAction = el('button', 'link-btn date-all-year', 'Use all year');
-  allYearAction.type = 'button';
-  allYearAction.dataset.action = 'dates-all-year';
-  allYearAction.addEventListener('click', () => {
+  card.monthEditor = scopeEditor;
+  card.seasonDates = scopeEditor;
+  card.allYear = allYear;
+  card.fromDate = fromDate;
+  card.toDate = toDate;
+  card.dateFields = dateFields;
+  card.dateFallback = dateFallback;
+  card.dateReference = reference;
+  card.dateStatus = status;
+  card.dateStored = stored;
+  card.dateError = dateError;
+  card.advancedMonths = advanced;
+  card.advancedSummary = advancedSummary;
+  card.advancedHint = advancedHint;
+  card.monthChips = monthChips;
+
+  allYear.addEventListener('change', () => {
     if (settingsSaving) return;
-    applyMonths(card, null, { focusCheckbox: true });
+    if (allYear.checked) {
+      applyMonths(card, null, { focusCheckbox: true });
+      return;
+    }
+    const seed = periodDateSeed({ kind: 'all' }, new Date());
+    applyDates(card, seed.from, seed.to);
+    card.fromDate.focus({ preventScroll: true });
   });
-  datePanel.append(dateRow, dateHint, dateError, allYearAction);
 
   const commitDates = () => {
     if (settingsSaving) return;
-    const from = dateControlValue(fromMonth.value, fromDay.value);
-    const to = dateControlValue(toMonth.value, toDay.value);
+    const from = boundFromDateInput(fromDate.value);
+    const to = boundFromDateInput(toDate.value);
     const current = periodDateBounds(card.period);
     if (from === (current.from ?? null) && to === (current.to ?? null)) return;
     applyDates(card, from, to);
   };
-  fromMonth.addEventListener('change', commitDates);
-  fromDay.addEventListener('change', commitDates);
-  toMonth.addEventListener('change', commitDates);
-  toDay.addEventListener('change', commitDates);
+  fromDate.addEventListener('change', commitDates);
+  toDate.addEventListener('change', commitDates);
 
-  for (const control of [fromMonth, fromDay, toMonth, toDay]) {
-    control.setAttribute('aria-describedby', `${dateHintId} ${dateErrorId}`);
-  }
-
-  monthsMode.addEventListener('click', () => {
-    if (settingsSaving || !periodHasDates(card.period)) return;
-    const bounds = periodDateBounds(card.period);
-    const months = monthsCovering(bounds.from, bounds.to);
-    if (months.length === 0) {
-      card.fromDay.focus({ preventScroll: true });
-      return;
-    }
-    applyMonths(card, months, { focusScope: true });
-  });
-  datesMode.addEventListener('click', () => {
-    if (settingsSaving || periodHasDates(card.period)) return;
-    const seed = periodDateSeed(card.period);
-    if (!seed) return;
-    applyDates(card, seed.from, seed.to);
-    card.fromDay.focus({ preventScroll: true });
-  });
-
-  scopeEditor.append(modeRow, scopeHint, monthPanel, datePanel);
-  card.monthEditor = scopeEditor;
-  card.scopeEditor = scopeEditor;
-  card.scopeModes = modeRow;
-  card.monthsMode = monthsMode;
-  card.datesMode = datesMode;
-  card.scopeHint = scopeHint;
-  card.monthPanel = monthPanel;
-  card.datePanel = datePanel;
-  card.fromMonth = fromMonth;
-  card.fromDay = fromDay;
-  card.toMonth = toMonth;
-  card.toDay = toDay;
-  card.dateHint = dateHint;
-  card.dateError = dateError;
-  card.allYear = allYear;
-  card.monthChips = monthChips;
-  allYear.addEventListener('change', () => {
+  editDates.addEventListener('click', () => {
     if (settingsSaving) return;
-    applyMonths(card, allYear.checked ? null : [new Date().getMonth() + 1], {
-      focusCheckbox: true,
-    });
+    setExpanded(card, true);
+    const state = seasonDateState(card.period);
+    if (state.allYear) {
+      card.allYear.focus({ preventScroll: true });
+    } else if (state.canPick) {
+      (card.dateFocus || card.fromDate).focus({ preventScroll: true });
+    } else {
+      card.advancedMonths.open = true;
+      const chip =
+        card.monthChips.querySelector('[aria-pressed="true"]') ||
+        card.monthChips.querySelector('button') ||
+        card.advancedMonths.querySelector('summary');
+      chip.focus({ preventScroll: true });
+    }
+    scrollToNode(card.seasonDates);
   });
+
+  const baseBlock = createBaseBlock(card, period, index);
 
   const coverage = el('div', 'coverage');
   const list = el('div', 'rate-list');
   list.setAttribute('role', 'group');
-  list.setAttribute('aria-label', `Windows in ${periodName(period)}`);
+  list.setAttribute('aria-label', `Daily windows in ${periodName(period)}`);
   const addButton = el('button', 'btn add-rule');
   addButton.type = 'button';
   addButton.dataset.action = 'add-window';
   addButton.append(el('span', 'add-plus', '+'), el('span', null, 'Add window'));
-  addButton.setAttribute('aria-label', `Add a window to ${periodName(period)}`);
+  addButton.setAttribute('aria-label', `Add a daily window to ${periodName(period)}`);
   addButton.addEventListener('click', () => addWindow(card));
 
-  const modeNotice = el('div', 'period-mode-notice');
-  const seasonNote = el('p', 'period-mode-note', 'One price for every hour in this season.');
-  const mixNote = el('p', 'rule-error period-mix', SEASON_RATE_MIX_MESSAGE);
-  seasonNote.hidden = true;
-  mixNote.hidden = true;
-  modeNotice.append(seasonNote, mixNote);
-
-  const modeActions = el('div', 'period-mode-actions');
-  const useTou = el('button', 'btn small', 'Use time-of-use windows');
-  useTou.type = 'button';
-  useTou.dataset.action = 'use-tou';
-  useTou.hidden = true;
-  useTou.addEventListener('click', () => convertToTou(card));
-  const useSeason = el('button', 'btn small', 'Convert to one season rate');
-  useSeason.type = 'button';
-  useSeason.dataset.action = 'use-season-rate';
-  useSeason.hidden = true;
-  useSeason.addEventListener('click', () => convertToSeasonRate(card));
-  modeActions.append(useTou, useSeason);
+  const windowsSection = el('section', 'windows-section');
+  const windowsTitle = el('h6', 'windows-title', 'Daily windows (optional)');
+  const windowsHint = el(
+    'p',
+    'windows-hint',
+    'A daily window overrides the base for its days and hours.',
+  );
+  const windowsEmpty = el('p', 'windows-empty', 'No daily windows — the base covers every hour.');
+  windowsEmpty.hidden = true;
+  windowsSection.append(windowsTitle, windowsHint, windowsEmpty, list, addButton);
+  card.windowsSection = windowsSection;
+  card.windowsEmpty = windowsEmpty;
 
   const periodActions = el('div', 'period-actions');
   const duplicateButton = el('button', 'btn small', 'Duplicate');
@@ -1331,10 +1672,10 @@ function createPeriodCard(period, index) {
   card.cancelRemove = cancelRemove;
   card.removeButton = removeButton;
 
-  body.append(scopeEditor, modeNotice, coverage, list, addButton, modeActions, periodActions);
+  body.append(scopeEditor, baseBlock, windowsSection, coverage, periodActions);
   node.append(body);
 
-  period.rows.forEach((entry) => {
+  period.windows.forEach((entry) => {
     const windowCard = createWindowCard(entry, card);
     windowCards[entry.index] = windowCard;
     card.cards.push(windowCard);
@@ -1343,10 +1684,6 @@ function createPeriodCard(period, index) {
   card.list = list;
   card.addButton = addButton;
   card.coverage = coverage;
-  card.seasonNote = seasonNote;
-  card.mixNote = mixNote;
-  card.useTou = useTou;
-  card.useSeason = useSeason;
 
   toggle.addEventListener('click', () => {
     const next = card.body.hidden;
@@ -1365,11 +1702,7 @@ function createPeriodCard(period, index) {
 // The card is rebuilt because the period key can change (merge, split, or move
 // to/from the malformed group); focus returns to the same control when the
 // period survives and to the merged header when its rows join another period.
-function applyMonths(
-  card,
-  months,
-  { focusMonth = null, focusCheckbox = false, focusScope = false } = {},
-) {
+function applyMonths(card, months, { focusMonth = null, focusCheckbox = false } = {}) {
   if (settingsSaving) return;
   const indices = card.period.rows.map((entry) => entry.index);
   const first = indices[0];
@@ -1394,12 +1727,18 @@ function applyMonths(
   }
   if (focusCheckbox) {
     next.allYear.focus({ preventScroll: true });
-  } else if (focusScope) {
-    next.monthsMode.focus({ preventScroll: true });
   } else if (focusMonth != null) {
-    const chip = next.monthChips.querySelector(`[data-month="${focusMonth}"]`);
-    if (chip) chip.focus({ preventScroll: true });
-    else next.toggle.focus({ preventScroll: true });
+    // The chips live in the advanced disclosure, which this edit can hide: a
+    // removal that leaves one contiguous run hands the scope to the date fields.
+    // Focus what is on screen — a hidden chip would leave focus on <body> and
+    // restart the next Tab at the top of the page.
+    if (next.advancedMonths.hidden) {
+      (next.dateFocus || next.editDates).focus({ preventScroll: true });
+    } else {
+      next.advancedMonths.open = true;
+      const chip = next.monthChips.querySelector(`[data-month="${focusMonth}"]`);
+      (chip || next.toggle).focus({ preventScroll: true });
+    }
   } else {
     next.toggle.focus({ preventScroll: true });
   }
@@ -1433,7 +1772,7 @@ function cancelPlanRebuild() {
 // The commit runs inside `change`, which a real pointer press fires on blur
 // before the click that caused it is dispatched (and a Tab before the key
 // moves focus). Replacing the focused control synchronously would therefore
-// swallow the very next action — the conversion buttons included. So: repaint
+// swallow the very next action. So: repaint
 // without touching the DOM for the common case, and defer a structural rebuild
 // to the next task, which lets the click/Tab land first.
 function applyDates(card, from, to) {
@@ -1497,7 +1836,7 @@ function deferPlanRebuild(anchorIndex) {
     const edited = periodCards.find((card) =>
       card.period.rows.some((entry) => entry.index === anchorIndex),
     );
-    const control = edited && edited.node.querySelector(`[data-field="${field || 'from-day'}"]`);
+    const control = edited && edited.node.querySelector(`[data-field="${field || 'from-date'}"]`);
     if (control) control.focus({ preventScroll: true });
   }, 0);
 }
@@ -1505,11 +1844,10 @@ function deferPlanRebuild(anchorIndex) {
 function addWindow(card) {
   if (settingsSaving || draftRates.length >= MAX_RATE_WINDOWS) return;
   if (card.period.kind === 'invalid') {
-    if (periodHasDates(card.period)) card.fromDay.focus({ preventScroll: true });
+    if (periodHasDates(card.period)) card.fromDate.focus({ preventScroll: true });
     else card.allYear.focus({ preventScroll: true });
     return;
   }
-  if (periodRateMode(card.period) !== 'tou') return;
   // The new row inherits the period's whole scope — its months and, for a date
   // season, the raw day bounds — so it stays a window of that season. Passing
   // the months alone would create a second, month-wide season and silently widen
@@ -1533,116 +1871,109 @@ function addWindow(card) {
   }
 }
 
-// The flat opt-in asks once what kind of plan to start, then builds exactly
-// that shape. Season rate is an all-day, every-day row in an All-year season;
-// time-of-use keeps the everyday overnight preset.
-function addRatePlan(mode) {
-  if (settingsSaving || draftRates.length > 0) return;
-  draftRates = [mode === 'season' ? seasonRateRow(null) : newWindowRow(null, 'overnight')];
-  expandedPeriods = new Set(['all']);
+function addBaseRate(card) {
+  if (settingsSaving || card.period.base) return;
+  if (periodHasBaseOverlap(card.period, draftRates)) return;
+  const flat = $('setting-rate').value;
+  const scope = periodRowScope(card.period);
+  const row = baseRateRow(
+    crypto.randomUUID(),
+    rateIsUsable(flat) ? flat : '',
+    scope.months,
+    scope.dates,
+  );
+  const first = card.period.rows[0] ? card.period.rows[0].index : draftRates.length;
+  draftRates = [...draftRates.slice(0, first), row, ...draftRates.slice(first)];
+  planPeriods = ratePeriodsForDraft();
+  expandedPeriods.add(card.key);
   markEdited();
   renderPlan();
-  const added = windowCards[0];
-  if (added) {
-    added.rateInput.focus({ preventScroll: true });
-    scrollToNode(added.node);
+  const next = periodCards.find((entry) => entry.key === card.key);
+  if (next && next.baseInput) {
+    next.baseInput.focus({ preventScroll: true });
+    scrollToNode(next.baseBlock);
   }
 }
 
-function resetRatePlanChoices() {
-  $('rate-plan-choices').hidden = true;
-  $('add-rate-plan').hidden = false;
+function removeBaseRate(card) {
+  if (settingsSaving || !card.period.base) return;
+  const index = card.period.base.index;
+  const key = card.key;
+  const previous = draftRates;
+  draftRates = draftRates.filter((_, rowIndex) => rowIndex !== index);
+  settleFlatRate(previous);
+  planPeriods = ratePeriodsForDraft();
+  if (!planPeriods.some((period) => period.key === key)) expandedPeriods.delete(key);
+  else expandedPeriods.add(key);
+  markEdited();
+  renderPlan();
+  const next = periodCards.find((entry) => entry.key === key);
+  if (next && next.addBaseButton && !next.addBaseButton.hidden) {
+    next.addBaseButton.focus({ preventScroll: true });
+  } else if (next && next.addButton) {
+    next.addButton.focus({ preventScroll: true });
+  } else {
+    focusAfterRemoval();
+  }
 }
 
-function revealRatePlanChoices() {
+function fillGaps() {
   if (settingsSaving) return;
-  $('add-rate-plan').hidden = true;
-  $('rate-plan-choices').hidden = false;
-  $('add-season-rate').focus({ preventScroll: true });
-}
-
-function hideRatePlanChoices() {
-  resetRatePlanChoices();
-  $('add-rate-plan').focus({ preventScroll: true });
-}
-
-function convertToTou(card) {
-  if (settingsSaving || card.period.rows.length !== 1) return;
-  const entry = card.period.rows[0];
-  draftRates = draftRates.map((row, index) =>
-    index === entry.index
-      ? { ...row, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '07:00' }
-      : row,
+  const scopes = uncoveredGapScopes(draftRates);
+  if (scopes.length === 0) return;
+  const rows = scopes.map((scope) =>
+    baseRateRow(
+      crypto.randomUUID(),
+      '',
+      scope.months,
+      scope.from != null ? { from: scope.from, to: scope.to } : null,
+    ),
   );
-  markEdited();
-  renderPlan();
-  const added = windowCards[entry.index];
-  if (added) {
-    added.startInput.focus({ preventScroll: true });
-    scrollToNode(added.node);
+  draftRates = [...draftRates, ...rows];
+  planPeriods = ratePeriodsForDraft();
+  for (const period of planPeriods) {
+    if (period.rows.some((entry) => rows.some((row) => row.id === entry.row.id))) {
+      expandedPeriods.add(period.key);
+    }
   }
-}
-
-function convertToSeasonRate(card) {
-  if (settingsSaving || card.period.rows.length !== 1) return;
-  if (periodRateMode(card.period) !== 'tou') return;
-  const entry = card.period.rows[0];
-  draftRates = draftRates.map((row, index) =>
-    index === entry.index
-      ? { ...row, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00' }
-      : row,
-  );
   markEdited();
   renderPlan();
-  const added = windowCards[entry.index];
-  if (added) {
-    added.rateInput.focus({ preventScroll: true });
-    scrollToNode(added.node);
+  const first = periodCards.find((card) =>
+    card.period.rows.some((entry) => rows.some((row) => row.id === entry.row.id)),
+  );
+  if (first && first.baseInput) {
+    first.baseInput.focus({ preventScroll: true });
+    scrollToNode(first.baseBlock);
   }
 }
 
 function addSeason() {
   if (settingsSaving || draftRates.length >= MAX_RATE_WINDOWS) return;
-  const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  // Once the plan has a day-precision season, a new season is seeded from the
-  // uncovered dates rather than from months: a date season's months are only a
-  // compatibility hint, and a month seed can land on the days the date season
-  // owns.
-  const hasDates = planPeriods.some((period) => period.kind === 'dates');
-  let row;
-  if (allSeasonRates || hasDates) {
-    // A plan made only of season rates grows into the largest uncovered date
-    // range, so two seasons divide the year instead of overlapping.
-    const scope = largestDateScope(uncoveredDateRanges(draftRates));
-    if (!scope) return;
-    const dates = scope.fullYear ? null : { from: scope.from, to: scope.to };
-    row = allSeasonRates
-      ? seasonRateRow(dates ? monthsCovering(dates.from, dates.to) : null, dates)
-      : newWindowRow(
-          dates ? monthsCovering(dates.from, dates.to) : null,
-          draftRates.length === 0 ? 'overnight' : 'peak',
-          dates,
-        );
-  } else {
-    const uncovered = uncoveredMonths(draftRates);
-    const months =
-      uncovered.length === 12
-        ? null
-        : uncovered.length > 0
-          ? largestMonthRun(uncovered)
-          : [new Date().getMonth() + 1];
-    row = newWindowRow(months, draftRates.length === 0 ? 'overnight' : 'peak');
-  }
-  draftRates = [...draftRates, row];
-  const index = draftRates.length - 1;
+  const scope = largestDateScope(uncoveredDateRanges(draftRates));
+  const hasBase = planPeriods.some((period) => Boolean(period.base));
+  // A new season is a base. Prefer the largest uncovered range; when the year is
+  // already covered and no base exists, an All-year base can layer over existing
+  // windows (a base plus overrides is valid). With a base already present there
+  // is nowhere non-overlapping to put another, so the action is not offered.
+  let dates = scope && !scope.fullYear ? { from: scope.from, to: scope.to } : null;
+  if (!scope && hasBase) return;
+  const months = dates ? monthsCovering(dates.from, dates.to) : null;
+  const row = baseRateRow(crypto.randomUUID(), '', months, dates);
+  const targetKey = dates ? `dates:${dates.from}-${dates.to}` : 'all';
+  const existing = planPeriods.find((period) => period.key === targetKey);
+  const insertAt =
+    existing && existing.rows.length > 0 ? existing.rows[0].index : draftRates.length;
+  draftRates = [...draftRates.slice(0, insertAt), row, ...draftRates.slice(insertAt)];
   planPeriods = ratePeriodsForDraft();
-  const target = planPeriods.find((period) => period.rows.some((entry) => entry.index === index));
+  const target = planPeriods.find((period) => period.rows.some((entry) => entry.row.id === row.id));
   if (target) expandedPeriods.add(target.key);
   markEdited();
   renderPlan();
-  const added = windowCards[index];
+  const added = periodCards.find((period) =>
+    period.period.rows.some((entry) => entry.row.id === row.id),
+  );
   if (added) {
-    added.rateInput.focus({ preventScroll: true });
+    added.baseInput.focus({ preventScroll: true });
     scrollToNode(added.node);
   }
 }
@@ -1694,9 +2025,17 @@ function requestRemovePeriod(card) {
   removePeriod(card);
 }
 
+function settleFlatRate(previousRows) {
+  if (draftRates.length > 0) return;
+  const flat = scheduleToFlatRate(previousRows, $('setting-rate').value);
+  if (typeof flat === 'number') $('setting-rate').value = String(flat);
+}
+
 function removePeriod(card) {
   const indices = new Set(card.period.rows.map((entry) => entry.index));
+  const previous = draftRates;
   draftRates = draftRates.filter((_, index) => !indices.has(index));
+  settleFlatRate(previous);
   expandedPeriods.delete(card.key);
   removeConfirmKey = null;
   markEdited();
@@ -1707,7 +2046,9 @@ function removePeriod(card) {
 function removeWindow(card) {
   if (settingsSaving) return;
   const periodKey = card.periodCard.key;
+  const previous = draftRates;
   draftRates = draftRates.filter((_, index) => index !== card.index);
+  settleFlatRate(previous);
   // Indexes after the removed row shift down; every card is rebuilt.
   planPeriods = ratePeriodsForDraft();
   if (!planPeriods.some((period) => period.key === periodKey)) expandedPeriods.delete(periodKey);
@@ -1726,9 +2067,7 @@ function focusAfterRemoval() {
     else periodCards[0]?.toggle.focus({ preventScroll: true });
     return;
   }
-  // renderPlan resets the opt-in when the plan becomes flat; focus the restored
-  // button rather than a hidden choice.
-  $('add-rate-plan').focus({ preventScroll: true });
+  $('rate-mode-flat').focus({ preventScroll: true });
 }
 
 // ---------- painting ----------
@@ -1738,20 +2077,26 @@ function ratePeriodsForDraft() {
 }
 
 function paintPlan() {
-  const flat = draftRates.length === 0;
-  $('rates-flat').hidden = !flat;
-  $('rates-plan').hidden = flat;
-  if (flat) {
-    // The fallback line belongs to the plan view; a flat config has no plan.
-    $('other-times-line').hidden = true;
+  const mode = currentRateMode();
+  paintRateMode();
+  if (mode === 'flat') {
+    planPeriods = [];
+    seedNoticeKey = '';
+    planUnpriced = false;
+    $('rates-plan').hidden = true;
+    $('uncovered-line').hidden = true;
+    $('plan-seed').hidden = true;
     return;
   }
 
   planPeriods = ratePeriodsForDraft();
-  // Only rows that can actually match and pass validation set a meaningful
-  // range: a row with unusable months or an invalid time/price is shown and
-  // fixed, but its price never applies. Letting it widen the advertised range
-  // would quote a price no moment can ever be charged.
+  // One walk of the draft per paint: the plan summary's 0.00 minimum and each
+  // base block's warning both ask whether any instant is unpriced.
+  planUnpriced = planHasUnpriced(draftRates);
+  // Only rows that can match and pass validation set a meaningful range; an
+  // invalid row is shown and fixed but its price never applies. A base-less
+  // season and a date gap both put 0 in the range, so the plan cannot advertise
+  // a minimum it does not actually charge.
   const rateRows = planPeriods
     .filter((period) => period.kind !== 'invalid')
     .flatMap((period) => period.rows)
@@ -1760,55 +2105,56 @@ function paintPlan() {
   const range = ratePlanRange(rateRows);
   const problems = validationProblemCount(rateValidation, draftRates.length);
   const capped = draftRates.length > MAX_RATE_WINDOWS;
-  // "3 windows · USD 0.10–0.32 · other times USD 0.31": the count already says
-  // "windows", so the range does not repeat the word. Prices are unbreakable
-  // runs so a range never splits after the en dash at 320. A season rate is one
-  // price, not a window, and an all-season-rate plan is counted as rates.
-  const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  const rowNoun = allSeasonRates ? (draftRates.length === 1 ? 'rate' : 'rates') : null;
+  const gaps = mergeDateRanges(uncoveredDateRanges(draftRates));
   const counts = `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'} · ${
     draftRates.length
-  } ${rowNoun || (draftRates.length === 1 ? 'window' : 'windows')}`;
-  // Every separator is bound to the run it introduces with a no-break space, so
-  // a plan line never ends on a lone `·` when it wraps at 320 px. The count is
-  // one unbreakable run too: "2 seasons · 2" / "windows" split the noun from its
-  // number.
+  } ${draftRates.length === 1 ? 'rate' : 'rates'}`;
   const summary = [nowrapEl(counts)];
   if (range) summary.push(nowrapEl(`\u00a0· ${priceRangeText(range)}`));
-  // No row contributes a usable price: name the reason instead of omitting the
-  // range, which read as "no price applies" rather than "a price needs fixing".
-  // An untitled row is the same state as an invalid one to the owner — the price
-  // is not there yet — so both read the same.
   else summary.push(nowrapEl('\u00a0· — needs attention'));
-  summary.push(nowrapEl(`\u00a0· other times ${priceText(readFields().rate)}`));
+  if (gaps.length > 0) {
+    summary.push(nowrapEl(`\u00a0· ${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'}`));
+  }
   $('plan-summary-text').replaceChildren(...summary);
   const problem = $('plan-problem');
   const problemText = planProblemText({ problems, capped });
   problem.hidden = problems === 0;
   setText(problem, problemText);
 
-  // The fallback is a line, not a season: name the days nothing covers. Date
-  // ranges collapse back to whole months when that is what the gap is, so a
-  // month-only plan reads exactly as before.
-  const uncovered = dateSetText(uncoveredDateRanges(draftRates));
-  const otherTimes = $('other-times-line');
-  otherTimes.hidden = !uncovered;
-  if (uncovered) {
-    // The separator is bound to the text that follows it with a no-break space,
-    // so a wrap at 320 px can never leave a line starting with a lone `·`. The
-    // title itself is two runs split at the dash: at 320 it breaks into
-    // "No season —" / "other times · …" instead of splitting "other times".
-    const runs = uncovered.split(', ');
-    const title = el('span', 'other-times-title');
-    title.append(nowrapEl('No season —'), ' ', nowrapEl('other times'));
-    const nodes = [title];
-    nodes.push(nowrapEl(`\u00a0· ${runs[0]}`));
-    for (const run of runs.slice(1)) nodes.push(nowrapEl(`, ${run}`));
-    const fallback = readFields().rate;
-    if (Number.isFinite(parseRateValue(fallback))) {
-      nodes.push(el('span', 'other-times-price', `\u00a0· ${priceText(fallback)}`));
-    }
-    otherTimes.replaceChildren(...nodes);
+  // The seed note explains the workable season the mode switch created, and
+  // retires itself as soon as that seed stops being the whole plan (dates
+  // edited, a window or another season added, or the plan emptied).
+  const seeded = seedNoticeKey
+    ? planPeriods.find((period) => period.key === seedNoticeKey && period.base)
+    : null;
+  if (!seeded || planPeriods.length !== 1 || seeded.rows.length !== 1) seedNoticeKey = '';
+  const seedNote = $('plan-seed');
+  seedNote.hidden = !seedNoticeKey;
+  setText(
+    $('plan-seed-note'),
+    seedNoticeKey && seeded
+      ? `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost 0.00 until you cover them.`
+      : '',
+  );
+
+  const uncoveredLine = $('uncovered-line');
+  const gapText = dateSetText(gaps);
+  uncoveredLine.hidden = gaps.length === 0;
+  if (gaps.length > 0) {
+    const dateNode = $('uncovered-dates');
+    dateNode.replaceChildren();
+    // The copy above already separates the range from the sentence; a leading
+    // `·` here started a wrapped line with punctuation.
+    gapText.split(', ').forEach((run, index) => {
+      if (index > 0) dateNode.append(', ');
+      dateNode.append(nowrapEl(run));
+    });
+    const fill = $('fill-gaps');
+    setText(fill, `Fill ${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'}`);
+    fill.setAttribute(
+      'aria-label',
+      `Fill ${gaps.length} ${gaps.length === 1 ? 'gap' : 'gaps'}: ${gapText}`,
+    );
   }
 
   for (const card of periodCards) {
@@ -1831,42 +2177,24 @@ function paintRateValidation() {
   // storage index.
   const rates = windowRates();
   const fallback = readFields().rate;
-  // A mixed season's rows collide by construction: its all-day row overlaps
-  // every time window of the same season. The structural banner already names
-  // the one fix, and a row-level "Overlaps …" reads as a time tweak that cannot
-  // work, so those pairs are withheld from the row notes. Cross-season overlaps
-  // keep theirs, and the counts/flags below still use the full set.
-  const mixedPeriodOf = new Map();
-  for (const period of planPeriods) {
-    if (periodRateMode(period) !== 'mixed') continue;
-    for (const entry of period.rows) mixedPeriodOf.set(entry.index, period);
-  }
   const addNote = (map, index, text) => {
     if (!map.has(index)) map.set(index, []);
     map.get(index).push(text);
   };
   const notes = new Map();
-  const displayNotes = new Map();
   for (const [a, b] of rateValidation.overlaps) {
     const sameScope = rateScopeText(draftRates[a]) === rateScopeText(draftRates[b]);
     const left = windowLabel(draftRates[a], rates, fallback, { months: !sameScope });
     const right = windowLabel(draftRates[b], rates, fallback, { months: !sameScope });
-    const leftNote = left === right ? 'Overlaps an identical window' : `Overlaps “${right}”`;
-    const rightNote = left === right ? 'Overlaps an identical window' : `Overlaps “${left}”`;
-    addNote(notes, a, leftNote);
-    addNote(notes, b, rightNote);
-    const sameMix = mixedPeriodOf.has(a) && mixedPeriodOf.get(a) === mixedPeriodOf.get(b);
-    if (!sameMix) {
-      addNote(displayNotes, a, leftNote);
-      addNote(displayNotes, b, rightNote);
-    }
+    addNote(notes, a, left === right ? 'Overlaps an identical window' : `Overlaps “${right}”`);
+    addNote(notes, b, left === right ? 'Overlaps an identical window' : `Overlaps “${left}”`);
   }
 
   for (const card of windowCards) {
     if (!card) continue;
     const errors = rateValidation.rows[card.index] || {};
-    const rowNotes = displayNotes.get(card.index) || [];
-    // Date errors belong to the season's From/To editor, which prefixes the
+    const rowNotes = notes.get(card.index) || [];
+    // Date errors belong to the season's Starts/Ends editor, which prefixes the
     // field name; repeating the bare sentence inside every member row is noise.
     const rowMessages = Object.entries(errors)
       .filter(([field]) => field !== 'from' && field !== 'to')
@@ -1875,11 +2203,13 @@ function paintRateValidation() {
     card.errorEl.hidden = messages.length === 0;
     setText(card.errorEl, messages.join(' '));
     card.rateInput.setAttribute('aria-invalid', String(Boolean(errors.rate)));
-    card.presetsEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
-    card.daysEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
-    card.daysEl.classList.toggle('invalid', Boolean(errors.days));
-    card.startInput.setAttribute('aria-invalid', String(Boolean(errors.start)));
-    card.endInput.setAttribute('aria-invalid', String(Boolean(errors.end)));
+    if (!card.isBase) {
+      card.presetsEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
+      card.daysEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
+      card.daysEl.classList.toggle('invalid', Boolean(errors.days));
+      card.startInput.setAttribute('aria-invalid', String(Boolean(errors.start)));
+      card.endInput.setAttribute('aria-invalid', String(Boolean(errors.end)));
+    }
     card.node.classList.toggle('invalid', messages.length > 0);
     card.node.setAttribute('aria-invalid', String(messages.length > 0));
     if (rowNotes.length > 0) {
@@ -1899,38 +2229,9 @@ function paintRateValidation() {
     card.flag.hidden = bad === 0;
     setText(card.flag, bad === 1 ? '1 to fix' : `${bad} to fix`);
     card.node.classList.toggle('invalid', bad > 0);
-    // Re-derive the date target from the validation that was just applied; the
-    // submit path paints validation without rebuilding the period.
-    if (periodHasDates(card.period)) {
-      const first = card.period.rows
-        .map((entry) => ({ entry, errors: rateValidation.rows[entry.index] || {} }))
-        .find(({ errors }) => errors.from || errors.to);
-      card.dateFocus = first ? (first.errors.from ? card.fromDay : card.toDay) : card.fromDay;
-      const fromError = card.period.rows
-        .map((entry) => (rateValidation.rows[entry.index] || {}).from)
-        .find(Boolean);
-      const toError = card.period.rows
-        .map((entry) => (rateValidation.rows[entry.index] || {}).to)
-        .find(Boolean);
-      card.fromMonth.setAttribute('aria-invalid', String(Boolean(fromError)));
-      card.fromDay.setAttribute('aria-invalid', String(Boolean(fromError)));
-      card.toMonth.setAttribute('aria-invalid', String(Boolean(toError)));
-      card.toDay.setAttribute('aria-invalid', String(Boolean(toError)));
-      const messages = [
-        fromError ? `From: ${fromError}` : '',
-        toError ? `To: ${toError}` : '',
-      ].filter(Boolean);
-      card.dateError.hidden = messages.length === 0;
-      setText(card.dateError, messages.join(' '));
-    }
   }
 
-  // A mixed season is one structural problem, and the season card already names
-  // it. The generic overlap sentence is withheld for that case: its remedy
-  // ("change one of them") cannot fix an all-day row colliding with every time
-  // window, and two banners for one condition contradicted each other.
-  const mixed = planHasMix();
-  const general = mixed && !rateValidation.capped ? '' : rateValidation.general.join(' ');
+  const general = rateValidation.general.join(' ');
   const docError = $('rates-error');
   docError.hidden = !general;
   setText(docError, general);
@@ -1943,23 +2244,36 @@ function paintRateValidation() {
   blockers.hidden = problems === 0;
   setText(blockers, planProblemText({ problems, capped }));
 
-  // Saving locks the plan; the cap disables the two add paths.
+  // Saving locks the plan; the cap disables the add paths.
   for (const node of $('rates-plan').querySelectorAll('input, button, select')) {
     node.disabled = settingsSaving;
   }
-  for (const node of $('rates-flat').querySelectorAll('button')) node.disabled = settingsSaving;
   const atCap = draftRates.length >= MAX_RATE_WINDOWS;
-  const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  // A new season is seeded from the uncovered dates once the plan has any date
-  // season, so a fully partitioned year leaves nowhere to add one.
-  const datedPlan = allSeasonRates || planPeriods.some((period) => period.kind === 'dates');
-  const noUncoveredDates = datedPlan && uncoveredDateRanges(draftRates).length === 0;
-  $('add-season').disabled = settingsSaving || atCap || noUncoveredDates;
-  $('add-season').title = noUncoveredDates ? 'Every date already has a season.' : '';
+  const hasBase = planPeriods.some((period) => Boolean(period.base));
+  const noUncoveredDates = uncoveredDateRanges(draftRates).length === 0;
+  // A new base needs an uncovered range. With every date covered and a base
+  // already present, another base would only collide, so the action is refused —
+  // with a visible, focusable explanation beside it, not just a tooltip on a
+  // disabled button.
+  const addSeasonBlocked = noUncoveredDates && hasBase;
+  $('add-season').disabled = settingsSaving || atCap || addSeasonBlocked;
+  $('add-season').title = addSeasonBlocked ? 'A base season already covers every date.' : '';
+  const seasonNote = $('add-season-note');
+  seasonNote.hidden = !addSeasonBlocked;
+  setText(
+    seasonNote,
+    addSeasonBlocked
+      ? 'Every date is covered by a season, so there is no room for another. Edit a season’s dates to make one.'
+      : '',
+  );
+  const fillCount = uncoveredGapScopes(draftRates).length;
+  $('fill-gaps').disabled = settingsSaving || draftRates.length + fillCount > MAX_RATE_WINDOWS;
+  $('fill-gaps').title = draftRates.length + fillCount > MAX_RATE_WINDOWS ? RATE_CAP_REMEDY : '';
   for (const card of periodCards) {
     // The blanket lock above enables everything when not saving; restore the
-    // feature-level disabled states (date/months modes, conversions) after it.
+    // feature-level disabled states (date/month modes, row cap) after it.
     paintScopeEditor(card);
+    paintBaseBlock(card);
     paintPeriodMode(card);
     card.addButton.disabled = settingsSaving || atCap;
     paintPeriodActions(card);
@@ -1983,23 +2297,16 @@ function previewResult() {
   return { date, result: previewRate(draftRates, $('setting-rate').value, date) };
 }
 
-// A season that mixes a season rate with daily windows: the validator rejects it
-// and the UI must not draw a resolved schedule for it.
-function planHasMix() {
-  return planPeriods.some((period) => periodRateMode(period) === 'mixed');
-}
-
 function paintPreview() {
   if (draftRates.length === 0) return;
   const table = $('preview-table');
   const empty = $('preview-empty');
   const note = $('preview-note');
-  const mixed = planHasMix();
-  const blocker = mixed ? MIX_COVERAGE_MESSAGE : previewBlocker(rateValidation);
+  const blocker = previewBlocker(rateValidation);
   if (blocker) {
-    // Never claim "Other times" while a window is incomplete or two windows
-    // collide: the invalid row is omitted from the lookup, so the answer could
-    // be wrong. The checker resumes as soon as the plan is fixable.
+    // Never claim a price while a window is incomplete or two windows collide:
+    // the invalid row is omitted from the lookup, so the answer could be wrong.
+    // The checker resumes as soon as the plan is fixable.
     table.hidden = true;
     empty.hidden = true;
     note.hidden = false;
@@ -2023,27 +2330,33 @@ function paintPreview() {
   if (result.rate == null) {
     price.textContent = 'No rate set';
   } else {
-    // A season rate is named for what it is: a relative band ("Off-peak") beside
-    // "Season rate · Jun 15–Sep 15" described a band the owner never chose.
-    const band = result.seasonRate ? 'Season rate' : result.tier;
-    if (band) price.append(el('span', `tier ${tierClass(result.tier)}`, band));
+    const band =
+      result.source === 'base'
+        ? 'Base'
+        : result.source === 'window'
+          ? result.tier
+          : result.source === 'uncovered'
+            ? 'Uncovered'
+            : '';
+    if (band) price.append(el('span', `tier ${tierClass(band)}`, band));
     const money = el('span', 'preview-money');
     money.append(el('strong', null, priceText(result.rate)), el('span', 'unit', '/ kWh'));
     price.append(money);
   }
   rows.push(paintPreviewRow('Price', price));
-  // The fallback wins for two different reasons, and naming the wrong one sends
-  // the owner to the wrong control: no season covers this day at all, or a
-  // season covers it but no window covers this hour. The visible plan makes the
-  // same day-level distinction on its own line.
-  let applies = result.noSeason
-    ? 'No season — no rate window covers this moment.'
-    : 'Other times — no rate window covers this moment.';
-  if (!result.fallback) {
+  let applies = '';
+  if (result.uncoveredDate) {
+    applies = 'Uncovered date — no season covers this date — priced at 0.00.';
+  } else if (result.unpricedHour) {
+    applies = 'Uncovered hour — this season has no price for this hour — 0.00.';
+  } else if (result.source === 'base') {
     applies = el('span');
-    if (result.seasonRate) applies.append('Season rate · ');
-    else applies.append(`${result.summary} · `);
-    applies.append(nowrapEl(result.scopeText));
+    applies.append('Base · ', nowrapEl(result.scopeText));
+  } else if (result.source === 'window') {
+    applies = el('span');
+    applies.append(`${result.summary} · `, nowrapEl(result.scopeText));
+  } else {
+    applies = 'One rate applies everywhere.';
   }
   rows.push(paintPreviewRow('Applies', applies));
   $('preview-rows').replaceChildren(...rows);
@@ -2058,9 +2371,7 @@ function paintPreview() {
 function announcePreview() {
   if (draftRates.length === 0) return;
   const live = $('preview-live');
-  // Same gate as the visible checker: a mixed season's remedy is structural, so
-  // announcing the overlap remedy would describe a fix that cannot work.
-  const blocker = planHasMix() ? MIX_COVERAGE_MESSAGE : previewBlocker(rateValidation);
+  const blocker = previewBlocker(rateValidation);
   if (blocker) {
     setText(live, blocker);
     return;
@@ -2074,14 +2385,16 @@ function announcePreview() {
     setText(live, `${formatPreviewWhen(date)}: no rate set.`);
     return;
   }
-  const band = result.seasonRate ? 'Season rate, ' : result.tier ? `${result.tier}, ` : '';
-  // Announce what the visible Applies row says. Two windows in one season can be
-  // equally priced, so the day/time summary is what tells them apart.
-  const where = result.fallback
-    ? 'other times'
-    : result.seasonRate
-      ? `season rate ${result.scopeText}`
-      : `${result.summary} · ${result.scopeText}`;
+  const band = result.tier ? `${result.tier}, ` : '';
+  const where = result.uncoveredDate
+    ? 'uncovered date, priced at 0.00'
+    : result.unpricedHour
+      ? 'uncovered hour, priced at 0.00'
+      : result.source === 'base'
+        ? `base ${result.scopeText}`
+        : result.source === 'window'
+          ? `${result.summary} · ${result.scopeText}`
+          : 'one rate';
   setText(live, `${formatPreviewWhen(date)}: ${band}${priceText(result.rate)} per kWh, ${where}.`);
 }
 
@@ -2123,6 +2436,9 @@ function paintFeedback() {
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;
+  $('confirm-one-rate').disabled = settingsSaving;
+  $('cancel-one-rate').disabled = settingsSaving;
+  paintRateMode();
 }
 
 // ---------- rendering ----------
@@ -2132,11 +2448,7 @@ function renderPlan() {
   // have rendered is the one being rendered now.
   cancelPlanRebuild();
   planPeriods = ratePeriodsForDraft();
-  const flat = draftRates.length === 0;
-  const wasFlat = !$('rates-flat').hidden;
-  if (flat && !wasFlat) resetRatePlanChoices();
-  $('rates-flat').hidden = !flat;
-  $('rates-plan').hidden = flat;
+  paintRateMode();
   const list = $('rate-periods');
   list.replaceChildren();
   periodCards = [];
@@ -2332,7 +2644,32 @@ export function applySubmitFocus(target, view) {
   if (focus === 'months') {
     view.expand(card.periodCard);
     view.reveal(card.periodCard.node);
-    card.periodCard.allYear.focus({ preventScroll: true });
+    // The month chips are the legacy path, and they are hidden for a date or a
+    // contiguous month season: reveal them only where they exist, otherwise the
+    // scope is the date fields.
+    const { advancedMonths, monthChips } = card.periodCard;
+    if (advancedMonths && !advancedMonths.hidden) {
+      advancedMonths.open = true;
+      const chip =
+        monthChips &&
+        (monthChips.querySelector('[aria-pressed="true"]') || monthChips.querySelector('button'));
+      if (chip) {
+        chip.focus({ preventScroll: true });
+        return;
+      }
+    }
+    (card.periodCard.dateFocus || card.periodCard.fromDate).focus({ preventScroll: true });
+    return;
+  }
+  // A base price error belongs to the Base rate block, not a window row.
+  if (focus === 'base-rate') {
+    view.expand(card.periodCard);
+    view.reveal(card.periodCard.baseBlock);
+    // The block is rebuilt whenever a row's base shape changes, so the field is
+    // there for any base row; a malformed all-day row that never became the base
+    // keeps its own window card, which is where its price lives.
+    const control = card.periodCard.baseInput || card.rateInput;
+    if (control) control.focus({ preventScroll: true });
     return;
   }
   // A date problem belongs to the season header too. Focus the From/To control
@@ -2340,8 +2677,7 @@ export function applySubmitFocus(target, view) {
   if (focus === 'dates') {
     view.expand(card.periodCard);
     view.reveal(card.periodCard.node);
-    const control =
-      card.periodCard.dateFocus || card.periodCard.fromDay || card.periodCard.fromMonth;
+    const control = card.periodCard.dateFocus || card.periodCard.fromDate;
     if (control) control.focus({ preventScroll: true });
     return;
   }
@@ -2390,10 +2726,17 @@ export function initSettings() {
   $('settings-form').addEventListener('submit', submit);
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
-  $('add-rate-plan').addEventListener('click', revealRatePlanChoices);
-  $('add-season-rate').addEventListener('click', () => addRatePlan('season'));
-  $('add-tou').addEventListener('click', () => addRatePlan('tou'));
-  $('cancel-rate-plan').addEventListener('click', hideRatePlanChoices);
+  $('rate-mode-flat').addEventListener('click', requestOneRate);
+  $('rate-mode-seasons').addEventListener('click', switchToSeasons);
+  $('rate-mode-flat').addEventListener('keydown', paintModeKeyboard);
+  $('rate-mode-seasons').addEventListener('keydown', paintModeKeyboard);
+  $('confirm-one-rate').addEventListener('click', confirmOneRate);
+  $('cancel-one-rate').addEventListener('click', cancelOneRate);
+  $('rate-mode-confirm').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') cancelOneRate();
+  });
+  $('fill-gaps').addEventListener('click', fillGaps);
+  $('seed-cover').addEventListener('click', fillGaps);
   $('add-season').addEventListener('click', addSeason);
   $('preview-date').addEventListener('input', paintPreview);
   $('preview-time').addEventListener('input', paintPreview);

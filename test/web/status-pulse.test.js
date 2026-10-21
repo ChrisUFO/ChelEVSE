@@ -19,6 +19,15 @@ function stubElement() {
     title: '',
     hidden: false,
     value: '',
+    children: [],
+    replaceChildren(...nodes) {
+      this.children = nodes;
+      this.textContent = nodes.map((node) => node.textContent || '').join('');
+    },
+    append(...nodes) {
+      this.children.push(...nodes);
+      this.textContent += nodes.map((node) => node.textContent || '').join('');
+    },
     setAttribute() {},
     addEventListener() {},
     focus() {},
@@ -39,6 +48,8 @@ function element(id) {
 globalThis.document = {
   documentElement: { style: { setProperty() {} } },
   getElementById: (id) => element(id),
+  createElement: () => stubElement(),
+  createTextNode: (text) => ({ textContent: text }),
 };
 
 const { showStatus } = await import('../../web/js/screens/status.js');

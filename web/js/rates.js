@@ -1,13 +1,16 @@
 // Pure rate-schedule helpers: normalization, validation, window matching and
 // pro-rated costing. No DOM, no Firebase — covered by test/web/rates.test.js.
 //
-// The settings document keeps the flat `rate` as the fallback for every moment
-// no window covers, so an owner who never adds windows keeps exactly today's
-// costs:
+// The settings document keeps a flat `rate` for One rate. A non-empty `rates`
+// list is a season plan: the all-day, every-day row is a base, day-restricted
+// rows are overrides, and an unmatched instant costs 0. The stored flat rate is
+// ignored while that list has usable rows:
 //
 //   { rate: 0.31, currency: 'USD', rates: [
-//     { id: 'w1', rate: 0.12, days: [0, 1, 2, 3, 4], start: '00:00', end: '07:00',
-//       months: null },
+//     { id: 'base', rate: 0.30, days: [0,1,2,3,4,5,6], start: '00:00',
+//       end: '00:00', months: null },
+//     { id: 'night', rate: 0.12, days: [0, 1, 2, 3, 4], start: '22:00',
+//       end: '06:00', months: null },
 //   ] }
 //
 // `days` uses 0 = Monday … 6 = Sunday: the same convention as `DAY_NAMES`, the
@@ -185,6 +188,15 @@ export function normalizeWindow(raw) {
     from: dateBound(source.from),
     to: dateBound(source.to),
   };
+}
+
+// A season base is the all-day, every-day row. The shape is the whole marker:
+// no new stored field. A day-restricted all-day row is an override, not a base.
+export function isBaseWindow(row) {
+  if (!row || row.start !== row.end) return false;
+  const days = Array.isArray(row.days) ? row.days : [];
+  if (days.length !== 7) return false;
+  return [0, 1, 2, 3, 4, 5, 6].every((day) => days.includes(day));
 }
 
 // One date bound's message. The field key names which bound; the text states the
@@ -386,10 +398,11 @@ export function windowMatches(window, date) {
   });
 }
 
-// A stored document's optional window list. Invalid rows are dropped one at a
-// time — a hand-edited or half-written document keeps its usable windows and
-// the flat rate still covers every gap. Order is preserved: it only matters as
-// the tie-break for overlapping rows an older writer may have stored.
+// A stored document's optional row list. Invalid rows are dropped one at a time
+// — a hand-edited or half-written document keeps its usable rows. If no usable
+// row remains, the flat price is the only configuration left; once usable rows
+// exist, an unmatched instant is 0. Order is preserved: it only matters as the
+// tie-break within a tier for overlapping rows an older writer may have stored.
 export function normalizeRateSchedule(data) {
   const source = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
   const rate = typeof source.rate === 'number' && Number.isFinite(source.rate) ? source.rate : null;
@@ -402,41 +415,82 @@ export function normalizeRateSchedule(data) {
   };
 }
 
-// The window that prices one local instant, or null when the flat fallback does.
-// Last matching window wins: validation rejects overlapping windows on a
-// calendar-segment basis (a wrapping window's tail is compared against the next
-// weekday, with the possible months its start day implies), so a schedule it
-// accepts never matches one instant twice. This only decides between rows
-// stored by an older or hand-edited writer, keeping the result deterministic
-// instead of depending on the read order.
-function matchingWindow(schedule, date) {
-  let match = null;
+// The rate tier that wins one instant. A base applies only when no override
+// matches; the last row within each tier is the deterministic tie-break for
+// hand-edited overlaps.
+function matchingEntry(schedule, date) {
+  let base = null;
+  let override = null;
   for (const window of schedule.rates) {
-    if (windowMatches(window, date)) match = window;
+    if (!windowMatches(window, date)) continue;
+    if (isBaseWindow(window)) base = window;
+    else override = window;
   }
-  return match;
+  if (override) return { window: override, source: 'window' };
+  if (base) return { window: base, source: 'base' };
+  return null;
 }
+
+const UNPRICED_RATE = 0;
 
 function rateFor(schedule, date) {
-  const window = matchingWindow(schedule, date);
-  return window ? window.rate : schedule.rate;
+  const hit = matchingEntry(schedule, date);
+  if (hit) return hit.window.rate;
+  // A flat configuration is the fallback. Once any row exists, settings.rate is
+  // deliberately ignored; an unmatched instant has no price (0).
+  return schedule.rates.length === 0 ? schedule.rate : UNPRICED_RATE;
 }
 
-// The rate for one local instant: the last matching window, else the flat rate.
-// Returns null when the schedule has neither.
+// The rate for one local instant: override, season base, flat only when the
+// schedule is empty, else 0.
 export function rateAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   return rateFor(normalizeRateSchedule(schedule), date);
 }
 
-// The same lookup with the winning row attached, so a preview can name the
-// window (or say the fallback applies) instead of showing an unexplained price.
-// `window` is the normalized row, so it carries the stored months and times.
+// The same lookup with the winning row and why it won. With no match, the
+// `uncoveredDate` / `unpricedHour` flags distinguish "no season covers this
+// date" from "a season covers the date but has no base/window for this hour";
+// both price 0.
 export function rateEntryAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   const normalized = normalizeRateSchedule(schedule);
-  const window = matchingWindow(normalized, date);
-  return { rate: window ? window.rate : normalized.rate, window };
+  const hit = matchingEntry(normalized, date);
+  if (hit) return { rate: hit.window.rate, window: hit.window, source: hit.source };
+  if (normalized.rates.length === 0) {
+    return {
+      rate: normalized.rate,
+      window: null,
+      source: normalized.rate == null ? 'none' : 'flat',
+    };
+  }
+  const scopeCoversDate = normalized.rates.some((window) => seasonMatches(window, date));
+  return {
+    rate: UNPRICED_RATE,
+    window: null,
+    source: 'uncovered',
+    uncoveredDate: !scopeCoversDate,
+    unpricedHour: scopeCoversDate,
+  };
+}
+
+// Whether a schedule leaves any slice of an interval without a row. Flat
+// schedules never do; a non-empty schedule does when no base or override matches
+// a slice. Used for the live cost marker.
+export function intervalUncovered(start, end, schedule) {
+  const startMs = toMillis(start);
+  const endMs = toMillis(end);
+  if (startMs == null || endMs == null || endMs <= startMs) return false;
+  const normalized = normalizeRateSchedule(schedule);
+  if (normalized.rates.length === 0) return false;
+  const boundaries = intervalBoundaries(startMs, endMs, normalized);
+  for (let i = 1; i < boundaries.length; i += 1) {
+    const from = boundaries[i - 1];
+    const to = boundaries[i];
+    if (to <= from) continue;
+    if (!matchingEntry(normalized, new Date(from))) return true;
+  }
+  return false;
 }
 
 // One local day as a complete, contiguous partition: every minute from 00:00 to
@@ -468,13 +522,26 @@ export function rateDayPartition(schedule, date) {
       Math.floor(from / 60),
       from % 60,
     );
-    const window = matchingWindow(normalized, at);
-    const rate = window ? window.rate : normalized.rate;
+    const hit = matchingEntry(normalized, at);
+    const window = hit ? hit.window : null;
+    const rate = hit
+      ? hit.window.rate
+      : normalized.rates.length === 0
+        ? normalized.rate
+        : UNPRICED_RATE;
+    const source = hit
+      ? hit.source
+      : normalized.rates.length === 0
+        ? normalized.rate == null
+          ? 'none'
+          : 'flat'
+        : 'uncovered';
     const last = segments[segments.length - 1];
-    // Merge only the same row at the same price: two rows with an equal rate
-    // stay separate so the partition can still name their different scopes.
-    if (last && last.window === window && last.rate === rate) last.to = to;
-    else segments.push({ from, to, rate, window });
+    // Merge only the same row at the same price and source: two rows with an
+    // equal rate stay separate so the partition can still name their scopes.
+    if (last && last.window === window && last.rate === rate && last.source === source)
+      last.to = to;
+    else segments.push({ from, to, rate, window, source });
   }
   return segments;
 }
@@ -624,7 +691,14 @@ function overlapPairs(values, rowErrors) {
     if (Object.keys(rowErrors[i]).length > 0) continue;
     for (let j = i + 1; j < values.length; j += 1) {
       if (Object.keys(rowErrors[j]).length > 0) continue;
-      if (windowsOverlap(values[i], values[j])) pairs.push([i, j]);
+      // Bases and overrides are different tiers; only same-tier collisions are
+      // ambiguous. A base plus a window is the supported base/override model.
+      if (
+        isBaseWindow(values[i]) === isBaseWindow(values[j]) &&
+        windowsOverlap(values[i], values[j])
+      ) {
+        pairs.push([i, j]);
+      }
     }
   }
   return pairs;
@@ -661,7 +735,13 @@ export function validateRateWindows(rows) {
   for (const [i, j] of overlapPairs(values, rowErrors)) {
     const left = values[i].id || `#${i + 1}`;
     const right = values[j].id || `#${j + 1}`;
-    general.push(`Window “${left}” overlaps window “${right}”.`);
+    if (isBaseWindow(values[i]) && isBaseWindow(values[j])) {
+      general.push(
+        `Base rates “${left}” and “${right}” cover some of the same dates. Keep one base per date.`,
+      );
+    } else {
+      general.push(`Window “${left}” overlaps window “${right}”.`);
+    }
   }
 
   return {
@@ -771,8 +851,8 @@ export function costForInterval(wh, start, end, schedule) {
     const to = boundaries[i];
     if (to <= from) continue;
     const rate = rateFor(normalized, new Date(from));
-    // A slice no window covers needs the flat fallback; without one the cost is
-    // unknown for that part of the interval.
+    // Flat with no rate is unknown; a schedule with no matching row prices the
+    // slice at 0 instead of inventing a fallback.
     if (rate == null) return null;
     cost += ((energy * (to - from)) / duration / 1000) * rate;
   }

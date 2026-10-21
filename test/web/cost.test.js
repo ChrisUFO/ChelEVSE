@@ -12,6 +12,7 @@ import {
   liveCostLabel,
   sessionCostLabel,
   statusCostLabel,
+  statusCostUncovered,
 } from '../../web/js/cost.js';
 import { fmtCost } from '../../web/js/format.js';
 
@@ -24,12 +25,21 @@ function date(year, month, day, hours = 0, minutes = 0) {
 
 const FLAT = { rate: 0.245, currency: 'GBP' };
 
-// A nightly off-peak window (00:00–06:00) at 0.10 and a 0.30 fallback.
+// A nightly off-peak window (00:00–06:00) at 0.10 over a visible all-day base
+// at 0.30. The stored rate is no longer an invisible fallback.
 function nightly(overrides = {}) {
   return {
     rate: 0.3,
     currency: 'GBP',
     rates: [
+      {
+        id: 'base',
+        rate: 0.3,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: null,
+      },
       {
         id: 'night',
         rate: 0.1,
@@ -131,6 +141,55 @@ function liveStatus(state, updated, elapsed, wh = 1000, overrides = {}) {
     ...overrides,
   };
 }
+
+// A base-less season: the window prices 16:00–19:00 and every other hour of the
+// day prices 0.00, which is the slice the live marker reports.
+function windowOnly(overrides = {}) {
+  return {
+    rate: 0.3,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'peak',
+        rate: 0.32,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '16:00',
+        end: '19:00',
+        months: null,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+test('the live "understates cost" marker follows the interval it describes', () => {
+  const inWindow = date(2026, 1, 5, 17, 0).getTime();
+  const outside = date(2026, 1, 5, 12, 0).getTime();
+  // A plan with a base prices every slice of the interval.
+  assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), nightly()), false);
+  // A base-less window prices only its own hours.
+  assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), windowOnly()), false);
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnly()), true);
+  // An interval that straddles the window edge includes an unpriced slice, and
+  // the figure it caveats is still shown: the marker never stands alone.
+  const straddle = date(2026, 1, 5, 16, 30).getTime();
+  assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnly()), true);
+  assert.notEqual(statusCostLabel(liveStatus(3, straddle, 3600), windowOnly()), null);
+  // The marker shares the cost's gate: nothing to caveat when the figure is
+  // hidden (not charging, missing write time or elapsed, flat config).
+  for (const status of [
+    liveStatus(1, outside, 3600),
+    liveStatus(3, null, 3600),
+    liveStatus(3, outside, null),
+    liveStatus(3, outside, 0),
+    liveStatus(3, outside, -60),
+    liveStatus(3, outside, 3600, 1000, { charger_online: false }),
+  ]) {
+    assert.equal(statusCostUncovered(status, windowOnly()), false);
+  }
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), FLAT), false);
+  assert.equal(statusCostUncovered(null, windowOnly()), false);
+});
 
 test('live cost ends at the snapshot write, not the render instant', () => {
   // 1 kWh over the hour ending 06:30: half at 0.10, half at the fallback 0.30.
@@ -287,21 +346,23 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
       },
     ],
   };
-  // The day before the season pays the fallback; the first day pays the season.
+  // The day before the season is outside every season and costs 0; the first
+  // day pays the season.
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 14, 12, 0), date(2026, 6, 14, 13, 0), 1000), summer),
-    'GBP 0.30',
+    'GBP 0.00',
   );
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 15, 12, 0), date(2026, 6, 15, 13, 0), 1000), summer),
     'GBP 0.20',
   );
-  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge.
+  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge into
+  // the uncovered 0.00 hour.
   assert.equal(
     sessionCostLabel(session(date(2026, 9, 15, 23, 0), date(2026, 9, 16, 1, 0), 2000), summer),
-    'GBP 0.50',
+    'GBP 0.20',
   );
   // The season rate prices any hour, live included.
   assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.30');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.00');
 });

@@ -276,13 +276,6 @@ button {
   gap: 10px;
   margin-top: 8px;
 }
-.btn.solid {
-  border-color: transparent;
-  background: var(--accent);
-  color: #0b1220;
-  font-weight: 700;
-}
-
 /* ---------- header ---------- */
 .app-header {
   display: flex;
@@ -643,6 +636,13 @@ button {
 .fig-cost {
   color: var(--ok);
 }
+.cost-unpriced {
+  display: block;
+  color: color-mix(in oklab, var(--warn) 88%, var(--text));
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
 .temp-sensors {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -967,6 +967,19 @@ input[type='range']::-moz-range-thumb {
   font-size: 12px;
   line-height: 1.45;
   color: var(--muted);
+}
+.plan-banner {
+  margin: 8px 2px 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in oklab, var(--warn) 48%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--warn) 7%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.plan-banner a {
+  color: var(--accent);
 }
 .chart-card {
   margin-top: 14px;
@@ -1591,7 +1604,7 @@ input[aria-invalid='true'] {
   gap: 14px;
 }
 
-/* rate plan editor — the all-other-times price first, then month periods and
+/* rate plan editor — the flat price first, then the season plan and
    a draft-live checker. Periods are the only nesting level. */
 .rate-editor {
   display: grid;
@@ -1621,6 +1634,91 @@ input[aria-invalid='true'] {
 .rate-head .block-sub {
   margin: 0;
 }
+.rate-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg);
+}
+.rate-mode-option {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.rate-mode-option:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+}
+.rate-mode-option[aria-checked='true'] {
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.rate-mode-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rate-mode-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in oklab, var(--err) 55%, var(--line));
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--err) 7%, transparent);
+}
+.rate-mode-confirm p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rate-mode-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.rate-mode-confirm-actions .btn {
+  justify-self: start;
+}
+/* Cancel is the safe action and the loudest control in the panel; the
+   destructive switch is deliberately secondary — a tinted outline, not a
+   filled button. */
+.rate-mode-confirm .btn.small.danger {
+  border-color: color-mix(in oklab, var(--err) 42%, var(--line));
+  background: transparent;
+  color: color-mix(in oklab, var(--err) 76%, var(--muted));
+  font-weight: 600;
+}
+.rate-mode-confirm .btn.small.danger:hover {
+  background: color-mix(in oklab, var(--err) 10%, transparent);
+}
+.rate-mode-confirm[hidden] {
+  display: none;
+}
+.fallback-card.is-season {
+  gap: 8px;
+}
+.fallback-card.is-season .settings-grid {
+  grid-template-columns: 1fr;
+}
+.fallback-card.is-season .fallback-head,
+.fallback-card.is-season #fallback-rate-field {
+  display: none;
+}
+@media (max-width: 389px) {
+  .rate-mode {
+    grid-template-columns: 1fr;
+  }
+}
 .fallback-card {
   display: grid;
   gap: 10px;
@@ -1644,50 +1742,6 @@ input[aria-invalid='true'] {
   font-size: 11.5px;
   line-height: 1.4;
   color: var(--muted);
-}
-.flat-state {
-  display: grid;
-  gap: 8px;
-}
-.flat-hint {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--muted);
-}
-.plan-choices {
-  display: grid;
-  gap: 8px;
-}
-.plan-choice {
-  display: grid;
-  gap: 2px;
-  min-height: 60px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--bg);
-  text-align: left;
-  transition:
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-.plan-choice:hover {
-  border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
-  background: color-mix(in oklab, var(--accent) 7%, var(--bg));
-}
-.plan-choice-title {
-  font-size: 13px;
-  font-weight: 650;
-  color: var(--text);
-}
-.plan-choice-note {
-  font-size: 11.5px;
-  line-height: 1.4;
-  color: var(--muted);
-}
-.plan-cancel {
-  justify-self: start;
 }
 .rate-plan {
   display: grid;
@@ -1751,6 +1805,36 @@ input[aria-invalid='true'] {
   margin: 0;
   font: inherit;
 }
+.period-head-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.period-head-row .period-toggle {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.period-edit-dates {
+  flex: none;
+  min-height: 44px;
+  margin: 7px 8px 0 0;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--surface-2) 45%, transparent);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.period-edit-dates:hover {
+  border-color: color-mix(in oklab, var(--accent) 42%, var(--line));
+  background: color-mix(in oklab, var(--accent) 9%, transparent);
+}
+.period-edit-dates:focus-visible {
+  outline-offset: 1px;
+}
 .period-toggle {
   display: grid;
   gap: 6px;
@@ -1778,7 +1862,12 @@ input[aria-invalid='true'] {
   font-weight: 650;
   letter-spacing: -0.01em;
 }
+/* The band gives way so the caret stays on the title line: a wrapped caret reads
+   as a stray glyph at 320 px. */
 .period-band {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 11.5px;
   color: var(--muted);
 }
@@ -1806,9 +1895,9 @@ input[aria-invalid='true'] {
 }
 .period-caret {
   flex: none;
-  width: 7px;
-  height: 7px;
-  margin-left: auto;
+  width: 9px;
+  height: 9px;
+  margin-left: 2px;
   border-right: 1.5px solid var(--muted);
   border-bottom: 1.5px solid var(--muted);
   transform: rotate(45deg);
@@ -1850,7 +1939,7 @@ input[aria-invalid='true'] {
   min-width: 1px;
 }
 .strip-seg.base {
-  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+  background: color-mix(in oklab, var(--accent) 52%, var(--surface));
 }
 .strip-seg.off {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
@@ -1864,11 +1953,19 @@ input[aria-invalid='true'] {
 .strip-seg.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
-/* A season rate shares the all-day green: the two names never appear in one
-   card (a season is either one season-wide price or a set of daily windows), so
-   the colour identifies "this whole day is priced" without inventing a hue. */
-.strip-seg.season {
-  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
+/* A priced window whose season has no base: its own band and legend entry, so
+   it is never labelled with a tier it cannot have. It borrows the accent rather
+   than the `Same price` grey — in a base-less season it is the only priced band
+   inside a full-width uncovered hatch, so it has to be what the eye finds. */
+.strip-seg.window {
+  background: color-mix(in oklab, var(--accent) 72%, var(--surface));
+}
+/* Uncovered is 0.00, not a price: the only band that is not a colour of the
+   plan. It reads as the warning it is, and grey no longer stands for both it and
+   a priced window. */
+.strip-seg.uncovered {
+  background: color-mix(in oklab, var(--err) 22%, transparent);
+  border: 1px dashed color-mix(in oklab, var(--err) 60%, var(--line));
 }
 .strip-axis {
   display: flex;
@@ -1897,7 +1994,7 @@ input[aria-invalid='true'] {
   border-radius: 2px;
 }
 .legend-dot.base {
-  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+  background: color-mix(in oklab, var(--accent) 58%, var(--surface));
 }
 .legend-dot.off {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
@@ -1911,8 +2008,12 @@ input[aria-invalid='true'] {
 .legend-dot.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
-.legend-dot.season {
-  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
+.legend-dot.window {
+  background: color-mix(in oklab, var(--accent) 72%, var(--surface));
+}
+.legend-dot.uncovered {
+  background: transparent;
+  border: 1px dashed color-mix(in oklab, var(--err) 70%, var(--line));
 }
 .period-body {
   display: grid;
@@ -1923,173 +2024,198 @@ input[aria-invalid='true'] {
 .period-body[hidden] {
   display: none;
 }
-.scope-editor {
+.season-dates {
   display: grid;
-  gap: 8px;
-  padding: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--accent) 22%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--accent) 4%, var(--surface-2) 25%);
 }
-.scope-modes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--bg);
-}
-.scope-mode {
-  min-width: 0;
-  min-height: 44px;
-  padding: 0 6px;
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
-}
-.scope-mode:hover:not(:disabled) {
-  color: var(--text);
-  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
-}
-.scope-mode[aria-pressed='true'] {
-  background: color-mix(in oklab, var(--accent) 15%, transparent);
-  color: var(--accent);
-}
-.scope-mode:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.scope-hint {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--muted);
-}
-.scope-panel {
-  display: grid;
-  gap: 8px;
-}
-.scope-panel[hidden] {
-  display: none;
-}
-.date-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: end;
-  gap: 8px;
-}
-.date-bound {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-.date-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px;
-  gap: 5px;
-}
-.date-select,
-.date-day {
-  width: 100%;
-  min-width: 0;
-  min-height: 44px;
-  padding: 0 7px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  font-size: 12.5px;
-}
-.date-day {
-  padding: 0 5px;
-  text-align: center;
-  appearance: textfield;
-  -moz-appearance: textfield;
-}
-/* The focused number input's spinner is a different, moving control inside the
-   narrow day field; the value stays an editable number without it. */
-.date-day::-webkit-outer-spin-button,
-.date-day::-webkit-inner-spin-button {
-  margin: 0;
-  -webkit-appearance: none;
-}
-.date-select:focus-visible,
-.date-day:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.date-select[aria-invalid='true'],
-.date-day[aria-invalid='true'] {
-  border-color: color-mix(in oklab, var(--err) 70%, var(--line));
-  background: color-mix(in oklab, var(--err) 5%, var(--bg));
-}
-.date-arrow {
-  padding-bottom: 13px;
-  color: var(--muted);
-  font-size: 14px;
-}
-.scope-date-hint {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--muted);
-}
-.date-error {
-  margin: 0;
-}
-/* The day-precision escape hatch is a text-looking action, not a 20 px line: it
-   is the only one-click dates -> all-year route, so it keeps a 44 px target in
-   a panel where every other new control is 44 px. `.link-btn` later in this file
-   resets display/padding, hence the compound selector. */
-.link-btn.date-all-year {
-  display: inline-flex;
-  align-items: center;
-  justify-self: start;
-  min-height: 44px;
-  padding: 0 8px;
-  margin-left: -8px;
-}
-.period-band.date-range {
-  white-space: nowrap;
-}
-.period-mode-notice {
-  display: grid;
-  gap: 4px;
-}
-.period-mode-note {
-  margin: 0;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--muted);
-}
-.period-mix {
-  margin: 0;
-  padding: 8px 10px;
-  border-left: 2px solid color-mix(in oklab, var(--err) 62%, var(--line));
-  border-radius: 0 8px 8px 0;
-  background: color-mix(in oklab, var(--err) 7%, transparent);
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-.period-mode-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.month-editor {
-  display: grid;
-  gap: 8px;
-  padding: 0;
-}
-.month-editor-head {
+.season-dates-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 6px 10px;
+}
+.season-dates-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+.season-all-year {
+  flex: none;
+}
+.season-dates-reference {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.season-date-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+}
+.season-date-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.season-dates-fallback {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--surface-2) 38%, transparent);
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.season-dates-fallback.unavailable {
+  border-style: dashed;
+  background: transparent;
+}
+.season-date-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  color-scheme: dark;
+}
+.season-date-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.season-date-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.season-date-input[aria-invalid='true'] {
+  border-color: color-mix(in oklab, var(--err) 70%, var(--line));
+  background: color-mix(in oklab, var(--err) 5%, var(--bg));
+}
+.season-date-arrow {
+  padding-bottom: 13px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.season-dates-status,
+.season-dates-stored {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.season-dates-stored {
+  color: color-mix(in oklab, var(--err) 78%, var(--text));
+}
+.season-dates-error {
+  margin: 0;
+}
+.advanced-months {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.advanced-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+.advanced-summary-row::-webkit-details-marker {
+  display: none;
+}
+.advanced-summary-row::before {
+  content: '▸';
+  color: var(--muted);
+  font-size: 12px;
+  transition: transform 0.12s ease;
+}
+.advanced-months[open] .advanced-summary-row::before {
+  transform: rotate(90deg);
+}
+.advanced-summary {
+  color: var(--text);
+  font-weight: 600;
+}
+.advanced-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.period-band.date-range {
+  white-space: nowrap;
+}
+.base-block,
+.windows-section {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--surface-2) 32%, transparent);
+}
+.base-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.base-title,
+.windows-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.base-note,
+.windows-hint,
+.windows-empty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.base-warning {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: color-mix(in oklab, var(--warn) 82%, var(--text));
+}
+.base-field {
+  max-width: 220px;
+}
+.base-error {
+  margin: 0;
+}
+.windows-empty[hidden],
+.windows-section .rate-list:empty {
+  display: none;
+}
+.rate-window + .rate-window {
+  margin-top: 0;
 }
 .months-toggle {
   display: inline-flex;
@@ -2142,15 +2268,12 @@ input[aria-invalid='true'] {
   .month-chips {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-  .date-row {
+  .season-date-fields {
     grid-template-columns: 1fr;
     gap: 6px;
   }
-  .date-arrow {
+  .season-date-arrow {
     display: none;
-  }
-  .date-controls {
-    grid-template-columns: minmax(0, 1fr) 80px;
   }
 }
 .month-chip {
@@ -2197,20 +2320,74 @@ input[aria-invalid='true'] {
   line-height: 1.45;
   color: var(--muted);
 }
-.other-times-line {
+/* The mode switch seeds one month and leaves the rest of the year at 0.00, and
+   that plan can be saved as it stands: the note that explains the seed carries
+   the action that covers the gap, so the warning is not 11.5 px prose beside an
+   enabled Save. */
+.plan-seed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin: 0;
   padding: 9px 11px;
-  border: 1px dashed var(--line);
+  border-left: 2px solid color-mix(in oklab, var(--warn) 58%, var(--line));
+  border-radius: 0 10px 10px 0;
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+}
+.plan-seed[hidden] {
+  display: none;
+}
+.plan-seed-note {
+  flex: 1 1 200px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: color-mix(in oklab, var(--text) 74%, var(--muted));
+}
+.plan-seed .btn {
+  flex: none;
+}
+/* Why Add a season is refused, in the same place the action lives. */
+.plan-action-note {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.plan-action-note[hidden] {
+  display: none;
+}
+.uncovered-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px dashed color-mix(in oklab, var(--warn) 48%, var(--line));
   border-radius: 10px;
   font-size: 12px;
   line-height: 1.45;
   color: var(--muted);
 }
-.other-times-title {
+.uncovered-copy {
+  min-width: 0;
+}
+.uncovered-dates {
+  display: block;
+}
+.uncovered-copy strong {
   color: var(--text);
 }
-.other-times-price {
-  white-space: nowrap;
+.uncovered-line .btn {
+  flex: none;
+}
+.uncovered-line[hidden] {
+  display: none;
 }
 .all-day-row {
   display: flex;
@@ -2332,16 +2509,17 @@ input[aria-invalid='true'] {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-/* A price, a range or "other times USD 0.31" is one unbreakable run: breaking
-   after the en dash reads as two different numbers. */
+/* A price or a price range is one unbreakable run: breaking after the en dash
+   reads as two different numbers. */
 .nowrap {
   white-space: nowrap;
 }
 .coverage-table td.band {
   color: var(--muted);
 }
-.coverage-table tr.other-times td.band {
+.coverage-table tr.uncovered td.band {
   color: var(--muted);
+  font-style: italic;
 }
 .coverage-table .segment-note {
   display: block;
@@ -2376,11 +2554,21 @@ input[aria-invalid='true'] {
 .tier.same {
   color: var(--muted);
 }
-/* The table band for a season rate: the same green as its strip and legend dot,
-   so one dot never carries two names in a card. */
-.tier.season {
-  color: color-mix(in oklab, var(--ok) 82%, var(--text));
+.tier.window {
+  color: color-mix(in oklab, var(--accent) 82%, var(--text));
 }
+.tier.base {
+  color: color-mix(in oklab, var(--accent) 82%, var(--text));
+}
+.tier.uncovered {
+  color: color-mix(in oklab, var(--err) 74%, var(--text));
+}
+.tier.uncovered::before {
+  background: transparent;
+  border: 1px dashed currentColor;
+}
+/* The table band for a price: the same colour as its strip segment and legend
+   dot, so one band never carries two names in a card. */
 .period-actions {
   display: flex;
   align-items: center;
@@ -2411,6 +2599,15 @@ input[aria-invalid='true'] {
 }
 .btn.small.danger:hover {
   background: color-mix(in oklab, var(--err) 10%, transparent);
+}
+/* The filled variant, declared after `.btn.small` because both are equally
+   specific: a small solid button is filled too. The mode panel's Cancel and the
+   seed note's action are the two the safe path depends on. */
+.btn.solid {
+  border-color: transparent;
+  background: var(--accent);
+  color: #0b1220;
+  font-weight: 700;
 }
 .plan-actions .btn {
   display: inline-flex;
@@ -3209,6 +3406,18 @@ input[aria-invalid='true']:focus-visible {
   .period-toggle {
     padding: 10px 10px 9px;
   }
+  /* At 320 the Edit dates button leaves the toggle too narrow for the title, the
+     dates and the caret on one line, so the caret wrapped on its own. Stack the
+     button under the toggle and give the title row the full width. */
+  .period-head-row {
+    flex-wrap: wrap;
+  }
+  .period-head-row .period-toggle {
+    flex: 1 1 100%;
+  }
+  .period-edit-dates {
+    margin: 0 10px 8px auto;
+  }
   .period-body {
     padding: 2px 10px 10px;
   }
@@ -3242,8 +3451,9 @@ input[aria-invalid='true']:focus-visible {
   .coverage-table td {
     padding: 4px 2px;
   }
-  /* "SEASON · BAND" is the widest column heading; wrapping it to two lines adds
-     a header row of height to every table at 320. Tighten it instead. */
+  /* The coverage table's three headings are its widest line; wrapping one to two
+     lines adds a header row of height to every table at 320. Tighten them
+     instead. */
   .coverage-table thead th {
     font-size: 8.5px;
     letter-spacing: 0.03em;
