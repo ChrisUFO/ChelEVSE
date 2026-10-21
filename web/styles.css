@@ -2028,8 +2028,17 @@ input[aria-invalid='true'] {
 .date-error {
   margin: 0;
 }
-.date-all-year {
+/* The day-precision escape hatch is a text-looking action, not a 20 px line: it
+   is the only one-click dates -> all-year route, so it keeps a 44 px target in
+   a panel where every other new control is 44 px. `.link-btn` later in this file
+   resets display/padding, hence the compound selector. */
+.link-btn.date-all-year {
+  display: inline-flex;
+  align-items: center;
   justify-self: start;
+  min-height: 44px;
+  padding: 0 8px;
+  margin-left: -8px;
 }
 .period-band.date-range {
   white-space: nowrap;

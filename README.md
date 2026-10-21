@@ -37,10 +37,11 @@ App settings hold one **all other times** rate plus an optional plan of **season
   starting point. Both start with an empty price so the plan cannot be saved by accident.
 - **Season rate** is one price for every hour in its season. The season hides the day/time controls
   and **Add window**, says “One price for every hour in this season”, and shows a single
-  **Every day · 00:00–24:00** row in its table. **Use time-of-use windows** turns it into the
-  everyday 00:00–07:00 window; **Use season rate** turns a single time-of-use window back into one
-  price. Converting in either direction needs exactly one window in the season, so the action is not
-  offered otherwise.
+  **Every day · 00:00–24:00** row in its table, and the row is titled **Season rate** — never a
+  price band — in the card, the table, the plan summary and the checker. **Use time-of-use windows**
+  turns it into the everyday 00:00–07:00 window; **Convert to one season rate** turns a single
+  time-of-use window back into one price. Converting in either direction needs exactly one window in
+  the season, so the action is not offered otherwise.
 - A **season** owns a month or date scope. **Months** mode has the 12 month chips and **All year**;
   chips apply immediately to every window in the season, and each chip is a toggle: on an All-year
   season every month is pressed, so clicking one removes that month and leaves the other eleven (the
@@ -56,8 +57,13 @@ App settings hold one **all other times** rate plus an optional plan of **season
   - Dates → Months derives the months the range covers, clears the dates, and rounds to whole months;
     the date panel says so. **Use all year** clears both dates and stores no month limit.
   - Date bounds are inclusive and repeat every year. A range may wrap the year; a same-month reversed
-    range wraps too and the editor says “This range wraps the year.” `from === to` is one day.
-    Missing or unreal values block saving and point at From or To.
+    range wraps too, the hint says “This range wraps the year.” and every place the range is printed
+    marks it (`Jun 20–Jun 10 (wraps)`). `from === to` is one day, printed `Jun 15 (one day)` and
+    tabulated as **One day · Jun 15** rather than a weekday that moves each year. Missing or unreal
+    values block saving and point at From or To.
+  - Editing a date commits to every row in the season at once. The season is repainted in place, so
+    the Tab or click that ended the edit is still delivered — typing a day and then pressing
+    Months, Use all year or Duplicate works on the first press.
 - A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
   windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
   Custom reveals the individual day chips for an exact choice. A window whose start equals its end
@@ -73,13 +79,18 @@ App settings hold one **all other times** rate plus an optional plan of **season
   coverage strip and any error even when collapsed. Expanding shows the scope editor, one complete
   24-hour table per day pattern for the same sample, and the windows themselves. The table highlights
   that season's own rows and labels a row from another season by band and season, keeping its band
-  dot on the first line; a sibling note names the other seasons that also apply (for example
-  “Season Jun 1–Jun 30 also applies here”), and the checker shows the combined price.
-- **No window — other times** is a line under the seasons for days no window covers. It is where the
+  dot on the first line and, for a date season, its dates, so two overlapping date seasons are never
+  both just “Season”; a sibling note names the other seasons that also apply (for example “Season
+  Jun 1–Jun 30 also applies here”), and the checker shows the combined price.
+- **No season — other times** is a line under the seasons for days no season covers. It is where the
   all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
-  summary. A month-only gap collapses to whole months; a date season leaves the exact day range.
+  summary. A month-only gap collapses to whole months; a date season leaves the exact day range
+  (marked `(wraps)` when it crosses the year). The checker keeps `Other times` for hours.
 - **Price bands** (Peak / Off-peak / Shoulder / Same price) are derived from the plan's relative
-  prices for display only; no band or season name is stored.
+  prices for display only; no band or season name is stored. A season rate is the exception: it is
+  always banded **Season rate**, because a relative tier would describe a band the owner never chose.
+  A window with an invalid time or price contributes nothing to the plan's price range (`— needs
+attention`).
 - **What applies at** checks a local date and time against the current draft — saved or not — and
   names the winning window or the fallback. The scope reads as a season rate (`Season rate · Jun
 15–Sep 15`), a time-of-use summary (`Weekdays · 16:00–19:00 · Jun 15–Sep 15`), or
@@ -91,8 +102,9 @@ App settings hold one **all other times** rate plus an optional plan of **season
   Sep 16–Jun 14). It is only offered when that complement is free, the season is not a hand-edited
   mix, and the copy stays within the 24-window limit.
 - A **season rate and daily windows cannot share one season**. The editor never offers that mix. A
-  stored or hand-edited mix is shown with a clear message and rejected by the overlap validation,
-  which blocks the save and the checker.
+  stored or hand-edited mix shows one structural message in the season, the per-row overlap notes,
+  and `Fix the mix to see coverage.` in place of the tables and the checker; the overlap validation
+  blocks the save. The mix is never drawn as a working base-plus-override schedule.
 
 The stored document is unchanged: one flat `rates` list. A month window keeps
 `{ id, rate, days, start, end, months }`. A date window adds `from` and `to` (`MM-DD`, inclusive)

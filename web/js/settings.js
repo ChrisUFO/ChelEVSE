@@ -287,6 +287,10 @@ export function periodRateMode(period) {
 
 export const SEASON_RATE_MIX_MESSAGE =
   'A season rate and daily windows cannot share a season. Remove the all-day row or change it to a time window.';
+// The coverage table and the checker refuse a mixed season instead of drawing
+// the resolved schedule: the resolver would show a base-plus-override result the
+// editor rejects, so the screen would claim the mix works.
+export const MIX_COVERAGE_MESSAGE = 'Fix the mix to see coverage.';
 
 // Whether two scopes can match the same date. Duplicating a season into its
 // complement is only a clean action while that complement is still free.
@@ -312,14 +316,19 @@ export function largestDateScope(ranges) {
   };
 }
 
-// A stored or draft season bound in owner language: "Jun 15–Sep 15", or one day.
+// A stored or draft season bound in owner language: "Jun 15–Sep 15". A range
+// whose end precedes its start is marked "(wraps)": printed bare it reads as an
+// inverted or empty range, and only the hint underneath explained it. One day is
+// marked "(one day)" so an annual single date is never mistaken for a weekday
+// scope that moves with the calendar.
 export function dateRangeText(from, to) {
   const start = parseMonthDay(from);
   const end = parseMonthDay(to);
   if (!start || !end) return '';
   const startText = `${MONTH_SHORT[start.month - 1]} ${start.day}`;
-  if (start.month === end.month && start.day === end.day) return startText;
-  return `${startText}–${MONTH_SHORT[end.month - 1]} ${end.day}`;
+  if (start.month === end.month && start.day === end.day) return `${startText} (one day)`;
+  const wraps = start.month * 100 + start.day > end.month * 100 + end.day;
+  return `${startText}–${MONTH_SHORT[end.month - 1]} ${end.day}${wraps ? ' (wraps)' : ''}`;
 }
 
 // "MM-DD" from a leap-ring slot, for a computed complement.
@@ -405,7 +414,8 @@ function isMonthEnd(index) {
 
 // Owner language for a set of annual ranges. Whole months collapse to
 // "Mar–Oct", partial months stay "Apr 16–Jun 14", and a range that wraps the
-// year reads as one run. An empty set is an empty line.
+// year reads as one run marked "(wraps)" — a bare "Sep 16–Jun 14" looks
+// inverted. An empty set is an empty line.
 export function dateSetText(ranges) {
   const merged = mergeDateRanges(ranges);
   if (merged.length === 0) return '';
@@ -423,7 +433,7 @@ export function dateSetText(ranges) {
       }
       const startText = `${MONTH_SHORT[a.month - 1]} ${a.day}`;
       if (a.month === b.month && a.day === b.day) return startText;
-      return `${startText}–${MONTH_SHORT[b.month - 1]} ${b.day}`;
+      return `${startText}–${MONTH_SHORT[b.month - 1]} ${b.day}${start > end ? ' (wraps)' : ''}`;
     })
     .join(', ');
 }
@@ -663,13 +673,17 @@ function periodAppliesOn(period, date) {
 }
 
 // Months no stored window covers: the line where nothing but the all-other-times
-// rate applies. This is not a period and is never counted as one.
+// rate applies. This is not a period and is never counted as one. The scope is
+// derived with `rateScope`, never the stored `months` hint, so a date row with a
+// missing or stale hint still covers the months its dates actually reach.
 export function uncoveredMonths(rows) {
   const covered = new Set();
   for (const row of Array.isArray(rows) ? rows : []) {
-    const scope = rateMonthScope(row);
+    const scope = rateScope(row);
     if (scope.kind === 'all') for (const month of ALL_MONTHS) covered.add(month);
-    else if (scope.kind === 'months') for (const month of scope.months) covered.add(month);
+    // A date scope carries the months it reaches as its compatibility hint, so
+    // the same line covers both shapes.
+    else if (Array.isArray(scope.months)) for (const month of scope.months) covered.add(month);
   }
   return ALL_MONTHS.filter((month) => !covered.has(month));
 }
@@ -818,6 +832,33 @@ export function canDuplicatePeriod(rowCount, periodRowCount) {
   );
 }
 
+// The scope a row added inside a period must inherit: its months, plus the raw
+// date bounds when the period is day-scoped. Passing only the months would put
+// the new row in a second, month-wide season and silently widen a date season to
+// the whole months it touches.
+export function periodRowScope(period) {
+  if (!period) return { months: null, dates: null };
+  const months = period.kind === 'all' ? null : (period.months ?? null);
+  if (!periodHasDates(period)) return { months, dates: null };
+  return { months, dates: periodDateBounds(period) };
+}
+
+// The preset Add window should use: the one the season does not already contain,
+// so the editor's own action does not immediately build an overlapping pair the
+// validator rejects. A first window is the overnight preset; once a season
+// already has the weekday-evening shape, the next row is the overnight one.
+export function nextWindowPreset(period) {
+  const entries = (period && period.rows) || [];
+  if (entries.length === 0) return 'overnight';
+  const hasPeak = entries.some((entry) => {
+    const row = entry && entry.row;
+    return Boolean(
+      row && dayPresetFor(row.days) === 'weekdays' && row.start === '16:00' && row.end === '19:00',
+    );
+  });
+  return hasPeak ? 'overnight' : 'peak';
+}
+
 // ---------- day presets ----------
 
 // Presets are shortcuts over the same `days` array the chips edit, not a second
@@ -927,9 +968,12 @@ export function rateScopeText(row) {
 // A full name for an error that has to distinguish two rows ("Off-peak Weekdays
 // · 16:00–19:00 · Nov–Feb"). The season is included because that is what
 // decides whether two rows can actually collide; a date season reads as its
-// dates.
+// dates. A season rate is named "Season rate" rather than a price tier, the
+// same name its card and table row carry.
 export function windowLabel(row, windowRates, fallbackRate, { months = true } = {}) {
-  const tier = rateTierFor(row && row.rate, windowRates, fallbackRate);
+  const tier = isSeasonRateRow(row)
+    ? 'Season rate'
+    : rateTierFor(row && row.rate, windowRates, fallbackRate);
   const price = parseRateValue(row && row.rate);
   const head = [tier, Number.isFinite(price) ? String(price) : ''].filter(Boolean).join(' ');
   const summary = rateWindowSummary(row);
@@ -1269,9 +1313,27 @@ export function periodCoverage(
   if (period && period.seasonRate && types.length > 0) {
     types = [{ days: [0, 1, 2, 3, 4, 5, 6], label: 'Every day', segments: types[0].segments }];
   }
+  // A one-date season is sampled on one weekday. Printing that weekday ("Mon")
+  // asserts a weekday scope on a date that moves every year, so the sample is
+  // named for what it is instead.
+  const onlyDate = dated && dates.length === 1 ? dates[0] : null;
+  if (onlyDate && types.length === 1) {
+    types = [{ ...types[0], label: 'One day' }];
+  }
   return {
     month,
     monthName: dated ? period.dateText : MONTH_NAMES[month - 1],
+    // The table caption names the sample: a date season its dates, an all-year
+    // season "All year" (the January the week is sampled in is not a scope), and
+    // a month season its month. One date drops its "(one day)" marker here
+    // because the row group is already labelled "One day".
+    captionText: dated
+      ? onlyDate
+        ? `${MONTH_SHORT[onlyDate.month - 1]} ${onlyDate.day}`
+        : period.dateText
+      : period && period.kind === 'all'
+        ? 'All year'
+        : MONTH_NAMES[month - 1],
     dateText: dated ? period.dateText : '',
     dates,
     week: Array.isArray(week) ? week : [],
@@ -1281,9 +1343,12 @@ export function periodCoverage(
   };
 }
 
-// The band name for a resolved segment, or "Other times" for the fallback.
+// The band name for a resolved segment, or "Other times" for the fallback. A
+// season rate is named for what it is: its price tier is an artefact of
+// comparing one season-wide price with the others, not a band the owner chose.
 export function rateSegmentLabel(segment, windowRates, fallbackRate) {
   if (!segment || !segment.window) return 'Other times';
+  if (isSeasonRateRow(segment.window)) return 'Season rate';
   return rateTierFor(segment.rate, windowRates, fallbackRate) || 'Window';
 }
 

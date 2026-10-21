@@ -13,6 +13,7 @@ import { DAY_NAMES } from '../schedule.js';
 import { $, setText } from '../ui.js';
 import {
   DAY_PRESETS,
+  MIX_COVERAGE_MESSAGE,
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   RATE_CAP_REMEDY,
@@ -30,9 +31,11 @@ import {
   defaultRateRow,
   formatPreviewWhen,
   isAllDayWindow,
+  isSeasonRateRow,
   largestDateScope,
   largestMonthRun,
   minutesToClock,
+  nextWindowPreset,
   normalizeSettings,
   parseLocalDateTime,
   periodCoverage,
@@ -41,6 +44,7 @@ import {
   periodEffectiveRange,
   periodHasDates,
   periodRateMode,
+  periodRowScope,
   planProblemText,
   previewBlocker,
   previewRate,
@@ -159,16 +163,27 @@ function segmentClass(segment) {
 }
 
 function windowName(row) {
-  const tier = rateTierFor(row && row.rate, windowRates(), readFields().rate);
+  const tier = bandName(row);
   return `${tier ? `${tier} ` : ''}${rateWindowSummary(row)}`;
+}
+
+// A row's visible band. A season rate is named for what it is: the price tier a
+// relative comparison invents ("Off-peak", "Same price") would title a
+// whole-season price with a band the owner never chose, contradicting the
+// "one price for every hour" note on the same card.
+function bandName(row) {
+  if (isSeasonRateRow(row)) return 'Season rate';
+  return rateTierFor(row && row.rate, windowRates(), readFields().rate);
 }
 
 // A new window is the everyday overnight preset for a first window, and the
 // weekday evening peak once the period already has a window — the two shapes
 // most tariffs start from. The price stays empty so it cannot be saved by
-// accident.
-function newWindowRow(months, preset) {
-  const row = defaultRateRow(crypto.randomUUID(), months);
+// accident. `dates` carries the period's day-precision bounds the same way
+// `months` carries its month scope, so a window added inside a date season stays
+// in that season instead of forming a second, month-wide one.
+function newWindowRow(months, preset, dates = null) {
+  const row = defaultRateRow(crypto.randomUUID(), months, dates);
   if (preset === 'peak') {
     row.days = [0, 1, 2, 3, 4];
     row.start = '16:00';
@@ -301,9 +316,8 @@ function paintTimeControl(card) {
 function paintWindowCard(card) {
   const row = card.row;
   const name = windowName(row);
-  const fallback = readFields().rate;
-  const tier = rateTierFor(row.rate, windowRates(), fallback);
-  setText(card.title, tier || (String(row.rate ?? '').trim() === '' ? 'New window' : 'Window'));
+  const band = bandName(row);
+  setText(card.title, band || (String(row.rate ?? '').trim() === '' ? 'New window' : 'Window'));
   setText(card.summary, rateWindowSummary(row));
   card.rateInput.setAttribute('aria-label', `Rate for ${rateWindowSummary(row)}`);
   card.removeButton.setAttribute('aria-label', `Remove the ${rateWindowSummary(row)} window`);
@@ -529,6 +543,23 @@ function paintMonthEditor(card) {
   }
 }
 
+// A date commit can be repainted in place (see applyDates), which does not
+// rebuild the date panel: sync the controls from the model so the bound the
+// owner did not type still follows the commit. The focused control is left
+// exactly as typed.
+function syncDateControls(card, bounds) {
+  const from = splitMonthDay(bounds.from);
+  const to = splitMonthDay(bounds.to);
+  const set = (control, value) => {
+    if (!control || control === document.activeElement) return;
+    if (control.value !== value) control.value = value;
+  };
+  set(card.fromMonth, from.month ? String(from.month) : '');
+  set(card.fromDay, from.day ? String(from.day) : '');
+  set(card.toMonth, to.month ? String(to.month) : '');
+  set(card.toDay, to.day ? String(to.day) : '');
+}
+
 // The scope controls are derived from the rows, not a stored mode: dates when
 // either bound is present (even a broken one, so it stays visible), months
 // otherwise. The disabled reason is visible next to the segmented control, not
@@ -565,6 +596,8 @@ function paintScopeEditor(card) {
     card.dateFocus = null;
     return;
   }
+
+  syncDateControls(card, bounds);
 
   const rowErrors = period.rows.map((entry) => rateValidation.rows[entry.index] || {});
   const fromError = rowErrors.map((errors) => errors.from).find(Boolean) || '';
@@ -625,7 +658,16 @@ function paintPeriodHeader(card) {
 
   const range = periodEffectiveRange(draftRates, readFields().rate, period);
   const count = period.rows.length;
-  const countText = `${count} ${count === 1 ? 'window' : 'windows'}`;
+  // A season rate is one price, not a window: naming it a window contradicts the
+  // row title and the plan summary.
+  const noun = period.seasonRate
+    ? count === 1
+      ? 'rate'
+      : 'rates'
+    : count === 1
+      ? 'window'
+      : 'windows';
+  const countText = `${count} ${noun}`;
   // The range covers one representative month (January for an all-year scope,
   // otherwise the first month of the scope). Naming it keeps an All-year header
   // from advertising a range that a July sibling changes; the table caption
@@ -686,6 +728,16 @@ function paintPeriodActions(card) {
       : 'Copy this season into the months it does not cover.';
 }
 
+// A period's visible name. A month scope reads as its months; a date season adds
+// its dates, so two overlapping date seasons are never both just "Season" in the
+// band column of a sibling row.
+function periodBandLabel(period) {
+  const name = periodName(period);
+  if (!period || period.kind !== 'dates') return name;
+  const dates = period.monthText || '';
+  return dates ? `${name} ${dates}` : name;
+}
+
 // The 7-day strip is a quiet shape cue in the collapsed header; the tables and
 // the hidden description carry the same information in words. Both describe the
 // period's own layer for a representative month in its own scope; sibling
@@ -711,6 +763,20 @@ function paintCoverage(card) {
       dateMode
         ? 'This period has unusable dates. Fix the From and To dates to include its windows.'
         : 'This period has no usable months. Choose months to include its windows.',
+    );
+    return;
+  }
+  // A hand-edited mix of a season rate and daily windows is rejected by the
+  // validator. Drawing the resolver's schedule here would show a base plus
+  // override result the editor refuses to save, so the tables are withheld.
+  if (periodRateMode(period) === 'mixed') {
+    card.strip.replaceChildren();
+    card.axis.hidden = true;
+    card.legend.replaceChildren();
+    card.coverage.replaceChildren(el('p', 'coverage-empty', MIX_COVERAGE_MESSAGE));
+    setText(
+      card.desc,
+      'This season mixes a season rate with daily windows. Fix the mix to see coverage.',
     );
     return;
   }
@@ -775,7 +841,7 @@ function paintCoverage(card) {
               ? 'Other times'
               : owner === period
                 ? rateSegmentLabel(segment, windowRates(), readFields().rate)
-                : `${periodName(owner)} ${rateSegmentLabel(
+                : `${periodBandLabel(owner)} ${rateSegmentLabel(
                     segment,
                     windowRates(),
                     readFields().rate,
@@ -810,8 +876,8 @@ function paintCoverage(card) {
     const table = el('table', 'coverage-table');
     const caption = el('caption');
     caption.append(el('span', null, `${type.label} · `));
-    if (period.kind === 'dates') caption.append(nowrapEl(coverage.monthName));
-    else caption.append(coverage.monthName);
+    if (period.kind === 'dates') caption.append(nowrapEl(coverage.captionText));
+    else caption.append(coverage.captionText);
     const thead = el('thead');
     const headRow = el('tr');
     for (const [label, className] of [
@@ -837,7 +903,7 @@ function paintCoverage(card) {
       if (note) time.append(el('span', 'segment-note', note));
       const band = el('td', 'band');
       if (own) {
-        const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
+        const tier = bandName(segment.window);
         band.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'));
       } else if (segment.window) {
         // An inherited row keeps the band dot (so the legend still matches the
@@ -846,13 +912,13 @@ function paintCoverage(card) {
         // line. There is no separator glyph between the band and the months: a
         // `·` left at the end of the band's line dangles when the months wrap at
         // 320 px, so the two are only separated by a break opportunity. Each
-        // month range is its own nowrap run — `Jan–Feb` must not split at the en
-        // dash when the cell is narrow.
-        const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
+        // month or date range is its own nowrap run — `Jan–Feb` must not split at
+        // the en dash when the cell is narrow.
+        const tier = bandName(segment.window);
         const label = el('span', 'sibling-band');
         label.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'), ' ');
         const ownerLabel = el('span', 'sibling-owner');
-        const runs = (owner ? periodName(owner) : 'Other season').split(', ');
+        const runs = (owner ? periodBandLabel(owner) : 'Other season').split(', ');
         runs.forEach((run, index) => {
           if (index > 0) ownerLabel.append(', ');
           ownerLabel.append(nowrapEl(run));
@@ -1099,18 +1165,18 @@ function createPeriodCard(period, index) {
   });
   datePanel.append(dateRow, dateHint, dateError, allYearAction);
 
-  const commitDates = (field) => {
+  const commitDates = () => {
     if (settingsSaving) return;
     const from = dateControlValue(fromMonth.value, fromDay.value);
     const to = dateControlValue(toMonth.value, toDay.value);
     const current = periodDateBounds(card.period);
     if (from === (current.from ?? null) && to === (current.to ?? null)) return;
-    applyDates(card, from, to, field);
+    applyDates(card, from, to);
   };
-  fromMonth.addEventListener('change', () => commitDates('from-month'));
-  fromDay.addEventListener('change', () => commitDates('from-day'));
-  toMonth.addEventListener('change', () => commitDates('to-month'));
-  toDay.addEventListener('change', () => commitDates('to-day'));
+  fromMonth.addEventListener('change', commitDates);
+  fromDay.addEventListener('change', commitDates);
+  toMonth.addEventListener('change', commitDates);
+  toDay.addEventListener('change', commitDates);
 
   for (const control of [fromMonth, fromDay, toMonth, toDay]) {
     control.setAttribute('aria-describedby', `${dateHintId} ${dateErrorId}`);
@@ -1130,7 +1196,8 @@ function createPeriodCard(period, index) {
     if (settingsSaving || periodHasDates(card.period)) return;
     const seed = periodDateSeed(card.period);
     if (!seed) return;
-    applyDates(card, seed.from, seed.to, 'from-day');
+    applyDates(card, seed.from, seed.to);
+    card.fromDay.focus({ preventScroll: true });
   });
 
   scopeEditor.append(modeRow, scopeHint, monthPanel, datePanel);
@@ -1181,7 +1248,7 @@ function createPeriodCard(period, index) {
   useTou.dataset.action = 'use-tou';
   useTou.hidden = true;
   useTou.addEventListener('click', () => convertToTou(card));
-  const useSeason = el('button', 'btn small', 'Use season rate');
+  const useSeason = el('button', 'btn small', 'Convert to one season rate');
   useSeason.type = 'button';
   useSeason.dataset.action = 'use-season-rate';
   useSeason.hidden = true;
@@ -1296,37 +1363,94 @@ function applyMonths(
   scrollToNode(next.node);
 }
 
+// How the draft indices are grouped into periods, in render order. A date edit
+// that leaves this unchanged only renames the scope: nothing merges, splits or
+// moves, so the cards can be repainted in place.
+function periodShape(periods) {
+  return (Array.isArray(periods) ? periods : [])
+    .map((period) => period.rows.map((entry) => entry.index).join(','))
+    .join('|');
+}
+
+// A pending structural rebuild: see applyDates. The token cancels it when
+// another action has already rendered the (already committed) draft.
+let planRenderTimer = 0;
+let planRenderToken = 0;
+
+function cancelPlanRebuild() {
+  planRenderToken += 1;
+  if (planRenderTimer) clearTimeout(planRenderTimer);
+  planRenderTimer = 0;
+}
+
 // Apply a From/To edit to every member row. Date rows can merge with another
-// period carrying the same dates or split away from one, so the focus rule is
-// the month editor's: same control when the period survives, header when it
-// merges. Invalid pairs are applied as typed so the problem stays visible.
-function applyDates(card, from, to, field = 'from-day') {
+// period carrying the same dates or split away from one, so a structural edit
+// rebuilds the plan; a plain edit is repainted in place.
+//
+// The commit runs inside `change`, which a real pointer press fires on blur
+// before the click that caused it is dispatched (and a Tab before the key
+// moves focus). Replacing the focused control synchronously would therefore
+// swallow the very next action — the conversion buttons included. So: repaint
+// without touching the DOM for the common case, and defer a structural rebuild
+// to the next task, which lets the click/Tab land first.
+function applyDates(card, from, to) {
   if (settingsSaving) return;
   const indices = card.period.rows.map((entry) => entry.index);
   const first = indices[0];
   if (first == null) return;
-  const ownCount = indices.length;
+  const before = periodShape(planPeriods);
   draftRates = applyPeriodDates(draftRates, indices, from, to);
   markEdited();
   planPeriods = ratePeriodsForDraft();
   const target = planPeriods.find((period) => period.rows.some((entry) => entry.index === first));
   if (target) expandedPeriods.add(target.key);
-  renderPlan();
-  const next = target ? periodCards.find((entry) => entry.key === target.key) : null;
-  if (!next) {
+  if (!target) {
     $('add-season').focus({ preventScroll: true });
     return;
   }
-  const merged = target.rows.length > ownCount;
-  if (merged) {
-    next.toggle.focus({ preventScroll: true });
-    scrollToNode(next.node);
+  if (periodShape(planPeriods) === before) {
+    renamePeriods();
+    refresh();
     return;
   }
-  const control = next.datePanel.querySelector(`[data-field="${field}"]`);
-  if (control) control.focus({ preventScroll: true });
-  else next.toggle.focus({ preventScroll: true });
-  scrollToNode(next.node);
+  deferPlanRebuild();
+}
+
+// Keep the rendered cards in step with the renamed period keys, so nothing is
+// re-expanded or re-collapsed by a date commit. `periodCards` is index-aligned
+// with `planPeriods` whenever the shape is unchanged.
+function renamePeriods() {
+  planPeriods.forEach((period, index) => {
+    const card = periodCards[index];
+    if (!card) return;
+    const oldKey = card.key;
+    if (oldKey === period.key) return;
+    if (expandedPeriods.delete(oldKey)) expandedPeriods.add(period.key);
+    if (removeConfirmKey === oldKey) removeConfirmKey = period.key;
+    card.key = period.key;
+    card.node.dataset.key = period.key;
+  });
+}
+
+// Rebuild after the interaction that caused the commit has been delivered. A
+// Tab may already have moved focus to the next date control; that control is
+// remembered by `data-field` and refocused once its replacement exists, so the
+// rebuild does not undo the move.
+function deferPlanRebuild() {
+  cancelPlanRebuild();
+  const token = planRenderToken;
+  planRenderTimer = setTimeout(() => {
+    if (token !== planRenderToken) return;
+    planRenderTimer = 0;
+    const active = document.activeElement;
+    const field = active && active.dataset ? active.dataset.field || '' : '';
+    renderPlan();
+    // The rebuild detaches the focused control; if focus moved somewhere the
+    // rebuild left alone (a button outside the list), it is already correct.
+    if (document.contains(active) && active !== document.body) return;
+    const control = $('rate-periods').querySelector(`[data-field="${field || 'from-day'}"]`);
+    if (control) control.focus({ preventScroll: true });
+  }, 0);
 }
 
 function addWindow(card) {
@@ -1337,13 +1461,20 @@ function addWindow(card) {
     return;
   }
   if (periodRateMode(card.period) !== 'tou') return;
-  const row = newWindowRow(
-    card.period.months,
-    card.period.rows.length === 0 ? 'overnight' : 'peak',
-  );
+  // The new row inherits the period's whole scope — its months and, for a date
+  // season, the raw day bounds — so it stays a window of that season. Passing
+  // the months alone would create a second, month-wide season and silently widen
+  // a day-precision season back to the months it touches. The preset is the one
+  // the season does not already contain, so the first window cannot collide.
+  const scope = periodRowScope(card.period);
+  const row = newWindowRow(scope.months, nextWindowPreset(card.period), scope.dates);
   draftRates = [...draftRates, row];
   const index = draftRates.length - 1;
-  expandedPeriods.add(card.key);
+  planPeriods = ratePeriodsForDraft();
+  // Expand the period that actually owns the new row; a date season keeps its
+  // key (same dates), but a merge/split can move it.
+  const target = planPeriods.find((period) => period.rows.some((entry) => entry.index === index));
+  if (target) expandedPeriods.add(target.key);
   markEdited();
   renderPlan();
   const added = windowCards[index];
@@ -1424,14 +1555,25 @@ function convertToSeasonRate(card) {
 function addSeason() {
   if (settingsSaving || draftRates.length >= MAX_RATE_WINDOWS) return;
   const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
+  // Once the plan has a day-precision season, a new season is seeded from the
+  // uncovered dates rather than from months: a date season's months are only a
+  // compatibility hint, and a month seed can land on the days the date season
+  // owns.
+  const hasDates = planPeriods.some((period) => period.kind === 'dates');
   let row;
-  if (allSeasonRates) {
+  if (allSeasonRates || hasDates) {
     // A plan made only of season rates grows into the largest uncovered date
     // range, so two seasons divide the year instead of overlapping.
     const scope = largestDateScope(uncoveredDateRanges(draftRates));
     if (!scope) return;
     const dates = scope.fullYear ? null : { from: scope.from, to: scope.to };
-    row = seasonRateRow(dates ? monthsCovering(dates.from, dates.to) : null, dates);
+    row = allSeasonRates
+      ? seasonRateRow(dates ? monthsCovering(dates.from, dates.to) : null, dates)
+      : newWindowRow(
+          dates ? monthsCovering(dates.from, dates.to) : null,
+          draftRates.length === 0 ? 'overnight' : 'peak',
+          dates,
+        );
   } else {
     const uncovered = uncoveredMonths(draftRates);
     const months =
@@ -1557,22 +1699,35 @@ function paintPlan() {
   }
 
   planPeriods = ratePeriodsForDraft();
-  // Only rows that can actually match a month set a meaningful range: a row
-  // with unusable months is shown and fixed, but its price never applies.
+  // Only rows that can actually match and pass validation set a meaningful
+  // range: a row with unusable months or an invalid time/price is shown and
+  // fixed, but its price never applies. Letting it widen the advertised range
+  // would quote a price no moment can ever be charged.
   const rateRows = planPeriods
     .filter((period) => period.kind !== 'invalid')
-    .flatMap((period) => period.rows.map((entry) => entry.row));
+    .flatMap((period) => period.rows)
+    .filter((entry) => Object.keys(rateValidation.rows[entry.index] || {}).length === 0)
+    .map((entry) => entry.row);
   const range = ratePlanRange(rateRows);
   const problems = validationProblemCount(rateValidation, draftRates.length);
   const capped = draftRates.length > MAX_RATE_WINDOWS;
   // "3 windows · USD 0.10–0.32 · other times USD 0.31": the count already says
   // "windows", so the range does not repeat the word. Prices are unbreakable
-  // runs so a range never splits after the en dash at 320.
+  // runs so a range never splits after the en dash at 320. A season rate is one
+  // price, not a window, and an all-season-rate plan is counted as rates.
+  const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
+  const rowNoun = allSeasonRates ? (draftRates.length === 1 ? 'rate' : 'rates') : null;
   const counts = `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'} · ${
     draftRates.length
-  } ${draftRates.length === 1 ? 'window' : 'windows'}`;
+  } ${rowNoun || (draftRates.length === 1 ? 'window' : 'windows')}`;
   const summary = [el('span', null, `${counts} · `)];
   if (range) summary.push(nowrapEl(priceRangeText(range)), el('span', null, ' · '));
+  // No row contributes a usable price: say so instead of silently omitting the
+  // range, which read as "no price applies" rather than "a price needs fixing".
+  // An untouched, empty plan keeps the quiet form; its header already says
+  // "rate not set".
+  else if (draftRates.some((row) => String(row.rate ?? '').trim() !== ''))
+    summary.push(nowrapEl('— needs attention'), el('span', null, ' · '));
   summary.push(nowrapEl(`other times ${priceText(readFields().rate)}`));
   $('plan-summary-text').replaceChildren(...summary);
   const problem = $('plan-problem');
@@ -1587,16 +1742,15 @@ function paintPlan() {
   const otherTimes = $('other-times-line');
   otherTimes.hidden = !uncovered;
   if (uncovered) {
-    const months = el('span', 'other-times-months');
-    months.append(' · ');
-    uncovered.split(', ').forEach((run, index) => {
-      if (index > 0) months.append(', ');
-      months.append(nowrapEl(run));
-    });
-    const nodes = [el('span', 'other-times-title', 'No window — other times'), months];
+    // The separator is bound to the text that follows it with a no-break space,
+    // so a wrap at 320 px can never leave a line starting with a lone `·`.
+    const runs = uncovered.split(', ');
+    const nodes = [el('span', 'other-times-title', 'No season — other times')];
+    nodes.push(nowrapEl(`\u00a0· ${runs[0]}`));
+    for (const run of runs.slice(1)) nodes.push(nowrapEl(`, ${run}`));
     const fallback = readFields().rate;
     if (Number.isFinite(parseRateValue(fallback))) {
-      nodes.push(el('span', 'other-times-price', ` · ${priceText(fallback)}`));
+      nodes.push(el('span', 'other-times-price', `\u00a0· ${priceText(fallback)}`));
     }
     otherTimes.replaceChildren(...nodes);
   }
@@ -1695,7 +1849,12 @@ function paintRateValidation() {
     }
   }
 
-  const general = rateValidation.general.join(' ');
+  // A mixed season is one structural problem, and the season card already names
+  // it. The generic overlap sentence is withheld for that case: its remedy
+  // ("change one of them") cannot fix an all-day row colliding with every time
+  // window, and two banners for one condition contradicted each other.
+  const mixed = planHasMix();
+  const general = mixed && !rateValidation.capped ? '' : rateValidation.general.join(' ');
   const docError = $('rates-error');
   docError.hidden = !general;
   setText(docError, general);
@@ -1715,7 +1874,10 @@ function paintRateValidation() {
   for (const node of $('rates-flat').querySelectorAll('button')) node.disabled = settingsSaving;
   const atCap = draftRates.length >= MAX_RATE_WINDOWS;
   const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  const noUncoveredDates = allSeasonRates && uncoveredDateRanges(draftRates).length === 0;
+  // A new season is seeded from the uncovered dates once the plan has any date
+  // season, so a fully partitioned year leaves nowhere to add one.
+  const datedPlan = allSeasonRates || planPeriods.some((period) => period.kind === 'dates');
+  const noUncoveredDates = datedPlan && uncoveredDateRanges(draftRates).length === 0;
   $('add-season').disabled = settingsSaving || atCap || noUncoveredDates;
   $('add-season').title = noUncoveredDates ? 'Every date already has a season.' : '';
   for (const card of periodCards) {
@@ -1745,12 +1907,19 @@ function previewResult() {
   return { date, result: previewRate(draftRates, $('setting-rate').value, date) };
 }
 
+// A season that mixes a season rate with daily windows: the validator rejects it
+// and the UI must not draw a resolved schedule for it.
+function planHasMix() {
+  return planPeriods.some((period) => periodRateMode(period) === 'mixed');
+}
+
 function paintPreview() {
   if (draftRates.length === 0) return;
   const table = $('preview-table');
   const empty = $('preview-empty');
   const note = $('preview-note');
-  const blocker = previewBlocker(rateValidation);
+  const mixed = planHasMix();
+  const blocker = mixed ? MIX_COVERAGE_MESSAGE : previewBlocker(rateValidation);
   if (blocker) {
     // Never claim "Other times" while a window is incomplete or two windows
     // collide: the invalid row is omitted from the lookup, so the answer could
@@ -1778,7 +1947,10 @@ function paintPreview() {
   if (result.rate == null) {
     price.textContent = 'No rate set';
   } else {
-    if (result.tier) price.append(el('span', `tier ${tierClass(result.tier)}`, result.tier));
+    // A season rate is named for what it is: a relative band ("Off-peak") beside
+    // "Season rate · Jun 15–Sep 15" described a band the owner never chose.
+    const band = result.seasonRate ? 'Season rate' : result.tier;
+    if (band) price.append(el('span', `tier ${tierClass(result.tier)}`, band));
     const money = el('span', 'preview-money');
     money.append(el('strong', null, priceText(result.rate)), el('span', 'unit', '/ kWh'));
     price.append(money);
@@ -1818,12 +1990,14 @@ function announcePreview() {
     setText(live, `${formatPreviewWhen(date)}: no rate set.`);
     return;
   }
-  const band = result.tier ? `${result.tier}, ` : '';
+  const band = result.seasonRate ? 'Season rate, ' : result.tier ? `${result.tier}, ` : '';
+  // Announce what the visible Applies row says. Two windows in one season can be
+  // equally priced, so the day/time summary is what tells them apart.
   const where = result.fallback
     ? 'other times'
     : result.seasonRate
       ? `season rate ${result.scopeText}`
-      : result.scopeText;
+      : `${result.summary} · ${result.scopeText}`;
   setText(live, `${formatPreviewWhen(date)}: ${band}${priceText(result.rate)} per kWh, ${where}.`);
 }
 
@@ -1870,6 +2044,9 @@ function paintFeedback() {
 // ---------- rendering ----------
 
 function renderPlan() {
+  // A full rebuild supersedes any deferred date rebuild: the draft it would
+  // have rendered is the one being rendered now.
+  cancelPlanRebuild();
   planPeriods = ratePeriodsForDraft();
   const flat = draftRates.length === 0;
   const wasFlat = !$('rates-flat').hidden;
