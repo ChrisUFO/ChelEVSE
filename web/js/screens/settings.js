@@ -48,6 +48,7 @@ import {
   planProblemText,
   previewBlocker,
   previewRate,
+  rateIsUsable,
   ratePeriods,
   ratePlanRange,
   rateRowFields,
@@ -258,6 +259,12 @@ function priceCell(rate) {
   cell.push(el('span', 'price-amount', amount));
   td.append(...cell);
   return td;
+}
+
+// A PRICE cell for a row whose own price is still missing. Words, not a money
+// run: the plan summary, the card meta and the checker say the same.
+function needsAttentionCell() {
+  return el('td', 'price needs-attention', '— needs attention');
 }
 
 // "USD 0.20–0.32", not "USD 0.20–USD 0.32": one currency for a range.
@@ -793,13 +800,29 @@ function paintCoverage(card) {
     );
     return;
   }
+  // A row whose price is not usable (empty, or finite but outside the accepted
+  // range) is rejected by the validator, so the resolved week drops it: its
+  // hours fall back to "Other times" and the table would quote a resolved price
+  // the plan, the card meta and the checker all deny. Resolve a copy with a
+  // stand-in price so the row keeps its place and its band, then put the real
+  // (unusable) price back and let the table say the price is missing.
+  const unpriced = new Set(
+    period.rows.filter((entry) => !rateIsUsable(entry.row.rate)).map((entry) => entry.row.id),
+  );
   const coverage = periodCoverage(
-    draftRates,
+    draftRates.map((row) => (row && unpriced.has(row.id) ? { ...row, rate: '0' } : row)),
     readFields().rate,
     period,
     planPeriods,
     new Date().getFullYear(),
   );
+  for (const type of coverage.types) {
+    for (const segment of type.segments) {
+      if (segment.window && unpriced.has(segment.window.id)) {
+        segment.window = { ...segment.window, rate: '' };
+      }
+    }
+  }
 
   // The legend is collected from the same resolved segments the strip and the
   // table draw, so every dot carries the name of the row it stands for. A
@@ -842,6 +865,11 @@ function paintCoverage(card) {
     if (coverage.ownIds.has(segment.window.id)) return period;
     return planPeriods.find((entry) => entry.rows.some((row) => row.row.id === segment.window.id));
   };
+  // A resolved row whose own price is still unusable. Its band stays the row's
+  // (or the season's) name; only the price and the hidden description change.
+  // The id set is read rather than the segment's rate, which the stand-in pass
+  // above has already replaced with a placeholder.
+  const needsRate = (segment) => Boolean(segment.window) && unpriced.has(segment.window.id);
   const described = coverage.types
     .map(
       (type) =>
@@ -850,13 +878,15 @@ function paintCoverage(card) {
             const owner = ownerOf(segment);
             const label = !segment.window
               ? 'Other times'
-              : owner === period
-                ? rateSegmentLabel(segment, windowRates(), readFields().rate)
-                : `${periodBandLabel(owner)} ${rateSegmentLabel(
-                    segment,
-                    windowRates(),
-                    readFields().rate,
-                  )}`;
+              : needsRate(segment)
+                ? 'Needs a rate'
+                : owner === period
+                  ? rateSegmentLabel(segment, windowRates(), readFields().rate)
+                  : `${periodBandLabel(owner)} ${rateSegmentLabel(
+                      segment,
+                      windowRates(),
+                      readFields().rate,
+                    )}`;
             return `${minutesToClock(segment.from)}–${minutesToClock(segment.to)} ${label}`;
           })
           .join(', ')}`,
@@ -939,7 +969,9 @@ function paintCoverage(card) {
       } else {
         band.textContent = 'Other times';
       }
-      const price = priceCell(segment.rate);
+      // An own row with no usable price names the gap: quoting the resolver's
+      // fallback here would assert a price the rest of the screen denies.
+      const price = needsRate(segment) ? needsAttentionCell() : priceCell(segment.rate);
       tr.append(time, band, price);
       tbody.append(tr);
     }
@@ -1799,21 +1831,41 @@ function paintRateValidation() {
   // storage index.
   const rates = windowRates();
   const fallback = readFields().rate;
+  // A mixed season's rows collide by construction: its all-day row overlaps
+  // every time window of the same season. The structural banner already names
+  // the one fix, and a row-level "Overlaps …" reads as a time tweak that cannot
+  // work, so those pairs are withheld from the row notes. Cross-season overlaps
+  // keep theirs, and the counts/flags below still use the full set.
+  const mixedPeriodOf = new Map();
+  for (const period of planPeriods) {
+    if (periodRateMode(period) !== 'mixed') continue;
+    for (const entry of period.rows) mixedPeriodOf.set(entry.index, period);
+  }
+  const addNote = (map, index, text) => {
+    if (!map.has(index)) map.set(index, []);
+    map.get(index).push(text);
+  };
   const notes = new Map();
+  const displayNotes = new Map();
   for (const [a, b] of rateValidation.overlaps) {
     const sameScope = rateScopeText(draftRates[a]) === rateScopeText(draftRates[b]);
     const left = windowLabel(draftRates[a], rates, fallback, { months: !sameScope });
     const right = windowLabel(draftRates[b], rates, fallback, { months: !sameScope });
-    if (!notes.has(a)) notes.set(a, []);
-    if (!notes.has(b)) notes.set(b, []);
-    notes.get(a).push(left === right ? 'Overlaps an identical window' : `Overlaps “${right}”`);
-    notes.get(b).push(left === right ? 'Overlaps an identical window' : `Overlaps “${left}”`);
+    const leftNote = left === right ? 'Overlaps an identical window' : `Overlaps “${right}”`;
+    const rightNote = left === right ? 'Overlaps an identical window' : `Overlaps “${left}”`;
+    addNote(notes, a, leftNote);
+    addNote(notes, b, rightNote);
+    const sameMix = mixedPeriodOf.has(a) && mixedPeriodOf.get(a) === mixedPeriodOf.get(b);
+    if (!sameMix) {
+      addNote(displayNotes, a, leftNote);
+      addNote(displayNotes, b, rightNote);
+    }
   }
 
   for (const card of windowCards) {
     if (!card) continue;
     const errors = rateValidation.rows[card.index] || {};
-    const rowNotes = notes.get(card.index) || [];
+    const rowNotes = displayNotes.get(card.index) || [];
     // Date errors belong to the season's From/To editor, which prefixes the
     // field name; repeating the bare sentence inside every member row is noise.
     const rowMessages = Object.entries(errors)

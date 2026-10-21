@@ -30,6 +30,15 @@ import { DAY_NAMES } from './schedule.js';
 // a window row, so both validators share one definition.
 export { RATE_MAX, RATE_MIN } from './rates.js';
 
+// A rate the engine can actually use: finite once parsed and inside the
+// documented bounds. The validators and the resolver both reject anything else,
+// so any view asking "does this row have a price?" must ask it the same way —
+// otherwise it quotes a fallback the rest of the screen denies.
+export function rateIsUsable(value) {
+  const rate = parseRateValue(value);
+  return Number.isFinite(rate) && rate >= RATE_MIN && rate <= RATE_MAX;
+}
+
 // Mirror firestore.rules: a write must carry both flat fields, rate is a number
 // from 0 to 5, currency is a string of 1–8 characters. The optional `rates`
 // list keeps the flat rate as its fallback; its rows are validated by
@@ -528,9 +537,7 @@ export function ratePeriodTitle(months, kind) {
 }
 
 function rateRangeFor(rows) {
-  const rates = rows
-    .map((row) => parseRateValue(row && row.rate))
-    .filter((rate) => Number.isFinite(rate) && rate >= RATE_MIN && rate <= RATE_MAX);
+  const rates = rows.map((row) => parseRateValue(row && row.rate)).filter(rateIsUsable);
   if (rates.length === 0) return null;
   return { min: Math.min(...rates), max: Math.max(...rates) };
 }
