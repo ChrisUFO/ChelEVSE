@@ -2403,3 +2403,23 @@ test('a season rate is banded by name, not by a relative price tier', () => {
   assert.equal(rateSegmentLabel({ window: summerDates, rate: 0.2 }, [0.2], 0.31), 'Season rate');
   assert.equal(MIX_COVERAGE_MESSAGE, 'Fix the mix to see coverage.');
 });
+
+test('a months target opens the advanced month panel and focuses a chip', () => {
+  const card = cardStub();
+  let focused = false;
+  card.periodCard.advancedMonths = { open: false };
+  card.periodCard.monthChips = {
+    querySelector: (selector) =>
+      selector === '[aria-pressed="true"]'
+        ? {
+            focus: () => {
+              focused = true;
+            },
+          }
+        : null,
+  };
+  const view = viewStub([card]);
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'months' }, view);
+  assert.equal(card.periodCard.advancedMonths.open, true);
+  assert.equal(focused, true);
+});

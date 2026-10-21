@@ -1686,6 +1686,12 @@ input[aria-invalid='true'] {
   line-height: 1.4;
   color: var(--muted);
 }
+.plan-choices-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
 .plan-cancel {
   justify-self: start;
 }
@@ -1751,6 +1757,36 @@ input[aria-invalid='true'] {
   margin: 0;
   font: inherit;
 }
+.period-head-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.period-head-row .period-toggle {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.period-edit-dates {
+  flex: none;
+  min-height: 44px;
+  margin: 7px 8px 0 0;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--surface-2) 45%, transparent);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.period-edit-dates:hover {
+  border-color: color-mix(in oklab, var(--accent) 42%, var(--line));
+  background: color-mix(in oklab, var(--accent) 9%, transparent);
+}
+.period-edit-dates:focus-visible {
+  outline-offset: 1px;
+}
 .period-toggle {
   display: grid;
   gap: 6px;
@@ -1806,9 +1842,9 @@ input[aria-invalid='true'] {
 }
 .period-caret {
   flex: none;
-  width: 7px;
-  height: 7px;
-  margin-left: auto;
+  width: 9px;
+  height: 9px;
+  margin-left: 2px;
   border-right: 1.5px solid var(--muted);
   border-bottom: 1.5px solid var(--muted);
   transform: rotate(45deg);
@@ -1923,134 +1959,143 @@ input[aria-invalid='true'] {
 .period-body[hidden] {
   display: none;
 }
-.scope-editor {
+.season-dates {
   display: grid;
-  gap: 8px;
-  padding: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in oklab, var(--accent) 22%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--accent) 4%, var(--surface-2) 25%);
 }
-.scope-modes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--bg);
+.season-dates-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
 }
-.scope-mode {
-  min-width: 0;
-  min-height: 44px;
-  padding: 0 6px;
-  border-radius: 8px;
-  color: var(--muted);
+.season-dates-title {
+  margin: 0;
   font-size: 12px;
-  font-weight: 600;
-  transition:
-    background 0.15s ease,
-    color 0.15s ease;
-}
-.scope-mode:hover:not(:disabled) {
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--text);
-  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
 }
-.scope-mode[aria-pressed='true'] {
-  background: color-mix(in oklab, var(--accent) 15%, transparent);
-  color: var(--accent);
+.season-all-year {
+  flex: none;
 }
-.scope-mode:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.scope-hint {
+.season-dates-reference {
   margin: 0;
   font-size: 11px;
   line-height: 1.45;
   color: var(--muted);
 }
-.scope-panel {
-  display: grid;
-  gap: 8px;
-}
-.scope-panel[hidden] {
-  display: none;
-}
-.date-row {
+.season-date-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: end;
   gap: 8px;
 }
-.date-bound {
+.season-date-field {
   display: grid;
   gap: 4px;
   min-width: 0;
 }
-.date-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 64px;
-  gap: 5px;
+.season-dates-fallback {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 0;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--surface-2) 38%, transparent);
+  color: var(--muted);
+  font-size: 12.5px;
 }
-.date-select,
-.date-day {
+.season-dates-fallback.unavailable {
+  border-style: dashed;
+  background: transparent;
+}
+.season-date-input {
   width: 100%;
   min-width: 0;
   min-height: 44px;
-  padding: 0 7px;
+  padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
   font-size: 12.5px;
+  color-scheme: dark;
 }
-.date-day {
-  padding: 0 5px;
-  text-align: center;
-  appearance: textfield;
-  -moz-appearance: textfield;
+.season-date-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
-/* The focused number input's spinner is a different, moving control inside the
-   narrow day field; the value stays an editable number without it. */
-.date-day::-webkit-outer-spin-button,
-.date-day::-webkit-inner-spin-button {
-  margin: 0;
-  -webkit-appearance: none;
-}
-.date-select:focus-visible,
-.date-day:focus-visible {
+.season-date-input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.date-select[aria-invalid='true'],
-.date-day[aria-invalid='true'] {
+.season-date-input[aria-invalid='true'] {
   border-color: color-mix(in oklab, var(--err) 70%, var(--line));
   background: color-mix(in oklab, var(--err) 5%, var(--bg));
 }
-.date-arrow {
+.season-date-arrow {
   padding-bottom: 13px;
   color: var(--muted);
   font-size: 14px;
 }
-.scope-date-hint {
+.season-dates-status,
+.season-dates-stored {
   margin: 0;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.45;
   color: var(--muted);
 }
-.date-error {
+.season-dates-stored {
+  color: color-mix(in oklab, var(--err) 78%, var(--text));
+}
+.season-dates-error {
   margin: 0;
 }
-/* The day-precision escape hatch is a text-looking action, not a 20 px line: it
-   is the only one-click dates -> all-year route, so it keeps a 44 px target in
-   a panel where every other new control is 44 px. `.link-btn` later in this file
-   resets display/padding, hence the compound selector. */
-.link-btn.date-all-year {
-  display: inline-flex;
+.advanced-months {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.advanced-summary-row {
+  display: flex;
   align-items: center;
-  justify-self: start;
+  gap: 7px;
   min-height: 44px;
-  padding: 0 8px;
-  margin-left: -8px;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+.advanced-summary-row::-webkit-details-marker {
+  display: none;
+}
+.advanced-summary-row::before {
+  content: '▸';
+  color: var(--muted);
+  font-size: 12px;
+  transition: transform 0.12s ease;
+}
+.advanced-months[open] .advanced-summary-row::before {
+  transform: rotate(90deg);
+}
+.advanced-summary {
+  color: var(--text);
+  font-weight: 600;
+}
+.advanced-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 .period-band.date-range {
   white-space: nowrap;
@@ -2078,18 +2123,6 @@ input[aria-invalid='true'] {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-}
-.month-editor {
-  display: grid;
-  gap: 8px;
-  padding: 0;
-}
-.month-editor-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px 10px;
 }
 .months-toggle {
   display: inline-flex;
@@ -2142,15 +2175,12 @@ input[aria-invalid='true'] {
   .month-chips {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-  .date-row {
+  .season-date-fields {
     grid-template-columns: 1fr;
     gap: 6px;
   }
-  .date-arrow {
+  .season-date-arrow {
     display: none;
-  }
-  .date-controls {
-    grid-template-columns: minmax(0, 1fr) 80px;
   }
 }
 .month-chip {

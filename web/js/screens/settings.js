@@ -33,7 +33,6 @@ import {
   isAllDayWindow,
   isSeasonRateRow,
   largestDateScope,
-  largestMonthRun,
   minutesToClock,
   nextWindowPreset,
   normalizeSettings,
@@ -49,6 +48,7 @@ import {
   previewBlocker,
   previewRate,
   rateIsUsable,
+  rateMonthsText,
   ratePeriods,
   ratePlanRange,
   rateRowFields,
@@ -69,13 +69,12 @@ import {
   timeInputValue,
   toggledMonthScope,
   uncoveredDateRanges,
-  uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
   validationProblemCount,
   windowLabel,
 } from '../settings.js';
-import { MAX_RATE_WINDOWS, monthsCovering, parseRateValue } from '../rates.js';
+import { MAX_RATE_WINDOWS, monthsCovering, parseMonthDay, parseRateValue } from '../rates.js';
 import { saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 
@@ -211,29 +210,28 @@ function seasonRateRow(months, dates = null) {
   return row;
 }
 
-// The stored date spelling split back into the two controls. Invalid values
-// stay visible: a day of 30 in February must not silently become a blank field
-// or a different day.
-function splitMonthDay(value) {
-  const text = typeof value === 'string' ? value : '';
-  const [monthText = '', dayText = ''] = text.split('-');
-  const month = /^\d{1,2}$/.test(monthText) ? Number(monthText) : 0;
-  const day = /^\d{1,2}$/.test(dayText) ? Number(dayText) : 0;
-  return {
-    month: month >= 1 && month <= 12 ? month : 0,
-    // Keep an out-of-range day visible (February 30, a hand-edited 32) rather
-    // than blanking the value the owner needs to see and fix.
-    day: Number.isInteger(day) && day > 0 ? day : 0,
-  };
+// The date inputs are real date pickers, but only a month and day are stored.
+// 2024 is a leap reference year so 29 February is representable; any year the
+// owner picks is discarded, and the visible hint says the year is a reference.
+const DATE_REFERENCE_YEAR = 2024;
+
+function dateInputForBound(value) {
+  const parsed = parseMonthDay(value);
+  if (!parsed) return '';
+  return `${DATE_REFERENCE_YEAR}-${String(parsed.month).padStart(2, '0')}-${String(
+    parsed.day,
+  ).padStart(2, '0')}`;
 }
 
-// Build the MM-DD spelling from the controls. A missing half becomes 00, which
-// the engine rejects and the field error names; returning null instead would
-// drop date mode and silently fall back to the old month scope.
-function dateControlValue(monthValue, dayValue) {
-  const month = Number(monthValue) || 0;
-  const day = Number(dayValue) || 0;
-  return `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+// A native date value is YYYY-MM-DD. The year is deliberately discarded: the
+// season repeats annually. A blank value becomes the 00-00 sentinel so date
+// mode survives until validation explains the missing half, instead of the
+// period silently falling back to an old month scope.
+function boundFromDateInput(value) {
+  const match = /^\d{4}-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
+  if (!match) return '00-00';
+  const monthDay = `${match[1]}-${match[2]}`;
+  return parseMonthDay(monthDay) ? monthDay : '00-00';
 }
 
 function priceText(rate) {
@@ -554,88 +552,140 @@ function createWindowCard(entry, periodCard) {
 
 function paintMonthEditor(card) {
   const all = card.period.kind === 'all';
-  const months = card.period.kind === 'months' ? card.period.months : [];
-  card.allYear.checked = all;
+  const months =
+    (card.period.kind === 'months' || card.period.kind === 'dates') &&
+    Array.isArray(card.period.months)
+      ? card.period.months
+      : [];
   for (const chip of card.monthChips.querySelectorAll('[data-month]')) {
     chip.setAttribute('aria-pressed', String(all || months.includes(Number(chip.dataset.month))));
   }
 }
 
-// A date commit can be repainted in place (see applyDates), which does not
-// rebuild the date panel: sync the controls from the model so the bound the
-// owner did not type still follows the commit. The focused control is left
-// exactly as typed.
-function syncDateControls(card, bounds) {
-  const from = splitMonthDay(bounds.from);
-  const to = splitMonthDay(bounds.to);
-  const set = (control, value) => {
-    if (!control || control === document.activeElement) return;
-    if (control.value !== value) control.value = value;
+// The scope in the terms the date block needs: the canonical All-year state,
+// raw date bounds, and the derived first/last date a legacy month range can
+// show. A non-contiguous or invalid month scope has no single date range.
+function seasonDateState(period) {
+  const allYear = period.kind === 'all';
+  const dateMode = periodHasDates(period);
+  const raw = periodDateBounds(period);
+  const seed = !allYear && !dateMode ? periodDateSeed(period) : null;
+  const values = allYear
+    ? { from: null, to: null }
+    : dateMode
+      ? raw
+      : seed || { from: null, to: null };
+  return {
+    allYear,
+    dateMode,
+    raw,
+    seed,
+    values,
+    canPick: !allYear && (dateMode || Boolean(seed)),
+    monthStored: !allYear && !dateMode,
   };
-  set(card.fromMonth, from.month ? String(from.month) : '');
-  set(card.fromDay, from.day ? String(from.day) : '');
-  set(card.toMonth, to.month ? String(to.month) : '');
-  set(card.toDay, to.day ? String(to.day) : '');
 }
 
-// The scope controls are derived from the rows, not a stored mode: dates when
-// either bound is present (even a broken one, so it stays visible), months
-// otherwise. The disabled reason is visible next to the segmented control, not
-// only in a title.
+// The visible season dates. Dates are the first decision; the month chips are a
+// secondary, advanced route for the legacy month-only scopes. The mode is
+// derived from the rows, never stored.
 function paintScopeEditor(card) {
   const period = card.period;
-  const dateMode = periodHasDates(period);
-  const bounds = periodDateBounds(period);
-  const seed = dateMode ? null : periodDateSeed(period);
-  const monthsFromDates = dateMode ? monthsCovering(bounds.from, bounds.to) : [];
-  const canDates = dateMode || Boolean(seed);
-  const canMonths = !dateMode || monthsFromDates.length > 0;
-  const hint =
-    !dateMode && !canDates
-      ? period.kind === 'invalid'
-        ? 'Fix the months to use specific dates.'
-        : 'Specific dates need one continuous range.'
-      : '';
+  const state = seasonDateState(period);
+  const values = state.values;
+  card.allYear.checked = state.allYear;
 
-  card.monthsMode.setAttribute('aria-pressed', String(!dateMode));
-  card.datesMode.setAttribute('aria-pressed', String(dateMode));
-  card.monthsMode.disabled = settingsSaving || (dateMode && !canMonths);
-  card.datesMode.disabled = settingsSaving || (!dateMode && !canDates);
-  card.monthsMode.title = dateMode && !canMonths ? 'Fix the From and To dates first.' : '';
-  card.datesMode.title = hint;
-  card.scopeHint.hidden = !hint;
-  setText(card.scopeHint, hint);
-  card.monthPanel.hidden = dateMode;
-  card.datePanel.hidden = !dateMode;
-  paintMonthEditor(card);
+  // Always normalize the visible year back to the reference year. A native
+  // picker may have produced 2025; only its month and day are kept.
+  const fromValue = dateInputForBound(values.from);
+  const toValue = dateInputForBound(values.to);
+  if (card.fromDate.value !== fromValue) card.fromDate.value = fromValue;
+  if (card.toDate.value !== toValue) card.toDate.value = toValue;
 
-  if (!dateMode) {
-    card.dateError.hidden = true;
-    card.dateFocus = null;
-    return;
+  const dateDisabled = settingsSaving || !state.canPick;
+  card.fromDate.disabled = dateDisabled;
+  card.toDate.disabled = dateDisabled;
+
+  // Do not leave two empty pickers looking like required fields when the scope
+  // has no single start/end (All year or separate month ranges). A read-only
+  // value takes their place and the real control is the checkbox or the month
+  // editor below.
+  const showFallback = state.allYear || !state.canPick;
+  card.dateFields.hidden = showFallback;
+  card.dateFallback.hidden = !showFallback;
+  card.dateFallback.classList.toggle('unavailable', !state.allYear);
+  if (state.allYear) {
+    setText(card.dateFallback, 'All year — every day of the year.');
+  } else if (!state.canPick) {
+    setText(card.dateFallback, 'No single start and end for this month range.');
   }
-
-  syncDateControls(card, bounds);
 
   const rowErrors = period.rows.map((entry) => rateValidation.rows[entry.index] || {});
   const fromError = rowErrors.map((errors) => errors.from).find(Boolean) || '';
   const toError = rowErrors.map((errors) => errors.to).find(Boolean) || '';
-  const messages = [fromError ? `From: ${fromError}` : '', toError ? `To: ${toError}` : ''].filter(
-    Boolean,
-  );
+  const dateErrors = Boolean(fromError || toError);
+  card.fromDate.setAttribute('aria-invalid', String(Boolean(fromError)));
+  card.toDate.setAttribute('aria-invalid', String(Boolean(toError)));
+  const messages = [
+    fromError ? `Starts: ${fromError}` : '',
+    toError ? `Ends: ${toError}` : '',
+  ].filter(Boolean);
   card.dateError.hidden = messages.length === 0;
   setText(card.dateError, messages.join(' '));
-  card.fromMonth.setAttribute('aria-invalid', String(Boolean(fromError)));
-  card.fromDay.setAttribute('aria-invalid', String(Boolean(fromError)));
-  card.toMonth.setAttribute('aria-invalid', String(Boolean(toError)));
-  card.toDay.setAttribute('aria-invalid', String(Boolean(toError)));
-  card.dateFocus = fromError ? card.fromDay : toError ? card.toDay : card.fromDay;
+  card.dateFocus = fromError ? card.fromDate : toError ? card.toDate : card.fromDate;
 
-  const base = canMonths
-    ? 'Dates are inclusive and repeat every year. Switching to Months rounds them to whole months.'
-    : 'Fix the From and To dates before switching to Months.';
-  const wrapHint = dateRangeHint(bounds.from, bounds.to);
-  setText(card.dateHint, wrapHint ? `${base} ${wrapHint}` : base);
+  // A native date input cannot show 30 February. Keep the stored spelling
+  // visible in words, so a malformed row is still diagnosable rather than just
+  // a blank picker.
+  const stored = [];
+  for (const [label, rawValue] of [
+    ['Starts', state.raw.from],
+    ['Ends', state.raw.to],
+  ]) {
+    if (rawValue != null && rawValue !== '' && rawValue !== '00-00' && !parseMonthDay(rawValue)) {
+      stored.push(`${label} ${rawValue}`);
+    }
+  }
+  card.dateStored.hidden = stored.length === 0;
+  setText(card.dateStored, stored.length ? `Stored: ${stored.join(' · ')}.` : '');
+
+  let status = '';
+  if (state.allYear) {
+    status = 'Uncheck All year to choose a start and end.';
+  } else if (state.dateMode) {
+    status = dateErrors
+      ? 'Choose real start and end dates to keep this season day-precise.'
+      : 'Starts and ends are inclusive.';
+  } else if (state.seed) {
+    status = `Stored as a month range (${rateMonthsText(period.months)}). Editing a start or end date makes this season day-precise.`;
+  } else if (period.kind === 'invalid') {
+    status = 'Use Advanced: month ranges to fix this season.';
+  } else {
+    status = 'Use Advanced: month ranges to edit this season.';
+  }
+  const wrapHint = !state.allYear && !dateDisabled ? dateRangeHint(values.from, values.to) : '';
+  setText(card.dateStatus, wrapHint ? `${status} ${wrapHint}` : status);
+
+  // Months are advanced: visible for date seasons (a rounding route) and legacy
+  // month scopes, but not for All year or a malformed date scope. A
+  // non-contiguous month scope opens the disclosure so it remains editable.
+  const hideAdvanced = state.allYear || (state.dateMode && period.kind === 'invalid');
+  card.advancedMonths.hidden = hideAdvanced;
+  let monthSummary = '';
+  if (!state.allYear && !hideAdvanced) {
+    monthSummary =
+      period.kind === 'invalid' ? 'needs attention' : rateMonthsText(period.months, period.kind);
+  }
+  setText(card.advancedSummary, monthSummary ? ` · ${monthSummary}` : '');
+  setText(
+    card.advancedHint,
+    state.dateMode
+      ? 'Editing a month chip rounds this season to whole months.'
+      : period.kind === 'invalid'
+        ? 'Pick the months this season covers; dates need one continuous range.'
+        : 'Editing a month chip keeps this season on month precision.',
+  );
+  paintMonthEditor(card);
 }
 
 function paintPeriodMode(card) {
@@ -660,6 +710,10 @@ function periodName(period) {
 // count stays the period's own windows.
 function paintPeriodHeader(card) {
   const period = card.period;
+  setText(card.title, period.title);
+  card.list.setAttribute('aria-label', `Windows in ${periodName(period)}`);
+  card.addButton.setAttribute('aria-label', `Add a window to ${periodName(period)}`);
+  card.editDates.setAttribute('aria-label', `Edit season dates for ${periodName(period)}`);
   const dateMode = periodHasDates(period);
   const dateBounds = periodDateBounds(period);
   const dateText =
@@ -714,6 +768,7 @@ function setExpanded(card, expanded) {
   if (expanded) expandedPeriods.add(card.key);
   else expandedPeriods.delete(card.key);
   card.toggle.setAttribute('aria-expanded', String(expanded));
+  if (card.editDates) card.editDates.setAttribute('aria-expanded', String(expanded));
   card.body.hidden = !expanded;
 }
 
@@ -989,6 +1044,7 @@ function createPeriodCard(period, index) {
     period,
     node,
     toggle: null,
+    title: null,
     band: null,
     meta: null,
     flag: null,
@@ -997,27 +1053,26 @@ function createPeriodCard(period, index) {
     legend: null,
     desc: null,
     body: null,
-    monthEditor: null,
-    scopeEditor: null,
-    scopeModes: null,
-    monthsMode: null,
-    datesMode: null,
-    scopeHint: null,
-    monthPanel: null,
-    datePanel: null,
-    fromMonth: null,
-    fromDay: null,
-    toMonth: null,
-    toDay: null,
-    dateHint: null,
+    seasonDates: null,
+    editDates: null,
+    allYear: null,
+    fromDate: null,
+    dateFields: null,
+    dateFallback: null,
+    toDate: null,
+    dateReference: null,
+    dateStatus: null,
+    dateStored: null,
     dateError: null,
     dateFocus: null,
+    advancedMonths: null,
+    advancedSummary: null,
+    advancedHint: null,
+    monthChips: null,
     seasonNote: null,
     mixNote: null,
     useTou: null,
     useSeason: null,
-    allYear: null,
-    monthChips: null,
     coverage: null,
     list: null,
     addButton: null,
@@ -1046,7 +1101,7 @@ function createPeriodCard(period, index) {
   flag.hidden = true;
   const caret = el('span', 'period-caret');
   caret.setAttribute('aria-hidden', 'true');
-  titleRow.append(title, band, flag, caret);
+  titleRow.append(title, band, caret, flag);
   const meta = el('span', 'period-meta');
   const strip = el('span', 'period-strip');
   strip.setAttribute('aria-hidden', 'true');
@@ -1057,9 +1112,19 @@ function createPeriodCard(period, index) {
   const legend = el('span', 'strip-legend');
   legend.setAttribute('aria-hidden', 'true');
   toggle.append(titleRow, meta, strip, axis, legend);
-  heading.append(toggle);
+  const headRow = el('div', 'period-head-row');
+  const editDates = el('button', 'period-edit-dates', 'Edit dates');
+  editDates.type = 'button';
+  editDates.dataset.action = 'edit-dates';
+  editDates.setAttribute('aria-controls', bodyId);
+  editDates.setAttribute('aria-expanded', String(expanded));
+  editDates.setAttribute('aria-label', `Edit season dates for ${periodName(period)}`);
+  headRow.append(toggle, editDates);
+  heading.append(headRow);
   node.append(heading);
   card.toggle = toggle;
+  card.editDates = editDates;
+  card.title = title;
   card.band = band;
   card.meta = meta;
   card.flag = flag;
@@ -1076,33 +1141,78 @@ function createPeriodCard(period, index) {
   body.hidden = !expanded;
   card.body = body;
 
-  const scopeEditor = el('div', 'scope-editor');
-  const modeRow = el('div', 'scope-modes');
-  modeRow.setAttribute('role', 'group');
-  modeRow.setAttribute('aria-label', `Season scope for ${periodName(period)}`);
-  const monthsMode = el('button', 'scope-mode', 'Months');
-  monthsMode.type = 'button';
-  monthsMode.dataset.scope = 'months';
-  const datesMode = el('button', 'scope-mode', 'Specific dates');
-  datesMode.type = 'button';
-  datesMode.dataset.scope = 'dates';
-  modeRow.append(monthsMode, datesMode);
-  const scopeHint = el('p', 'scope-hint');
-  scopeHint.id = `period-${index}-scope-hint`;
-  scopeHint.hidden = true;
-  datesMode.setAttribute('aria-describedby', scopeHint.id);
+  const scopeEditor = el('section', 'season-dates');
+  const seasonDatesTitleId = `period-${index}-season-dates`;
+  scopeEditor.setAttribute('aria-labelledby', seasonDatesTitleId);
 
-  const monthPanel = el('div', 'month-panel scope-panel');
-  const monthHead = el('div', 'month-editor-head');
-  // The segmented control names the mode; this label names what the chips are
-  // and keeps All year from reading as a stray checkbox above the grid.
-  monthHead.append(el('span', 'field-label', 'Pick months'));
-  const toggleLabel = el('label', 'months-toggle');
+  const datesHead = el('div', 'season-dates-head');
+  const datesTitle = el('h6', 'season-dates-title', 'Season dates');
+  datesTitle.id = seasonDatesTitleId;
+  const allYearLabel = el('label', 'months-toggle season-all-year');
   const allYear = el('input');
   allYear.type = 'checkbox';
   allYear.id = `period-${index}-all-year`;
-  toggleLabel.append(allYear, el('span', null, 'All year'));
-  monthHead.append(toggleLabel);
+  allYearLabel.append(allYear, el('span', null, 'All year'));
+  datesHead.append(datesTitle, allYearLabel);
+
+  const referenceId = `period-${index}-date-reference`;
+  const reference = el(
+    'p',
+    'season-dates-reference',
+    'Repeats every year. The year is only a reference — 2024 is a leap year, so 29 February is available.',
+  );
+  reference.id = referenceId;
+
+  const dateField = (labelText, id, input) => {
+    const field = el('div', 'season-date-field');
+    const label = el('label', 'field-label', labelText);
+    label.htmlFor = id;
+    field.append(label, input);
+    return field;
+  };
+  const fromDateId = `period-${index}-starts`;
+  const toDateId = `period-${index}-ends`;
+  const statusId = `period-${index}-date-status`;
+  const storedId = `period-${index}-date-stored`;
+  const errorId = `period-${index}-date-error`;
+  const fromDate = el('input', 'season-date-input');
+  fromDate.type = 'date';
+  fromDate.id = fromDateId;
+  fromDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
+  fromDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
+  fromDate.dataset.field = 'from-date';
+  fromDate.setAttribute('aria-label', 'Season start date');
+  fromDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
+  const toDate = el('input', 'season-date-input');
+  toDate.type = 'date';
+  toDate.id = toDateId;
+  toDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
+  toDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
+  toDate.dataset.field = 'to-date';
+  toDate.setAttribute('aria-label', 'Season end date');
+  toDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
+
+  const dateFields = el('div', 'season-date-fields');
+  const arrow = el('span', 'season-date-arrow', '→');
+  arrow.setAttribute('aria-hidden', 'true');
+  dateFields.append(
+    dateField('Starts', fromDateId, fromDate),
+    arrow,
+    dateField('Ends', toDateId, toDate),
+  );
+  const dateFallback = el('p', 'season-dates-fallback');
+  dateFallback.hidden = true;
+
+  const status = el('p', 'season-dates-status');
+  status.id = statusId;
+  allYear.setAttribute('aria-describedby', `${referenceId} ${statusId}`);
+  const stored = el('p', 'season-dates-stored');
+  stored.id = storedId;
+  stored.hidden = true;
+  const dateError = el('p', 'rule-error season-dates-error');
+  dateError.id = errorId;
+  dateError.hidden = true;
+
   const monthChips = el('div', 'month-chips');
   monthChips.setAttribute('role', 'group');
   monthChips.setAttribute('aria-label', `Months for ${periodName(period)}`);
@@ -1122,149 +1232,83 @@ function createPeriodCard(period, index) {
     });
     monthChips.append(chip);
   });
-  monthPanel.append(monthHead, monthChips);
 
-  const datePanel = el('div', 'date-panel scope-panel');
-  const dateBounds = periodDateBounds(period);
-  const fromParts = splitMonthDay(dateBounds.from);
-  const toParts = splitMonthDay(dateBounds.to);
-  const dateHintId = `period-${index}-date-hint`;
-  const dateErrorId = `period-${index}-date-error`;
-  const monthOptions = (select, selected, label) => {
-    const placeholder = el('option', null, 'Month');
-    placeholder.value = '';
-    select.append(placeholder);
-    MONTH_NAMES.forEach((name, monthIndex) => {
-      // The two bounds share a row at 390 px; a full month name clips inside
-      // the native select, so the option uses the same three-letter form as the
-      // month chips and the date band.
-      const option = el('option', null, name.slice(0, 3));
-      option.value = String(monthIndex + 1);
-      if (monthIndex + 1 === selected) option.selected = true;
-      select.append(option);
-    });
-    select.setAttribute('aria-label', label);
-    return select;
-  };
-  const fromMonth = monthOptions(el('select', 'date-select'), fromParts.month, 'From month');
-  fromMonth.dataset.field = 'from-month';
-  const fromDay = el('input', 'date-day');
-  fromDay.dataset.field = 'from-day';
-  fromDay.type = 'number';
-  fromDay.min = '1';
-  fromDay.max = '31';
-  fromDay.step = '1';
-  fromDay.inputMode = 'numeric';
-  fromDay.placeholder = 'Day';
-  fromDay.value = fromParts.day ? String(fromParts.day) : '';
-  fromDay.setAttribute('aria-label', 'From day');
-  const toMonth = monthOptions(el('select', 'date-select'), toParts.month, 'To month');
-  toMonth.dataset.field = 'to-month';
-  const toDay = el('input', 'date-day');
-  toDay.dataset.field = 'to-day';
-  toDay.type = 'number';
-  toDay.min = '1';
-  toDay.max = '31';
-  toDay.step = '1';
-  toDay.inputMode = 'numeric';
-  toDay.placeholder = 'Day';
-  toDay.value = toParts.day ? String(toParts.day) : '';
-  toDay.setAttribute('aria-label', 'To day');
+  const advanced = el('details', 'advanced-months');
+  const advancedSummaryRow = el('summary', 'advanced-summary-row');
+  const advancedSummary = el('span', 'advanced-summary');
+  advancedSummaryRow.append(el('span', null, 'Advanced: month ranges'), advancedSummary);
+  const advancedHint = el('p', 'advanced-hint');
+  advanced.append(advancedSummaryRow, advancedHint, monthChips);
+  // A legacy non-contiguous or malformed month scope has no single date range;
+  // open its month editor so it remains editable without making months the
+  // first decision for normal seasons.
+  advanced.open = period.kind !== 'all' && !periodHasDates(period) && !periodDateSeed(period);
 
-  const dateBound = (labelText, monthSelect, dayInput) => {
-    const group = el('div', 'date-bound');
-    group.setAttribute('role', 'group');
-    group.setAttribute('aria-label', labelText);
-    const label = el('span', 'field-label', labelText);
-    group.append(label);
-    const controls = el('div', 'date-controls');
-    controls.append(monthSelect, dayInput);
-    group.append(controls);
-    return group;
-  };
-  const dateRow = el('div', 'date-row');
-  dateRow.append(
-    dateBound('From', fromMonth, fromDay),
-    (() => {
-      const arrow = el('span', 'date-arrow', '→');
-      arrow.setAttribute('aria-hidden', 'true');
-      return arrow;
-    })(),
-    dateBound('To', toMonth, toDay),
+  scopeEditor.append(
+    datesHead,
+    reference,
+    dateFields,
+    dateFallback,
+    status,
+    stored,
+    dateError,
+    advanced,
   );
-  const dateHint = el('p', 'scope-date-hint');
-  dateHint.id = dateHintId;
-  const dateError = el('p', 'rule-error date-error');
-  dateError.id = dateErrorId;
-  dateError.hidden = true;
-  // A direct route from day precision to All year: it clears both bounds and
-  // sets months:null without first rounding through the month editor.
-  const allYearAction = el('button', 'link-btn date-all-year', 'Use all year');
-  allYearAction.type = 'button';
-  allYearAction.dataset.action = 'dates-all-year';
-  allYearAction.addEventListener('click', () => {
+  card.monthEditor = scopeEditor;
+  card.seasonDates = scopeEditor;
+  card.allYear = allYear;
+  card.fromDate = fromDate;
+  card.toDate = toDate;
+  card.dateFields = dateFields;
+  card.dateFallback = dateFallback;
+  card.dateReference = reference;
+  card.dateStatus = status;
+  card.dateStored = stored;
+  card.dateError = dateError;
+  card.advancedMonths = advanced;
+  card.advancedSummary = advancedSummary;
+  card.advancedHint = advancedHint;
+  card.monthChips = monthChips;
+
+  allYear.addEventListener('change', () => {
     if (settingsSaving) return;
-    applyMonths(card, null, { focusCheckbox: true });
+    if (allYear.checked) {
+      applyMonths(card, null, { focusCheckbox: true });
+      return;
+    }
+    const seed = periodDateSeed({ kind: 'all' }, new Date());
+    applyDates(card, seed.from, seed.to);
+    card.fromDate.focus({ preventScroll: true });
   });
-  datePanel.append(dateRow, dateHint, dateError, allYearAction);
 
   const commitDates = () => {
     if (settingsSaving) return;
-    const from = dateControlValue(fromMonth.value, fromDay.value);
-    const to = dateControlValue(toMonth.value, toDay.value);
+    const from = boundFromDateInput(fromDate.value);
+    const to = boundFromDateInput(toDate.value);
     const current = periodDateBounds(card.period);
     if (from === (current.from ?? null) && to === (current.to ?? null)) return;
     applyDates(card, from, to);
   };
-  fromMonth.addEventListener('change', commitDates);
-  fromDay.addEventListener('change', commitDates);
-  toMonth.addEventListener('change', commitDates);
-  toDay.addEventListener('change', commitDates);
+  fromDate.addEventListener('change', commitDates);
+  toDate.addEventListener('change', commitDates);
 
-  for (const control of [fromMonth, fromDay, toMonth, toDay]) {
-    control.setAttribute('aria-describedby', `${dateHintId} ${dateErrorId}`);
-  }
-
-  monthsMode.addEventListener('click', () => {
-    if (settingsSaving || !periodHasDates(card.period)) return;
-    const bounds = periodDateBounds(card.period);
-    const months = monthsCovering(bounds.from, bounds.to);
-    if (months.length === 0) {
-      card.fromDay.focus({ preventScroll: true });
-      return;
-    }
-    applyMonths(card, months, { focusScope: true });
-  });
-  datesMode.addEventListener('click', () => {
-    if (settingsSaving || periodHasDates(card.period)) return;
-    const seed = periodDateSeed(card.period);
-    if (!seed) return;
-    applyDates(card, seed.from, seed.to);
-    card.fromDay.focus({ preventScroll: true });
-  });
-
-  scopeEditor.append(modeRow, scopeHint, monthPanel, datePanel);
-  card.monthEditor = scopeEditor;
-  card.scopeEditor = scopeEditor;
-  card.scopeModes = modeRow;
-  card.monthsMode = monthsMode;
-  card.datesMode = datesMode;
-  card.scopeHint = scopeHint;
-  card.monthPanel = monthPanel;
-  card.datePanel = datePanel;
-  card.fromMonth = fromMonth;
-  card.fromDay = fromDay;
-  card.toMonth = toMonth;
-  card.toDay = toDay;
-  card.dateHint = dateHint;
-  card.dateError = dateError;
-  card.allYear = allYear;
-  card.monthChips = monthChips;
-  allYear.addEventListener('change', () => {
+  editDates.addEventListener('click', () => {
     if (settingsSaving) return;
-    applyMonths(card, allYear.checked ? null : [new Date().getMonth() + 1], {
-      focusCheckbox: true,
-    });
+    setExpanded(card, true);
+    const state = seasonDateState(card.period);
+    if (state.allYear) {
+      card.allYear.focus({ preventScroll: true });
+    } else if (state.canPick) {
+      (card.dateFocus || card.fromDate).focus({ preventScroll: true });
+    } else {
+      card.advancedMonths.open = true;
+      const chip =
+        card.monthChips.querySelector('[aria-pressed="true"]') ||
+        card.monthChips.querySelector('button') ||
+        card.advancedMonths.querySelector('summary');
+      chip.focus({ preventScroll: true });
+    }
+    scrollToNode(card.seasonDates);
   });
 
   const coverage = el('div', 'coverage');
@@ -1365,11 +1409,7 @@ function createPeriodCard(period, index) {
 // The card is rebuilt because the period key can change (merge, split, or move
 // to/from the malformed group); focus returns to the same control when the
 // period survives and to the merged header when its rows join another period.
-function applyMonths(
-  card,
-  months,
-  { focusMonth = null, focusCheckbox = false, focusScope = false } = {},
-) {
+function applyMonths(card, months, { focusMonth = null, focusCheckbox = false } = {}) {
   if (settingsSaving) return;
   const indices = card.period.rows.map((entry) => entry.index);
   const first = indices[0];
@@ -1394,9 +1434,10 @@ function applyMonths(
   }
   if (focusCheckbox) {
     next.allYear.focus({ preventScroll: true });
-  } else if (focusScope) {
-    next.monthsMode.focus({ preventScroll: true });
   } else if (focusMonth != null) {
+    // The chips live in the advanced disclosure; a conversion must reveal the
+    // chip before trying to focus it.
+    next.advancedMonths.open = true;
     const chip = next.monthChips.querySelector(`[data-month="${focusMonth}"]`);
     if (chip) chip.focus({ preventScroll: true });
     else next.toggle.focus({ preventScroll: true });
@@ -1505,7 +1546,7 @@ function deferPlanRebuild(anchorIndex) {
 function addWindow(card) {
   if (settingsSaving || draftRates.length >= MAX_RATE_WINDOWS) return;
   if (card.period.kind === 'invalid') {
-    if (periodHasDates(card.period)) card.fromDay.focus({ preventScroll: true });
+    if (periodHasDates(card.period)) card.fromDate.focus({ preventScroll: true });
     else card.allYear.focus({ preventScroll: true });
     return;
   }
@@ -1534,18 +1575,25 @@ function addWindow(card) {
 }
 
 // The flat opt-in asks once what kind of plan to start, then builds exactly
-// that shape. Season rate is an all-day, every-day row in an All-year season;
-// time-of-use keeps the everyday overnight preset.
+// that shape on the current month's dates. Season rate is one all-day, every-day
+// row; time-of-use starts with the everyday overnight preset.
 function addRatePlan(mode) {
   if (settingsSaving || draftRates.length > 0) return;
-  draftRates = [mode === 'season' ? seasonRateRow(null) : newWindowRow(null, 'overnight')];
-  expandedPeriods = new Set(['all']);
+  // Start with a visible, editable date range rather than a hidden All-year
+  // scope. The current month is only a seed; the owner lands on Starts.
+  const seed = periodDateSeed({ kind: 'all' }, new Date());
+  const months = monthsCovering(seed.from, seed.to);
+  draftRates = [
+    mode === 'season' ? seasonRateRow(months, seed) : newWindowRow(months, 'overnight', seed),
+  ];
+  planPeriods = ratePeriodsForDraft();
+  expandedPeriods = new Set(planPeriods.map((period) => period.key));
   markEdited();
   renderPlan();
   const added = windowCards[0];
-  if (added) {
-    added.rateInput.focus({ preventScroll: true });
-    scrollToNode(added.node);
+  if (added && added.periodCard) {
+    added.periodCard.fromDate.focus({ preventScroll: true });
+    scrollToNode(added.periodCard.node);
   }
 }
 
@@ -1603,36 +1651,22 @@ function convertToSeasonRate(card) {
 
 function addSeason() {
   if (settingsSaving || draftRates.length >= MAX_RATE_WINDOWS) return;
+  // Every new season starts on dates. The largest uncovered date range is a
+  // useful seed; when the year is already covered (or only an invalid row
+  // remains) the current month is the safe, visible starting range.
+  const scope = largestDateScope(uncoveredDateRanges(draftRates));
   const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  // Once the plan has a day-precision season, a new season is seeded from the
-  // uncovered dates rather than from months: a date season's months are only a
-  // compatibility hint, and a month seed can land on the days the date season
-  // owns.
-  const hasDates = planPeriods.some((period) => period.kind === 'dates');
-  let row;
-  if (allSeasonRates || hasDates) {
-    // A plan made only of season rates grows into the largest uncovered date
-    // range, so two seasons divide the year instead of overlapping.
-    const scope = largestDateScope(uncoveredDateRanges(draftRates));
-    if (!scope) return;
-    const dates = scope.fullYear ? null : { from: scope.from, to: scope.to };
-    row = allSeasonRates
-      ? seasonRateRow(dates ? monthsCovering(dates.from, dates.to) : null, dates)
-      : newWindowRow(
-          dates ? monthsCovering(dates.from, dates.to) : null,
-          draftRates.length === 0 ? 'overnight' : 'peak',
-          dates,
-        );
-  } else {
-    const uncovered = uncoveredMonths(draftRates);
-    const months =
-      uncovered.length === 12
-        ? null
-        : uncovered.length > 0
-          ? largestMonthRun(uncovered)
-          : [new Date().getMonth() + 1];
-    row = newWindowRow(months, draftRates.length === 0 ? 'overnight' : 'peak');
-  }
+  // A full year of season rates has nowhere non-overlapping to go; a TOU plan
+  // can still add a layering season, seeded in the current month.
+  if (!scope && allSeasonRates) return;
+  const dates =
+    scope && !scope.fullYear
+      ? { from: scope.from, to: scope.to }
+      : periodDateSeed({ kind: 'all' }, new Date());
+  const months = monthsCovering(dates.from, dates.to);
+  const row = allSeasonRates
+    ? seasonRateRow(months, dates)
+    : newWindowRow(months, draftRates.length === 0 ? 'overnight' : 'peak', dates);
   draftRates = [...draftRates, row];
   const index = draftRates.length - 1;
   planPeriods = ratePeriodsForDraft();
@@ -1641,9 +1675,9 @@ function addSeason() {
   markEdited();
   renderPlan();
   const added = windowCards[index];
-  if (added) {
-    added.rateInput.focus({ preventScroll: true });
-    scrollToNode(added.node);
+  if (added && added.periodCard) {
+    added.periodCard.fromDate.focus({ preventScroll: true });
+    scrollToNode(added.periodCard.node);
   }
 }
 
@@ -1899,30 +1933,6 @@ function paintRateValidation() {
     card.flag.hidden = bad === 0;
     setText(card.flag, bad === 1 ? '1 to fix' : `${bad} to fix`);
     card.node.classList.toggle('invalid', bad > 0);
-    // Re-derive the date target from the validation that was just applied; the
-    // submit path paints validation without rebuilding the period.
-    if (periodHasDates(card.period)) {
-      const first = card.period.rows
-        .map((entry) => ({ entry, errors: rateValidation.rows[entry.index] || {} }))
-        .find(({ errors }) => errors.from || errors.to);
-      card.dateFocus = first ? (first.errors.from ? card.fromDay : card.toDay) : card.fromDay;
-      const fromError = card.period.rows
-        .map((entry) => (rateValidation.rows[entry.index] || {}).from)
-        .find(Boolean);
-      const toError = card.period.rows
-        .map((entry) => (rateValidation.rows[entry.index] || {}).to)
-        .find(Boolean);
-      card.fromMonth.setAttribute('aria-invalid', String(Boolean(fromError)));
-      card.fromDay.setAttribute('aria-invalid', String(Boolean(fromError)));
-      card.toMonth.setAttribute('aria-invalid', String(Boolean(toError)));
-      card.toDay.setAttribute('aria-invalid', String(Boolean(toError)));
-      const messages = [
-        fromError ? `From: ${fromError}` : '',
-        toError ? `To: ${toError}` : '',
-      ].filter(Boolean);
-      card.dateError.hidden = messages.length === 0;
-      setText(card.dateError, messages.join(' '));
-    }
   }
 
   // A mixed season is one structural problem, and the season card already names
@@ -1949,11 +1959,10 @@ function paintRateValidation() {
   }
   for (const node of $('rates-flat').querySelectorAll('button')) node.disabled = settingsSaving;
   const atCap = draftRates.length >= MAX_RATE_WINDOWS;
+  // A full year of season rates has nowhere non-overlapping to go. A TOU plan
+  // may still add an overlapping layering season at another time of day.
   const allSeasonRates = planPeriods.length > 0 && planPeriods.every((period) => period.seasonRate);
-  // A new season is seeded from the uncovered dates once the plan has any date
-  // season, so a fully partitioned year leaves nowhere to add one.
-  const datedPlan = allSeasonRates || planPeriods.some((period) => period.kind === 'dates');
-  const noUncoveredDates = datedPlan && uncoveredDateRanges(draftRates).length === 0;
+  const noUncoveredDates = allSeasonRates && uncoveredDateRanges(draftRates).length === 0;
   $('add-season').disabled = settingsSaving || atCap || noUncoveredDates;
   $('add-season').title = noUncoveredDates ? 'Every date already has a season.' : '';
   for (const card of periodCards) {
@@ -2332,7 +2341,15 @@ export function applySubmitFocus(target, view) {
   if (focus === 'months') {
     view.expand(card.periodCard);
     view.reveal(card.periodCard.node);
-    card.periodCard.allYear.focus({ preventScroll: true });
+    // Month editing lives in the advanced disclosure now; reveal it and land on
+    // a month chip instead of the All year option.
+    if (card.periodCard.advancedMonths) card.periodCard.advancedMonths.open = true;
+    const chip =
+      card.periodCard.monthChips &&
+      (card.periodCard.monthChips.querySelector('[aria-pressed="true"]') ||
+        card.periodCard.monthChips.querySelector('button'));
+    if (chip) chip.focus({ preventScroll: true });
+    else card.periodCard.allYear.focus({ preventScroll: true });
     return;
   }
   // A date problem belongs to the season header too. Focus the From/To control
@@ -2340,8 +2357,7 @@ export function applySubmitFocus(target, view) {
   if (focus === 'dates') {
     view.expand(card.periodCard);
     view.reveal(card.periodCard.node);
-    const control =
-      card.periodCard.dateFocus || card.periodCard.fromDay || card.periodCard.fromMonth;
+    const control = card.periodCard.dateFocus || card.periodCard.fromDate;
     if (control) control.focus({ preventScroll: true });
     return;
   }
