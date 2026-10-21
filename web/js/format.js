@@ -197,12 +197,14 @@ export function fmtMoney(value, currency) {
 
 // Cost for an energy amount at the configured rate. Returns null when either
 // input is missing/invalid — callers hide the cost line entirely in that case.
-// A per-kWh price keeps the precision the settings schema allows: rates are
-// 0–5 to three decimals, so 0.245 must not render as "0.25" the way a rounded
-// cost would. Same currency convention as fmtMoney.
+// A per-kWh price keeps the precision a utility bill quotes: five decimals
+// (0.15303), so the label must not round it to "0.153". Two decimals stay the
+// minimum, so a round price still reads as "0.30" rather than "0.3". The 0–5
+// rule is the only bound; money itself stays at two decimals. Same currency
+// convention as fmtMoney.
 const RATE = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
-  maximumFractionDigits: 3,
+  maximumFractionDigits: 5,
 });
 
 export function fmtRate(value, currency) {
