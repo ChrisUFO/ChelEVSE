@@ -21,6 +21,7 @@
 // inherits. Either way the rule is all-or-nothing and hide-not-misprice: a
 // malformed interval list falls back, and a *valid* list with one unpriceable
 // interval hides the figure rather than pro-rating over a tariff it cannot read.
+//
 // A day's history document stores one kWh total, not the shape of the intervals
 // behind it, so a daily/period cost cannot be re-costed under a schedule.
 // `aggregateCostLabel` therefore returns null whenever a schedule exists and the
