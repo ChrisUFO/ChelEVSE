@@ -7,6 +7,8 @@ import {
   SAVE_FAILED_FIRST_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
+  CHECK_BLOCKED_MESSAGE,
+  CHECK_CONFLICT_MESSAGE,
   applyPeriodMonths,
   complementMonths,
   copyPeriodRows,
@@ -17,10 +19,13 @@ import {
   daysForPreset,
   defaultRateRow,
   formatPreviewWhen,
+  isAllDayWindow,
   minutesToClock,
   normalizeSettings,
   parseLocalDateTime,
   periodCoverage,
+  periodEffectiveRange,
+  previewBlocker,
   previewRate,
   largestMonthRun,
   rateMonthsText,
@@ -34,6 +39,7 @@ import {
   rateTierFor,
   rateWeek,
   rateWindowSummary,
+  representativeMonth,
   reconcileSettingsSave,
   sameSettingsInput,
   segmentNote,
@@ -41,9 +47,12 @@ import {
   settingsFields,
   settingsPayload,
   settingsSaveState,
+  siblingNote,
   timeInputValue,
+  uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
+  validationProblemCount,
   windowLabel,
 } from '../../web/js/settings.js';
 import { normalizeRateSchedule, validateRateWindows } from '../../web/js/rates.js';
@@ -883,16 +892,12 @@ test('the flat list groups into stable month periods without reordering rows', (
       ['Summer', 'months', [3, 4, 5, 6, 7, 8, 9, 10], [2]],
     ],
   );
-  assert.deepEqual(periods[1].rateRange, { min: 0.32, max: 0.32 });
-  // A number and its numeric text are the same rate; a 0–5 violation is not
-  // allowed to widen the range the header advertises.
-  const mixed = ratePeriods([
-    { ...rateRowFields(nightEveryDay), rate: '0.120' },
-    { ...rateRowFields(winterPeak), rate: 9 },
-    { ...rateRowFields(summerFlat), rate: '' },
-  ]);
-  assert.deepEqual(mixed[0].rateRange, { min: 0.12, max: 0.12 });
-  assert.deepEqual(mixed[1].rateRange, null);
+  // There is no synthetic season for the months a window does not cover; the
+  // uncovered remainder is a non-season line elsewhere.
+  assert.equal(
+    periods.some((period) => period.kind === 'rest'),
+    false,
+  );
 
   // A malformed month value has no period to belong to and is surfaced first.
   const broken = ratePeriods([rateRowFields({ ...nightEveryDay, months: 3 }), ...rows]);
@@ -1052,29 +1057,129 @@ test('a typical week is a complete 24 h partition grouped into day types', () =>
   assert.equal(dayTypesForWeek(summer).length, 1);
 });
 
-test('coverage uses a month the period sets on its own', () => {
-  const rows = [rateRowFields(nightEveryDay), rateRowFields(winterPeak)];
+test('coverage is the effective week for a month, with owners and named siblings', () => {
+  const rows = [rateRowFields(nightEveryDay), rateRowFields(winterPeak), rateRowFields(summerFlat)];
   const periods = ratePeriods(rows);
   const allYear = periods.find((period) => period.kind === 'all');
   const winter = periods.find((period) => period.title === 'Winter');
+  const summer = periods.find((period) => period.title === 'Summer');
+
+  // Both periods use January for a January-inclusive scope, so the header and
+  // the table caption cannot describe different months.
+  assert.equal(representativeMonth(allYear), 1);
+  assert.equal(representativeMonth(winter), 1);
+  assert.equal(representativeMonth(summer), 3);
+
+  const allCoverage = periodCoverage(rows, 0.31, allYear, periods, 2026);
+  assert.equal(allCoverage.month, 1);
+  assert.equal(allCoverage.monthName, 'January');
+  // The week is the effective January: the all-year night, the fallback and
+  // the Winter peak. The own ids let the view style the all-year rows and name
+  // the Winter row as a sibling rather than mislabelling it as the fallback.
+  const allWeekday = allCoverage.types.find((type) => type.label === 'Weekdays');
+  assert.deepEqual(
+    allWeekday.segments.map((segment) => segment.rate),
+    [0.1, 0.31, 0.32, 0.31, 0.1],
+  );
+  assert.equal(allCoverage.ownIds.has('night'), true);
+  assert.equal(allCoverage.ownIds.has('winter-peak'), false);
+  assert.deepEqual(
+    allCoverage.siblings.map((period) => period.title),
+    ['Winter'],
+  );
+  assert.equal(siblingNote(allCoverage.siblings[0]), 'Winter also applies in Nov–Feb.');
 
   const winterCoverage = periodCoverage(rows, 0.31, winter, periods, 2026);
   assert.equal(winterCoverage.month, 1);
-  assert.equal(winterCoverage.monthText, 'Nov–Feb');
-  assert.equal(winterCoverage.partial, false);
-  assert.equal(winterCoverage.types.length, 2);
-
-  // The all-year period's own months are all twelve, but Nov–Feb belong to the
-  // winter period: its representative week is March, where only the night row
-  // applies and the winter peak must not leak in.
-  const allCoverage = periodCoverage(rows, 0.31, allYear, periods, 2026);
-  assert.equal(allCoverage.month, 3);
-  assert.equal(allCoverage.monthText, 'Mar–Oct');
-  assert.equal(allCoverage.partial, true);
+  assert.equal(winterCoverage.monthName, 'January');
+  // The Winter week is the same effective January; its own id is the peak, and
+  // the all-year night rows are attributed to the sibling.
+  const winterWeekday = winterCoverage.types.find((type) => type.label === 'Weekdays');
   assert.deepEqual(
-    allCoverage.types[0].segments.map((segment) => segment.rate),
-    [0.1, 0.31, 0.1],
+    winterWeekday.segments.map((segment) => segment.rate),
+    [0.1, 0.31, 0.32, 0.31, 0.1],
   );
+  assert.equal(winterCoverage.ownIds.has('winter-peak'), true);
+  assert.equal(winterCoverage.ownIds.has('night'), false);
+  assert.deepEqual(
+    winterCoverage.siblings.map((period) => period.title),
+    ['All year'],
+  );
+  assert.equal(siblingNote(winterCoverage.siblings[0]), 'All year windows also apply here.');
+  assert.equal(
+    siblingNote({ kind: 'months', title: 'Custom months', monthText: 'Jan, Jun' }),
+    'Jan, Jun windows also apply here.',
+  );
+
+  const summerCoverage = periodCoverage(rows, 0.31, summer, periods, 2026);
+  assert.equal(summerCoverage.month, 3);
+  assert.equal(summerCoverage.monthName, 'March');
+  assert.deepEqual(
+    summerCoverage.types.map((type) => type.segments.map((segment) => segment.rate)),
+    [[0.2]],
+  );
+  assert.deepEqual(
+    summerCoverage.siblings.map((period) => period.title),
+    ['All year'],
+  );
+});
+
+test('the header range is effective for the representative month, not just the own rows', () => {
+  const rows = [rateRowFields(nightEveryDay), rateRowFields(winterPeak), rateRowFields(summerFlat)];
+  const periods = ratePeriods(rows);
+  const allYear = periods.find((period) => period.kind === 'all');
+  const winter = periods.find((period) => period.title === 'Winter');
+  const summer = periods.find((period) => period.title === 'Summer');
+
+  // Overnight .10 (own) + winter peak .32 (sibling) + fallback .31.
+  assert.deepEqual(periodEffectiveRange(rows, 0.31, allYear), { min: 0.1, max: 0.32, month: 1 });
+  assert.deepEqual(periodEffectiveRange(rows, 0.31, winter), { min: 0.1, max: 0.32, month: 1 });
+  // The summer all-day .20 wins the whole of March; the fallback never applies,
+  // so it must not widen the effective range.
+  assert.deepEqual(periodEffectiveRange(rows, 0.31, summer), { min: 0.2, max: 0.2, month: 3 });
+
+  // A malformed row never widens an "effective" range.
+  const broken = [rateRowFields(nightEveryDay), rateRowFields({ ...winterPeak, rate: 9 })];
+  assert.deepEqual(periodEffectiveRange(broken, 0.31, ratePeriods(broken)[0]), {
+    min: 0.1,
+    max: 0.31,
+    month: 1,
+  });
+  // A missing fallback leaves only the usable window rates.
+  assert.deepEqual(
+    periodEffectiveRange(
+      [rateRowFields(nightEveryDay)],
+      '',
+      ratePeriods([rateRowFields(nightEveryDay)])[0],
+    ),
+    {
+      min: 0.1,
+      max: 0.1,
+      month: 1,
+    },
+  );
+});
+
+test('uncovered months are a fallback line, not a season', () => {
+  const winterOnly = [rateRowFields(winterPeak)];
+  const periods = ratePeriods(winterOnly);
+  assert.deepEqual(
+    periods.map((period) => [period.title, period.monthText, period.rows.length]),
+    [['Winter', 'Nov–Feb', 1]],
+  );
+  assert.deepEqual(uncoveredMonths(winterOnly), [3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(rateMonthsText(uncoveredMonths(winterOnly)), 'Mar–Oct');
+
+  // An all-year row covers everything: no fallback line.
+  assert.deepEqual(uncoveredMonths([rateRowFields(nightEveryDay)]), []);
+  // Non-contiguous scopes leave the other months uncovered.
+  assert.deepEqual(uncoveredMonths([rateRowFields(nightEveryDay), rateRowFields(winterPeak)]), []);
+  const loose = [
+    rateRowFields({ ...nightEveryDay, months: [1, 6] }),
+    rateRowFields({ ...winterPeak, months: [11, 12] }),
+  ];
+  assert.deepEqual(uncoveredMonths(loose), [2, 3, 4, 5, 7, 8, 9, 10]);
+  assert.equal(rateMonthsText(uncoveredMonths(loose)), 'Feb–May, Jul–Oct');
 });
 
 test('the exact-date checker names the winning window, fallback and boundaries', () => {
@@ -1141,36 +1246,45 @@ test('the checker fields parse local dates by parts and format for people', () =
   assert.equal(minutesToClock(-1), '');
 });
 
-test('months no window covers are shown as an other-months period', () => {
-  const rows = [rateRowFields(winterPeak)];
-  const periods = ratePeriods(rows);
-  assert.deepEqual(
-    periods.map((period) => [period.key, period.title, period.monthText, period.rows.length]),
-    [
-      ['months:1,2,11,12', 'Winter', 'Nov–Feb', 1],
-      ['rest', 'Other months', 'Mar–Oct', 0],
-    ],
-  );
-  const rest = periods[1];
-  assert.equal(rest.rateRange, null);
-  // The rest is the fallback made literal: one all-day segment, no window.
-  const coverage = periodCoverage(rows, 0.31, rest, periods, 2026);
-  assert.equal(coverage.monthText, 'Mar–Oct');
-  assert.equal(coverage.types.length, 1);
-  assert.deepEqual(
-    coverage.types[0].segments.map((segment) => [
-      segment.from,
-      segment.to,
-      segment.rate,
-      segment.window,
-    ]),
-    [[0, 1440, 0.31, null]],
-  );
-  // A plan whose months are all covered has no rest period.
-  assert.equal(
-    ratePeriods([rateRowFields(nightEveryDay)]).some((period) => period.kind === 'rest'),
-    false,
-  );
+test('the save row and plan summary count affected rows, not collisions', () => {
+  assert.equal(validationProblemCount(validateRateEditorRows([]), 0), 0);
+  const oneBad = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), rate: '' }]);
+  assert.equal(validationProblemCount(oneBad, 1), 1);
+  const overlap = validateRateEditorRows([
+    rateRowFields(nightEveryDay),
+    rateRowFields({ ...nightEveryDay, id: 'copy' }),
+  ]);
+  assert.equal(overlap.valid, false);
+  assert.equal(validationProblemCount(overlap, 2), 2);
+  // The cap is its own blocker; rows with no errors do not add to the count.
+  const capped = {
+    valid: false,
+    rows: Array.from({ length: 25 }, () => ({})),
+    overlaps: [],
+    general: ['cap'],
+  };
+  assert.equal(validationProblemCount(capped, 25), 1);
+});
+
+test('the checker withholds a definitive answer while the plan is incomplete', () => {
+  assert.equal(previewBlocker(validateRateEditorRows([])), '');
+  const bad = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), rate: '' }]);
+  assert.equal(previewBlocker(bad), CHECK_BLOCKED_MESSAGE);
+  assert.equal(CHECK_BLOCKED_MESSAGE, 'Fix the incomplete windows to check this moment.');
+  const overlap = validateRateEditorRows([
+    rateRowFields(nightEveryDay),
+    rateRowFields({ ...nightEveryDay, id: 'copy' }),
+  ]);
+  assert.equal(previewBlocker(overlap), CHECK_CONFLICT_MESSAGE);
+});
+
+test('an all-day window is recognised from its stored start and end', () => {
+  assert.equal(isAllDayWindow({ start: '00:00', end: '00:00' }), true);
+  assert.equal(isAllDayWindow({ start: '07:30', end: '07:30' }), true);
+  assert.equal(isAllDayWindow({ start: '00:00', end: '07:00' }), false);
+  assert.equal(isAllDayWindow({ start: '', end: '' }), false);
+  assert.equal(isAllDayWindow({ start: '25:00', end: '25:00' }), false);
+  assert.equal(isAllDayWindow(null), false);
 });
 
 test('the longest uncovered run seeds a new season, and the plan range ignores bad prices', () => {

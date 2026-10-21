@@ -249,9 +249,6 @@ export function largestMonthRun(months) {
 function periodOrder(period) {
   if (period.kind === 'invalid') return -1;
   if (period.kind === 'all') return 0;
-  // The derived other-months period is the plan's tail, never a sibling that
-  // can appear between two real seasons.
-  if (period.kind === 'rest') return 100;
   return Math.min(...period.months);
 }
 
@@ -288,33 +285,7 @@ export function ratePeriods(rows) {
     months: period.kind === 'all' ? null : period.months,
     title: ratePeriodTitle(period.months, period.kind),
     monthText: rateMonthsText(period.months, period.kind),
-    rateRange: rateRangeFor(period.rows.map((entry) => entry.row)),
   }));
-
-  // Months no stored window covers still belong to the plan: they are where the
-  // all-other-times rate applies. Showing them as one "Other months" period
-  // makes the fallback literal instead of an unstated remainder. It owns no
-  // rows, so it has no month editor and no remove action — only "Add window",
-  // which turns those months into a real period.
-  if (list.length > 0) {
-    const covered = new Set();
-    for (const period of periods) {
-      if (period.kind === 'all') for (const month of ALL_MONTHS) covered.add(month);
-      else for (const month of period.months || []) covered.add(month);
-    }
-    const rest = ALL_MONTHS.filter((month) => !covered.has(month));
-    if (rest.length > 0) {
-      periods.push({
-        key: 'rest',
-        kind: 'rest',
-        months: rest,
-        rows: [],
-        title: 'Other months',
-        monthText: rateMonthsText(rest),
-        rateRange: null,
-      });
-    }
-  }
 
   periods.sort(
     (a, b) =>
@@ -323,6 +294,68 @@ export function ratePeriods(rows) {
       a.key.localeCompare(b.key),
   );
   return periods;
+}
+
+// A period is a layer, not a slice of a partition: an every-month night and a
+// Nov–Feb peak can both apply in January. These helpers make that layering
+// explicit without changing the stored rows.
+
+// The month used for a period's representative week. `null` months mean every
+// month, so January is the stable example; otherwise the first (sorted) month
+// of the scope is used.
+export function representativeMonth(period) {
+  const months = period && Array.isArray(period.months) ? period.months : [];
+  return months.length > 0 ? months[0] : 1;
+}
+
+function periodAppliesInMonth(period, month) {
+  if (!period) return false;
+  if (period.kind === 'all') return true;
+  if (period.kind !== 'months') return false;
+  return Array.isArray(period.months) && period.months.includes(month);
+}
+
+// Months no stored window covers: the line where nothing but the all-other-times
+// rate applies. This is not a period and is never counted as one.
+export function uncoveredMonths(rows) {
+  const covered = new Set();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const scope = rateMonthScope(row);
+    if (scope.kind === 'all') for (const month of ALL_MONTHS) covered.add(month);
+    else if (scope.kind === 'months') for (const month of scope.months) covered.add(month);
+  }
+  return ALL_MONTHS.filter((month) => !covered.has(month));
+}
+
+// The effective price range a period header should advertise for its
+// representative month: every window that can apply in that month (own,
+// inherited and all-year) plus the all-other-times fallback. It answers "what
+// could this month cost", while the window count stays the period's own.
+export function periodEffectiveRange(rows, fallbackRate, period, year = new Date().getFullYear()) {
+  const month = representativeMonth(period);
+  // Resolve the representative week from the whole plan, so a sibling window
+  // that also prices this month is included. The fallback only appears when
+  // some hour of that week is genuinely uncovered (an all-day window can cover
+  // the month completely, in which case advertising the fallback would lie).
+  const week = rateWeek(rows, fallbackRate, month, year);
+  const values = [];
+  for (const entry of Array.isArray(week) ? week : []) {
+    if (!entry) continue;
+    for (const segment of entry.segments) {
+      const price = parseRateValue(segment.rate);
+      if (Number.isFinite(price) && price >= RATE_MIN && price <= RATE_MAX) values.push(price);
+    }
+  }
+  if (values.length === 0) return null;
+  return { min: Math.min(...values), max: Math.max(...values), month };
+}
+
+// A one-line explanation of a period that also prices some of this month.
+export function siblingNote(sibling) {
+  if (!sibling) return '';
+  if (sibling.kind === 'all') return 'All year windows also apply here.';
+  if (sibling.title === 'Custom months') return `${sibling.monthText} windows also apply here.`;
+  return `${sibling.title} also applies in ${sibling.monthText}.`;
 }
 
 // Change one period's months, in one edit, for every row it owns. Other rows are
@@ -522,6 +555,48 @@ export function rateOverlapMessage(pairs, rows, fallbackRate) {
   return `${clauses.join('; ')}. Change one of them so no moment has two rates.`;
 }
 
+// How many rows the edit has to fix. Counts affected rows (not collision
+// pairs), so the plan summary, a period badge and the save row all agree.
+export function validationProblemCount(validation, rowCount = 0) {
+  if (!validation) return 0;
+  const affected = new Set();
+  (validation.rows || []).forEach((errors, index) => {
+    if (errors && Object.keys(errors).length > 0) affected.add(index);
+  });
+  for (const [a, b] of validation.overlaps || []) {
+    affected.add(a);
+    affected.add(b);
+  }
+  return affected.size + (rowCount > MAX_RATE_WINDOWS ? 1 : 0);
+}
+
+// A definitive checker answer is withheld while the plan has anything blocking:
+// the invalid row would otherwise be dropped and the fallback claimed for a
+// moment it may actually price.
+export const CHECK_BLOCKED_MESSAGE = 'Fix the incomplete windows to check this moment.';
+export const CHECK_CONFLICT_MESSAGE = 'Fix the overlapping windows to check this moment.';
+
+export function previewBlocker(validation) {
+  if (!validation || validation.valid !== false) return '';
+  const incomplete = (validation.rows || []).some(
+    (errors) => errors && Object.keys(errors).length > 0,
+  );
+  return incomplete ? CHECK_BLOCKED_MESSAGE : CHECK_CONFLICT_MESSAGE;
+}
+
+// A window whose stored start equals its end covers the whole day. The editor
+// shows "All day" for it; the table still renders 00:00–24:00.
+const ALL_DAY_TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+export function isAllDayWindow(row) {
+  return Boolean(
+    row &&
+    typeof row.start === 'string' &&
+    ALL_DAY_TIME_RE.test(row.start) &&
+    row.start === row.end,
+  );
+}
+
 // ---------- coverage and preview ----------
 
 export function minutesToClock(minutes) {
@@ -594,11 +669,12 @@ export function dayTypesForWeek(week) {
     }));
 }
 
-// What applies in one period, for a representative month it sets on its own.
-// Months shared with a broader period (an all-year window) are not used for the
-// representative week when this period has its own months, so its coverage is
-// not distorted by a sibling; when every month is shared, the first month is
-// still the honest example.
+// One period's own layer for a representative month in its own scope. The table
+// is deliberately not the union: it shows this period's windows and the
+// fallback, and names the sibling periods that also apply in that month. The
+// checker is the place that resolves the union. For an all-year period the
+// representative month is January; otherwise it is the first month of the
+// scope, so the caption can never disagree with the chips.
 export function periodCoverage(
   rows,
   fallbackRate,
@@ -606,23 +682,26 @@ export function periodCoverage(
   periods,
   year = new Date().getFullYear(),
 ) {
-  const own = period && period.kind === 'all' ? ALL_MONTHS : (period && period.months) || [];
-  const covered = new Set();
-  for (const other of Array.isArray(periods) ? periods : []) {
-    if (!other || other.key === (period && period.key) || other.kind === 'all') continue;
-    for (const month of other.months || []) covered.add(month);
-  }
-  const exclusive = own.filter((month) => !covered.has(month));
-  const months = exclusive.length > 0 ? exclusive : [...own];
-  const month = months[0] || 1;
+  const month = representativeMonth(period);
+  // The table is the effective week for this month, but every segment keeps its
+  // owner: own rows are the period's windows, sibling rows are named in the
+  // band column instead of being mislabelled as the fallback.
   const week = rateWeek(rows, fallbackRate, month, year);
+  const ownIds = new Set(
+    (period && period.rows ? period.rows : [])
+      .map((entry) => entry.row && entry.row.id)
+      .filter(Boolean),
+  );
+  const siblings = (Array.isArray(periods) ? periods : []).filter(
+    (other) => other && other.key !== (period && period.key) && periodAppliesInMonth(other, month),
+  );
   return {
-    months,
     month,
-    monthText: rateMonthsText(months),
-    partial: months.length < own.length,
+    monthName: MONTH_NAMES[month - 1],
     week: Array.isArray(week) ? week : [],
     types: dayTypesForWeek(week),
+    siblings,
+    ownIds,
   };
 }
 

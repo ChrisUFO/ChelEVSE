@@ -623,8 +623,14 @@
                       </p>
                     </div>
                   </div>
+                  <p class="plan-help" id="plan-help">
+                    Months can carry windows from more than one season. Each table shows this
+                    season's own windows and names any other season that applies; the checker shows
+                    the combined price.
+                  </p>
                   <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
                   <div class="rate-periods" id="rate-periods"></div>
+                  <p class="other-times-line" id="other-times-line" hidden></p>
                   <div class="plan-actions">
                     <button class="btn small" id="add-season" type="button">
                       <span class="add-plus" aria-hidden="true">+</span><span>Add a season</span>
@@ -663,6 +669,7 @@
               </div>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+                <span class="save-blockers" id="save-blockers" hidden></span>
                 <button id="save-settings" class="btn solid" type="submit" disabled>
                   Save settings
                 </button>

@@ -15,6 +15,9 @@
   --muted: #8d97a8;
   --faint: #5b6675;
   --accent: #58a6ff;
+  /* A non-accent hue for the middle band, so a shoulder price never reads as
+     the selected/interactive colour. */
+  --shoulder: #b48cf2;
   --ok: #38d996;
   --warn: #e0b45c;
   --err: #f26d5f;
@@ -1394,7 +1397,7 @@ input[type='time'],
 .amps-input {
   width: 100%;
   min-width: 0;
-  min-height: 40px;
+  min-height: 44px;
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 9px;
@@ -1820,7 +1823,7 @@ input[aria-invalid='true'] {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
 }
 .strip-seg.shoulder {
-  background: color-mix(in oklab, var(--accent) 62%, var(--surface));
+  background: color-mix(in oklab, var(--shoulder) 58%, var(--surface));
 }
 .strip-seg.peak {
   background: color-mix(in oklab, var(--warn) 72%, var(--surface));
@@ -1861,7 +1864,7 @@ input[aria-invalid='true'] {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
 }
 .legend-dot.shoulder {
-  background: color-mix(in oklab, var(--accent) 62%, var(--surface));
+  background: color-mix(in oklab, var(--shoulder) 58%, var(--surface));
 }
 .legend-dot.peak {
   background: color-mix(in oklab, var(--warn) 72%, var(--surface));
@@ -1881,23 +1884,7 @@ input[aria-invalid='true'] {
 .month-editor {
   display: grid;
   gap: 8px;
-  /* The pending rail sits in this gutter, clear of the first chip column. */
-  padding: 0 0 0 10px;
-}
-/* A month selection is not in the draft until Apply; mark the whole editor
-   while it differs, and lift the commit control with it. */
-.month-editor.pending {
-  box-shadow: inset 2px 0 0 var(--warn);
-}
-.month-editor.pending [data-action='apply-months'] {
-  border-color: color-mix(in oklab, var(--accent) 55%, var(--line));
-  color: var(--accent);
-}
-.month-actions .btn:disabled {
-  border-color: var(--line);
-  background: transparent;
-  color: var(--faint);
-  opacity: 1;
+  padding: 0;
 }
 .month-editor-head {
   display: flex;
@@ -1950,8 +1937,13 @@ input[aria-invalid='true'] {
 }
 .month-chips {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 5px;
+}
+@media (max-width: 389px) {
+  .month-chips {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 .month-chip {
   min-width: 0;
@@ -1977,31 +1969,97 @@ input[aria-invalid='true'] {
   background: color-mix(in oklab, var(--accent) 15%, transparent);
   color: var(--accent);
 }
-.month-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-}
-.month-note {
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--muted);
-}
-.month-note.pending {
-  color: var(--warn);
-}
-.month-editor .rule-error {
-  margin: 0;
-}
 .coverage {
   display: grid;
   gap: 12px;
 }
+.coverage-siblings {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, var(--line));
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.plan-help {
+  margin: -4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.other-times-line {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.other-times-title {
+  color: var(--text);
+}
+.other-times-price {
+  white-space: nowrap;
+}
+.all-day-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 2px;
+}
+.all-day-text {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--text);
+}
+.link-btn {
+  min-height: 44px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.link-btn:hover {
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+.save-blockers {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--err) 14%, transparent);
+  color: var(--err);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
 .coverage-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 12px;
+}
+.coverage-table thead th:nth-child(1) {
+  width: 38%;
+}
+.coverage-table thead th:nth-child(2) {
+  width: 32%;
+}
+.coverage-table thead th:nth-child(3) {
+  width: 30%;
+}
+.coverage-table td.band {
+  white-space: nowrap;
+}
+.sibling-band {
+  color: var(--muted);
+  white-space: nowrap;
 }
 .coverage-table caption {
   padding-bottom: 4px;
@@ -2078,15 +2136,9 @@ input[aria-invalid='true'] {
   color: color-mix(in oklab, var(--warn) 88%, var(--text));
 }
 .tier.shoulder {
-  color: color-mix(in oklab, var(--accent) 85%, var(--text));
+  color: color-mix(in oklab, var(--shoulder) 82%, var(--text));
 }
 .tier.same {
-  color: var(--muted);
-}
-.period-note {
-  margin: 0;
-  font-size: 11.5px;
-  line-height: 1.45;
   color: var(--muted);
 }
 .period-actions {
@@ -2369,6 +2421,13 @@ input[aria-invalid='true'] {
 .preview-note.warn {
   color: var(--warn);
 }
+.preview-note.blocked {
+  padding: 8px 10px;
+  border-left: 2px solid var(--warn);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
 .coverage-note,
 .coverage-empty {
   margin: 0;
@@ -2435,7 +2494,8 @@ input[aria-invalid='true']:focus-visible {
 .settings-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
 }
 .settings-actions .feedback {
   flex: 1;
@@ -2908,6 +2968,14 @@ input[aria-invalid='true']:focus-visible {
   .month-chip,
   .plan-day {
     font-size: 10.5px;
+  }
+  .month-chips {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .preview-price {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
   }
   /* Four preset labels at 320 leave no slack; two per row keeps each target
      wide enough for "Weekdays" without shrinking the touch area. */
