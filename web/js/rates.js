@@ -20,6 +20,13 @@
 // clock, so daylight-saving transitions move with the owner's clock instead of
 // a fixed UTC offset.
 //
+// `from`/`to` are an optional day-precision season scope: `MM-DD` strings,
+// inclusive, recurring every year, wrapping when `from > to` (and `from === to`
+// is one day). Both or neither must be valid. When both are, date mode is active
+// and outranks `months`, which is then only the coarse compatibility hint the
+// settings payload derives. A **season rate** is an ordinary all-day, every-day
+// row (`start === end`); it needs no new field.
+//
 // A window's post-midnight hours belong to the day the window *started*
 // (matching the bridge's schedule model): a Monday 22:00–06:00 window also
 // covers Tuesday 00:00–05:59, and a December-only 22:00–06:00 window covers
@@ -31,10 +38,23 @@ export const MAX_RATE_WINDOWS = 24;
 
 // ASCII digits only, exactly HH:MM — the same contract as schedule.js.
 const TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+// Zero-padded MM-DD: the stored date contract. A real-date check follows.
+const MONTH_DAY_RE = /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/;
 const MINUTES_PER_DAY = 24 * 60;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const ALL_MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
-const ALL_MONTHS_SET = new Set(ALL_MONTHS);
+
+// The annual date model is a 366-slot leap ring: 0 = 1 January, 59 = 29
+// February, 365 = 31 December. Pinning February to 29 is what makes date
+// matching and overlap leap-exact; a non-leap year simply has no instant on
+// slot 59. `DAYS_IN_MONTH` is the leap-year shape and `MONTH_START` the first
+// slot of each month.
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const MONTH_START = DAYS_IN_MONTH.map((_, index) =>
+  DAYS_IN_MONTH.slice(0, index).reduce((total, days) => total + days, 0),
+);
+const RING_DAYS = 366;
+const FEB_28 = MONTH_START[1] + 27;
+const MAR_1 = MONTH_START[2];
 
 // ---------- primitive parsing ----------
 
@@ -55,6 +75,66 @@ function parseTime(value) {
   return hours * 60 + minutes;
 }
 
+// A stored `MM-DD` bound as `{month, day}`, or null when it is not a strict
+// zero-padded, real annual date. February is checked against the leap ring, so
+// `02-29` is valid and `02-30` is not.
+export function parseMonthDay(value) {
+  if (typeof value !== 'string' || !MONTH_DAY_RE.test(value)) return null;
+  const month = Number(value.slice(0, 2));
+  const day = Number(value.slice(3));
+  if (day > DAYS_IN_MONTH[month - 1]) return null;
+  return { month, day };
+}
+
+// Integer `MMDD` comparison key, the same ordering as the calendar within a
+// year and across a wrap.
+function monthDayKey(month, day) {
+  return month * 100 + day;
+}
+
+// The months a date range spans, in calendar order (a wrap goes forward through
+// December). `months` is the coarse compatibility hint: new clients derive it on
+// write, old clients read it and over-apply at the edges.
+export function monthsCovering(from, to) {
+  const start = parseMonthDay(from);
+  const end = parseMonthDay(to);
+  if (!start || !end) return [];
+  const months = [];
+  let month = start.month;
+  for (;;) {
+    months.push(month);
+    if (month === end.month) break;
+    month = month === 12 ? 1 : month + 1;
+  }
+  return months;
+}
+
+// The leap-ring slot of a month-day.
+function monthDayIndex(month, day) {
+  return MONTH_START[month - 1] + day - 1;
+}
+
+function indexMonthDay(index) {
+  for (let month = 12; month >= 1; month -= 1) {
+    if (index >= MONTH_START[month - 1]) {
+      return { month, day: index - MONTH_START[month - 1] + 1 };
+    }
+  }
+  return { month: 1, day: 1 };
+}
+
+// Shared annual-calendar helpers for the settings projections: one source for
+// the 366-slot leap ring keeps coverage labels and matching on the same dates.
+export const ANNUAL_DAYS = RING_DAYS;
+
+export function annualDayIndex(month, day) {
+  return monthDayIndex(month, day);
+}
+
+export function annualMonthDay(index) {
+  return indexMonthDay(index);
+}
+
 function toMillis(value) {
   if (value instanceof Date) {
     const ms = value.getTime();
@@ -71,9 +151,14 @@ function toMillis(value) {
 
 // ---------- row shape ----------
 
-// The stored row shape is fixed: {id, rate, days, start, end, months}. Values
-// are carried through as they are (invalid ones included) so validation can
-// flag them instead of silently repairing a document.
+// The stored row shape is fixed: {id, rate, days, start, end, months, from, to}.
+// Values are carried through as they are (invalid ones included) so validation
+// can flag them instead of silently repairing a document. A blank date bound is
+// absent, not an invalid date.
+function dateBound(value) {
+  return value == null || value === '' ? null : value;
+}
+
 export function normalizeWindow(raw) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const months = source.months;
@@ -84,10 +169,19 @@ export function normalizeWindow(raw) {
     start: typeof source.start === 'string' ? source.start : '',
     end: typeof source.end === 'string' ? source.end : '',
     months: months == null ? null : Array.isArray(months) ? [...months] : months,
+    from: dateBound(source.from),
+    to: dateBound(source.to),
   };
 }
 
-function validateWindow(window) {
+// One date bound's message. The field key names which bound; the text states the
+// contract so a hand-edited value is recognisable.
+function dateError(value) {
+  if (value == null) return 'Set a date like 06-15.';
+  return 'Use a real date like 06-15.';
+}
+
+export function validateWindow(window) {
   const errors = {};
 
   if (!window || typeof window.id !== 'string' || window.id.trim() === '') {
@@ -120,14 +214,24 @@ function validateWindow(window) {
     errors.end = 'Use 24-hour times like 22:00.';
   }
 
-  const months = window && window.months;
-  if (months !== null && months !== undefined) {
-    if (!Array.isArray(months) || months.length === 0) {
-      errors.months = 'Pick at least one month, or choose All year.';
-    } else if (months.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) {
-      errors.months = 'Months must be whole numbers from 1 to 12.';
-    } else if (new Set(months).size !== months.length) {
-      errors.months = 'Each month can only appear once.';
+  // Date mode is active only when both bounds are valid, so a row with one
+  // bound (or an unusable one) is invalid regardless of its months: the dates
+  // were meant to outrank the hint, and guessing would hide a typo.
+  const from = dateBound(window && window.from);
+  const to = dateBound(window && window.to);
+  if (from != null || to != null) {
+    if (parseMonthDay(from) == null) errors.from = dateError(from);
+    if (parseMonthDay(to) == null) errors.to = dateError(to);
+  } else {
+    const months = window && window.months;
+    if (months !== null && months !== undefined) {
+      if (!Array.isArray(months) || months.length === 0) {
+        errors.months = 'Pick at least one month, or choose All year.';
+      } else if (months.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) {
+        errors.months = 'Months must be whole numbers from 1 to 12.';
+      } else if (new Set(months).size !== months.length) {
+        errors.months = 'Each month can only appear once.';
+      }
     }
   }
 
@@ -140,13 +244,62 @@ function windowIsValid(window) {
 
 // ---------- matching ----------
 
-// A window's month set: `null` (all year) is every month; a malformed value the
-// caller did not validate is no month, so matching fails closed.
-// `ALL_MONTHS_SET` is shared read-only.
-function monthSet(window) {
-  const months = window.months;
-  if (months == null) return ALL_MONTHS_SET;
-  return new Set(Array.isArray(months) ? months : []);
+// A window's month list reduced to what it can match. `null` (all year) is
+// every month; a malformed value the caller did not validate is no month, so
+// matching fails closed. Entries outside 1–12 are dropped here (validation
+// keeps them in the row and reports them).
+function monthScope(months) {
+  if (months == null) return { kind: 'all', months: null };
+  if (!Array.isArray(months)) return { kind: 'invalid', months: [] };
+  const valid = [...new Set(months.filter((m) => Number.isInteger(m) && m >= 1 && m <= 12))].sort(
+    (a, b) => a - b,
+  );
+  if (valid.length === 0) return { kind: 'invalid', months: [] };
+  if (valid.length === 12) return { kind: 'all', months: null };
+  return { kind: 'months', months: valid };
+}
+
+// The season a window belongs to, in the terms matching needs. Date mode is
+// active only when both bounds are valid (`dates`); when one is present but
+// unusable, the scope is `invalid` and matches nothing, so a typo fails closed
+// instead of silently falling back to stale months. `fromKey`/`toKey` are
+// integer MMDD comparison keys.
+export function seasonScope(window) {
+  const from = window && window.from;
+  const to = window && window.to;
+  const present = (value) => value != null && value !== '';
+  const start = parseMonthDay(from);
+  const end = parseMonthDay(to);
+  if (start && end) {
+    return {
+      kind: 'dates',
+      from: from,
+      to: to,
+      fromKey: monthDayKey(start.month, start.day),
+      toKey: monthDayKey(end.month, end.day),
+    };
+  }
+  if (present(from) || present(to)) return { kind: 'invalid', months: [] };
+  return monthScope(window && window.months);
+}
+
+// Whether a scope covers one local calendar date. Only the month and day are
+// read, so the answer recurs every year; a wrapped range compares as MMDD.
+export function scopeMatches(scope, date) {
+  if (!scope || !(date instanceof Date) || !Number.isFinite(date.getTime())) return false;
+  if (scope.kind === 'all') return true;
+  if (scope.kind === 'months') return scope.months.includes(date.getMonth() + 1);
+  if (scope.kind === 'dates') {
+    const key = monthDayKey(date.getMonth() + 1, date.getDate());
+    return scope.fromKey <= scope.toKey
+      ? key >= scope.fromKey && key <= scope.toKey
+      : key >= scope.fromKey || key <= scope.toKey;
+  }
+  return false;
+}
+
+export function seasonMatches(window, date) {
+  return scopeMatches(seasonScope(window), date);
 }
 
 // 0 = Monday … 6 = Sunday, from a local Date whose `getDay()` is 0 = Sunday.
@@ -155,7 +308,7 @@ function dayIndex(date) {
 }
 
 // A window as the calendar ranges it actually covers: one segment per weekday,
-// each carrying the month set of the day the window *started*. `end <= start`
+// each carrying the season of the day the window *started*. `end <= start`
 // wraps midnight (`start === end` covers the whole day), and a wrapping window
 // splits in two:
 //
@@ -163,29 +316,30 @@ function dayIndex(date) {
 //   tail  [0, end)       on the *next* day (`tail: true`)
 //
 // The tail is the next day's early hours, so its weekday is the instant's
-// weekday, but its weekday *and* month are judged on the previous calendar day
-// — the day the window started. A December-only window therefore covers 1
-// January 00:00–05:59 and nothing later in January.
-function windowSegments(window) {
-  const start = parseTime(window.start);
-  const end = parseTime(window.end);
+// weekday, but its weekday *and* season are judged on the previous calendar day
+// — the day the window started. A December-only window therefore covers
+// 1 January 00:00–05:59 and nothing later in January; a 15 June–15 September
+// season's tail on 16 September belongs to 15 September.
+export function windowSegments(window) {
+  const start = parseTime(window && window.start);
+  const end = parseTime(window && window.end);
   if (start == null || end == null) return [];
   const days = Array.isArray(window.days)
     ? window.days.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
     : [];
-  const months = monthSet(window);
+  const season = seasonScope(window);
   if (start === end) {
-    return days.map((day) => ({ day, months, from: 0, to: MINUTES_PER_DAY }));
+    return days.map((day) => ({ day, season, from: 0, to: MINUTES_PER_DAY }));
   }
   if (start < end) {
-    return days.map((day) => ({ day, months, from: start, to: end }));
+    return days.map((day) => ({ day, season, from: start, to: end }));
   }
   const segments = [];
   for (const day of days) {
-    segments.push({ day, months, from: start, to: MINUTES_PER_DAY });
+    segments.push({ day, season, from: start, to: MINUTES_PER_DAY });
     segments.push({
       day: (day + 1) % 7,
-      months,
+      season,
       from: 0,
       to: end,
       tail: true,
@@ -195,7 +349,7 @@ function windowSegments(window) {
 }
 
 // Noon of the local day before `date`. Anchoring at noon keeps the weekday and
-// month read away from a missing or repeated DST hour.
+// date boundaries read away from a missing or repeated DST hour.
 function previousDayNoon(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() - 1, 12, 0);
 }
@@ -203,17 +357,19 @@ function previousDayNoon(date) {
 export function windowMatches(window, date) {
   if (!window || !(date instanceof Date) || !Number.isFinite(date.getTime())) return false;
   const day = dayIndex(date);
-  const month = date.getMonth() + 1;
   const minutes = date.getHours() * 60 + date.getMinutes();
-  let startMonth = null;
+  let previous = null;
   return windowSegments(window).some((segment) => {
     if (segment.day !== day) return false;
     if (minutes < segment.from || minutes >= segment.to) return false;
-    if (!segment.tail) return segment.months.has(month);
-    // A tail belongs to the instant's previous calendar day: its weekday is
-    // implied by `segment.day`, and its month is that day's month.
-    if (startMonth == null) startMonth = previousDayNoon(date).getMonth() + 1;
-    return segment.months.has(startMonth);
+    // A tail belongs to the instant's previous calendar day, across a date edge
+    // and across New Year.
+    let seasonDate = date;
+    if (segment.tail) {
+      if (previous == null) previous = previousDayNoon(date);
+      seasonDate = previous;
+    }
+    return scopeMatches(segment.season, seasonDate);
   });
 }
 
@@ -312,39 +468,136 @@ export function rateDayPartition(schedule, date) {
 
 // ---------- overlap validation ----------
 
-function setsIntersect(left, right) {
-  for (const value of left) if (right.has(value)) return true;
+// The annual date model is not a calendar scan: one reference year would pin
+// each month-day to one weekday (and miss overlaps), 400 years is too slow per
+// render. Instead each season is a set of slots on the 366-day leap ring, so a
+// month-day means the same date in every year and 29 February exists exactly
+// once.
+
+function markDateRange(flags, start, end) {
+  if (start <= end) {
+    flags.fill(true, start, end + 1);
+    return;
+  }
+  flags.fill(true, start, RING_DAYS);
+  flags.fill(true, 0, end + 1);
+}
+
+function dateFlagsToSet(flags) {
+  const ranges = [];
+  let start = -1;
+  for (let day = 0; day < RING_DAYS; day += 1) {
+    if (flags[day] && start < 0) start = day;
+    else if (!flags[day] && start >= 0) {
+      ranges.push([start, day - 1]);
+      start = -1;
+    }
+  }
+  if (start >= 0) ranges.push([start, RING_DAYS - 1]);
+  return ranges;
+}
+
+function dateSetContains(set, day) {
+  return (Array.isArray(set) ? set : []).some(([start, end]) => day >= start && day <= end);
+}
+
+// The dates a season scope covers, as sorted inclusive leap-ring intervals.
+// Months become whole months (February includes 29 February), a date range is
+// `[from..to]` or the wrapped pair, all-year is the whole ring, and an unusable
+// scope covers nothing (fail closed).
+export function seasonDateSet(scope) {
+  const flags = new Array(RING_DAYS).fill(false);
+  if (!scope || scope.kind === 'invalid') return [];
+  if (scope.kind === 'all') return [[0, RING_DAYS - 1]];
+  if (scope.kind === 'dates') {
+    const start = indexOfMonthDay(scope.fromKey);
+    const end = indexOfMonthDay(scope.toKey);
+    markDateRange(flags, start, end);
+    return dateFlagsToSet(flags);
+  }
+  for (const month of scope.months) {
+    markDateRange(
+      flags,
+      MONTH_START[month - 1],
+      MONTH_START[month - 1] + DAYS_IN_MONTH[month - 1] - 1,
+    );
+  }
+  return dateFlagsToSet(flags);
+}
+
+function indexOfMonthDay(key) {
+  return monthDayIndex(Math.floor(key / 100), key % 100);
+}
+
+// The same date set one day later: the dates whose *next* day is in `set`. It is
+// the annual reading of "yesterday's season", which is what a tail is judged by.
+// The 28 February slot shifts to 29 February in a leap year *and* to 1 March in
+// a common year, so both possible next days are included; overlap only needs a
+// year type where the two windows meet.
+export function shiftDateSet(set) {
+  const flags = new Array(RING_DAYS).fill(false);
+  for (const [start, end] of Array.isArray(set) ? set : []) {
+    for (let day = start; day <= end; day += 1) flags[(day + 1) % RING_DAYS] = true;
+  }
+  if (dateSetContains(set, FEB_28)) flags[MAR_1] = true;
+  return dateFlagsToSet(flags);
+}
+
+// Whether two sorted interval lists share any day.
+export function intersectDateSets(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i][1] < b[j][0]) i += 1;
+    else if (b[j][1] < a[i][0]) j += 1;
+    else return true;
+  }
   return false;
 }
 
-// The same month set, one month later (December rolls into January).
-function rollMonths(months) {
-  return new Set([...months].map((month) => (month === 12 ? 1 : month + 1)));
-}
-
-// The month sets two segments can meet in. A tail's instant can fall in a
-// month that the start day is in (mid-month) or in the month after it (the
-// start day was the last day of the month), so the tail contributes both.
-function segmentMonths(segment) {
-  if (!segment.tail) return segment.months;
-  return new Set([...segment.months, ...rollMonths(segment.months)]);
-}
-
 // Two windows collide when they can both match one instant: two segments on the
-// same weekday, with intersecting month sets and overlapping time-of-day
-// ranges. Comparing segments (rather than day/month sets) is what catches a
-// Tuesday-early window against a Monday night, and January's early hours against
-// a December wrap. The tail's months are the possible months of its start day,
-// so a calendar pair that can never meet is the only thing this over-rejects.
+// same weekday, on intersecting season dates, with overlapping time-of-day
+// ranges. Comparing segments (rather than day/date sets alone) is what catches
+// a Tuesday-early window against a Monday night.
+//
+// A tail is judged on the previous calendar date, so the season sets combine as
+// the four-case table:
+//
+//   main/main   S_A ∩ S_B
+//   main/tail   S_A ∩ shift(S_B)
+//   tail/main   shift(S_A) ∩ S_B
+//   tail/tail   S_A ∩ S_B        (both starts are the same previous day)
+//
+// Tail/tail is why instant-date sets alone are wrong: A(29 Feb) and B(28 Feb)
+// tails both touch 1 March, but in different year types, so they never meet.
 // Touching endpoints do not overlap (one window ends exactly where the other
 // starts).
 export function windowsOverlap(left, right) {
   if (!left || !right) return false;
-  for (const a of windowSegments(left)) {
-    for (const b of windowSegments(right)) {
+  const segmentsA = windowSegments(left);
+  const segmentsB = windowSegments(right);
+  const cache = new Map();
+  const seasonSets = (scope) => {
+    if (!cache.has(scope)) {
+      const dates = seasonDateSet(scope);
+      cache.set(scope, { dates, shifted: shiftDateSet(dates) });
+    }
+    return cache.get(scope);
+  };
+  for (const a of segmentsA) {
+    for (const b of segmentsB) {
       if (a.day !== b.day) continue;
-      if (!setsIntersect(segmentMonths(a), segmentMonths(b))) continue;
-      if (a.from < b.to && b.from < a.to) return true;
+      if (a.from >= b.to || b.from >= a.to) continue;
+      const setA = seasonSets(a.season);
+      const setB = seasonSets(b.season);
+      let collides;
+      if (!a.tail && !b.tail) collides = intersectDateSets(setA.dates, setB.dates);
+      else if (!a.tail) collides = intersectDateSets(setA.dates, setB.shifted);
+      else if (!b.tail) collides = intersectDateSets(setA.shifted, setB.dates);
+      else collides = intersectDateSets(setA.dates, setB.dates);
+      if (collides) return true;
     }
   }
   return false;
@@ -404,20 +657,28 @@ export function validateRateWindows(rows) {
 }
 
 // Stable comparison for drafts against stored settings. Day and month order is
-// not meaningful; text that parses to the same number is the same value.
+// not meaningful; text that parses to the same number is the same value. In date
+// mode the `months` value is only a coarse hint, so the key compares the dates
+// and ignores the hint: a stale hint is not an unsaved change.
 export function rateWindowsKey(rows) {
   const list = Array.isArray(rows) ? rows.map(normalizeWindow) : [];
   const sorted = (values) =>
     Array.isArray(values) ? [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) : [];
   return JSON.stringify(
-    list.map((window) => ({
-      id: window.id,
-      rate: Number.isFinite(window.rate) ? window.rate : String(window.rate),
-      days: sorted(window.days),
-      start: window.start,
-      end: window.end,
-      months: Array.isArray(window.months) ? sorted(window.months) : window.months,
-    })),
+    list.map((window) => {
+      const scope = seasonScope(window);
+      const dated = scope.kind === 'dates';
+      return {
+        id: window.id,
+        rate: Number.isFinite(window.rate) ? window.rate : String(window.rate),
+        days: sorted(window.days),
+        start: window.start,
+        end: window.end,
+        months: dated ? null : Array.isArray(window.months) ? sorted(window.months) : window.months,
+        from: dated ? scope.from : window.from,
+        to: dated ? scope.to : window.to,
+      };
+    }),
   );
 }
 
