@@ -302,9 +302,9 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 | Suite | Command                                                | Current size | Scope                                                                                                                  |
 | ----- | ------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Web   | `npm test`                                             | 339 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse; no browser or Firebase                           |
+| Web   | `npm test`                                             | 344 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse; no browser or Firebase                           |
 | Rules | `npm run test:rules`                                   | 34 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                                                    |
-| Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 286 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes |
+| Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 288 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes |
 
 - **No CI.** Gates are local and operator-enforced: hooks (Prettier pre-commit/pre-push), full test runs, a reviewed head SHA, and squash merges with `--match-head-commit`.
 - The browser harness under `/tmp/opencode/chelevse-preview` is an ephemeral manual/preview tool; it is not part of the repo and must not be a merge dependency.
