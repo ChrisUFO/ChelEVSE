@@ -139,6 +139,59 @@ test('validateSettings mirrors the rules shape', () => {
   assert.ok(empty.errors.currency);
 });
 
+test('a rate with more than three decimals is a valid 0–5 price end to end', () => {
+  // Owner report: 0.11270 (11.27p/kWh) was rejected with the empty-field
+  // message. The contract is only "a number from 0 to 5", so five decimals are
+  // a price, not a typo, and the field must not narrow precision to a step.
+  const flat = validateSettings({ rate: '0.11270', currency: 'USD' });
+  assert.equal(flat.valid, true);
+  assert.deepEqual(flat.errors, {});
+  assert.equal(flat.values.rate, 0.1127);
+
+  const row = {
+    id: 'night',
+    rate: '0.11270',
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const windows = validateRateWindows([row]);
+  assert.equal(windows.valid, true);
+  assert.equal(windows.values[0].rate, 0.1127);
+  assert.equal(validateRateEditorRows([row], '0.1127').valid, true);
+
+  // The saved document carries the parsed number, never the typed string.
+  const values = validateSettings({ rate: '0.11270', currency: 'USD', rates: [row] }).values;
+  const payload = settingsPayload(values);
+  assert.equal(payload.rate, 0.1127);
+  assert.equal(typeof payload.rate, 'number');
+  assert.equal(payload.rates[0].rate, 0.1127);
+  assert.equal(typeof payload.rates[0].rate, 'number');
+
+  // The single 0–5 rule still bounds the value, whatever the precision.
+  assert.equal(
+    validateSettings({ rate: '5.11270', currency: 'USD' }).errors.rate,
+    'Rate must be between 0 and 5.',
+  );
+  assert.equal(
+    validateSettings({ rate: '-0.00001', currency: 'USD' }).errors.rate,
+    'Rate must be between 0 and 5.',
+  );
+  // Empty and non-numeric input keep the existing message.
+  for (const rate of ['', '   ', 'abc', '0.11270e']) {
+    assert.equal(
+      validateSettings({ rate, currency: 'USD' }).errors.rate,
+      'Enter a rate between 0 and 5.',
+      rate,
+    );
+  }
+  assert.equal(
+    validateRateWindows([{ ...row, rate: 'abc' }]).errors.rows[0].rate,
+    'Enter a rate between 0 and 5.',
+  );
+});
+
 test('validateSettings carries and validates the optional rate windows', () => {
   const night = {
     id: 'night',

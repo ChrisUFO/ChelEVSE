@@ -670,7 +670,14 @@ function createWindowCard(entry, periodCard) {
   rateInput.type = 'number';
   rateInput.min = '0';
   rateInput.max = '5';
-  rateInput.step = '0.001';
+  // `step = 'any'`: the price contract is only "a number from 0 to 5", so the
+  // field must not narrow precision to three decimals. With `0.001` a real
+  // tariff such as 0.11270 (11.27p/kWh) made the field constraint-invalid
+  // (`validity.stepMismatch`), and the handler below stores `input.value`
+  // verbatim: a number input reports an empty value whenever the browser
+  // cannot keep the typed text, which then reads as the confusing "Enter a rate
+  // between 0 and 5." The 0–5 rule stays the only bound.
+  rateInput.step = 'any';
   rateInput.inputMode = 'decimal';
   // No placeholder: a `0.000` in an empty field reads as a planted price beside
   // the "Enter a rate between 0 and 5." rule. The label, the `/ kWh` suffix and
@@ -1274,7 +1281,10 @@ function createBaseBlock(card, period, index) {
     baseInput.type = 'number';
     baseInput.min = '0';
     baseInput.max = '5';
-    baseInput.step = '0.001';
+    // Same contract as a window rate: any decimal precision the owner types is
+    // accepted here and judged by the single 0–5 rule, never by an arbitrary
+    // step (see the window rate field above).
+    baseInput.step = 'any';
     baseInput.inputMode = 'decimal';
     // No placeholder: a `0.000` in an empty field reads as a planted price
     // beside the "Enter a rate between 0 and 5." rule, the same reason the
@@ -2762,6 +2772,10 @@ function setPreviewNow() {
 
 export function initSettings() {
   $('settings-form').addEventListener('submit', submit);
+  // The One-rate field carries the same price contract as an editor row — any
+  // number from 0 to 5 — so it must not narrow precision with a fixed step
+  // either. `step = 'any'` replaces the markup's 0.001 before the owner types.
+  $('setting-rate').step = 'any';
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
   $('rate-mode-flat').addEventListener('click', requestOneRate);
