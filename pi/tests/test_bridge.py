@@ -676,6 +676,222 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions()[fresh]["elapsed"], 3600)
 
 
+class IntervalTests(unittest.TestCase):
+    """Charging intervals: one per contiguous charging block, energy per block.
+
+    Every tick goes through ``observe`` with ``_utcnow`` patched, so an interval
+    opens and closes on the state edge the way the status loop drives it.
+    """
+
+    def setUp(self):
+        self.db = FakeDB()
+        self.tracker = bridge.StatusTracker(self.db)
+        self.now = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+
+    def tick(self, state, energy, elapsed, vehicle=1, step=timedelta(minutes=5), tracker=None):
+        """One status tick at a later instant; returns that instant.
+
+        ``elapsed`` is the charger's cumulative plug-in timer, so callers keep it
+        growing with the clock exactly as the charger does.
+        """
+        self.now += step
+        with mock.patch.object(bridge, "_utcnow", return_value=self.now):
+            (tracker or self.tracker).observe(
+                {
+                    "state": state,
+                    "session_energy": energy,
+                    "elapsed": elapsed,
+                    "vehicle": vehicle,
+                }
+            )
+        return self.now
+
+    def sessions(self):
+        return self.db.data.get("sessions", {})
+
+    def test_an_uninterrupted_session_is_one_interval_equal_to_wh(self):
+        started = self.tick(3, 0, 0)
+        self.tick(3, 3000, 300)
+        self.tick(3, 6000, 600)
+        ended = self.tick(1, 6000, 900)
+        (record,) = self.sessions().values()
+        # Aggregates are untouched: the charger's own counters and plug-in span.
+        self.assertEqual(record["wh"], 6000.0)
+        # elapsed is the last charging tick's timer, as before intervals existed.
+        self.assertEqual(record["elapsed"], 600)
+        self.assertEqual(record["started_at"], ended - timedelta(seconds=600))
+        self.assertEqual(record["ended_at"], ended)
+        self.assertEqual(record["ended_at"], ended)
+        (interval,) = record["intervals"]
+        self.assertEqual(interval["started_at"], started)
+        self.assertEqual(interval["ended_at"], ended)
+        self.assertAlmostEqual(interval["wh"], record["wh"])
+
+    def test_a_pause_and_resume_records_two_intervals_that_sum_to_wh(self):
+        block1 = self.tick(3, 0, 0)
+        self.tick(3, 2000, 300)
+        paused = self.tick(1, 2000, 600)
+        block2 = self.tick(3, 5000, 900)
+        self.tick(3, 7000, 1200)
+        stopped = self.tick(1, 7000, 1500)
+
+        self.assertEqual(len(self.sessions()), 1)
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 7000.0)
+        self.assertEqual(record["elapsed"], 1200)
+        first, second = record["intervals"]
+        # The pause closed the first interval; the resume opened a second one
+        # and its energy is measured from where the counters stood at the pause.
+        self.assertEqual((first["started_at"], first["ended_at"]), (block1, paused))
+        self.assertEqual((second["started_at"], second["ended_at"]), (block2, stopped))
+        self.assertAlmostEqual(first["wh"], 2000.0)
+        self.assertAlmostEqual(second["wh"], 5000.0)
+        self.assertAlmostEqual(first["wh"] + second["wh"], record["wh"])
+        # The merged write keeps the pre-pause document id.
+        self.assertEqual(list(self.sessions()), [str(int(record["started_at"].timestamp()))])
+
+    def test_a_restart_mid_charge_keeps_one_interval_and_fabricates_nothing(self):
+        self.db.data["status"] = {
+            "current": {
+                "state": 3,
+                "session_energy": 4000,
+                "elapsed": 2400,
+                "total_energy": 20.0,
+            }
+        }
+        # A new process: the tracker seeds from status/current and must not fold
+        # the 4 kWh it never measured into the interval it opens now.
+        tracker = bridge.StatusTracker(self.db)
+        self.assertTrue(tracker.seed())
+        self.tick(3, 4000, 2700, tracker=tracker)
+        self.tick(3, 6000, 3000, tracker=tracker)
+        self.tick(1, 6000, 3300, tracker=tracker)
+
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 6000.0)
+        (interval,) = record["intervals"]
+        self.assertAlmostEqual(interval["wh"], 2000.0)
+        for entry in record["intervals"]:
+            self.assertGreater(entry["wh"], 0)
+            self.assertGreater(entry["ended_at"], entry["started_at"])
+
+    def test_a_counter_reset_is_dropped_instead_of_written_as_negative(self):
+        self.tick(3, 1000, 600)
+        self.tick(3, 3000, 900)
+        self.tick(3, 100, 1200)  # firmware reset mid-session
+        self.tick(3, 900, 1500)
+        self.tick(1, 900, 1800)
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        self.assertGreater(interval["wh"], 0)
+        # 3000-1000 growth, then nothing for the reset tick, then 800 from the
+        # reset baseline. The first tick only supplies the baseline.
+        self.assertAlmostEqual(interval["wh"], 2800.0)
+
+    def test_no_intervals_beside_a_skipped_zero_wh_session(self):
+        self.tick(3, 0, 0)
+        self.tick(1, 0, 0)
+        self.assertEqual(self.sessions(), {})
+        self.assertIsNone(self.tracker.open_interval)
+        self.assertIsNone(self.tracker.pending_session)
+
+    def test_a_seeded_session_without_measured_growth_has_no_intervals(self):
+        # Restarted mid-charge, stopped before any tick showed growth: the
+        # session is still written from the counters, but it carries no interval
+        # — a record with no measured shape falls back to pro-rating.
+        self.db.data["status"] = {
+            "current": {"state": 3, "session_energy": 5000, "elapsed": 3000}
+        }
+        tracker = bridge.StatusTracker(self.db)
+        self.assertTrue(tracker.seed())
+        self.tick(3, 5000, 3300, tracker=tracker)
+        self.tick(1, 5000, 3600, tracker=tracker)
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 5000.0)
+        self.assertNotIn("intervals", record)
+
+
+class MergeIntervalTests(unittest.TestCase):
+    """Interval lists on the merge path: concatenation, order, cap."""
+
+    def record(self, start, intervals, wh, elapsed=3600):
+        return {
+            "started_at": start,
+            "ended_at": start + timedelta(seconds=elapsed),
+            "wh": wh,
+            "elapsed": elapsed,
+            "intervals": intervals,
+        }
+
+    def interval(self, start, minutes, wh):
+        return {
+            "started_at": start,
+            "ended_at": start + timedelta(minutes=minutes),
+            "wh": wh,
+        }
+
+    def test_a_merge_concatenates_intervals_in_start_order(self):
+        start = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+        candidate = self.record(start, [self.interval(start, 30, 2000)], 2000)
+        candidate["_id"] = "first"
+        later = self.interval(start + timedelta(hours=2), 30, 1500)
+        record = self.record(start + timedelta(hours=1), [later], 3500)
+        merged = bridge._merge_session(candidate, record, vehicle_connected=True)
+        self.assertEqual(merged["_id"], "first")
+        self.assertEqual(merged["intervals"], [candidate["intervals"][0], later])
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in merged["intervals"]), merged["wh"]
+        )
+
+    def test_unusable_stored_intervals_are_dropped_on_merge(self):
+        start = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+        candidate = self.record(start, [], 2000)
+        candidate["intervals"] = [
+            {"started_at": "not-a-date", "ended_at": start, "wh": 100},
+            {"started_at": start, "ended_at": start, "wh": 100},
+            {"started_at": start, "ended_at": start + timedelta(minutes=10), "wh": 0},
+            "junk",
+        ]
+        record = self.record(start + timedelta(hours=1), [self.interval(start, 30, 500)], 2500)
+        merged = bridge._merge_session(candidate, record, vehicle_connected=True)
+        self.assertEqual(merged["intervals"], record["intervals"])
+
+    def test_the_cap_keeps_the_most_recent_intervals_and_folds_the_oldest(self):
+        start = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
+        stored = [
+            self.interval(start + timedelta(minutes=10 * index), 5, 10.0)
+            for index in range(bridge.MAX_SESSION_INTERVALS + 20)
+        ]
+        candidate = self.record(start, stored, 1200)
+        candidate["_id"] = "first"
+        newest = self.interval(start + timedelta(hours=30), 5, 7.0)
+        record = self.record(start + timedelta(hours=29), [newest], 1207.0)
+        merged = bridge._merge_session(candidate, record, vehicle_connected=True)
+        kept = merged["intervals"]
+        self.assertEqual(len(kept), bridge.MAX_SESSION_INTERVALS)
+        self.assertEqual(kept[-1], newest)
+        starts = [entry["started_at"] for entry in kept]
+        self.assertEqual(starts, sorted(starts))
+        # The oldest entries fold into one head: nothing is silently unpriced.
+        head = len(stored) + 1 - bridge.MAX_SESSION_INTERVALS
+        self.assertEqual(kept[0]["started_at"], stored[0]["started_at"])
+        self.assertEqual(kept[0]["ended_at"], stored[head]["ended_at"])
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in kept), 1200.0 + 7.0
+        )
+        # Aggregates still cover the whole session.
+        self.assertEqual(merged["wh"], 1207.0)
+        self.assertEqual(merged["started_at"], start)
+
+    def test_one_hundred_intervals_are_kept_as_they_are(self):
+        start = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
+        stored = [
+            self.interval(start + timedelta(minutes=10 * index), 5, 10.0)
+            for index in range(bridge.MAX_SESSION_INTERVALS)
+        ]
+        self.assertEqual(bridge._merge_intervals(stored), stored)
+
+
 class FcmTests(unittest.TestCase):
     def test_transition_edges(self):
         self.assertIsNone(bridge._transition_body(False, False, True))
