@@ -1137,17 +1137,27 @@ export function submitSettingsPlan({ fields, onCommit = () => {} } = {}) {
 
 // A definitive checker answer is withheld while the plan has anything blocking:
 // the invalid row would otherwise be dropped and the fallback claimed for a
-// moment it may actually price.
+// moment it may actually price. The remedy names the cause: an unpriced row
+// needs a price, not its windows repaired.
 export const CHECK_BLOCKED_MESSAGE = 'Fix the incomplete windows to check this moment.';
+export const CHECK_RATE_MESSAGE = 'Add a rate to check this moment.';
 export const CHECK_CONFLICT_MESSAGE = 'Fix the overlapping windows to check this moment.';
 export const CHECK_CAP_MESSAGE = `Reduce the plan to ${MAX_RATE_WINDOWS} windows to check this moment.`;
 
 export function previewBlocker(validation) {
   if (!validation || validation.valid !== false) return '';
-  const incomplete = (validation.rows || []).some(
+  const incomplete = (validation.rows || []).filter(
     (errors) => errors && Object.keys(errors).length > 0,
   );
-  if (incomplete) return CHECK_BLOCKED_MESSAGE;
+  if (incomplete.length > 0) {
+    // A row whose only problem is its price has no incomplete window to fix:
+    // telling the owner to repair a window that is fine sends them to the wrong
+    // field.
+    const unpricedOnly = incomplete.every((errors) =>
+      Object.keys(errors).every((field) => field === 'rate'),
+    );
+    return unpricedOnly ? CHECK_RATE_MESSAGE : CHECK_BLOCKED_MESSAGE;
+  }
   // A plan over the cap has no overlap to fix: naming the cap keeps the
   // checker from accusing windows that are fine.
   if (validation.capped) return CHECK_CAP_MESSAGE;
@@ -1325,15 +1335,20 @@ export function periodCoverage(
     monthName: dated ? period.dateText : MONTH_NAMES[month - 1],
     // The table caption names the sample: a date season its dates, an all-year
     // season "All year" (the January the week is sampled in is not a scope), and
-    // a month season its month. One date drops its "(one day)" marker here
-    // because the row group is already labelled "One day".
+    // a month season its month. A month season that spans several months is
+    // sampled in the first of them, so the caption marks that month as the
+    // example instead of reading as the season's whole scope. One date drops its
+    // "(one day)" marker here because the row group is already labelled "One
+    // day".
     captionText: dated
       ? onlyDate
         ? `${MONTH_SHORT[onlyDate.month - 1]} ${onlyDate.day}`
         : period.dateText
       : period && period.kind === 'all'
         ? 'All year'
-        : MONTH_NAMES[month - 1],
+        : Array.isArray(period && period.months) && period.months.length > 1
+          ? `${MONTH_NAMES[month - 1]} · example`
+          : MONTH_NAMES[month - 1],
     dateText: dated ? period.dateText : '',
     dates,
     week: Array.isArray(week) ? week : [],
@@ -1370,21 +1385,25 @@ export function segmentNote(segment) {
 // derived band and the row's own name. It reads the same draft array the editor
 // shows, so unsaved edits are checked without a save. `scopeText` is the season
 // in owner language and `seasonRate` says whether the winning row is one
-// all-day, every-day price.
+// all-day, every-day price. `noSeason` separates the two reasons the fallback
+// wins: no season covers the day at all, or a season covers the day but no
+// window covers that hour.
 export function previewRate(rows, fallbackRate, date) {
   const base = parseRateValue(fallbackRate);
+  const list = Array.isArray(rows) ? rows : [];
   const entry = rateEntryAt(date, {
     rate: Number.isFinite(base) ? base : null,
     rates: rows,
   });
   if (!entry) return null;
-  const rates = (Array.isArray(rows) ? rows : []).map((row) => row && row.rate);
+  const rates = list.map((row) => row && row.rate);
   const scope = entry.window ? rateScope(entry.window) : null;
   const dateText = scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '';
   return {
     rate: entry.rate,
     window: entry.window,
     fallback: entry.window == null,
+    noSeason: entry.window == null && !list.some((row) => scopeMatches(rateScope(row), date)),
     tier: entry.window ? rateTierFor(entry.window.rate, rates, base) : '',
     summary: entry.window ? rateWindowSummary(entry.window) : '',
     monthsText: entry.window ? rateMonthsText(entry.window.months) : '',

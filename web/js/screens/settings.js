@@ -151,15 +151,23 @@ function windowRates() {
 }
 
 function tierClass(tier) {
+  // A season rate is its own band: it is not a relative tier, so it gets its own
+  // name and dot wherever a band is drawn.
+  if (tier === 'Season rate') return 'season';
   if (tier === 'Off-peak') return 'off';
   if (tier === 'Peak') return 'peak';
   if (tier === 'Shoulder') return 'shoulder';
   return 'same';
 }
 
+// The legend's order, cheap to expensive with the fallback last. The labels are
+// never listed here: they come from the same resolved segments the table names,
+// so a band cannot be "Off-peak" in the legend and "Season rate" in the row.
+const LEGEND_ORDER = ['season', 'off', 'shoulder', 'peak', 'same', 'base'];
+
 function segmentClass(segment) {
   if (!segment || !segment.window) return 'base';
-  return tierClass(rateTierFor(segment.rate, windowRates(), readFields().rate));
+  return tierClass(rateSegmentLabel(segment, windowRates(), readFields().rate));
 }
 
 function windowName(row) {
@@ -444,7 +452,10 @@ function createWindowCard(entry, periodCard) {
   rateInput.max = '5';
   rateInput.step = '0.001';
   rateInput.inputMode = 'decimal';
-  rateInput.placeholder = '0.000';
+  // No placeholder: a `0.000` in an empty field reads as a planted price beside
+  // the "Enter a rate between 0 and 5." rule. The label, the `/ kWh` suffix and
+  // that error carry the rule; the field itself stays visibly empty until the
+  // owner types their price.
   rateInput.autocomplete = 'off';
   rateInput.value = row.rate;
   rateInput.setAttribute('aria-describedby', errorId);
@@ -673,18 +684,20 @@ function paintPeriodHeader(card) {
   // from advertising a range that a July sibling changes; the table caption
   // repeats the same month.
   const example = range && !dateMode ? `${MONTH_NAMES[range.month - 1].slice(0, 3)} example` : '';
-  // The range and "effective" are one unbreakable run: a break after the en
-  // dash reads as two numbers, and "effective" alone on a line reads as a
-  // stray word at 320.
+  // A row with no usable price contributes nothing to the range, so a range that
+  // only the fallback fills would advertise a price this season does not charge.
+  // The plan summary and the checker say the same thing at the same moment.
+  const ownPriced = period.rows.some((entry) => {
+    const price = parseRateValue(entry.row.rate);
+    return (
+      Number.isFinite(price) && Object.keys(rateValidation.rows[entry.index] || {}).length === 0
+    );
+  });
   const meta = [el('span', null, `${countText} · ${example ? `${example} ` : ''}`)];
   if (period.kind === 'invalid')
     meta.push(el('span', null, dateMode ? 'needs dates' : 'needs months'));
-  else if (range) {
-    // "effective" only qualifies a range: a single price has nothing to qualify
-    // and reads as a stray adjective.
-    const rangeText = priceRangeText(range);
-    meta.push(nowrapEl(range.min === range.max ? rangeText : `${rangeText} effective`));
-  } else meta.push(el('span', null, 'rate not set'));
+  else if (!ownPriced || !range) meta.push(nowrapEl('— needs attention'));
+  else meta.push(nowrapEl(priceRangeText(range)));
   card.meta.replaceChildren(...meta);
   paintScopeEditor(card);
   paintPeriodMode(card);
@@ -788,7 +801,11 @@ function paintCoverage(card) {
     new Date().getFullYear(),
   );
 
-  const present = new Set();
+  // The legend is collected from the same resolved segments the strip and the
+  // table draw, so every dot carries the name of the row it stands for. A
+  // season rate is "Season rate" here, as in its card title, its table band and
+  // the plan — never the relative tier its single price happens to sit at.
+  const legend = new Map();
   const strip = [];
   for (const type of coverage.types) {
     const row = el('span', 'strip-row');
@@ -798,9 +815,12 @@ function paintCoverage(card) {
     row.append(el('span', 'strip-day', label));
     const track = el('span', 'strip-track');
     for (const segment of type.segments) {
-      const piece = el('span', `strip-seg ${segmentClass(segment)}`);
+      const key = segmentClass(segment);
+      const piece = el('span', `strip-seg ${key}`);
       piece.style.flexGrow = String(segment.to - segment.from);
-      present.add(segmentClass(segment));
+      if (!legend.has(key)) {
+        legend.set(key, rateSegmentLabel(segment, windowRates(), readFields().rate));
+      }
       track.append(piece);
     }
     row.append(track);
@@ -809,21 +829,12 @@ function paintCoverage(card) {
   card.axis.hidden = false;
   card.strip.replaceChildren(...strip);
 
-  const labels = [
-    ['off', 'Off-peak'],
-    ['shoulder', 'Shoulder'],
-    ['peak', 'Peak'],
-    ['same', 'Same price'],
-    ['base', 'Other times'],
-  ];
-  const legend = labels
-    .filter(([key]) => present.has(key))
-    .map(([key, label]) => {
-      const item = el('span', 'legend-item');
-      item.append(el('span', `legend-dot ${key}`), el('span', null, label));
-      return item;
-    });
-  card.legend.replaceChildren(...legend);
+  const items = LEGEND_ORDER.filter((key) => legend.has(key)).map((key) => {
+    const item = el('span', 'legend-item');
+    item.append(el('span', `legend-dot ${key}`), el('span', null, legend.get(key)));
+    return item;
+  });
+  card.legend.replaceChildren(...items);
 
   const siblingLines = coverage.siblings.map((sibling) => siblingNote(sibling)).filter(Boolean);
   const ownerOf = (segment) => {
@@ -1413,7 +1424,7 @@ function applyDates(card, from, to) {
     refresh();
     return;
   }
-  deferPlanRebuild();
+  deferPlanRebuild(first);
 }
 
 // Keep the rendered cards in step with the renamed period keys, so nothing is
@@ -1435,8 +1446,11 @@ function renamePeriods() {
 // Rebuild after the interaction that caused the commit has been delivered. A
 // Tab may already have moved focus to the next date control; that control is
 // remembered by `data-field` and refocused once its replacement exists, so the
-// rebuild does not undo the move.
-function deferPlanRebuild() {
+// rebuild does not undo the move. `data-field` names a control in every season's
+// scope editor, so the restore is scoped to the season the edit came from: the
+// first match in the plan can belong to an earlier season, and the next typed
+// edit would land in a season the owner never touched.
+function deferPlanRebuild(anchorIndex) {
   cancelPlanRebuild();
   const token = planRenderToken;
   planRenderTimer = setTimeout(() => {
@@ -1448,7 +1462,10 @@ function deferPlanRebuild() {
     // The rebuild detaches the focused control; if focus moved somewhere the
     // rebuild left alone (a button outside the list), it is already correct.
     if (document.contains(active) && active !== document.body) return;
-    const control = $('rate-periods').querySelector(`[data-field="${field || 'from-day'}"]`);
+    const edited = periodCards.find((card) =>
+      card.period.rows.some((entry) => entry.index === anchorIndex),
+    );
+    const control = edited && edited.node.querySelector(`[data-field="${field || 'from-day'}"]`);
     if (control) control.focus({ preventScroll: true });
   }, 0);
 }
@@ -1720,15 +1737,18 @@ function paintPlan() {
   const counts = `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'} · ${
     draftRates.length
   } ${rowNoun || (draftRates.length === 1 ? 'window' : 'windows')}`;
-  const summary = [el('span', null, `${counts} · `)];
-  if (range) summary.push(nowrapEl(priceRangeText(range)), el('span', null, ' · '));
-  // No row contributes a usable price: say so instead of silently omitting the
+  // Every separator is bound to the run it introduces with a no-break space, so
+  // a plan line never ends on a lone `·` when it wraps at 320 px. The count is
+  // one unbreakable run too: "2 seasons · 2" / "windows" split the noun from its
+  // number.
+  const summary = [nowrapEl(counts)];
+  if (range) summary.push(nowrapEl(`\u00a0· ${priceRangeText(range)}`));
+  // No row contributes a usable price: name the reason instead of omitting the
   // range, which read as "no price applies" rather than "a price needs fixing".
-  // An untouched, empty plan keeps the quiet form; its header already says
-  // "rate not set".
-  else if (draftRates.some((row) => String(row.rate ?? '').trim() !== ''))
-    summary.push(nowrapEl('— needs attention'), el('span', null, ' · '));
-  summary.push(nowrapEl(`other times ${priceText(readFields().rate)}`));
+  // An untitled row is the same state as an invalid one to the owner — the price
+  // is not there yet — so both read the same.
+  else summary.push(nowrapEl('\u00a0· — needs attention'));
+  summary.push(nowrapEl(`\u00a0· other times ${priceText(readFields().rate)}`));
   $('plan-summary-text').replaceChildren(...summary);
   const problem = $('plan-problem');
   const problemText = planProblemText({ problems, capped });
@@ -1743,9 +1763,13 @@ function paintPlan() {
   otherTimes.hidden = !uncovered;
   if (uncovered) {
     // The separator is bound to the text that follows it with a no-break space,
-    // so a wrap at 320 px can never leave a line starting with a lone `·`.
+    // so a wrap at 320 px can never leave a line starting with a lone `·`. The
+    // title itself is two runs split at the dash: at 320 it breaks into
+    // "No season —" / "other times · …" instead of splitting "other times".
     const runs = uncovered.split(', ');
-    const nodes = [el('span', 'other-times-title', 'No season — other times')];
+    const title = el('span', 'other-times-title');
+    title.append(nowrapEl('No season —'), ' ', nowrapEl('other times'));
+    const nodes = [title];
     nodes.push(nowrapEl(`\u00a0· ${runs[0]}`));
     for (const run of runs.slice(1)) nodes.push(nowrapEl(`, ${run}`));
     const fallback = readFields().rate;
@@ -1956,7 +1980,13 @@ function paintPreview() {
     price.append(money);
   }
   rows.push(paintPreviewRow('Price', price));
-  let applies = 'Other times — no rate window covers this moment.';
+  // The fallback wins for two different reasons, and naming the wrong one sends
+  // the owner to the wrong control: no season covers this day at all, or a
+  // season covers it but no window covers this hour. The visible plan makes the
+  // same day-level distinction on its own line.
+  let applies = result.noSeason
+    ? 'No season — no rate window covers this moment.'
+    : 'Other times — no rate window covers this moment.';
   if (!result.fallback) {
     applies = el('span');
     if (result.seasonRate) applies.append('Season rate · ');
@@ -1976,7 +2006,9 @@ function paintPreview() {
 function announcePreview() {
   if (draftRates.length === 0) return;
   const live = $('preview-live');
-  const blocker = previewBlocker(rateValidation);
+  // Same gate as the visible checker: a mixed season's remedy is structural, so
+  // announcing the overlap remedy would describe a fix that cannot work.
+  const blocker = planHasMix() ? MIX_COVERAGE_MESSAGE : previewBlocker(rateValidation);
   if (blocker) {
     setText(live, blocker);
     return;

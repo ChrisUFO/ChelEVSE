@@ -1861,6 +1861,12 @@ input[aria-invalid='true'] {
 .strip-seg.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
+/* A season rate shares the all-day green: the two names never appear in one
+   card (a season is either one season-wide price or a set of daily windows), so
+   the colour identifies "this whole day is priced" without inventing a hue. */
+.strip-seg.season {
+  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
+}
 .strip-axis {
   display: flex;
   justify-content: space-between;
@@ -1901,6 +1907,9 @@ input[aria-invalid='true'] {
 }
 .legend-dot.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
+}
+.legend-dot.season {
+  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
 }
 .period-body {
   display: grid;
@@ -2356,6 +2365,11 @@ input[aria-invalid='true'] {
 }
 .tier.same {
   color: var(--muted);
+}
+/* The table band for a season rate: the same green as its strip and legend dot,
+   so one dot never carries two names in a card. */
+.tier.season {
+  color: color-mix(in oklab, var(--ok) 82%, var(--text));
 }
 .period-actions {
   display: flex;
