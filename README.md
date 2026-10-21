@@ -8,7 +8,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 - **Monitor**: live charger status (state, current draw, power, session/total energy, temperatures, setpoint) from anywhere — not just the home LAN.
 - **Control**: stop, return to auto, or hold at a chosen current (6–48 A) from your phone.
-- **History**: Week / Month / Year energy chart (7 daily bars, 30 daily bars or 12 monthly bars) and the 20 most recent charging sessions, with cost at your electricity rate.
+- **History**: Day / Week / Month / Year energy chart (24 hourly bars for today, 7 daily, 30 daily or 12 monthly bars) and the 20 most recent charging sessions, with cost at your electricity rate. A day recorded before hourly capture began shows its total and says the hours are missing, never 24 empty bars.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.
 - **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for One rate or Seasons & time-of-use (base rates, daily windows, dates, currency), notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
@@ -16,13 +16,13 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 ## Screens
 
-| Tab          | What it shows                                                                                                                                                               |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                                           |
-| **History**  | Week / Month / Year energy chart (7 daily, 30 daily or 12 monthly bars, hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.               |
-| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                                            |
-| **Config**   | Charger configuration with secrets redacted, App settings (One rate / Seasons & time-of-use, base rates, daily windows, dates, currency), and the notification opt-in card. |
-| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                                                     |
+| Tab          | What it shows                                                                                                                                                                                                                                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                                                                                                                                                                                 |
+| **History**  | Day / Week / Month / Year energy chart (24 hourly bars for today, 7 daily, 30 daily or 12 monthly bars, hand-rolled SVG) and recent sessions, each flagged when served from cache or offline. Day reads only today's document; a day with no hourly buckets shows its total and says the hours were not recorded. |
+| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                                                                                                                                                                                  |
+| **Config**   | Charger configuration with secrets redacted, App settings (One rate / Seasons & time-of-use, base rates, daily windows, dates, currency), and the notification opt-in card.                                                                                                                                       |
+| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                                                                                                                                                                                           |
 
 ## Electricity rates
 
