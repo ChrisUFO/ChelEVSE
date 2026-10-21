@@ -1,19 +1,21 @@
-// History screen: 30 local days of daily energy in a hand-rolled SVG bar chart
-// plus the 20 most recent sessions. One-shot reads on first tab activation and
-// on Refresh — deliberately no realtime listener here.
+// History screen: a Week / Month / Year energy chart over hand-rolled SVG bars,
+// plus the 20 most recent sessions. One-shot reads on first tab activation, on
+// Refresh and on a period switch — deliberately no realtime listener here.
 
 import { $, setText } from '../ui.js';
-import { fetchHistory, fetchSessions, historyBounds } from '../store.js';
+import { fetchHistory, fetchSessions } from '../store.js';
 import {
-  CHART_SLOTS,
   CHART_VIEW_W,
+  DEFAULT_PERIOD,
+  PERIODS,
   chartIndexAt,
   dayId,
   dayLabel,
   historyReadState,
-  historySeries,
-  lastDayIds,
   maxSeries,
+  periodBounds,
+  periodById,
+  periodSeries,
   sectionView,
   sumSeries,
 } from '../history.js';
@@ -27,15 +29,21 @@ const VIEW_H = 132;
 const TOP = 10;
 const BASE = 118;
 const PLOT_H = BASE - TOP;
-const SLOT = VIEW_W / CHART_SLOTS;
-const BAR_W = 5.6;
+// A bar keeps this share of its slot. 0.56 reproduces the 5.6-unit bar of the
+// original 30-slot chart at VIEW_W / 30 and fills the viewBox for 7 or 12 bars.
+const BAR_RATIO = 0.56;
 
 let active = false;
 let loaded = false;
 let loading = false;
 // Full cost settings ({rate, currency, rates}); per-session costs use the
-// schedule, and its presence hides the aggregate daily/30-day cost below.
+// schedule, and its presence hides the aggregate daily/period cost below.
 let settings = null;
+// Selected chart range (a PERIODS id), and the read that owns the chart. Every
+// history read takes a sequence number so a period switch cannot be repainted by
+// the read it superseded.
+let periodId = DEFAULT_PERIOD;
+let historySeq = 0;
 let series = [];
 let selectedId = null;
 let todayId = null;
@@ -69,8 +77,8 @@ function svgEl(tag, attrs) {
 
 // ---------- summary + chart ----------
 
-// Daily/30-day cost from a kWh total. Null when a schedule exists: a day stores
-// one kWh figure, so its cost cannot be split across the windows it was drawn in.
+// Period cost from a kWh total. Null when a schedule exists: a day stores one
+// kWh figure, so its cost cannot be split across the windows it was drawn in.
 // The chart and summary then show kWh only.
 function seriesCost(kwh) {
   return aggregateCostLabel(kwh, settings);
@@ -98,6 +106,38 @@ function renderPlanBanner() {
   banner.hidden = !showPlanBanner(settings);
 }
 
+function currentPeriod() {
+  return periodById(periodId);
+}
+
+function periodHeading(descriptor) {
+  return descriptor.noun.charAt(0).toUpperCase() + descriptor.noun.slice(1);
+}
+
+// The chart heading, summary label and SVG label name the selected range; the
+// segment control is static markup, so the period copy is applied here instead
+// of being duplicated across the markup.
+function paintPeriodCopy() {
+  const descriptor = currentPeriod();
+  setText($('chart-heading'), periodHeading(descriptor));
+  setText($('history-total-label'), descriptor.summaryLabel);
+  $('history-summary').setAttribute('aria-label', `${descriptor.summaryLabel} summary`);
+  $('history-chart').setAttribute('aria-label', descriptor.chartLabel);
+}
+
+function periodButtons() {
+  return [...document.querySelectorAll('#period-switch [data-period]')];
+}
+
+// Roving tabindex, like the rate-mode control: one stop for the whole group.
+function paintPeriodSwitch() {
+  for (const button of periodButtons()) {
+    const selected = button.dataset.period === periodId;
+    button.setAttribute('aria-checked', String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  }
+}
+
 function renderSummary() {
   renderPlanBanner();
   if (!series.length) {
@@ -120,33 +160,41 @@ function showChartEmpty(title, line) {
   $('history-chart').setAttribute('hidden', '');
   $('chart-head').hidden = true;
   $('chart-empty').hidden = false;
+  // A hidden chart must not keep another period's points in the DOM; the next
+  // paint rebuilds them from the selected range.
+  $('chart-bars').replaceChildren();
+  barEls = [];
   setText($('chart-empty-title'), title);
   setText($('chart-empty-line'), line);
 }
 
-function buildBar(point, index) {
+function buildBar(point, index, slot, barW) {
+  const descriptor = currentPeriod();
+  const cost = seriesCost(point.kwh);
+  // The current month is partial (only recorded days exist), so its accessible
+  // label says so; day buckets already announce themselves via "Today ·" in the
+  // readout.
+  const suffix = point.isCurrent && descriptor.bucket === 'month' ? ' (current month)' : '';
   const group = svgEl('g', {
     class: 'bar',
     role: 'button',
     tabindex: '-1',
     'data-index': String(index),
-    'aria-label': `${point.label}: ${fmtK(point.kwh)} kWh${
-      seriesCost(point.kwh) ? `, ${seriesCost(point.kwh)}` : ''
-    }`,
+    'aria-label': `${point.label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
   });
   const hit = svgEl('rect', {
     class: 'bar-hit',
-    x: String(index * SLOT),
+    x: String(index * slot),
     y: '0',
-    width: String(SLOT),
+    width: String(slot),
     height: String(VIEW_H),
     fill: 'transparent',
   });
   const guide = svgEl('rect', {
     class: 'bar-guide',
-    x: String(index * SLOT + (SLOT - BAR_W) / 2),
+    x: String(index * slot + (slot - barW) / 2),
     y: String(TOP),
-    width: String(BAR_W),
+    width: String(barW),
     height: String(PLOT_H),
     rx: '2',
   });
@@ -154,9 +202,9 @@ function buildBar(point, index) {
   const height = point.kwh > 0 && max > 0 ? Math.max(2, (point.kwh / max) * (PLOT_H - 2)) : 2;
   const fill = svgEl('rect', {
     class: 'bar-fill',
-    x: String(index * SLOT + (SLOT - BAR_W) / 2),
+    x: String(index * slot + (slot - barW) / 2),
     y: String(BASE - height),
-    width: String(BAR_W),
+    width: String(barW),
     height: String(height),
     rx: '1.2',
   });
@@ -178,8 +226,12 @@ function renderChart() {
       y2: String(BASE),
     }),
   );
+  // Geometry follows the series: every rendered point fills the viewBox, so 7,
+  // 12 and 30 bars all use the full width and the hit test has no dead slots.
+  const slot = VIEW_W / Math.max(1, series.length);
+  const barW = slot * BAR_RATIO;
   barEls = series.map((point, index) => {
-    const group = buildBar(point, index);
+    const group = buildBar(point, index, slot, barW);
     bars.append(group);
     return group;
   });
@@ -196,11 +248,15 @@ function renderChart() {
 
 function paintSelection(index) {
   if (!series.length) return;
+  const descriptor = currentPeriod();
   const x = Math.max(0, Math.min(series.length - 1, index));
   const point = series[x];
   selectedId = point.id;
   const cost = seriesCost(point.kwh);
-  setText($('chart-day'), `${point.id === dayId(new Date()) ? 'Today · ' : ''}${point.label}`);
+  // "Today ·" only names a whole-day bucket; a month bucket is the current month
+  // and keeps its month label.
+  const prefix = descriptor.prefixToday && point.isCurrent ? 'Today · ' : '';
+  setText($('chart-day'), `${prefix}${point.label}`);
   setText($('chart-kwh'), fmtK(point.kwh));
   $('chart-cost').hidden = !cost;
   setText($('chart-cost'), cost || '');
@@ -219,17 +275,10 @@ function selectIndex(index, { focus = false } = {}) {
   if (focus && target) target.focus({ preventScroll: true });
 }
 
-const OFFLINE_COPY = {
-  title: "You're offline — history isn't available.",
-  line: 'Reconnect, then tap Refresh to load the last 30 days.',
-};
-const ERROR_COPY = {
-  title: "Couldn't load daily energy.",
-  line: 'Check your connection and refresh.',
-};
-const EMPTY_COPY = {
+const OFFLINE_TITLE = "You're offline — history isn't available.";
+const NO_HISTORY_COPY = {
   title: 'No history yet',
-  line: 'Daily totals appear once the charger logs a day.',
+  line: 'Totals appear once the charger logs a day.',
 };
 
 function setHistoryNote(text) {
@@ -239,20 +288,23 @@ function setHistoryNote(text) {
   setText(note, text);
 }
 
-// A section note always describes the last read, never the rows on screen.
+// A section note always describes the last read, never the points on screen.
 function historyNote(view) {
   if (!view.stale) return '';
-  if (historyState === 'cached') return 'Showing cached daily energy — reconnect to refresh.';
-  if (historyState === 'offline') return "You're offline — showing the last daily energy loaded.";
-  return "Couldn't refresh daily energy — showing the last values loaded.";
+  const noun = currentPeriod().noun;
+  if (historyState === 'cached') return `Showing cached ${noun} — reconnect to refresh.`;
+  if (historyState === 'offline') return `You're offline — showing the last ${noun} loaded.`;
+  return `Couldn't refresh ${noun} — showing the last values loaded.`;
 }
 
 function renderHistory() {
+  const descriptor = currentPeriod();
+  paintPeriodCopy();
   const hasData = historyServer && sumSeries(series) > 0;
   const view = sectionView(historyState, hasData);
   if (historyState === 'loading' && !series.length) {
     renderSummary();
-    showChartEmpty('Loading daily energy…', 'Reading the last 30 days.');
+    showChartEmpty(`Loading ${descriptor.noun}…`, descriptor.loadingLine);
     setHistoryNote('');
     return;
   }
@@ -265,20 +317,22 @@ function renderHistory() {
     setCostNote(false);
     const copy =
       historyState === 'offline'
-        ? OFFLINE_COPY
+        ? { title: OFFLINE_TITLE, line: descriptor.offlineLine }
         : historyState === 'error'
-          ? ERROR_COPY
-          : EMPTY_COPY;
+          ? {
+              title: `Couldn't load ${descriptor.noun}.`,
+              line: 'Check your connection and refresh.',
+            }
+          : NO_HISTORY_COPY;
     showChartEmpty(copy.title, copy.line);
     setHistoryNote('');
     return;
   }
   renderSummary();
   if (view.claimEmpty || (sumSeries(series) === 0 && !view.stale)) {
-    showChartEmpty(
-      'No energy recorded in the last 30 days.',
-      'Days without charging count as zero.',
-    );
+    // Zero days inside a rendered period are real zero-height bars; only a read
+    // that found nothing in the whole range uses the empty panel.
+    showChartEmpty(descriptor.emptyTitle, descriptor.emptyLine);
   } else {
     renderChart();
   }
@@ -413,6 +467,72 @@ function recheckWindow() {
   if (!loading) loadAll();
 }
 
+// Every one-shot read ends here: a read that was in flight across local midnight
+// has painted yesterday's window under today's labels, so re-enter it once with
+// today's ids instead of leaving "Today · <yesterday>" on screen. Re-entry
+// captures a fresh `today`, so this check can only fire again at the next local
+// midnight, never in a loop.
+function reloadIfWindowStale() {
+  if (!active || !windowStale()) return;
+  loaded = false;
+  loadAll();
+}
+
+// The range read for the selected period. `today` is captured once per read so
+// the bounds and the points are derived from the same local date.
+function periodRange(descriptor, today = new Date()) {
+  const bounds = periodBounds(descriptor, today);
+  todayId = bounds.endId;
+  return bounds;
+}
+
+// Apply one settled history read. A failed read (null) and an offline cache miss
+// set the state only: points already on screen must never be relabelled as the
+// newly selected period.
+function applyHistory(descriptor, result, today) {
+  historyState = result ? historyReadState(result) : 'error';
+  if (historyState === 'offline' || historyState === 'error') return;
+  series = periodSeries(descriptor, result.docs, today);
+  historyServer = historyState === 'fresh' || historyState === 'empty';
+  if (!series.some((point) => point.id === selectedId)) {
+    selectedId = series.length ? series[series.length - 1].id : null;
+  }
+}
+
+// A period switch re-reads history only: the sessions list keeps its own read.
+// The chart is cleared before the read, so a cache miss shows that period's
+// offline copy instead of the previous range's bars.
+async function readHistory() {
+  const gen = generation;
+  const seq = ++historySeq;
+  const descriptor = currentPeriod();
+  const today = new Date();
+  const bounds = periodRange(descriptor, today);
+  series = [];
+  selectedId = null;
+  historyServer = false;
+  historyState = 'loading';
+  renderHistory();
+  let result = null;
+  try {
+    result = await fetchHistory(bounds.startId, bounds.endId);
+  } catch {
+    result = null;
+  }
+  if (gen !== generation || seq !== historySeq) return;
+  applyHistory(descriptor, result, today);
+  renderHistory();
+  reloadIfWindowStale();
+}
+
+async function switchPeriod(id) {
+  const next = periodById(id);
+  if (!next || next.id === periodId) return;
+  periodId = next.id;
+  paintPeriodSwitch();
+  await readHistory();
+}
+
 async function loadAll() {
   if (loading) return;
   loading = true;
@@ -427,9 +547,10 @@ async function loadAll() {
   }
   setRefreshBusy(true);
   setFeedback('Refreshing…');
-  const ids = lastDayIds(30);
-  todayId = ids[ids.length - 1];
-  const bounds = historyBounds(ids);
+  const seq = ++historySeq;
+  const descriptor = currentPeriod();
+  const today = new Date();
+  const bounds = periodRange(descriptor, today);
   const [hist, sess] = await Promise.allSettled([
     fetchHistory(bounds.startId, bounds.endId),
     fetchSessions(),
@@ -437,40 +558,54 @@ async function loadAll() {
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
 
-  historyState = hist.status === 'fulfilled' ? historyReadState(hist.value) : 'error';
-  sessionsState = sess.status === 'fulfilled' ? historyReadState(sess.value) : 'error';
-  // Only a read that returned rows (fresh or cached) replaces the payload; an
-  // offline cache miss or a failed read leaves the previous payload alone and
-  // sectionView decides whether it is still safe to show it as stale. The
-  // provenance flag follows the payload, not the latest read.
-  if (historyState === 'fresh' || historyState === 'empty' || historyState === 'cached') {
-    series = historySeries(ids, hist.value.docs);
-    historyServer = historyState !== 'cached';
-    if (!series.some((point) => point.id === selectedId)) selectedId = todayId;
-  }
-  if (sessionsState === 'fresh' || sessionsState === 'empty' || sessionsState === 'cached') {
-    sessions = sess.value.docs;
-    sessionsServer = sessionsState !== 'cached';
-  }
-
   loading = false;
   setRefreshBusy(false);
+  // A period switch during the read owns the chart; this payload belongs to the
+  // superseded range and must not be painted.
+  if (seq === historySeq) {
+    applyHistory(descriptor, hist.status === 'fulfilled' ? hist.value : null, today);
+  }
+  sessionsState = sess.status === 'fulfilled' ? historyReadState(sess.value) : 'error';
+  // Only a read that returned rows (fresh or cached) replaces the payload; an
+  // offline cache miss or a failed read leaves the previous list alone and
+  // sectionView decides whether it is still safe to show it as stale. The
+  // provenance flag follows the payload, not the latest read.
+  if (sess.status === 'fulfilled' && sessionsState !== 'offline') {
+    sessions = sess.value.docs;
+    sessionsServer = sessionsState === 'fresh' || sessionsState === 'empty';
+  }
   renderHistory();
   renderSessions();
   renderLoadFeedback();
 
-  // A read that was in flight across local midnight leaves yesterday's window
-  // on screen; reload once with today's ids.
-  if (active && windowStale()) {
-    loaded = false;
-    loadAll();
-  }
+  reloadIfWindowStale();
 }
 
 // ---------- screen lifecycle ----------
 
 export function initHistory() {
   $('history-refresh').addEventListener('click', loadAll);
+  const periodSwitch = $('period-switch');
+  if (periodSwitch) {
+    periodSwitch.addEventListener('click', (e) => {
+      const button = e.target.closest('[data-period]');
+      if (!button || !periodSwitch.contains(button)) return;
+      switchPeriod(button.dataset.period);
+    });
+    // Arrow keys move through the radiogroup and wrap at the ends, matching the
+    // rate-mode control. One tab stop — the checked option — owns the group.
+    periodSwitch.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+      const index = PERIODS.findIndex((period) => period.id === periodId);
+      const step = e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 1;
+      const next = PERIODS[(index + step + PERIODS.length) % PERIODS.length];
+      const button = periodSwitch.querySelector(`[data-period="${next.id}"]`);
+      if (button) button.focus({ preventScroll: true });
+      switchPeriod(next.id);
+    });
+    paintPeriodSwitch();
+  }
   const svg = $('history-chart');
   svg.addEventListener('keydown', (e) => {
     // Only the documented ←/→ mapping moves the selection. Modified keys and
@@ -541,8 +676,8 @@ export function enterHistory() {
 
 export function activateHistory() {
   if (!active) return;
-  // A tab left open across local midnight would keep yesterday's 30-day window
-  // and label it "Today"; reload once when the local date has changed.
+  // A tab left open across local midnight would keep yesterday's window and
+  // label it "Today"; reload once when the local date has changed.
   recheckWindow();
   if (!loaded && !loading) loadAll();
 }
@@ -566,10 +701,12 @@ export function showHistorySettings(data) {
 
 export function resetHistory() {
   generation += 1;
+  historySeq += 1;
   active = false;
   loaded = false;
   loading = false;
   settings = null;
+  periodId = DEFAULT_PERIOD;
   const planBanner = $('history-plan-banner');
   if (planBanner) planBanner.hidden = true;
   series = [];
@@ -586,6 +723,8 @@ export function resetHistory() {
   if ($('sessions-list')) $('sessions-list').replaceChildren();
   if ($('chart-bars')) $('chart-bars').replaceChildren();
   if ($('history-total')) {
+    paintPeriodSwitch();
+    paintPeriodCopy();
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');

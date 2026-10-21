@@ -1,5 +1,5 @@
-// Pure history helpers — local calendar dates and the 30-day series. No DOM,
-// no Firebase; covered by test/web/history.test.js.
+// Pure history helpers — local calendar dates, chart periods and the read
+// classification. No DOM, no Firebase; covered by test/web/history.test.js.
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -24,19 +24,153 @@ export function lastDayIds(count, today = new Date()) {
   return ids;
 }
 
-// Chart geometry shared by the screen and its hit-testing tests. The viewBox is
-// fixed and every one of its 30 slots is an equal share.
-export const CHART_VIEW_W = 300;
-export const CHART_SLOTS = 30;
+// Local calendar month, e.g. 2026-10. The year series buckets a day document by
+// this prefix; no UTC conversion, matching dayId's local-date convention.
+export function monthId(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
 
-// Nearest slot index for a pointer x, or null outside the plot. `rect` is the
-// SVG's bounding box in CSS pixels.
+// Stable "Oct 2026" label; a malformed id is returned unchanged.
+export function monthLabel(id) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(id));
+  if (!match) return String(id);
+  const month = Number(match[2]) - 1;
+  if (month < 0 || month > 11) return String(id);
+  return `${MONTHS[month]} ${match[1]}`;
+}
+
+// Chart geometry shared by the screen and its hit-testing tests. The viewBox is
+// fixed; every visible point owns an equal share of it.
+export const CHART_VIEW_W = 300;
+
+// One descriptor per selectable chart range. A period is data, not a branch:
+// `bucket` decides how bounds and series are derived ('day' points or 'month'
+// points) and `slots` is the number of points the chart draws. The screen reads
+// the series length for its bar geometry, so a fourth period (#61's 24 hourly
+// points) needs a descriptor and a segment button — no geometry or hit-test
+// change.
+export const PERIODS = [
+  {
+    id: 'week',
+    label: 'Week',
+    slots: 7,
+    bucket: 'day',
+    prefixToday: true,
+    summaryLabel: 'Last 7 days',
+    noun: 'daily energy',
+    chartLabel:
+      'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in the last 7 days.',
+    emptyLine: 'Days without charging count as zero.',
+    loadingLine: 'Reading the last 7 days.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
+  },
+  {
+    id: 'month',
+    label: 'Month',
+    slots: 30,
+    bucket: 'day',
+    prefixToday: true,
+    summaryLabel: 'Last 30 days',
+    noun: 'daily energy',
+    chartLabel:
+      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in the last 30 days.',
+    emptyLine: 'Days without charging count as zero.',
+    loadingLine: 'Reading the last 30 days.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
+  },
+  {
+    id: 'year',
+    label: 'Year',
+    slots: 12,
+    bucket: 'month',
+    prefixToday: false,
+    summaryLabel: 'Last 12 months',
+    noun: 'monthly energy',
+    chartLabel:
+      'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
+    emptyTitle: 'No energy recorded in the last 12 months.',
+    emptyLine: 'Months without charging count as zero.',
+    loadingLine: 'Reading the last 12 months.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
+  },
+];
+
+// Month keeps today's 30-day behaviour when the screen first opens.
+export const DEFAULT_PERIOD = 'month';
+
+export function periodById(id) {
+  return (
+    PERIODS.find((period) => period.id === id) ||
+    PERIODS.find((period) => period.id === DEFAULT_PERIOD)
+  );
+}
+
+function periodFor(period) {
+  return typeof period === 'string' ? periodById(period) : periodById(period && period.id);
+}
+
+// Inclusive document-id range for one period, oldest first. Both day periods and
+// the year resolve to a contiguous day-id range, so the store needs one
+// documentId() query and no period-specific read.
+export function periodBounds(period, today = new Date()) {
+  const descriptor = periodFor(period);
+  if (descriptor.bucket === 'month') {
+    const start = new Date(today.getFullYear(), today.getMonth() - (descriptor.slots - 1), 1, 12);
+    return { startId: dayId(start), endId: dayId(today) };
+  }
+  const ids = lastDayIds(descriptor.slots, today);
+  return { startId: ids[0], endId: ids[ids.length - 1] };
+}
+
+// One point per rendered slot, oldest first, in one shape for every period:
+// { id, kwh, label, isCurrent }. A month bucket sums its daily documents by the
+// local YYYY-MM prefix; days without a document are genuine zero points, not
+// gaps, and the current month is partial because only recorded days exist.
+export function periodSeries(period, docs, today = new Date()) {
+  const descriptor = periodFor(period);
+  if (descriptor.bucket === 'month') {
+    const months = [];
+    const end = new Date(today.getFullYear(), today.getMonth(), 1, 12);
+    for (let i = descriptor.slots - 1; i >= 0; i--) {
+      months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
+    }
+    const totals = new Map(months.map((id) => [id, 0]));
+    for (const doc of docs || []) {
+      if (!doc || typeof doc.id !== 'string') continue;
+      const bucket = doc.id.slice(0, 7);
+      if (!totals.has(bucket)) continue;
+      const kwh = Number(doc.kwh);
+      if (Number.isFinite(kwh) && kwh > 0) totals.set(bucket, totals.get(bucket) + kwh);
+    }
+    const current = monthId(today);
+    return months.map((id) => ({
+      id,
+      kwh: totals.get(id),
+      label: monthLabel(id),
+      isCurrent: id === current,
+    }));
+  }
+  const current = dayId(today);
+  return historySeries(lastDayIds(descriptor.slots, today), docs).map((point) => ({
+    ...point,
+    isCurrent: point.id === current,
+  }));
+}
+
+// Slot index for a pointer x, or null outside the plot. `count` is the number of
+// points actually rendered: they fill the viewBox with no dead slots (7, 12 and
+// 30 all map across the full width). `rect` is the SVG's bounding box in CSS
+// pixels.
 export function chartIndexAt(clientX, rect, count) {
   if (!rect || !(rect.width > 0) || !Number.isFinite(clientX)) return null;
+  const slots = Number(count);
+  if (!Number.isFinite(slots) || slots <= 0) return null;
   const x = ((clientX - rect.left) / rect.width) * CHART_VIEW_W;
   if (x < 0 || x > CHART_VIEW_W) return null;
-  const index = Math.max(0, Math.round((x / CHART_VIEW_W) * CHART_SLOTS - 0.5));
-  return index < count ? index : null;
+  const index = Math.floor((x / CHART_VIEW_W) * slots);
+  return index < slots ? index : null;
 }
 
 // Stable "Sat 18 Oct" label; parsing the id as local time keeps the same day.

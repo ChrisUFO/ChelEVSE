@@ -8,7 +8,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 - **Monitor**: live charger status (state, current draw, power, session/total energy, temperatures, setpoint) from anywhere — not just the home LAN.
 - **Control**: stop, return to auto, or hold at a chosen current (6–48 A) from your phone.
-- **History**: daily kWh chart for the last 30 days and the 20 most recent charging sessions, with cost at your electricity rate.
+- **History**: Week / Month / Year energy chart (7 daily bars, 30 daily bars or 12 monthly bars) and the 20 most recent charging sessions, with cost at your electricity rate.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.
 - **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for One rate or Seasons & time-of-use (base rates, daily windows, dates, currency), notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
@@ -19,7 +19,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 | Tab          | What it shows                                                                                                                                                               |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                                           |
-| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                                                            |
+| **History**  | Week / Month / Year energy chart (7 daily, 30 daily or 12 monthly bars, hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.               |
 | **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                                            |
 | **Config**   | Charger configuration with secrets redacted, App settings (One rate / Seasons & time-of-use, base rates, daily windows, dates, currency), and the notification opt-in card. |
 | **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                                                     |
@@ -170,7 +170,7 @@ live session and the whole history immediately.
   separate the two, so such a session can read under or over its true cost (the error is bounded by
   the rate difference across the gap). Issue #37 accepts this as the best available signal until the
   bridge stores the real charging intervals.
-- **The 30-day total and the daily bar cost are hidden when a rate plan exists**, because a history
+- **The period total and the selected bar's cost are hidden when a rate plan exists**, because a history
   document holds a single kWh figure per day and it cannot be split across the windows it was drawn
   in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary
   says so; the plan banner additionally flags any 0.00 moments. With no plan, every total and bar

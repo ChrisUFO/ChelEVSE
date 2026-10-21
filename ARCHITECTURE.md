@@ -124,7 +124,7 @@ Costs are presentation values, computed on every render from the current setting
 - **One rate:** `kWh × rate`, exactly the pre-schedule behaviour. Once any row exists, gaps are 0.00 and the stored rate is ignored.
 - **Live session:** the interval is `[updated_at − elapsed, updated_at]`, anchored to the status write. It is shown only while the charger is actually charging (`state_label === "charging"` and `charger_online !== false`). Paused/ready snapshots hide the figure instead of sliding it; a stale cache-only charging snapshot keeps the figure frozen at its own interval; an offline marker hides it. If any slice of the interval has no base/window price, that slice is 0.00 and the line adds **understates cost** on its own warning line.
 - **History session:** `costForSession` over the session's own `started_at…ended_at`, pro-rating `wh` uniformly across the rate boundaries.
-- **Aggregate daily/30-day cost:** hidden whenever a rate schedule exists. A day stores one kWh total, so it cannot be split across windows; kWh remains visible and per-session costs are still shown. A history banner also flags any 0.00 moments and links back to settings.
+- **Aggregate daily/period cost:** hidden whenever a rate schedule exists. A day stores one kWh total, so it cannot be split across windows; kWh remains visible and per-session costs are still shown. A history banner also flags any 0.00 moments and links back to settings.
 - **Approximation (accepted):** sessions store one energy total, not energy per window. Uniform pro-rating is the best available signal. A paused-then-resumed plug-in spans idle time while `wh`/`elapsed` cover charging only, so its cost can be off by the rate difference across the gap. Issue #57 tracks recording real charging intervals and pricing them when present; the fallback remains uniform pro-rating.
 
 ### Schedule (`schedule/current`) and commands
@@ -188,7 +188,7 @@ Python 3 service under systemd (`Restart=always`, `User=root`), installed by rsy
 | `js/cost.js`                 | flat-vs-schedule presentation labels for status/history                                     |
 | `js/settings.js`             | settings validate/normalize/draft compare/save-state machine                                |
 | `js/schedule.js`             | schedule validation, queue/discard state machines, snapshot routing                         |
-| `js/history.js`              | day ids, 30-day series, chart hit-test, read classification                                 |
+| `js/history.js`              | period descriptors/bounds/series, dynamic chart hit-test, read classification               |
 | `js/config.js`               | curated config rows, raw JSON, signature                                                    |
 | `js/advanced.js`             | RAPI validation, confirmation gate, scrollback helpers                                      |
 | `js/notifications.js`        | notification card copy, token decision/result                                               |
@@ -215,7 +215,7 @@ Screens never contain business rules that belong in a pure module; pure modules 
 - **Settings** holds draft rows, a confirmed baseline and an optional pending snapshot. Flags: dirty/saving/waiting/saved/error. Offline saves are refused before the write; a timeout enters "waiting" with late reconciliation; a failure rolls back to the newest server snapshot. The rate editor has two derived modes: **One rate** (no rows) and **Seasons & time-of-use**. Switching to Seasons seeds one visible **current-month** season at the flat rate and focuses **Base rate**; the rest of the year stays an uncovered gap the owner covers with its inline **Cover the rest of the year** action (or **Fill gaps** / **Add a season**). Switching to One rate confirms the loss, reuses a single All-year base's price when possible, and drops the rows. Every season opens on a visible **Season dates** block above **Base rate** and **Daily windows (optional)**: native **Starts**/**Ends** pickers use 2024 as a reference year while only `MM-DD` is stored, **All year** clears the dates, **Edit dates** on a collapsed header expands and focuses the block, and **Advanced: month ranges** appears only for a legacy non-contiguous month scope (or a malformed month scope that has to be repaired) — dates are the only normal scope editor. A new season seeds the largest uncovered date range (All-year when no base exists and the year is covered) and focuses Base rate; legacy month scopes show derived dates, and non-contiguous months open the month editor. A season base is an all-day every-day row; daily windows are overrides, and a base plus windows is valid. Uncovered dates are 0.00 with **Fill N gaps** (empty bases, focused first) and a plan summary gap count; a base-less season offers **Add base rate** only when no other base already overlaps its dates. Duplicate copies a season into its free complement. Date commits repaint in place when no merge or split occurs; structural edits rebuild on the next task and restore the `data-field` control. Add a base is withheld at the row cap and when it would collide with an existing base. The stored shape and matching are unchanged.
 
 - **Schedule** separates confirmed vs draft, supports optimistic queued writes, a queued-from-snapshot flag, unconfirmed-save handling, discard baseline reads and remote notices. A schedule can be disabled even if its rules are invalid.
-- **History** uses one-shot reads for the 30-day series and recent sessions (not listeners), tracks provenance separately, never paints cached/stale data as current, and rechecks midnight while open.
+- **History** uses one-shot reads for the selected period's range (Week 7 days, Month 30 days, Year 12 months — at most 366 daily documents in one `documentId()` query) and recent sessions (not listeners), tracks provenance separately, never paints cached/stale data as current, and rechecks midnight while open. The Week / Month / Year segment re-reads history only; the sessions list keeps its own read. Period descriptors and series derivation are pure (`js/history.js`), so bar geometry and the hit test follow the rendered point count rather than a per-period branch.
 - **Advanced** requires a per-visit confirmation gate and shows a 20-entry RAPI scrollback.
 - **Notifications** is a card state machine (`checking/unsupported/no-vapid/denied/granted/default`) backed by the DOM-free token lifecycle.
 
@@ -233,7 +233,7 @@ Any future editor (including #58) must preserve these semantics.
 
 ### Offline, service worker and push
 
-- `web/sw.js` is a plain service worker with no Firebase SDK. `CACHE` is currently `chelevse-v35`; `SHELL` lists every runtime `web/js/**` module plus the root assets. `test/web/sw-shell.test.js` fails if a module is missing, duplicated, or if `CACHE` is malformed.
+- `web/sw.js` is a plain service worker with no Firebase SDK. `CACHE` is currently `chelevse-v47`; `SHELL` lists every runtime `web/js/**` module plus the root assets. `test/web/sw-shell.test.js` fails if a module is missing, duplicated, or if `CACHE` is malformed.
 - Fetch is cache-first for same-origin GETs, except `firebase-config.js`, which is deliberately network-only. Navigation falls back to `index.html`; other failures return 503. Cross-origin/Firebase requests always go to the network.
 - Install precaches the shell and `skipWaiting`; activate deletes old caches and `clients.claim`; the page reloads once on `controllerchange` only if a controller already existed. **Any shell change must bump `CACHE`**, or existing clients keep the old modules.
 - Firestore uses its persistent cache with a multi-tab manager and an in-memory fallback. A cold reload still needs the network for the SDK and `firebase-config.js`.
@@ -302,7 +302,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 | Suite | Command                                                | Current size | Scope                                                                                        |
 | ----- | ------------------------------------------------------ | ------------ | -------------------------------------------------------------------------------------------- |
-| Web   | `npm test`                                             | 190 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse; no browser or Firebase |
+| Web   | `npm test`                                             | 316 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse; no browser or Firebase |
 | Rules | `npm run test:rules`                                   | 34 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                          |
 | Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 271 tests    | bridge parsing, commands, MQTT, schedule, history, sessions, watchdog, ACL; in-memory fakes  |
 
@@ -337,7 +337,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 - **Settings listener error handling:** `settings/current` has no error callback; a permission/backend failure leaves the card silently empty instead of showing an error.
 - **Single-bridge assumptions:** session upsert is read-then-write (not transactional), schedule sync uses a digest, and watchdog counters are process-local. These are acceptable for one Pi but not for HA.
 - **Bridge runs as root.** The unit is `User=root`; a dedicated service user with access to `private/` and the charger would reduce blast radius.
-- **History retention:** `history/*` and `sessions/*` grow without pruning; the UI only reads 30 days / 20 sessions.
+- **History retention:** `history/*` and `sessions/*` grow without pruning; the UI only reads the selected period (at most 366 days for a Year view) / 20 sessions.
 - **Docs drift:** `docs/DEPLOY.md` still mentions OTA; README/DEPLOY deploy-key filenames differ from `AGENTS.md`; `firestore.rules` still carries a stale comment about schedule validation landing later; README’s paused-session note cites #37, the scope that accepted the approximation, while #57 is the charging-interval follow-up.
 
 ## 12. Glossary
@@ -350,7 +350,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 | **Daily window**    | A rate row that is not a base; overrides the base for its days and local time range                                |
 | **Period / season** | A presentation grouping of rows sharing a month or date scope; not persisted                                       |
 | **Live cost**       | Scheduled cost for the current session, anchored to `status.updated_at − elapsed` and shown only while charging    |
-| **Aggregate cost**  | Daily/30-day cost from one kWh total; hidden when a schedule exists                                                |
+| **Aggregate cost**  | Daily/period cost from one kWh total; hidden when a schedule exists                                                |
 | **MQTT source**     | The bridge's optional event-driven status/command path; HTTP is the reconciler and fallback                        |
 | **Transport**       | `mqtt` or `http`, recorded on a command when the bridge actually sent it                                           |
 | **Bridge stale**    | No status write for a threshold; distinct from charger offline                                                     |
