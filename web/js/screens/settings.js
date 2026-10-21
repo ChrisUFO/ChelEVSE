@@ -926,6 +926,31 @@ function periodName(period) {
   return period.kind === 'dates' && scope ? `${base} ${scope}` : base;
 }
 
+// The collapsed band's words. `dateRangeText` is shared with coverage rows,
+// segment labels and sibling notes, where a recurrence suffix would be noise,
+// so the cue lives here. Only a real date pair names its recurrence: All year
+// and a month-only season already say their scope, and a malformed pair needs
+// fixing before recurrence means anything. "yearly" rather than "every year"
+// is a width decision: at 320 px a wrapped range ("(wraps)" included) plus the
+// longer phrase pushed the band below the title and the status flag onto a
+// third line.
+export function periodBandCopy(period) {
+  const dateMode = periodHasDates(period);
+  const bounds = periodDateBounds(period);
+  const dates = dateMode && bounds.from && bounds.to ? dateRangeText(bounds.from, bounds.to) : '';
+  return {
+    dateMode,
+    dateText: dates,
+    text: dateMode
+      ? dates
+        ? `${dates} · yearly`
+        : 'Dates need fixing'
+      : period.monthText !== period.title
+        ? period.monthText
+        : '',
+  };
+}
+
 // The header tells the truth for the representative month: the price range
 // includes the effective bases/windows and sibling rows that apply there, while
 // the count stays the period's own rows. Unpriced hours show as 0.00.
@@ -935,18 +960,9 @@ function paintPeriodHeader(card) {
   card.list.setAttribute('aria-label', `Windows in ${periodName(period)}`);
   card.addButton.setAttribute('aria-label', `Add a window to ${periodName(period)}`);
   card.editDates.setAttribute('aria-label', `Edit season dates for ${periodName(period)}`);
-  const dateMode = periodHasDates(period);
-  const dateBounds = periodDateBounds(period);
-  const dateText =
-    dateMode && dateBounds.from && dateBounds.to
-      ? dateRangeText(dateBounds.from, dateBounds.to)
-      : '';
-  const showMonths = dateMode || period.monthText !== period.title;
-  setText(
-    card.band,
-    dateMode ? dateText || 'Dates need fixing' : showMonths ? period.monthText : '',
-  );
-  card.band.hidden = !showMonths;
+  const { dateMode, dateText, text: bandText } = periodBandCopy(period);
+  setText(card.band, bandText);
+  card.band.hidden = !bandText;
   card.band.classList.toggle('date-range', dateMode && Boolean(dateText));
 
   const range = periodEffectiveRange(draftRates, readFields().rate, period);

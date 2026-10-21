@@ -98,6 +98,7 @@ import {
   applySubmitFocus,
   boundFromDateInput,
   dateInputForBound,
+  periodBandCopy,
   referenceStartYear,
 } from '../../web/js/screens/settings.js';
 import {
@@ -1579,6 +1580,24 @@ test('a picked date stores its month and day and round-trips through the picker'
   // can explain the missing half instead of dropping the bound.
   assert.equal(boundFromDateInput(''), '00-00');
   assert.equal(boundFromDateInput('2026-02-30'), '00-00');
+});
+
+test('the collapsed band names recurrence only for a real date pair', () => {
+  const dates = ratePeriods([rateRowFields(summerDates)])[0];
+  assert.deepEqual(periodBandCopy(dates), {
+    dateMode: true,
+    dateText: 'Jun 15–Sep 15',
+    text: 'Jun 15–Sep 15 · yearly',
+  });
+  // A wrapping season keeps its "(wraps)" note before the cue.
+  const wrap = ratePeriods([rateRowFields(winterDates)])[0];
+  assert.equal(periodBandCopy(wrap).text, 'Sep 16–Jun 14 (wraps) · yearly');
+  // All year and a month-only season already say their scope: no cue.
+  const all = ratePeriods([rateRowFields(nightEveryDay)])[0];
+  assert.equal(periodBandCopy(all).text, '');
+  const months = ratePeriods([rateRowFields(winterPeak)])[0];
+  assert.equal(periodBandCopy(months).text, 'Nov–Feb');
+  assert.equal(periodBandCopy(months).dateMode, false);
 });
 
 test('the save row and plan summary count affected rows, not collisions', () => {
