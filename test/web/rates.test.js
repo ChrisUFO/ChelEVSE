@@ -617,8 +617,54 @@ test('the compatibility month hint covers a range chronologically, wrapping the 
   assert.deepEqual(monthsCovering('10-15', '04-15'), [10, 11, 12, 1, 2, 3, 4]);
   assert.deepEqual(monthsCovering('02-29', '02-29'), [2]);
   assert.deepEqual(monthsCovering('12-31', '01-01'), [12, 1]);
+  // A reversed range inside one month wraps the whole year, so every month is
+  // covered; only the shared month is not the answer.
+  assert.deepEqual(monthsCovering('06-20', '06-10'), [6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5]);
+  assert.deepEqual(monthsCovering('12-31', '12-30'), [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(monthsCovering('02-29', '02-28'), [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1]);
   assert.deepEqual(monthsCovering('02-30', '03-01'), []);
   assert.deepEqual(monthsCovering(null, '03-01'), []);
+});
+
+test('the compatibility month hint contains every month a date range matches', () => {
+  const bounds = [
+    '01-01',
+    '01-31',
+    '02-28',
+    '02-29',
+    '03-01',
+    '04-15',
+    '06-10',
+    '06-15',
+    '06-20',
+    '07-04',
+    '09-15',
+    '10-15',
+    '11-30',
+    '12-30',
+    '12-31',
+  ];
+  for (const from of bounds) {
+    for (const to of bounds) {
+      const scope = seasonScope(windowRow({ months: null, from, to }));
+      const hint = monthsCovering(from, to);
+      for (const year of [2024, 2025]) {
+        for (let month = 1; month <= 12; month += 1) {
+          const daysInMonth = new Date(year, month, 0).getDate();
+          let matched = false;
+          for (let day = 1; day <= daysInMonth && !matched; day += 1) {
+            matched = scopeMatches(scope, date(year, month, day, 12));
+          }
+          if (matched) {
+            assert.ok(
+              hint.includes(month),
+              `${from}→${to} matches ${year}-${String(month).padStart(2, '0')} but the hint is [${hint}]`,
+            );
+          }
+        }
+      }
+    }
+  }
 });
 
 test('date validation requires both real bounds and ignores the months hint', () => {

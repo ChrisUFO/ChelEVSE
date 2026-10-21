@@ -99,12 +99,18 @@ export function monthsCovering(from, to) {
   const start = parseMonthDay(from);
   const end = parseMonthDay(to);
   if (!start || !end) return [];
+  const wraps = monthDayKey(start.month, start.day) > monthDayKey(end.month, end.day);
+  // A reversed range whose bounds share a month (`06-20` → `06-10`) runs through
+  // December and back into that same month, so it spans the whole year rather
+  // than the single shared month.
+  const wholeYear = wraps && start.month === end.month;
   const months = [];
   let month = start.month;
   for (;;) {
     months.push(month);
-    if (month === end.month) break;
+    if (!wholeYear && month === end.month) break;
     month = month === 12 ? 1 : month + 1;
+    if (wholeYear && month === start.month) break;
   }
   return months;
 }
@@ -529,11 +535,13 @@ function indexOfMonthDay(key) {
   return monthDayIndex(Math.floor(key / 100), key % 100);
 }
 
-// The same date set one day later: the dates whose *next* day is in `set`. It is
-// the annual reading of "yesterday's season", which is what a tail is judged by.
-// The 28 February slot shifts to 29 February in a leap year *and* to 1 March in
-// a common year, so both possible next days are included; overlap only needs a
-// year type where the two windows meet.
+// The dates whose *previous* day is in `set` — the set shifted one day forward,
+// i.e. the successor of every date in `set`. That is the direction the main/tail
+// table needs: a tail on date X covers the instant on X's previous date, so A's
+// dates are intersected with `shift(S_B)`. The 28 February slot shifts to
+// 29 February in a leap year *and* to 1 March in a common year, so both possible
+// successors are included; overlap only needs a year type where the two windows
+// meet.
 export function shiftDateSet(set) {
   const flags = new Array(RING_DAYS).fill(false);
   for (const [start, end] of Array.isArray(set) ? set : []) {
