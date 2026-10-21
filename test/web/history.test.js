@@ -686,6 +686,26 @@ test('the plan banner appears exactly when a saved plan has an unpriced instant'
 });
 
 // ---------- screen read paths ----------
+//
+// Decision (issue #85a): the read-path wiring stays a source-text pin; the
+// behaviour it guards is covered at the pure layer instead.
+//
+// Exercising `readHistory`/`loadAll` end-to-end would need `fetchHistory` and
+// `fetchHistoryDay` replaced (ESM module mocking, i.e. Node's
+// `--experimental-test-module-mocks`) plus a chart DOM to paint into. This repo
+// has no DOM harness and no module-mocking setup, and `npm test` must not depend
+// on an experimental Node flag, so neither was added. What stays uncovered is
+// the screen's read lifecycle: which read runs, what it stores as the captured
+// window, and whether the guard fires once a read settles. The fixed-clock
+// invariants below pin the decisions that read makes (bounds, points, the
+// current slot, the midnight comparison) for every period; the pin at the end of
+// this section is the tripwire on the wiring itself, read from source the way
+// test/web/sw-shell.test.js reads web/sw.js.
+//
+// A future DOM + module-mocking harness would buy the lifecycle: an actual stale
+// read re-fired after midnight, a response that settles across midnight
+// discarded rather than painted, and sign-out/reset clearing the captured
+// window mid-flight — none of which source text or the pure layer can prove.
 
 test('a read that straddles local midnight leaves a stale window to re-check', () => {
   // The screen captures `today` once per read and stores its day as `todayId`,
@@ -727,6 +747,55 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
       const current = rebuilt.findIndex((point) => point.isCurrent);
       assert.equal(current, period.bucket === 'hour' ? 0 : rebuilt.length - 1, period.id);
     }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the day period keeps its captured day until local midnight', () => {
+  // Day is the one period read from a single document rather than a day-id
+  // range, so its captured window is both the query and the guard: the screen
+  // stores `bounds.endId` as `todayId` and compares it with dayId(new Date()).
+  // Exercise that for Day explicitly (the loop above covers all four periods
+  // generically): the window and the current hour slot survive a clock advance
+  // within the captured day, and the window is stale once local midnight passes.
+  const captured = new Date(2026, 9, 18, 23, 59, 30).getTime();
+  mock.timers.enable({ apis: ['Date'], now: captured });
+  try {
+    const bounds = periodBounds('day');
+    // The captured day is the whole window, and it is the document the read
+    // targets: startId and endId are the same day.
+    assert.deepEqual(bounds, { startId: '2026-10-18', endId: '2026-10-18' });
+    assert.equal(bounds.startId, bounds.endId);
+    // The painted series belongs to that day: hour 23 is in progress.
+    const points = periodSeries('day', {});
+    assert.equal(points.length, 24);
+    assert.equal(points[23].id, '23');
+    assert.equal(points[23].isCurrent, true);
+    assert.deepEqual(
+      points.filter((point) => point.isCurrent).map((point) => point.id),
+      ['23'],
+    );
+
+    // Settled 20 s later, still 18 Oct: the captured day is current, so the
+    // guard must not fire and the painted slot stays today's.
+    mock.timers.setTime(captured + 20_000);
+    assert.equal(dayId(new Date()), bounds.startId);
+    assert.equal(dayId(new Date()), bounds.endId);
+    assert.equal(points[23].isCurrent, true);
+
+    // Settled after local midnight: the same window now ends yesterday, so the
+    // guard must fire instead of leaving yesterday's hours under "Today".
+    mock.timers.setTime(captured + 60_000);
+    assert.equal(dayId(new Date()), '2026-10-19');
+    assert.notEqual(bounds.endId, dayId(new Date()));
+    // A re-read captures the new day, and a series built for it starts at hour 0.
+    assert.deepEqual(periodBounds('day'), { startId: '2026-10-19', endId: '2026-10-19' });
+    const rebuilt = periodSeries('day', {});
+    assert.equal(
+      rebuilt.findIndex((point) => point.isCurrent),
+      0,
+    );
   } finally {
     mock.timers.reset();
   }
