@@ -888,7 +888,6 @@ input[type='range']::-moz-range-thumb {
 /* Informational notes added with the Config/Advanced screens need AA contrast
    on the dark surfaces; the older History/Schedule counters keep --faint. */
 #config-updated,
-#rates-count,
 .advanced-note {
   color: var(--muted);
 }
@@ -1746,9 +1745,6 @@ input[aria-invalid='true'] {
   font-size: 11.5px;
   color: var(--muted);
 }
-.period-band.pending {
-  color: var(--warn);
-}
 .period-meta {
   display: flex;
   flex-wrap: wrap;
@@ -2108,6 +2104,18 @@ input[aria-invalid='true'] {
   font-family: var(--mono);
   color: var(--text);
   text-align: right;
+  /* The code can be 8 characters; the cell breaks between it and the amount
+     instead of running under the band column at 320 px. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.coverage-table .price-code,
+.coverage-table .price-amount {
+  white-space: nowrap;
+}
+/* A price, a range or "other times USD 0.31" is one unbreakable run: breaking
+   after the en dash reads as two different numbers. */
+.nowrap {
   white-space: nowrap;
 }
 .coverage-table td.band {
@@ -2426,9 +2434,6 @@ input[aria-invalid='true'] {
   line-height: 1.45;
   color: var(--muted);
 }
-.preview-note.warn {
-  color: var(--warn);
-}
 .preview-note.blocked {
   padding: 8px 10px;
   border-left: 2px solid var(--warn);
@@ -2436,7 +2441,6 @@ input[aria-invalid='true'] {
   background: color-mix(in oklab, var(--warn) 8%, transparent);
   color: var(--warn);
 }
-.coverage-note,
 .coverage-empty {
   margin: 0;
   font-size: 11.5px;
@@ -2521,10 +2525,20 @@ input[aria-invalid='true']:focus-visible {
   font-size: 14px;
   font-weight: 700;
 }
-#save-settings:disabled {
+#save-settings:disabled,
+#save-settings.blocked {
   border-color: var(--line);
   background: var(--surface-2);
   color: var(--muted);
+}
+/* The blocked button stays submit-capable: pressing it validates and jumps to
+   the first problem, so it keeps the pointer, not the disabled cursor. */
+#save-settings.blocked {
+  cursor: pointer;
+}
+#save-settings.blocked:hover {
+  border-color: color-mix(in oklab, var(--err) 45%, var(--line));
+  color: var(--text);
 }
 
 /* notifications */
@@ -2996,6 +3010,13 @@ input[aria-invalid='true']:focus-visible {
   .coverage-table th,
   .coverage-table td {
     padding: 4px 2px;
+  }
+  /* "SEASON · BAND" is the widest column heading; wrapping it to two lines adds
+     a header row of height to every table at 320. Tighten it instead. */
+  .coverage-table thead th {
+    font-size: 8.5px;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
   }
   .preview-table th {
     width: 56px;

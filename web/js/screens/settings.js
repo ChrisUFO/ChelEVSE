@@ -30,6 +30,7 @@ import {
   parseLocalDateTime,
   periodCoverage,
   periodEffectiveRange,
+  planProblemText,
   previewBlocker,
   previewRate,
   rateMonthsText,
@@ -40,6 +41,7 @@ import {
   rateTierFor,
   rateWindowSummary,
   reconcileSettingsSave,
+  saveButtonState,
   segmentNote,
   settingsDraftMatches,
   settingsFields,
@@ -165,6 +167,27 @@ function priceText(rate) {
   return fmtRate(rate, currency());
 }
 
+// A price cell breaks between the currency code and the amount rather than
+// running under the band column: the code can be CURRENCY_MAX (8) characters
+// and the 30% price column at 320 px cannot hold "US cents" and "0.315" on one
+// line. Each half stays unbreakable, so a number never splits.
+function priceCell(rate) {
+  const td = el('td', 'price');
+  const text = priceText(rate);
+  const code = currency();
+  if (!code || !text.startsWith(code) || text.length <= code.length) {
+    td.textContent = text;
+    return td;
+  }
+  const rest = text.slice(code.length);
+  const amount = rest.startsWith(' ') ? rest.slice(1) : rest;
+  const cell = [el('span', 'price-code', code)];
+  if (amount !== rest) cell.push(' ');
+  cell.push(el('span', 'price-amount', amount));
+  td.append(...cell);
+  return td;
+}
+
 // "USD 0.20–0.32", not "USD 0.20–USD 0.32": one currency for a range.
 function priceRangeText(range) {
   if (!range) return '';
@@ -173,9 +196,10 @@ function priceRangeText(range) {
 }
 
 // Keep "other times USD 0.31" and "USD 0.10–0.32" together when a summary
-// wraps; breaking inside a price reads as two different numbers.
-function nowrap(text) {
-  return String(text).replaceAll(' ', '\u00a0');
+// wraps; breaking inside a price reads as two different numbers. A class, not an
+// NBSP substitution, so a break after the en dash is prevented too.
+function nowrapEl(text) {
+  return el('span', 'nowrap', text);
 }
 
 function markEdited() {
@@ -458,14 +482,15 @@ function paintPeriodHeader(card) {
   // otherwise the first month of the scope). Naming it keeps an All-year header
   // from advertising a range that a July sibling changes; the table caption
   // repeats the same month.
-  const example = range ? `${MONTH_NAMES[range.month - 1].slice(0, 3)} example ` : '';
-  const price =
-    period.kind === 'invalid'
-      ? 'needs months'
-      : range
-        ? `${example}${nowrap(priceRangeText(range))} effective`
-        : 'rate not set';
-  setText(card.meta, `${countText} · ${price}`);
+  const example = range ? `${MONTH_NAMES[range.month - 1].slice(0, 3)} example` : '';
+  // The range and "effective" are one unbreakable run: a break after the en
+  // dash reads as two numbers, and "effective" alone on a line reads as a
+  // stray word at 320.
+  const meta = [el('span', null, `${countText} · ${example ? `${example} ` : ''}`)];
+  if (period.kind === 'invalid') meta.push(el('span', null, 'needs months'));
+  else if (range) meta.push(nowrapEl(`${priceRangeText(range)} effective`));
+  else meta.push(el('span', null, 'rate not set'));
+  card.meta.replaceChildren(...meta);
   paintMonthEditor(card);
 }
 
@@ -640,19 +665,21 @@ function paintCoverage(card) {
       } else if (segment.window) {
         // An inherited row keeps the band dot (so the legend still matches the
         // row) and names the season it came from; the column heading covers
-        // "Season · band".
+        // "Season · band". The band leads so the dot always sits on the first
+        // line — a long custom month list ("Jan–Feb, Jun–Jul") then wraps under
+        // it instead of orphaning the dot on a line of its own at 320 px.
         const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
         const label = el('span', 'sibling-band');
         label.append(
-          el('span', 'sibling-owner', owner ? periodName(owner) : 'Other season'),
-          el('span', 'sibling-sep', ' · '),
           el('span', `tier ${tierClass(tier)}`, tier || 'Window'),
+          el('span', 'sibling-sep', ' · '),
+          el('span', 'sibling-owner', owner ? periodName(owner) : 'Other season'),
         );
         band.append(label);
       } else {
         band.textContent = 'Other times';
       }
-      const price = el('td', 'price', priceText(segment.rate));
+      const price = priceCell(segment.rate);
       tr.append(time, band, price);
       tbody.append(tr);
     }
@@ -1036,16 +1063,21 @@ function paintPlan() {
     .flatMap((period) => period.rows.map((entry) => entry.row));
   const range = ratePlanRange(rateRows);
   const problems = validationProblemCount(rateValidation, draftRates.length);
-  const parts = [
-    `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'}`,
-    `${draftRates.length} ${draftRates.length === 1 ? 'window' : 'windows'}`,
-  ];
-  if (range) parts.push(nowrap(`windows ${priceRangeText(range)}`));
-  parts.push(nowrap(`other times ${priceText(readFields().rate)}`));
-  setText($('plan-summary-text'), parts.join(' · '));
+  const capped = draftRates.length > MAX_RATE_WINDOWS;
+  // "3 windows · USD 0.10–0.32 · other times USD 0.31": the count already says
+  // "windows", so the range does not repeat the word. Prices are unbreakable
+  // runs so a range never splits after the en dash at 320.
+  const counts = `${planPeriods.length} ${planPeriods.length === 1 ? 'season' : 'seasons'} · ${
+    draftRates.length
+  } ${draftRates.length === 1 ? 'window' : 'windows'}`;
+  const summary = [el('span', null, `${counts} · `)];
+  if (range) summary.push(nowrapEl(priceRangeText(range)), el('span', null, ' · '));
+  summary.push(nowrapEl(`other times ${priceText(readFields().rate)}`));
+  $('plan-summary-text').replaceChildren(...summary);
   const problem = $('plan-problem');
+  const problemText = planProblemText({ problems, capped });
   problem.hidden = problems === 0;
-  setText(problem, `${problems} to fix`);
+  setText(problem, problemText);
 
   // The fallback is a line, not a season: name the months nothing covers. With
   // no usable all-other-times rate there is no price to show, so the line omits
@@ -1138,21 +1170,22 @@ function paintRateValidation() {
   setText(docError, general);
 
   // The save row carries the same count as the plan summary; Save itself stays
-  // governed by the existing dirty/saving state machine.
+  // governed by the dirty/saving state machine.
   const problems = validationProblemCount(rateValidation, draftRates.length);
+  const capped = draftRates.length > MAX_RATE_WINDOWS;
   const blockers = $('save-blockers');
   blockers.hidden = problems === 0;
-  setText(blockers, `${problems} to fix`);
+  setText(blockers, planProblemText({ problems, capped }));
 
   // Saving locks the plan; the cap disables the two add paths.
   for (const node of $('rates-plan').querySelectorAll('input, button, select')) {
     node.disabled = settingsSaving;
   }
   for (const node of $('rates-flat').querySelectorAll('button')) node.disabled = settingsSaving;
-  const capped = draftRates.length >= MAX_RATE_WINDOWS;
-  $('add-season').disabled = settingsSaving || capped;
+  const atCap = draftRates.length >= MAX_RATE_WINDOWS;
+  $('add-season').disabled = settingsSaving || atCap;
   for (const card of periodCards) {
-    card.addButton.disabled = settingsSaving || capped;
+    card.addButton.disabled = settingsSaving || atCap;
     paintPeriodActions(card);
   }
 }
@@ -1268,16 +1301,20 @@ function paintFeedback() {
   setText(feedback, view.text);
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
-  // saved: the same count as the save-row chip relabels the button, and the
-  // existing submit validation/state machine is untouched (Enter in a field
-  // still explains what to fix).
+  // saved: the same count as the save-row chip relabels the button and marks it
+  // `blocked` (aria-disabled, muted surface). The button stays submit-capable on
+  // purpose — it is the form's only submit button, so disabling it would also
+  // swallow Enter in the rate fields and with it the jump to the first problem.
+  // Pressing it validates, paints the errors and focuses that row.
   const problems = validationProblemCount(rateValidation, draftRates.length);
   const save = $('save-settings');
-  save.disabled = !view.canSave || problems > 0;
-  if (settingsSaving) setText(save, 'Saving…');
-  else if (problems > 0) setText(save, `Fix ${problems} to save`);
-  else setText(save, 'Save settings');
-  if (problems > 0) save.setAttribute('aria-describedby', 'save-blockers');
+  const saveState = saveButtonState({ canSave: view.canSave, saving: settingsSaving, problems });
+  save.disabled = saveState.disabled;
+  save.classList.toggle('blocked', saveState.blocked);
+  if (saveState.blocked) save.setAttribute('aria-disabled', 'true');
+  else save.removeAttribute('aria-disabled');
+  setText(save, saveState.label);
+  if (saveState.describedBy) save.setAttribute('aria-describedby', saveState.describedBy);
   else save.removeAttribute('aria-describedby');
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;

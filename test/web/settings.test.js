@@ -5,6 +5,7 @@ import {
   DAY_PRESETS,
   OFFLINE_MESSAGE,
   RATE_CAP_MESSAGE,
+  RATE_CAP_REMEDY,
   SAVE_FAILED_FIRST_MESSAGE,
   SAVE_FAILED_MESSAGE,
   WAITING_MESSAGE,
@@ -29,6 +30,7 @@ import {
   periodCoverage,
   periodEffectiveRange,
   previewBlocker,
+  planProblemText,
   previewRate,
   largestMonthRun,
   rateMonthsText,
@@ -45,6 +47,7 @@ import {
   representativeMonth,
   reconcileSettingsSave,
   sameSettingsInput,
+  saveButtonState,
   segmentNote,
   settingsDraftMatches,
   settingsFields,
@@ -1047,9 +1050,39 @@ test('duplicating a season respects the 24-window cap', () => {
   const validation = validateRateEditorRows(rows);
   assert.equal(validation.capped, true);
   assert.equal(validation.valid, false);
-  assert.ok(validation.general.includes(RATE_CAP_MESSAGE));
+  assert.deepEqual(validation.general, [RATE_CAP_MESSAGE, RATE_CAP_REMEDY]);
   assert.equal(previewBlocker(validation), CHECK_CAP_MESSAGE);
   assert.equal(RATE_CAP_MESSAGE, 'A rate schedule can hold at most 24 windows.');
+  assert.equal(RATE_CAP_REMEDY, 'Remove a window to get back to 24.');
+});
+
+test('an over-cap stored document reports the cap only, not an overlap remedy', () => {
+  // A hand-edited 25-window document whose extra window also collides: the
+  // overlap remedy ("change one of them") would leave the plan over the cap, so
+  // the document message is the cap and its own remedy.
+  const extra = rateRowFields({ ...nightEveryDay, id: 'extra' });
+  const rows = [
+    ...Array.from({ length: 24 }, (_, index) =>
+      rateRowFields({ ...nightEveryDay, id: `w${index}`, start: '22:00', end: '06:00' }),
+    ),
+    extra,
+  ];
+  const validation = validateRateEditorRows(rows);
+  assert.equal(validation.capped, true);
+  assert.deepEqual(validation.general, [RATE_CAP_MESSAGE, RATE_CAP_REMEDY]);
+  assert.ok(validation.overlaps.length > 0);
+  // The colliding rows keep their own notes, so nothing is hidden.
+  assert.ok(validation.rows.every((errors) => errors && Object.keys(errors).length === 0));
+  assert.equal(validation.valid, false);
+
+  // Under the cap the overlap clause is the whole document message.
+  const under = validateRateEditorRows([
+    rateRowFields(nightEveryDay),
+    rateRowFields({ ...nightEveryDay, id: 'copy' }),
+  ]);
+  assert.equal(under.capped, false);
+  assert.equal(under.general.length, 1);
+  assert.match(under.general[0], /no moment has two rates/);
 });
 
 test('an all-day row keeps its time fields while focus moves inside it', () => {
@@ -1360,7 +1393,8 @@ test('the save row and plan summary count affected rows, not collisions', () => 
   ]);
   assert.equal(overlap.valid, false);
   assert.equal(validationProblemCount(overlap, 2), 2);
-  // The cap is its own blocker; rows with no errors do not add to the count.
+  // The cap counts once when it is the only blocker: no period badge exists to
+  // carry it, so the plan row owns the one problem.
   const capped = {
     valid: false,
     rows: Array.from({ length: 25 }, () => ({})),
@@ -1368,6 +1402,42 @@ test('the save row and plan summary count affected rows, not collisions', () => 
     general: ['cap'],
   };
   assert.equal(validationProblemCount(capped, 25), 1);
+  // With rows already flagged, the cap is not counted again: those same edits
+  // bring the plan back under 24, and a second number would disagree with the
+  // period badges.
+  assert.equal(validationProblemCount({ ...capped, overlaps: [[0, 1]] }, 25), 2);
+});
+
+test('the plan row labels the cap instead of adding an unexplained number', () => {
+  assert.equal(planProblemText({ problems: 0 }), '');
+  assert.equal(planProblemText({ problems: 2 }), '2 to fix');
+  assert.equal(planProblemText({ problems: 1, capped: true }), '1 to fix · cap');
+  assert.equal(planProblemText({ problems: 2, capped: true }), '2 to fix · cap');
+});
+
+test('Save stays submit-capable while a plan is blocked', () => {
+  // Clean and dirty: the normal solid Save.
+  assert.deepEqual(saveButtonState({ canSave: true }), {
+    disabled: false,
+    blocked: false,
+    label: 'Save settings',
+    describedBy: '',
+  });
+  // Blocked but dirty: relabelled and marked blocked, still submit-capable so
+  // Enter in a field reaches submit() and the focus-the-first-problem path.
+  assert.deepEqual(saveButtonState({ canSave: true, problems: 2 }), {
+    disabled: false,
+    blocked: true,
+    label: 'Fix 2 to save',
+    describedBy: 'save-blockers',
+  });
+  // Nothing to save: genuinely disabled, as before.
+  assert.equal(saveButtonState({ canSave: false }).disabled, true);
+  // A save in flight wins the label and disables the button.
+  const saving = saveButtonState({ canSave: false, saving: true, problems: 0 });
+  assert.equal(saving.disabled, true);
+  assert.equal(saving.label, 'Saving…');
+  assert.equal(saving.blocked, false);
 });
 
 test('the checker withholds a definitive answer while the plan is incomplete', () => {

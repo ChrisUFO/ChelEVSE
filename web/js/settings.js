@@ -548,6 +548,10 @@ export function windowLabel(row, windowRates, fallbackRate, { months = true } = 
 // range, so a valid non-contiguous list was flagged; the month chips can now
 // show any set, so the shared window rules are the whole rulebook again.
 export const RATE_CAP_MESSAGE = `A rate schedule can hold at most ${MAX_RATE_WINDOWS} windows.`;
+// The remedy belongs to the cap alone: an over-cap plan is fixed by removing
+// windows, and telling the owner to separate a pair of colliding windows would
+// leave the count over the limit.
+export const RATE_CAP_REMEDY = `Remove a window to get back to ${MAX_RATE_WINDOWS}.`;
 
 export function validateRateEditorRows(rows, fallbackRate) {
   const base = validateRateWindows(rows);
@@ -556,8 +560,12 @@ export function validateRateEditorRows(rows, fallbackRate) {
   const overlaps = overlappingWindowPairs(list);
   const capped = list.length > MAX_RATE_WINDOWS;
   const general = [];
-  if (capped) general.push(RATE_CAP_MESSAGE);
-  if (overlaps.length > 0) general.push(rateOverlapMessage(overlaps, list, fallbackRate));
+  // A plan over the cap gets one cap-only message and the cap remedy. The
+  // overlap clauses are withheld here because their remedy ("change one of
+  // them") would not bring the plan back under the cap; the rows still carry
+  // their own overlap notes, so nothing is hidden.
+  if (capped) general.push(RATE_CAP_MESSAGE, RATE_CAP_REMEDY);
+  else if (overlaps.length > 0) general.push(rateOverlapMessage(overlaps, list, fallbackRate));
   const valid = rowErrors.every((errors) => Object.keys(errors).length === 0);
   return { valid: valid && general.length === 0, general, rows: rowErrors, overlaps, capped };
 }
@@ -588,6 +596,10 @@ export function rateOverlapMessage(pairs, rows, fallbackRate) {
 
 // How many rows the edit has to fix. Counts affected rows (not collision
 // pairs), so the plan summary, a period badge and the save row all agree.
+// A plan over the cap has no row to blame: the cap counts once, and only when
+// no row is already flagged. Counting it alongside flagged rows would put a
+// number on the plan row that no period badge carries, and those same row
+// edits are what brings the plan back under the cap.
 export function validationProblemCount(validation, rowCount = 0) {
   if (!validation) return 0;
   const affected = new Set();
@@ -598,7 +610,31 @@ export function validationProblemCount(validation, rowCount = 0) {
     affected.add(a);
     affected.add(b);
   }
-  return affected.size + (rowCount > MAX_RATE_WINDOWS ? 1 : 0);
+  const capped = rowCount > MAX_RATE_WINDOWS;
+  return affected.size + (capped && affected.size === 0 ? 1 : 0);
+}
+
+// The plan row and the save row share this text. `cap` labels the one count
+// that has no period badge of its own, so the numbers on screen never disagree
+// about what is left to fix.
+export function planProblemText({ problems = 0, capped = false } = {}) {
+  if (problems <= 0) return '';
+  return capped ? `${problems} to fix · cap` : `${problems} to fix`;
+}
+
+// Save's visible and accessible state. A plan with blockers keeps the button
+// submit-capable: it is the form's only submit button, so disabling it would
+// swallow Enter and with it the jump to the first problem. `blocked` styles it
+// and marks it aria-disabled while the submit path stays live.
+export function saveButtonState({ canSave = false, saving = false, problems = 0 } = {}) {
+  const blocked = problems > 0;
+  const label = (saving && 'Saving…') || (blocked && `Fix ${problems} to save`) || 'Save settings';
+  return {
+    disabled: !canSave,
+    blocked,
+    label,
+    describedBy: blocked ? 'save-blockers' : '',
+  };
 }
 
 // A definitive checker answer is withheld while the plan has anything blocking:

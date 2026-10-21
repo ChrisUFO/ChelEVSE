@@ -51,10 +51,10 @@ and daily **windows**:
   any season that also applies in that month. The header keeps a coverage strip and any error even
   when collapsed. Expanding shows the month chips, one complete 24-hour table per day pattern for
   that same month, and the windows themselves. The table highlights that season's own rows and
-  labels a row from another season by season and band (for example “Winter · Peak”), keeping its
-  band dot so the legend still matches, instead of calling it the fallback. A sibling note names the
-  other seasons that also apply there (for example “Winter also applies in Nov–Feb”), and the
-  checker shows the combined price.
+  labels a row from another season by band and season (for example “Peak · Winter”), keeping its
+  band dot on the first line so the legend still matches, instead of calling it the fallback. A
+  sibling note names the other seasons that also apply there (for example “Winter also applies in
+  Nov–Feb”), and the checker shows the combined price.
 - **No window — other times** is a line under the seasons for months no window covers. It is where the
   all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
   summary.
@@ -66,19 +66,22 @@ and daily **windows**:
   says so and points back to the blocking fields.
 - **Duplicate** copies a season's windows into the months it does not cover, a quick start for the
   other half of the year. It is not offered when the copy would take the plan past the 24-window
-  limit; a stored plan already over that limit names the cap in the plan error and the checker
-  instead of accusing its windows of overlapping.
+  limit; a stored plan already over that limit shows the cap alone, with the cap's own remedy
+  (“Remove a window to get back to 24.”), in the plan error and the checker instead of accusing its
+  windows of overlapping.
 
 The stored document is unchanged: one flat `rates` list. Seasons are a presentation over each
 window's stored `months` value, so the editor never adds fields, reorders rows, or rewrites a month
 list it did not edit.
 
-The plan summary names the number of seasons, windows, the window-price range (`windows USD …`) and
-the other-times rate. The card header's range is labelled with its example month, so the summary's
-windows-only range and the card's effective range cannot read as two answers to one question. An
-unset fallback rate shows `—` (the fallback line omits it) rather than a made-up `USD 0.00`. The save
-row carries `N to fix` whenever validation has blockers, and Save is disabled and relabelled
-`Fix N to save` while they remain.
+The plan summary names the number of seasons and windows, the window-price range (`3 windows · USD
+0.10–0.32`) and the other-times rate. The card header's range is labelled with its example month, so
+the summary's windows-only range and the card's effective range cannot read as two answers to one
+question. An unset fallback rate shows `—` (the fallback line omits it) rather than a made-up
+`USD 0.00`. The save row carries `N to fix` whenever validation has blockers (`N to fix · cap` when
+the plan is over the 24-window limit); Save is styled and labelled `Fix N to save` while they
+remain, but stays submit-capable so Enter in any field still validates, explains, and jumps to the
+first problem.
 
 Technical rules:
 
