@@ -532,6 +532,27 @@ test('a tiny session one poll short still prices per interval', () => {
   assert.equal(sessionCostLabel({ ...tiny, intervals: undefined }, nightly()), 'GBP 0.03');
 });
 
+test('a folded head prices as a span and the rest per interval', () => {
+  // Past the 100-interval cap the oldest blocks fold into one head whose span
+  // covers idle time. That head is energy-preserving, so the list still
+  // reconciles with `wh` and prices per interval, with only the head pro-rated.
+  const folded = {
+    wh: 8000,
+    elapsed: 8 * 3600,
+    started_at: date(2026, 1, 5, 0, 0),
+    ended_at: date(2026, 1, 5, 8, 0),
+    intervals: [
+      { started_at: date(2026, 1, 5, 0, 0), ended_at: date(2026, 1, 5, 3, 0), wh: 3000 },
+      { started_at: date(2026, 1, 5, 3, 0), ended_at: date(2026, 1, 5, 4, 0), wh: 2000 },
+      { started_at: date(2026, 1, 5, 7, 0), ended_at: date(2026, 1, 5, 8, 0), wh: 3000 },
+    ],
+  };
+  // 3 kWh + 2 kWh off-peak, 3 kWh at the 0.30 fallback.
+  assert.equal(sessionCostLabel(folded, nightly()), 'GBP 1.40');
+  // The pro-rated aggregate would read 1.20, so this is really the interval path.
+  assert.equal(sessionCostLabel({ ...folded, intervals: undefined }, nightly()), 'GBP 1.20');
+});
+
 test('an unusable aggregate keeps the legacy path, intervals or not', () => {
   const start = date(2026, 1, 5, 5, 0);
   const end = date(2026, 1, 5, 7, 0);
