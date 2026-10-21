@@ -1,175 +1,349 @@
 # ChelEVSE Architecture
 
-## Goals
+> Status: v1 shipped. This document is the design source of truth for the system as built. It covers the topology, the Firestore contract, runtime flows, the bridge and PWA internals, deployment and test topology, and the known gaps. Behavioural details live in `README.md`, `pi/README.md` and `docs/VALIDATION.md`; this document explains how the pieces fit and why.
 
-- Move OpenEVSE charger status and basic control off the home LAN and onto the phone, reliably.
-- Nothing complex: no backend server, no cloud broker, no inbound connections to the house, minimal moving parts. The LAN-leg broker (Mosquitto on the Pi) is part of the trusted home network, not a public service.
+## 1. Goals, scope and constraints
 
-## Topology
+### Goals
+
+- Move OpenEVSE charger status and control off the home LAN and onto a phone, reliably.
+- Keep the moving parts small: no self-run backend, no inbound connections to the house, no third-party control broker.
+- Keep the data contract explicit enough that a native client could replace the PWA without touching the bridge.
+
+### Non-goals
+
+- Multi-tenant operation, fleet management, or a public API.
+- Supplier tariff import, standing charges, export rates, or automatic plan optimisation.
+- Interval-level metering accuracy beyond the approximations documented below.
+
+### Constraints
+
+- **Firebase is the only public surface.** Firestore carries data, Hosting serves the PWA, Auth gates access. The bridge initiates outbound HTTPS to Firebase and LAN connections to the charger; the only inbound listener is the LAN-only Mosquitto broker for the charger.
+- **The Firestore schema evolves additively.** No migration framework and no document version field; new fields are optional and absent means the old behaviour.
+- **Local wall clock is authoritative** for charger schedules, rate windows, daily history and session display. Sessions and server timestamps are UTC instants; conversion happens at the edges.
+- **The PWA has no build step.** Plain ES modules, no framework, no bundler.
+- **Single-household assumptions** are acceptable: one bridge instance, one charger, a small allowlist. Where that assumption is load-bearing it is called out in §11.
+
+## 2. System topology
 
 ```
-┌────────────────┐  LAN HTTP     ┌───────────────┐  outbound HTTPS ┌────────────────────────┐
-│ OpenEVSE       │◄─────────────►│ Raspberry Pi  │────────────────►│ Firebase               │
-│ (WiFi module)  │  LAN MQTT     │ mosquitto +   │  status writes / │ Firestore (data)       │
-│                │◄─────────────►│ bridge agent  │  command watch   │ Hosting (PWA)          │
-└────────────────┘   status      └───────────────┘                  └───────────┬────────────┘
-                                                                               │ HTTPS
-                                                                    ┌──────────▼───────────┐
-                                                                    │ Android phone (PWA)  │
-                                                                    │ Firebase Auth sign-in│
-                                                                    └──────────────────────┘
+┌────────────────┐   LAN HTTP      ┌────────────────────┐   outbound HTTPS   ┌─────────────────────────┐
+│ OpenEVSE       │◄───────────────►│ Raspberry Pi       │───────────────────►│ Firebase                │
+│ WiFi module    │   LAN MQTT      │ bridge agent       │   Admin SDK        │ Firestore  (data)       │
+│ (ESP32)        │◄───────────────►│ + Mosquitto broker │   status writes    │ Hosting    (PWA)        │
+└────────────────┘   status/control└────────────────────┘   command watch    │ Auth       (Google)     │
+                                                                              └────────────┬────────────┘
+                                                                                           │ HTTPS / WSS
+                                                                                ┌──────────▼───────────┐
+                                                                                │ Phone / desktop PWA  │
+                                                                                │ Firebase Auth sign-in│
+                                                                                └──────────────────────┘
 ```
 
-The only publicly reachable component is Firebase. The Pi accepts no inbound connection from outside the LAN (the MQTT listener is LAN-only and authenticated), and there is no self-run server anywhere.
+Trust boundaries:
 
-## Components
+- **Firebase** is internet-reachable and enforces access with Auth + Firestore rules.
+- **The home LAN** is trusted. The charger's HTTP API may be unauthenticated or Basic-auth; the Mosquitto listener is LAN-only and authenticated.
+- **The Pi** holds the Admin service-account key, so it is the most privileged component. The bridge initiates Firebase and charger connections; the only inbound listener is Mosquitto on the LAN. Nothing outside the LAN can connect in.
 
-### 1. Bridge agent — `pi/`
+Data flow, in one line: charger → bridge → Firestore → PWA, and PWA → Firestore → bridge → charger. The bridge is the only writer of charger state and the only component that talks to the charger.
 
-Python 3 service on the Raspberry Pi, run under systemd (`Restart=always`). Authenticates to Firebase with a **service-account key** (Admin SDK — bypasses security rules by design, so the key lives in gitignored `private/`).
+## 3. Repository map
 
-Four loops:
+| Path                                                         | Role                                                                                                                              |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `pi/`                                                        | Python bridge (`bridge.py`, `mqtt_source.py`, `acl.py`), systemd unit, installer, venv requirements, `tests/`, operational README |
+| `web/`                                                       | Static PWA: `index.html`, `app.js`, `js/` pure modules, `js/screens/` DOM screens, `sw.js`, `styles.css`, manifest, icon          |
+| `docs/`                                                      | `DEPLOY.md` (setup/runbook) and `VALIDATION.md` (acceptance and evidence)                                                         |
+| `test/web/`                                                  | `node:test` unit tests for the pure web modules and the service-worker shell                                                      |
+| `test/rules/`                                                | Firestore emulator tests for `firestore.rules`                                                                                    |
+| `scripts/`                                                   | `check-firebase-project.mjs` deploy guard                                                                                         |
+| `private.example/`                                           | Committed templates for `private/` (ACL, env, service account)                                                                    |
+| `private/`                                                   | Gitignored deployment values: ACL, bridge env, service-account keys                                                               |
+| `web/firebase-config.js`                                     | Gitignored Firebase web config                                                                                                    |
+| `firebase.json`, `firestore.rules`, `firestore.indexes.json` | Firebase project config, security rules, indexes                                                                                  |
+| `.firebaserc`                                                | Gitignored default project id (`chelevse`)                                                                                        |
+| `.githooks/`                                                 | Prettier pre-commit/pre-push hooks                                                                                                |
+| `node_modules/`, `pi/.venv/`, `__pycache__/`, `.firebase/`   | Generated; never committed                                                                                                        |
 
-| Loop     | Interval                                                | Action                                                                                                                                                                                                                                        |
-| -------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status   | 10 s (HTTP) / 60 s reconciliation while MQTT is healthy | HTTP: `GET http://<charger>/status` → write curated fields to `status/current`; MQTT: subscribed status topics → the same write path; maintain `history/<date>` from `total_energy` deltas; finalize one `sessions/*` doc per plug-in session |
-| Config   | 60 s (HTTP) / on `config_version` change under MQTT     | `GET /config` → write `status/config` with credential fields redacted                                                                                                                                                                         |
-| Schedule | on change + 60 s, reconcile every 300 s                 | Sync `schedule/current` → firmware `POST /schedule` (one event per request; each rule becomes a window-start `active` event and a window-end `disabled` event). Poll `GET /schedule/plan` → `status.current.schedule`                         |
-| Commands | 5 s poll                                                | New pending doc in `commands` → apply to the charger (MQTT `override/set` / `rapi/in` while the broker is ready, else HTTP) → mark acked / failed with the `transport` used (stale pending docs are failed without contacting the charger)    |
+`PLAN.md` and `.review/` are local workflow artifacts (gitignored) and are not part of the deployed system.
 
-Both status transports feed **one** `parse_status` → `apply_status` path, so an MQTT snapshot gets the same unit conversion (milliamps → amps, 10ths of °C → °C), the same curated field set, and the same history, session and transition logic as an HTTP reply — once per real change. An MQTT snapshot only runs the state machine once it is complete (the source holds a `/status` seed and the snapshot carries a `state`), and a reconcile reply older than an MQTT apply is discarded rather than allowed to rewind the tracker. MQTT is opt-in (`MQTT_ENABLED=false` by default) and HTTP remains the fallback, the reconciler and the transport for `/config`, `/schedule/plan` and OTA. See [pi/README.md](pi/README.md#mqtt-status-source-issue-44).
+## 4. Data model — Firestore is the API
 
-**Commands** are MQTT-first too (issue #46) once the broker is connected **and** the `<topic>/#` subscription is granted: pause/resume/set-current publish the firmware's `override/set` payload (`{"state":"disabled"}`, `clear`, `{"state":"active","charge_current":N,"max_current":N}`) and confirm against the retained `override` document (falling back to the status `manual_override` plus a non-charging `state`/`pilot` field) within 5 s; RAPI publishes `rapi/in/<command>` with its parameters as the payload and matches the first `rapi/out` after its publish (`$OK` → acked, `$NK` → failed), serialised because replies carry no correlation id, with a short quarantine retiring the reply of a timed-out transaction. HTTP is used only when MQTT is not ready _before_ a publish (or the client refuses it), with unchanged validation, staleness and lifecycle. A published command is never re-applied over HTTP: a lost acknowledgement is reconciled read-only from `/status` or the command fails. Every command document records the transport that carried the request (`transport: "mqtt"|"http"`), and none when it was rejected before a send. See [pi/README.md](pi/README.md#commands-over-mqtt-issue-46).
+### Principles
 
-The status loop also emits **FCM push notifications** on transitions — charging started, charging stopped, charger offline — sent by a background worker to every registered `fcmTokens` doc via the Admin SDK (invalid tokens are pruned on send error).
+- **One document shape per concern.** The bridge writes charger state and derived history with the Admin SDK (bypassing rules by design). The PWA writes only the three client-owned documents: `settings/current`, `schedule/current`, `commands/*` (plus its own `fcmTokens/*`).
+- **No schema migrations.** Optional fields are added; absent/empty means the previous behaviour. `settings/current.rates` is the worked example: absent = flat rate.
+- **Read-time derivation.** Costs, schedule state and config presentation are computed when rendered, never persisted. Changing a rate schedule immediately re-prices history.
+- **Curated status, raw config.** `status/current` is a fixed, unit-normalised field set. `status/config` is the charger's `/config` with secrets redacted; it is replaced wholesale, not merged.
 
-Config via environment file in `private/`: `CHARGER_HOST`, `FIREBASE_SERVICE_ACCOUNT` (path to key), optional intervals.
+### Collections and documents
 
-Failure handling: connection errors (charger or Firebase) are logged and retried at the loop's fixed poll interval; writes that fail are retried on the next tick; nothing crashes the service.
+| Path                   | Writer                           | Readers             | Shape and notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------- | -------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `status/current`       | bridge                           | allowlisted         | Curated `/status`: `state`, `state_label`, `amp` (A), `voltage`, `power`, `session_energy` (Wh), `total_energy` (kWh), `elapsed` (s), `vehicle`, `temp1–3`, `temp_c`, `pilot`, `charger_online`, `updated_at`, and a merged `schedule: {in_window, active_rule_id}`. Merge write every 10 s (HTTP) or per MQTT event; 60 s reconciliation while MQTT is healthy. Failed HTTP polls merge `charger_online: false` and refresh `updated_at` while keeping the last known values; under a ready MQTT source, two consecutive failed reconciles with no snapshot are required, and a late snapshot cancels the outage. |
+| `status/config`        | bridge                           | allowlisted         | Redacted `/config` snapshot plus `updated_at`; credential fields become `"***"`. Replace write on a `config_version` change under MQTT, or every 60 s over HTTP; a 600 s safety resync runs until a version is seen. Removed keys disappear.                                                                                                                                                                                                                                                                                                                                                                       |
+| `status/health`        | bridge (watchdog + MQTT source)  | allowlisted         | Merge writes from two writers: watchdog state (`state`, `reason`, `http_ok`, `controller_ok`, attempts, `last_action`, `last_transport`, `last_result`) and transport view (`source`, `mqtt_connected`, `mqtt_announced`, `mqtt_last_lwt_at`).                                                                                                                                                                                                                                                                                                                                                                     |
+| `history/{YYYY-MM-DD}` | bridge                           | allowlisted         | `{kwh, updated_at}` per **Pi-local** day, accumulated from positive `total_energy` deltas with `Increment`. First reading is a baseline; a negative delta rebaselines without writing. No retention/pruning.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `sessions/{id}`        | bridge                           | allowlisted         | One record per completed plug-in: `{started_at, ended_at, wh, elapsed}`. The id is deterministic from the start instant. Pause/resume is merged into one record (120 s touching/gap, or counters growing while plugged and the previous record is < 48 h old); merged records keep the original id and `max(wh)`, `max(elapsed)`.                                                                                                                                                                                                                                                                                  |
+| `schedule/current`     | PWA (allowlisted)                | allowlisted, bridge | Exactly `{enabled: bool, rules: [{id, days:[0–6, 0=Mon], start:"HH:MM", end:"HH:MM", amps}]}`. `end < start` wraps midnight; `start === end` is invalid; max 20 rules. The bridge mirrors it to the charger's scheduler; `amps` is stored but not applied because firmware v5.1.5 has no per-event current.                                                                                                                                                                                                                                                                                                        |
+| `settings/current`     | PWA (allowlisted)                | allowlisted         | `{rate: 0–5, currency: 1–8 chars, rates?: RateWindow[]}`. `rate` is the **fallback**; `rates` is optional, ≤ 24. A flat save omits `rates` and is byte-identical to the original two-field document.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `fcmTokens/{token}`    | PWA (own token)                  | —                   | Exactly `{uid, created_at}`. The bridge sends notifications and deletes tokens FCM reports as unregistered. A token owner may delete its doc without the access grant so revocation cannot strand the registration.                                                                                                                                                                                                                                                                                                                                                                                                |
+| `users/{uid}`          | `acl.py` (Admin)                 | that user (own doc) | `{allowed: true, email}` grant. Rules require this doc and `email_verified` for every data read. Only the owner may read it; no client writes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `commands/{id}`        | PWA (create), bridge (lifecycle) | allowlisted         | `{type: pause / resume / set_current / rapi, amps?, command?, status: pending / acked / failed, created_at, transport?, error?, result?}`. The bridge polls every 5 s, batches 10, and fails pending docs older than 10 min only when `created_at` is a valid past timestamp (missing/malformed timestamps are treated as not stale; a future timestamp defers the sweep). It is the only writer of `status`/`transport`/`error`/`result`.                                                                                                                                                                         |
 
-**Recovery flow (watchdog, issues #39/#45).** After `WATCHDOG_FAILURES` consecutive failed `/status` polls the bridge makes one extra probe and, if a transport can carry a restart, issues it once:
+### Rate schedule (`settings/current.rates`)
 
-1. **Probe/classify.** A usable `/status` reply means HTTP can restart the gateway; the last two replies also classify the domain (`rapi_connected`/`evse_connected`, or a frozen `comm_success` while `comm_sent` rises, is controller-side). Those counters are HTTP-only, so MQTT never classifies.
-2. **Choose the transport.** HTTP answering → `POST /restart`. HTTP unreachable but MQTT connected, subscribed **and** not Last-Will-disconnected → publish `{"device": "gateway"|"evse"}` on `<topic>/restart` (QoS 0) and do not also post. Neither → alert only (`Recovery failed — power cycle may be required`), because a device that is gone from both paths cannot be revived remotely.
-3. **Guards.** Charging guard, cooldown and hourly cap are transport-independent and never publish; one push per unhealthy episode; the next successful probe (the 60 s reconcile while MQTT carries status) clears the state, recording `last_action`, `last_transport` and `last_result` in `status/health`.
+```js
+{
+  rate: 0.245,                 // fallback: every moment no window covers
+  currency: "GBP",
+  rates: [                     // optional; absent/empty = flat behaviour
+    { id: "w1", rate: 0.10, days: [0,1,2,3,4,5,6], start: "00:30", end: "04:30", months: null },
+    { id: "w2", rate: 0.32, days: [1,2,3,4,5],     start: "16:00", end: "19:00", months: [11,12,1,2] }
+  ]
+}
+```
 
-The broker's announce topic (`openevse/announce/#`, the firmware's retained `{"state": …}` plus its Last Will) is the availability input: a `disconnected` announcement flips `status/health.mqtt_connected` to `false`, sends status back to the 10 s HTTP poll and makes an HTTP outage alert-only within one tick; a reconnect's `connected` announcement clears it.
+- `days`: `0` = Monday … `6` = Sunday, matching the charge schedule and `DAY_NAMES`. `Date#getDay()` is converted with `(getDay() + 6) % 7`.
+- `start`/`end`: local `HH:MM`, half-open `[start, end)`. `end <= start` wraps past midnight; `start === end` covers the whole day.
+- `months`: `null` = all year, or an inclusive list `1–12`. A range may wrap the year (Nov → Feb = 11, 12, 1, 2).
+- **Post-midnight attribution:** a window's after-midnight hours belong to the day the window started. A Monday 22:00–06:00 window covers Tuesday 00:00–05:59; a December-only window covers 1 January 00:00–05:59 only.
+- **Overlap rejection:** windows that can both match one local instant are rejected by the editor. Validation compares calendar segments (including next-day tails and the possible months a tail implies), so a Monday-night wrap and a Tuesday-early window collide.
+- **Legacy overlaps:** a document written outside the editor may still contain overlaps. Matching is deterministic: the **last matching window in list order wins**. The editor blocks the next save until the overlap is resolved, and payload order is preserved so grouping never changes legacy semantics.
+- **Limits:** ≤ 24 windows. `web/js/rates.js` owns normalization, matching, overlap detection and interval costing; `web/js/settings.js` owns form validation, normalization/dirty comparison and the save payload.
 
-### 2. Firebase — Firestore + Hosting
+### Cost semantics
 
-**Firestore data model (v1):**
+Costs are presentation values, computed on every render from the current settings and never stored:
 
-| Path                | Writer                                  | Readers               | Content                                                                                                                                                                                                                                      |
-| ------------------- | --------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status/current`    | bridge (admin)                          | verified, allowlisted | Curated `/status` fields: `{state, state_label, amp, voltage, power, session_energy (Wh), total_energy (kWh), elapsed (s), vehicle, temp1–temp3, temp_c, pilot, charger_online, schedule: {in_window, active_rule_id}, updated_at}`          |
-| `status/config`     | bridge (admin)                          | verified, allowlisted | Charger `/config` snapshot (firmware, hostname, service level, limits, integration settings) with credential fields redacted to `"***"`; refreshed ~60 s (or on a `config_version` change with MQTT)                                         |
-| `status/health`     | bridge (admin)                          | verified, allowlisted | Watchdog state (`healthy`/`unhealthy`, reason, `http_ok`, `controller_ok`, attempt history, `last_transport`) plus the transport view (`source`, `mqtt_connected`, `mqtt_announced`, `mqtt_last_lwt_at`) with merge writes from both writers |
-| `history/{date}`    | bridge (admin)                          | verified, allowlisted | `{kwh}` per local day, derived from `total_energy` deltas                                                                                                                                                                                    |
-| `sessions/{id}`     | bridge (admin)                          | verified, allowlisted | One record per completed plug-in session (merged across pause/resume): `{started_at, ended_at, wh, elapsed}`                                                                                                                                 |
-| `schedule/current`  | app (write), bridge (syncs to firmware) | allowlisted users     | Owner-defined charge schedule: `{enabled, rules: [{id, days [0–6 Mon=0], start "HH:MM", end "HH:MM", amps}]}`; `end < start` wraps past midnight; bridge mirrors it into the firmware scheduler                                              |
-| `settings/current`  | app (write)                             | allowlisted users     | App settings: `{rate ($/kWh), currency}` — used client-side for cost display                                                                                                                                                                 |
-| `fcmTokens/{token}` | app (create own)                        | —                     | Push registration: `{uid, created_at}`; the bridge sends FCM notifications to these tokens                                                                                                                                                   |
-| `users/{uid}`       | acl sync (admin)                        | that user (own doc)   | Access grant: `{allowed: bool, email}` — synced from `private/acl.txt` by `pi/acl.py`                                                                                                                                                        |
-| `commands/{id}`     | app (create), bridge (ack/fail)         | verified, allowlisted | `{type: pause\|resume\|set_current\|rapi, amps?, command?, created_at, status: pending\|acked\|failed}` plus `transport: "mqtt"\|"http"` naming the path that carried the request whenever one was sent; pending older than 10 min is failed |
+- **Flat:** `kWh × rate`, exactly the pre-schedule behaviour.
+- **Live session:** the interval is `[updated_at − elapsed, updated_at]`, anchored to the status write. It is shown only while the charger is actually charging (`state_label === "charging"` and `charger_online !== false`). Paused/ready snapshots hide the scheduled figure instead of sliding it; a stale cache-only charging snapshot keeps the figure frozen at its own interval; an offline marker hides it.
+- **History session:** `costForSession` over the session's own `started_at…ended_at`, pro-rating `wh` uniformly across the rate boundaries.
+- **Aggregate daily/30-day cost:** hidden whenever a rate schedule exists. A day stores one kWh total, so it cannot be split across windows; kWh remains visible and per-session costs are still shown.
+- **Approximation (accepted):** sessions store one energy total, not energy per window. Uniform pro-rating is the best available signal. A paused-then-resumed plug-in spans idle time while `wh`/`elapsed` cover charging only, so its cost can be off by the rate difference across the gap. Issue #57 tracks recording real charging intervals and pricing them when present; the fallback remains uniform pro-rating.
 
-Commands are typed whitelist entries; `rapi` is the explicit advanced escape hatch (string-validated in rules) for anything the curated types don't cover. Security rules enforce: only verified, allowlisted users can read (each user may read their own grant doc); only whitelisted command types with validated `amps`/`command` on create; status/history writes and command mutations are admin-only. `settings/current` is shape-validated in rules. `schedule/current` is container-validated in rules (exact keys, types, max 20 rules) because per-element validation exceeds Firestore's 1000-expression limit; each rule's shape is re-validated by the bridge, which skips and logs malformed rules (the app validates every rule before writing). Overlapping or touching windows are also skipped by the bridge, because the firmware resolves equal-time events by list order. See `firestore.rules`.
+### Schedule (`schedule/current`) and commands
 
-**Hosting** serves the static PWA from `web/` on a free HTTPS domain, with an SPA rewrite to `index.html`, `no-cache` headers (`index.html`, `sw.js` and `firebase-config.js` must never be served stale) and `Cross-Origin-Opener-Policy: same-origin-allow-popups` for the popup sign-in.
+- The charge schedule is enforced by the charger's firmware, not the bridge. The bridge validates and mirrors it; a missing or malformed document leaves the firmware untouched (never an implicit clear), while `enabled: false` or an empty rule list clears it.
+- The bridge converts each rule to two firmware events: an `active` event at the start and a `disabled` event at the end. Overnight ends shift to the next firmware day. A digest skips unchanged schedules; a 300 s reconcile re-posts after a firmware reset.
+- The bridge drops a later rule whose window overlaps or touches an earlier one (first rule wins). The web editor validates field shapes but does not detect those cross-rule collisions, so the bridge is the effective validator.
+- Commands are a typed whitelist: `pause` (stop), `resume` (clear override → auto), `set_current` (6–48 A), and `rapi` (the advanced escape hatch; must match `^[$][A-Za-z0-9]{1,2}([ ].*)?$`, ≤ 32 chars). Only `pending` creates are accepted; the bridge alone settles them.
+- Transport is chosen by the bridge, not the client: MQTT when connected, subscribed and ready; HTTP otherwise. A publish accepted by MQTT is never re-applied over HTTP. The command doc records the transport that carried a request (`"mqtt"` or `"http"`), and none when rejected before send.
 
-**Deployed pieces:** `firestore.rules`, `firestore.indexes.json` and `web/`. The single composite index (`commands` by `type` then `created_at` desc) backs the Advanced console's scrollback; the command poll and the status screen's recent-command window use single-field queries and need no index. An index that is still building fails the console query with `failed-precondition` until Firestore reports it ready.
+## 5. Bridge agent (`pi/`)
 
-### 3. Android app — PWA (`web/`)
+Python 3 service under systemd (`Restart=always`, `User=root`), installed by rsync to `/opt/chelevse` with a venv. It authenticates to Firebase with a service-account key from `private/`. Four loops run as daemon threads (status, config, schedule, and the optional MQTT status apply), the command loop runs on the main thread, and support threads handle FCM delivery and paho's network loop:
 
-Static HTML/JS using the Firebase Web SDK, installable to the Android home screen (manifest + service worker). Signs in with **Google** (Firebase Auth popup/redirect) — accounts without an allowlist grant see a clear "no access" screen and a sign-out control — and gets **realtime** updates via `onSnapshot`. Screens:
+| Thread       | Default cadence                           | Responsibility                                                                                                                                             |
+| ------------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status       | 10 s HTTP / 60 s reconciliation with MQTT | `GET /status` or MQTT snapshots → one `parse_status` → `apply_status` path; `status/current`, history deltas, session finalisation, transitions, FCM edges |
+| Config       | 60 s, or on `config_version`              | `GET /config` → redact/coerce → `status/config` (replace write)                                                                                            |
+| Schedule     | 60 s, reconcile 300 s                     | Read `schedule/current`, validate, mirror to `POST/DELETE /schedule`; poll `GET /schedule/plan` into `status/current.schedule`                             |
+| Commands     | 5 s (main thread)                         | Poll pending `commands`, apply, settle with `status`/`transport`/`result`                                                                                  |
+| MQTT apply   | per event (optional)                      | Debounce/merge MQTT status snapshots into the status path; command acknowledgements are awaited by the command thread, not here                            |
+| FCM notifier | on transition                             | Daemon worker draining a bounded queue; sends pushes and prunes invalid tokens                                                                             |
 
-- **Status** — everything the charger reports: state, live current/power/voltage, session energy + cost (rate × energy) + charging time, lifetime total, per-sensor temperatures, pilot (setpoint); charge-mode control — **stop / auto / hold** (`pause` = stop, `resume` = clear override → auto, `set_current` = hold at a new setpoint) — and the device name from config as the header.
-- **History** — daily kWh bar chart (last 30 days, hand-rolled SVG — no chart library) fed by `history/{date}`, plus a recent-sessions list from `sessions`; both show costs at the current rate.
-- **Schedule** — edit the charge schedule (enable toggle; rules with days, start/end, amps), with a live indicator when a window is currently active (from `status/current.schedule`).
-- **Config** — every configuration item the charger exposes (credential fields show `"***"` because the bridge redacts them), read from `status/config` and presented in our own layout; changes go through the Advanced console. Also **App settings**: electricity rate ($/kWh + currency, stored in `settings/current`) and an enable-notifications control (registers the device for FCM push).
-- **Advanced** — RAPI console (`$` commands via the `rapi` command type) for full configuration parity with the built-in UI, behind a per-visit confirmation gate since RAPI can alter safety-relevant settings, with a 20-entry scrollback showing each command's acked/failed result.
+### Status ingestion
 
-**Push delivery** uses a plain service worker (`web/sw.js`) with no Firebase SDK: FCM sends a notification-only message, the worker receives a raw `push` event, and it either shows the system notification (title `ChelEVSE`, tag `chelevse-state`) or, when a page is visible, posts a `chelevse-push` message so the app shows exactly one in-app toast. The page dedupes that message against the SDK's defensive `onMessage` inside a 5 s window (with no Firebase-managed worker, `onMessage` never fires in practice). A notification click focuses an existing app window or opens the app URL — same-origin targets only. When the browser rotates the push subscription (`pushsubscriptionchange`), the worker asks open pages to re-acquire and re-save their token; the next app load does the same, so a rotated token recovers without user action. The bridge prunes tokens FCM reports as unregistered/invalid; sign-out and a revoked grant release this device's token document.
+- HTTP and MQTT converge on `parse_status`: milliamps → amps, tenths °C → °C, absent sensors → `null`, `uint64` sentinels coerced, curated whitelist. Both feed the same state machine, history and session logic.
+- MQTT snapshots are debounced (~500 ms), seeded from a `/status` reply, and only run the state machine once complete. Ordering guards (`mqtt_mark`, arrival generations, seed-if-current) prevent a late HTTP reconcile from rewinding a newer MQTT apply.
+- MQTT is opt-in (`MQTT_ENABLED=false` by default). When enabled, the broker is Mosquitto on the Pi, LAN-only and authenticated; the bridge subscribes to `<topic>/#` and the firmware announce topic (`openevse/announce/#`, retained state + Last Will). HTTP remains the reconciler and the fallback.
+- When HTTP is the status source (or MQTT is not ready), failed polls merge `{charger_online: false, updated_at: SERVER_TIMESTAMP}` and keep the last values. Under a ready MQTT source, offline requires two consecutive failed reconciles with no snapshot; a late snapshot cancels the outage. The app distinguishes bridge staleness from charger offline with `freshnessState`.
 
-The Firestore contract is the API — a native Android app can be added later without touching the bridge, and the push payloads already carry everything a notification needs.
+### Commands and watchdog
 
-## OpenEVSE integration
+- MQTT commands: `override/set` for pause/resume/set-current (confirmed against the retained `override` doc, with a status fallback), `rapi/in`/`rapi/out` for RAPI (serialised; replies carry no correlation id, so a short quarantine retires timed-out replies). HTTP commands use `/override` and `/rapi`.
+- The watchdog probes after consecutive `/status` failures. HTTP answering → `POST /restart`; HTTP unreachable but MQTT connected/subscribed and not Last-Will-disconnected → publish on `<topic>/restart`; neither → alert only. Charging guard, cooldown and hourly cap apply across transports; the transition into unhealthy sends one push and recovery sends another.
+- Session tracking merges pause/resume across a plug-in (see §4). History is accumulated from `total_energy` deltas; a failed Firestore write keeps the baseline and retries the next tick.
 
-The charger's official WiFi module (ESP32 firmware) exposes a local JSON/HTTP API:
+### Configuration and secrets
 
-| Purpose                                                                              | Endpoint                                                                 |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Status (`state`, `amp`, `power`, `session_energy` Wh, `total_energy` kWh, `temp1–3`) | `GET /status`                                                            |
-| Config                                                                               | `GET /config`                                                            |
-| Set max current                                                                      | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` |
-| Pause / stop                                                                         | `POST /override` `{"state":"disabled"}`                                  |
-| Return to auto (clear override)                                                      | `DELETE /override`                                                       |
-| Hold at setpoint / force charge                                                      | `POST /override` `{"state":"active"}`                                    |
+- `private/bridge.env` supplies `CHARGER_HOST`, `FIREBASE_SERVICE_ACCOUNT`, loop intervals, MQTT settings and optional charger Basic auth. Real environment variables override the file.
+- Redaction covers credential/config keys before `status/config` is written. The service account bypasses rules; it must never reach the web app or the repo.
+- OTA/firmware flashing is **not implemented** in the bridge. Firmware updates are a manual operation against the charger; `status/config` exposes the firmware version for reference. (See §11 for the documentation drift on this point.)
 
-Plain HTTP on the trusted home LAN (HTTP Basic auth if an admin password is set on the charger). The API is small enough that the bridge can use a plain HTTP client; [`openevsehttp`](https://github.com/firstof9/python-openevse-http) — the library behind the Home Assistant integration — is the fuller-featured option: actively maintained, async, requires Python ≥ 3.13 on the Pi. The firmware also offers a WebSocket (`GET /ws`) with JSON deltas; v1 polls instead for simplicity.
+## 6. Web PWA (`web/`)
 
-**HTTP polling vs MQTT**: status is MQTT-first when `MQTT_ENABLED=true` — the
-firmware publishes one topic per value as its EVSE poll changes, so Firestore
-updates arrive in seconds and the HTTP `/status` poll drops to a 60 s
-reconciliation. Commands use the same transport when it is ready: `override/set`
-for pause/resume/set-current and `rapi/in`/`rapi/out` for RAPI, acknowledged by
-the charger's own retained `override` document or RAPI reply. HTTP stays
-authoritative for `/config` (redaction/coercion in one place),
-`/schedule/plan` (the firmware computes the plan), OTA, commissioning
-and the controller counters (`comm_sent`/`comm_success`/`rapi_connected`) that
-the watchdog reads from the HTTP reply and that MQTT does not publish (they stay
-out of `status/current`) — and it remains the fallback for status and commands
-and the rollback. The broker (Mosquitto) runs on the Pi: LAN-only, authenticated,
-no cloud dependency, and a flag flip back to polling.
+### Shell and lifecycle
 
-## Security
+- One `index.html` with five mutually exclusive screens: `booting`, `boot-error`, `signin`, `noaccess`, and `app`. `app` holds a five-tab `tablist` and five `tabpanel` sections (Status, History, Schedule, Config, Advanced). Hash routing selects the tab; `aria-selected` and roving focus follow the APG tabs pattern.
+- Boot: dynamic Firebase SDK init → screen `init*` wiring → tab bar → auth subscription. A missing/invalid `web/firebase-config.js` produces `boot-error`; a missing grant produces `noaccess` with a sign-out control.
+- `app.js` owns auth fan-out, data subscriptions, the status ticker lifecycle, lazy history load, Config-time notification refresh, and push toast display. Sign-out closes the store, resets every screen and releases the push token (bounded to 3 s); a revoked grant only releases the token for `no-access`.
+- `closeApp` is the teardown boundary: subscriptions stop, screen state resets, `activeUser` clears.
 
-- Public repo, private values: `private/` (service-account key, env) and `web/firebase-config.js` are gitignored; `private.example/` and `web/firebase-config.example.js` are the committed templates. (Firebase web config values aren't secrets — access is enforced by Auth + rules — but they stay out of the public repo anyway.)
-- AuthN: Firebase Auth with **Google Sign-In**. Anyone can authenticate; data access is allowlisted.
-- AuthZ: Firestore rules require a `users/{uid}` doc with `allowed == true` (and a verified email). The allowlist lives in gitignored `private/acl.txt` (one email per line) and is synced to those grant docs by `pi/acl.py` using the bridge's Admin credentials — personal emails stay out of the public repo, and grants change without redeploying rules. Each person must have signed in once before they can be granted (their auth user must exist to resolve the uid).
-- Command creates are schema-validated; only the bridge's admin credentials write status/history or mutate commands. `settings/current` and `schedule/current` are the client-writable data docs (allowlisted users): `settings/current` is shape-validated in rules, while `schedule/current` is container-validated in rules (exact keys, types, max 20 rules) because per-element validation exceeds Firestore's 1000-expression limit — each rule's shape is re-validated by the bridge, which skips and logs malformed rules; the app validates every rule before writing. `fcmTokens` docs are own-token-only.
-- HTTPS everywhere (Firebase domains + outbound-only from the Pi).
-- No router port forwarding.
+### Module boundaries
 
-## Deployment
+**Pure / DOM-free** (unit-tested under `node:test`):
 
-Full runbook: [docs/DEPLOY.md](docs/DEPLOY.md). End-to-end checklist: [docs/VALIDATION.md](docs/VALIDATION.md).
+| Module                       | Responsibility                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| `js/write.js`                | `settleWrite`: 10 s UI bound plus late reconciliation for Firestore writes                  |
+| `js/format.js`               | state map, numeric/clock/money formatting, `liveCharging`, `freshnessState`, `elapsedClock` |
+| `js/rates.js`                | rate-window normalize/validate/overlap/match, `costForInterval`, `costForSession`           |
+| `js/cost.js`                 | flat-vs-schedule presentation labels for status/history                                     |
+| `js/settings.js`             | settings validate/normalize/draft compare/save-state machine                                |
+| `js/schedule.js`             | schedule validation, queue/discard state machines, snapshot routing                         |
+| `js/history.js`              | day ids, 30-day series, chart hit-test, read classification                                 |
+| `js/config.js`               | curated config rows, raw JSON, signature                                                    |
+| `js/advanced.js`             | RAPI validation, confirmation gate, scrollback helpers                                      |
+| `js/notifications.js`        | notification card copy, token decision/result                                               |
+| `js/notification-session.js` | DOM-free FCM token lifecycle (generations, retry markers, sign-out races)                   |
+| `js/push.js`                 | push payload reduction, visible-client selection, dedupe                                    |
 
-- **Firebase**: create a project, a **Native mode** Firestore database (region is permanent; some projects need Blaze billing to create it), and enable Auth with the **Google provider**. Register a web app and copy its config into `web/firebase-config.js`; generate a Web Push certificate and add the public key as `vapidKey` (missing key disables opt-in with a clear message). Add every serving hostname — `<project-id>.web.app`, `<project-id>.firebaseapp.com`, the custom domain — to Auth's authorized domains.
-- **Service accounts**: the bridge key holds Cloud Datastore User, Firebase Authentication Viewer and Firebase Cloud Messaging API Admin; deploy credentials (a separate key or `firebase login`) hold Firebase Admin and Cloud Datastore Index Admin. Keys live in gitignored `private/`.
-- **Deploy**: rules, indexes and Hosting, from `main`, via `npm run deploy:rules`, `npm run deploy:indexes` and `npm run deploy:hosting` (or `npm run deploy`). Each script runs `scripts/check-firebase-project.mjs` first, which blocks a release whose target project (`FIREBASE_PROJECT`, else `.firebaserc`) differs from the service-account key's project. `npm run deploy:dry-run` compiles and validates without publishing. Let the command index finish building before relying on the Advanced scrollback.
-- **Allowlist**: each person signs in once; list emails in `private/acl.txt`, then run `/opt/chelevse/pi/.venv/bin/python /opt/chelevse/pi/acl.py` on the Pi (the venv the installer builds; needs the service account present). `--prune` removes grants no longer listed and their FCM tokens.
-- **Pi**: clone repo, copy the templates from `private.example/` to `private/`, fill in values, `sudo bash pi/install.sh` (idempotent; syncs `pi/` + `private/` to `/opt/chelevse`, builds the venv, installs and enables the systemd unit).
+**DOM / Firebase-facing:**
 
-Failure modes:
+| Module           | Responsibility                                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------------------------- |
+| `app.js`         | boot, auth wiring, screen fan-out, push toast                                                             |
+| `js/firebase.js` | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                      |
+| `js/auth.js`     | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                 |
+| `js/store.js`    | all Firestore subscriptions and writes                                                                    |
+| `js/ui.js`       | `$`/`setText`, network badge, tab router                                                                  |
+| `js/screens/*`   | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes |
 
-| Failure              | Behavior                                                                                                                                                                                                                                                                                                                |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pi offline           | PWA shows stale `updated_at` / **"Bridge offline"** (no status write for 60 s)                                                                                                                                                                                                                                          |
-| Charger unreachable  | Bridge retries at the fixed poll interval, writes `charger_online: false`, and the PWA banner distinguishes **"Charger offline"** from the bridge case; the watchdog restarts over HTTP, or over MQTT when HTTP is wedged, and alerts only when neither path can reach it; a command it cannot apply is marked `failed` |
-| MQTT broker down     | The bridge logs one `status source: http (mqtt disconnected …)`, resumes the 10 s HTTP poll and records `status/health.source: "http"`; when the broker returns it switches back and logs once. The charger keeps publishing into the void (QoS 0) with no impact on charging                                           |
-| Firebase blip        | SDKs auto-reconnect; the bridge retries failed writes on the next tick; history baselines only advance after a successful write                                                                                                                                                                                         |
-| PWA offline          | An already-loaded app keeps working from the Firestore cache and the service-worker shell; a cold reload needs the network because the Firebase SDK and `firebase-config.js` are deliberately network-only                                                                                                              |
-| Stale deployed shell | Shell files are cache-first: `index.html`, `sw.js` and `firebase-config.js` are served `no-cache`, and a shell change must bump `CACHE` in `web/sw.js`; an open tab keeps old modules until reopened                                                                                                                    |
-| Index still building | The Advanced console reports the in-progress index (`failed-precondition`) instead of a generic error; reload once Firestore shows it ready                                                                                                                                                                             |
+Screens never contain business rules that belong in a pure module; pure modules never import DOM or Firebase. This is the main testability boundary.
 
-Each row is triggered and checked in [docs/VALIDATION.md](docs/VALIDATION.md).
+### Store and screens
 
-## Decisions & future work
+- `store.js` owns `status/current`, `status/config`, `settings/current`, `schedule/current` (snapshot with metadata), `commands` (recent + pending windows), `history/{date}` and `sessions` reads, and writes for settings, schedule, commands and FCM tokens.
+- **Status** keeps the latest snapshot, schedule and settings; a 1 s ticker runs only while the Status tab is selected; the pulse is gated by `liveCharging`; command feedback lasts 5 min; Stop freezes the clock until a genuinely new write.
+- **Settings** holds draft rows, a confirmed baseline and an optional pending snapshot. Flags: dirty/saving/waiting/saved/error. Offline saves are refused before the write; a timeout enters "waiting" with late reconciliation; a failure rolls back to the newest server snapshot. The current editor is a flat list of rate windows above the fallback rate/currency; issue #58 redesigns that presentation without changing the stored shape.
+- **Schedule** separates confirmed vs draft, supports optimistic queued writes, a queued-from-snapshot flag, unconfirmed-save handling, discard baseline reads and remote notices. A schedule can be disabled even if its rules are invalid.
+- **History** uses one-shot reads for the 30-day series and recent sessions (not listeners), tracks provenance separately, never paints cached/stale data as current, and rechecks midnight while open.
+- **Advanced** requires a per-visit confirmation gate and shows a 20-entry RAPI scrollback.
+- **Notifications** is a card state machine (`checking/unsupported/no-vapid/denied/granted/default`) backed by the DOM-free token lifecycle.
 
-- **Serverless over a backend service** (Firebase vs Railway/custom server): Firestore listeners give realtime updates with zero server code, the free tier is ample, and a future native Android app plugs into the same data.
-- **Why the Pi bridge exists** (vs. charger → cloud directly): the ESP32 firmware has no Firebase client; its direct-to-cloud options are telemetry-only (built-in Emoncms HTTPS posting) or MQTT via an internet-reachable broker — which adds a service to run and puts charger control on a third-party broker. A ~100-line LAN bridge is the simplest path covering both status **and** control.
-- **V1 scope includes energy history**: per-day kWh (from `total_energy` deltas) and per-session records — both computed bridge-side so the PWA stays a dumb renderer.
-- **Config parity by functionality, not UI**: the app exposes all configuration the charger offers (view), with changes via whitelisted commands plus the gated RAPI console — we don't mirror the built-in UI's layout.
-- **Firmware-native scheduling**: the app edits `schedule/current` in Firestore; the bridge pushes it to the charger's own scheduler (`POST /schedule`; v5.1.5 events are flat `{id, state, time, days}` with no per-event current, so `amps` is stored but not applied). Windows are enforced by the charger itself and survive a Pi outage; a periodic reconcile re-posts them after a firmware reset. `/override` remains the dynamic manual path. (Research confirmed the v5.x scheduler API — bridge-side window evaluation was considered and rejected.)
-- **Deferred from the built-in UI**: session limits are reachable via the RAPI console in v1; a curated screen can follow if wanted.
-- **MQTT-first status, HTTP for the rest**: the charger publishes per-field
-  status topics and accepts commands on native topics, so the bridge subscribes
-  and publishes instead of polling, keeping HTTP for `/config`,
-  `/schedule/plan`, OTA and as the automatic fallback
-  (`MQTT_ENABLED=false` reverts to 10 s polling and HTTP commands). The broker
-  lives on the Pi — the existing always-on host on the charger's LAN — so the
-  design stays serverless from the internet's point of view and adds no cloud
-  service.
-- **FCM in v1**: push for charging started/stopped and offline events — the PWA self-registers its token, the bridge sends via the Admin SDK. Costs are computed client-side from the stored rate.
-- Future candidates: native Android app, per-event notification preferences, the
-  firmware's built-in Emoncms posting as a zero-code telemetry fallback.
+### Settings save state machine
+
+The settings editor is the most stateful screen. The flow is:
+
+1. A draft is compared to the confirmed snapshot as parsed values, not text.
+2. A save validates the document plus the rate rows; invalid input paints field errors and focuses the first problem.
+3. Offline → refuse before incrementing the write generation.
+4. Write → `settleWrite`; a timeout re-enables the form in a "waiting" state while the write continues.
+5. Success adopts the sent values and the latest remote echo; failure rolls back to the newest confirmed snapshot; a late settlement is generation-guarded so the first outcome wins.
+
+Any future editor (including #58) must preserve these semantics.
+
+### Offline, service worker and push
+
+- `web/sw.js` is a plain service worker with no Firebase SDK. `CACHE` is currently `chelevse-v35`; `SHELL` lists every runtime `web/js/**` module plus the root assets. `test/web/sw-shell.test.js` fails if a module is missing, duplicated, or if `CACHE` is malformed.
+- Fetch is cache-first for same-origin GETs, except `firebase-config.js`, which is deliberately network-only. Navigation falls back to `index.html`; other failures return 503. Cross-origin/Firebase requests always go to the network.
+- Install precaches the shell and `skipWaiting`; activate deletes old caches and `clients.claim`; the page reloads once on `controllerchange` only if a controller already existed. **Any shell change must bump `CACHE`**, or existing clients keep the old modules.
+- Firestore uses its persistent cache with a multi-tab manager and an in-memory fallback. A cold reload still needs the network for the SDK and `firebase-config.js`.
+- Push: FCM sends a notification-only message; the worker shows the system notification or posts `chelevse-push` to a visible page for exactly one in-app toast. The page dedupes against the SDK's defensive `onMessage` within 5 s. `pushsubscriptionchange` asks open pages to re-acquire and re-save the token; a token rotation therefore recovers without user action. The bridge prunes invalid tokens.
+
+## 7. Firebase platform and security
+
+### Auth and allowlist
+
+- Firebase Auth with Google Sign-In. Anyone can authenticate; data access requires a `users/{uid}` grant with `allowed == true` **and** a verified email.
+- `private/acl.txt` (one email per line) is the owner-managed allowlist. `pi/acl.py` syncs it to grant docs with the Admin SDK; `--prune` removes grants and their FCM tokens. A person must sign in once before they can be granted (the auth user must exist).
+
+### Rules boundaries
+
+| Path                                             | Rules                                                                                                                         |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `users/{uid}`                                    | read own only; write `false`                                                                                                  |
+| `status/{doc}`, `history/{day}`, `sessions/{id}` | read allowlisted; write `false`                                                                                               |
+| `schedule/{doc}`                                 | allowlisted write; exact keys `enabled`, `rules`; bool/list/≤20; per-rule shape re-validated by the bridge                    |
+| `settings/{doc}`                                 | allowlisted write; `rate` 0–5, `currency` 1–8, optional `rates` list ≤24; per-window shape and overlaps validated client-side |
+| `fcmTokens/{token}`                              | read false; create/update own uid with exact keys; delete own doc even after grant revocation                                 |
+| `commands/{cmd}`                                 | create allowlisted and `pending`, with one of the four typed shapes; update/delete false                                      |
+
+Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays exceed the 1,000-expression evaluation limit. The design therefore uses **container-only guards** for `schedule.rules` and `settings.rates`, with the app validating before write and the bridge re-validating the schedule it receives. This is a deliberate trade-off, not an oversight.
+
+### Hosting and indexes
+
+- Hosting serves `web/` with an SPA rewrite to `index.html`. Every path is served `no-cache, max-age=0, must-revalidate`; there is no per-file split. `Cross-Origin-Opener-Policy: same-origin-allow-popups` supports popup sign-in; COEP is not set.
+- One composite index: `commands` by `type` ascending, `created_at` descending, for the Advanced scrollback. The pending-command query and recent-command window use single-field indexes.
+- The custom domain `charge.chelydra.dev` points at the `chelevse-906d4` Hosting site; Auth authorized domains must include the Firebase domains and the custom domain.
+
+## 8. Deployment and operations
+
+### Project and credentials
+
+- Firebase project **`chelevse`** (`.firebaserc` default). Never deploy ChelEVSE to `boxedturtle-30096`.
+- Bridge key: `private/service-account.json` (Cloud Datastore User, Firebase Auth Viewer, FCM Admin).
+- Deploy key: `private/chelevse-deploy-service-account.json` (Firebase Admin, Datastore Index Admin). The README/DEPLOY examples still name `private/deploy-service-account.json`; the operator convention and the file actually present are the explicit `chelevse-` name.
+- Web config: `web/firebase-config.js`, gitignored.
+
+### Deploy pipeline
+
+`npm run deploy:*` scripts each run `scripts/check-firebase-project.mjs` first. The guard resolves the target from `FIREBASE_PROJECT` or `.firebaserc`, resolves the key from `GOOGLE_APPLICATION_CREDENTIALS` or `private/service-account.json`, and blocks a mismatch. **Caveat:** with no key present the guard warns and exits 0, so a deploy is only truly guarded when credentials resolve.
+
+- `deploy:dry-run` compiles rules and validates the release without publishing.
+- Rules first, then indexes (wait for the index to build), then hosting. `npm run deploy` does all three.
+- Deploy from `main` after the merge, never from a feature branch; no `--force`. Fix forward on a branch.
+
+### Pi deployment
+
+`sudo bash pi/install.sh` is the only supported path. It rsyncs `pi/` (with `--delete`) and `private/` (without `--delete`) to `/opt/chelevse`, builds/updates the venv, installs the unit and restarts the service. It is idempotent. Do not hand-edit `/opt/chelevse`.
+
+### Failure modes
+
+| Failure              | Behaviour                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi offline           | PWA shows stale `updated_at` / bridge-offline treatment; no status writes for ~60 s                                                                                       |
+| Charger unreachable  | Bridge retries, writes `charger_online: false`, distinguishes charger-offline from bridge-offline; watchdog restarts over HTTP or MQTT and alerts when neither path works |
+| MQTT broker down     | Bridge logs one transition, resumes 10 s HTTP polling, records `source: "http"`; the charger publishes into the void without affecting charging                           |
+| Firebase blip        | SDKs reconnect; bridge retries failed writes next tick; history baselines advance only after a successful write                                                           |
+| PWA offline          | Loaded app works from the Firestore cache and SW shell; cold reload needs the network (SDK/config are network-only)                                                       |
+| Stale deployed shell | Shell is cache-first; a shell change must bump `CACHE`; an open tab keeps old modules until reload                                                                        |
+| Index building       | Advanced reports `failed-precondition` until Firestore reports the index ready                                                                                            |
+
+## 9. Testing and quality gates
+
+| Suite | Command                                                | Current size | Scope                                                                                        |
+| ----- | ------------------------------------------------------ | ------------ | -------------------------------------------------------------------------------------------- |
+| Web   | `npm test`                                             | 190 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse; no browser or Firebase |
+| Rules | `npm run test:rules`                                   | 34 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                          |
+| Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 267 tests    | bridge parsing, commands, MQTT, schedule, history, sessions, watchdog, ACL; in-memory fakes  |
+
+- **No CI.** Gates are local and operator-enforced: hooks (Prettier pre-commit/pre-push), full test runs, a reviewed head SHA, and squash merges with `--match-head-commit`.
+- The browser harness under `/tmp/opencode/chelevse-preview` is an ephemeral manual/preview tool; it is not part of the repo and must not be a merge dependency.
+- Rules coverage has gaps: `status`/`history`/`sessions` reads and `users` self-read are not directly tested; `settings` rate bounds are only partly covered; command-create coverage is concentrated on `rapi`, not `pause`/`resume`/`set_current`.
+
+## 10. Key decisions
+
+| Decision                                      | Rationale                                                                                                                      | Consequence                                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Serverless Firebase over a custom backend     | Firestore listeners give realtime updates with no server code; free tier is ample; a native client can reuse the contract      | Rules are the security boundary; client validation is UX, not enforcement                                         |
+| Raspberry Pi bridge                           | The ESP32 firmware has no Firebase client; a LAN bridge covers status **and** control without a cloud broker                   | One always-on host; service-account key on the Pi; no inbound ports                                               |
+| MQTT-first status and commands, HTTP fallback | The firmware publishes per-field topics and accepts native commands; latency drops to seconds and polling drops to a reconcile | Broker on the Pi; `MQTT_ENABLED=false` is the rollback; HTTP remains for config, plan, commissioning and counters |
+| Firestore as the API                          | Both bridge and PWA speak the same documents; no RPC surface to version                                                        | Additive schema evolution; no migrations; document shapes are the contract                                        |
+| Flat rate as fallback, schedule optional      | Existing configs keep working; costs stay meaningful when no window matches                                                    | `rates` is optional; flat payloads are byte-identical; aggregate history cost is hidden when a schedule exists    |
+| Read-time pricing                             | Changing a tariff must re-price history immediately; no stale persisted costs                                                  | Costs are approximate where sessions lack interval energy (#57)                                                   |
+| Local wall clock                              | Tariffs and schedules are expressed in the owner's local time, including DST                                                   | All boundary logic uses local `Date` helpers; day numbering is explicit (`0=Mon`)                                 |
+| Presentation-only TOU refresh                 | Seasons can be made legible without a schema migration (#58)                                                                   | Grouping/periods are derived from month scopes; window order and semantics are preserved                          |
+| No build step / plain ES modules              | The app is small, auditable, and deployable as static files                                                                    | Manual module wiring; SW shell list must be maintained; cache bumps are mandatory                                 |
+
+## 11. Known gaps and future work
+
+- **Charging intervals (#57):** sessions store aggregate `wh`/`elapsed`, so paused-then-resumed sessions are costed over the plug-in span. Record per-interval energy in the bridge and price intervals when present; keep uniform pro-rating as the legacy fallback.
+- **TOU/seasonality editor (#58):** the current editor is a flat window list; the planned refresh makes seasons/periods first-class, adds a whole-plan view and a rate checker, and keeps the stored `rates` shape unchanged.
+- **OTA is not implemented.** The bridge has no firmware upload/version/rollback path. `ARCHITECTURE.md` and `docs/DEPLOY.md` historically described OTA as an HTTP responsibility; treat firmware updates as manual until the code exists.
+- **Deploy guard is weak without a key:** `check-firebase-project.mjs` warns and exits 0 when no credentials resolve. Deploy commands in README/DEPLOY also use a key filename that differs from the operator convention.
+- **Rules test coverage:** add read-authorization tests for `status`, `history`, `sessions` and `users`; the core data paths are currently unexercised.
+- **Command hardening:** rules do not require `created_at` or reject extra keys; the bridge treats a missing/malformed `created_at` as not stale, so a crafted pending doc can bypass the 10-minute sweep and sit indefinitely. There is no command claim/lease, so two bridge instances would double-apply.
+- **Settings listener error handling:** `settings/current` has no error callback; a permission/backend failure leaves the card silently empty instead of showing an error.
+- **Single-bridge assumptions:** session upsert is read-then-write (not transactional), schedule sync uses a digest, and watchdog counters are process-local. These are acceptable for one Pi but not for HA.
+- **Bridge runs as root.** The unit is `User=root`; a dedicated service user with access to `private/` and the charger would reduce blast radius.
+- **History retention:** `history/*` and `sessions/*` grow without pruning; the UI only reads 30 days / 20 sessions.
+- **Docs drift:** `docs/DEPLOY.md` still mentions OTA; README/DEPLOY deploy-key filenames differ from `AGENTS.md`; `firestore.rules` still carries a stale comment about schedule validation landing later; README’s paused-session note cites #37, the scope that accepted the approximation, while #57 is the charging-interval follow-up.
+
+## 12. Glossary
+
+| Term                | Meaning                                                                                                         |
+| ------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **Fallback rate**   | `settings/current.rate`; prices every local instant no rate window covers                                       |
+| **Rate window**     | One entry in `settings/current.rates`: price + weekday set + local time range + month set                       |
+| **Period / season** | A presentation grouping of windows that share a month scope; not persisted (`#58` design)                       |
+| **Live cost**       | Scheduled cost for the current session, anchored to `status.updated_at − elapsed` and shown only while charging |
+| **Aggregate cost**  | Daily/30-day cost from one kWh total; hidden when a schedule exists                                             |
+| **MQTT source**     | The bridge's optional event-driven status/command path; HTTP is the reconciler and fallback                     |
+| **Transport**       | `mqtt` or `http`, recorded on a command when the bridge actually sent it                                        |
+| **Bridge stale**    | No status write for a threshold; distinct from charger offline                                                  |
+| **Grant**           | `users/{uid}` doc with `allowed: true`; the allowlist primitive                                                 |
+| **SHELL**           | The service-worker precache list; any change requires a `CACHE` bump                                            |
