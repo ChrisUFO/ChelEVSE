@@ -33,27 +33,39 @@ and daily **windows**:
   keeps working with no plan at all. The currency is shared by every price.
 - A **season** owns a month scope: all year, a contiguous range such as November → February, or any
   custom set such as January + June. There is one month editor per season; the windows inside it
-  inherit those months and show no month control of their own.
+  inherit those months and show no month control of their own. Month chips apply immediately to
+  every window in the season.
 - A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
   windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
-  Custom reveals the individual day chips for an exact choice.
-- **Whole-plan view.** Each season header shows its months, window count, price range and any error
-  even when collapsed, plus a small seven-day coverage strip. Expanding it shows the month chips, a
-  complete 24-hour table for each distinct day pattern, and the windows themselves. Every table is a
-  full 24-hour partition with **Other times** rows wherever the base rate applies.
-- **Other months** is the derived season for months no window covers. It has no windows of its own,
-  shows the all-other-times price, and offers **Add window** if you want to give those months their
-  own prices.
+  Custom reveals the individual day chips for an exact choice. A window whose start equals its end
+  is **All day**; the editor shows that instead of `00:00 → 00:00`, and the table shows 00:00–24:00.
+- **Layering, not a partition.** A month can carry windows from more than one season (for example an
+  every-month overnight window plus a November–February peak). The plan is their union. Each season
+  header shows its **own** window count and the **effective** price range for a representative month
+  in its own scope (including the fallback and any season that also applies), plus a coverage strip
+  and any error even when collapsed. Expanding shows the month chips, one complete 24-hour table per
+  day pattern for a representative month, and the windows themselves. The table highlights that
+  season's own rows and labels a row from another season by name (for example “Winter”) instead of
+  calling it the fallback. A sibling note names the other seasons that also apply there (for example
+  “Winter also applies in Nov–Feb”), and the checker shows the combined price.
+- **No window — other times** is a line under the seasons for months no window covers. It is where the
+  all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
+  summary.
 - **Price bands** (Peak / Off-peak / Shoulder / Same price) are derived from the plan's relative
   prices for display only; no band or season name is stored.
 - **What applies at** checks a local date and time against the current draft — saved or not — and
-  names the winning window or the fallback. It never writes. **Now** fills in the current moment.
+  names the winning window or the fallback. It never writes. **Now** fills in the current moment. A
+  definitive answer is withheld while a window is incomplete or two windows collide: the checker
+  says so and points back to the blocking fields.
 - **Duplicate** copies a season's windows into the months it does not cover, a quick start for the
   other half of the year.
 
 The stored document is unchanged: one flat `rates` list. Seasons are a presentation over each
 window's stored `months` value, so the editor never adds fields, reorders rows, or rewrites a month
 list it did not edit.
+
+The plan summary names the number of seasons, windows and other-times rate; the save row carries
+`N to fix` whenever validation has blockers.
 
 Technical rules:
 
