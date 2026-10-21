@@ -575,8 +575,11 @@ and each case has its own journal line:
 deliver` — the step is physically impossible. The energy stays in the
   aggregate and the interval stays short.
 
-A cap fold is logged too, naming the session and the number of intervals
-dropped.
+A cap fold is logged too, naming the session, how many intervals it folded and
+how many it kept: `session <label>: <n> oldest intervals folded into
+<start>–<end> (<wh> Wh); <m> kept`. Nothing is lost to a fold — `<wh>` is the
+sum of the folded intervals. Only unusable entries are dropped, and they have
+their own line: `session <label>: <n> unusable interval(s) dropped`.
 
 Because of those three cases the web app does not trust the list blindly: it
 prices per interval only when the intervals add up to the session's `wh` within
