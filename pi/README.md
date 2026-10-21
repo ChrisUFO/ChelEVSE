@@ -554,9 +554,32 @@ equality is _not_ universal:
 A step is attributed only when the charger could have delivered it: at most
 `MAX_INTERVAL_POWER_W` (25 kW, more than twice the 48 A ceiling) × the measured
 seconds between the two readings, plus a small floor — so a legitimate step
-after a long outage is kept and an impossible jump is not. A non-positive step
-is a counter reset, never negative energy. Drops, resets and cap folds each
-write one journal line with the size, gap and reason.
+after a long outage is kept and an impossible jump is not. The gap is measured
+with `CLOCK_BOOTTIME`, which keeps counting across suspend (falling back to
+`time.monotonic()` where the platform lacks it), so a Pi that suspends
+mid-charge is judged on the time that actually elapsed rather than the awake
+time. Every other timer in the bridge stays on `time.monotonic()`.
+
+A non-positive step is never negative energy: it is dropped and the tick's
+reading becomes the next baseline. What it means depends on where it happens,
+and each case has its own journal line:
+
+- `interval opened: baseline <n> Wh` — a fresh interval starts here (a new
+  plug-in, or the resume half of a pause). Its first reading is only a baseline;
+  a new plug-in's cleared counter is routine, not an anomaly.
+- `interval step skipped: counter reset inside the open interval (<Δ> Wh, <gap>)`
+  — the counter went backwards while an interval was already open (a firmware
+  restart mid-session). The step is dropped and the reading becomes the new
+  baseline.
+- `interval step dropped: <Δ> Wh in <gap> exceeds the <n> Wh the charger could
+deliver` — the step is physically impossible. The energy stays in the
+  aggregate and the interval stays short.
+
+A cap fold is logged too, naming the session, how many intervals it folded and
+how many it kept: `session <label>: <n> oldest intervals folded into
+<start>–<end> (<wh> Wh); <m> kept`. Nothing is lost to a fold — `<wh>` is the
+sum of the folded intervals. Only unusable entries are dropped, and they have
+their own line: `session <label>: <n> unusable interval(s) dropped`.
 
 Because of those three cases the web app does not trust the list blindly: it
 prices per interval only when the intervals add up to the session's `wh` within
