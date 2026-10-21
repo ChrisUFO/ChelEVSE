@@ -485,12 +485,14 @@ document: it defaults to `exists=True` and raises `NotFound` on the first write
 of a new day. The merge list emits one write whose mask and transforms touch
 exactly `kwh`, that one hour bucket and `updated_at`, so sibling hours and every
 other field in the document survive. `Increment` on a missing field creates it,
-so no read-before-write or transaction is needed.
+so no read-before-write or transaction is needed. Elsewhere in these notes a stored
+map key is written `hours["<HH>"]`, while the backticked dotted form
+``hours.`<HH>` `` is reserved for the Firestore field path in a merge mask.
 
 **Daylight saving.** Buckets are local wall-clock hours. On a fall-back day the
 repeated hour merges into one bucket (both `01` hours accumulate under
-`hours.01`, so that bucket can hold two hours of energy); on a spring-forward
-day `hours.02` is absent. `kwh` stays the day's true total either way, so for a
+`hours["01"]`, so that bucket can hold two hours of energy); on a spring-forward
+day `hours["02"]` is absent. `kwh` stays the day's true total either way, so for a
 day recorded since hourly capture began `sum(hours) == kwh`.
 
 **Accuracy.** A delta lands in the hour the bridge observed it in, so it can be
