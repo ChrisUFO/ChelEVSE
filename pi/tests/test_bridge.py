@@ -839,7 +839,13 @@ class IntervalTests(unittest.TestCase):
         # Two hours of suspend mid-charge: `time.monotonic()` slept through it
         # (60 s of awake time), so a monotonic gap would call 6 kWh impossible.
         # The interval clock includes suspend, so the step is attributed.
-        with mock.patch.object(bridge, "log") as log:
+        # The guard's only input is the constant's presence, which a non-Linux
+        # dev host lacks; patching it in makes the real boottime branch of
+        # `_interval_clock` run wherever the suite does, instead of silently
+        # asserting the fallback's answer.
+        with mock.patch.object(
+            bridge.time, "CLOCK_BOOTTIME", 1, create=True
+        ), mock.patch.object(bridge, "log") as log:
             started = self.tick(3, 0, 0)
             self.tick(
                 3,
