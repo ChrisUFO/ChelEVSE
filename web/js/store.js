@@ -6,6 +6,7 @@ import {
   doc,
   collection,
   addDoc,
+  getDoc,
   getDocFromServer,
   getDocs,
   setDoc,
@@ -255,6 +256,34 @@ export async function fetchHistory(startId, endId) {
   return {
     docs: snap.docs.map((d) => ({ id: d.id, kwh: d.data().kwh })),
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
+  };
+}
+
+// The Day period reads one document: `history/{today}` already carries the
+// whole day, so a range query would add nothing and could not tell an absent
+// document from one that a cached read never reached. The bridge writes
+// `hours.<HH>` with zero-padded, strftime-shaped keys ('00'–'23'); a day
+// recorded before hourly capture has `kwh` and no `hours` at all, so `hours`
+// stays null rather than becoming an empty map — the screen uses that to say
+// "no intraday detail" instead of drawing 24 zero bars.
+//
+// getDoc prefers the server but may resolve from the cache (reported in
+// metadata) and rejects while offline when the document is not cached, which the
+// screen already classifies as an error. A missing document is `exists: false`
+// with zero energy: the caller must not treat that as "nothing was recorded"
+// unless the read actually reached the server.
+export async function fetchHistoryDay(dayId) {
+  const snap = await getDoc(doc(db, 'history', dayId));
+  const exists = Boolean(snap && snap.exists());
+  const data = exists ? snap.data() || {} : {};
+  const kwh = Number(data.kwh);
+  const hours = data.hours;
+  return {
+    id: dayId,
+    exists,
+    kwh: exists && Number.isFinite(kwh) ? kwh : 0,
+    hours: exists && hours && typeof hours === 'object' ? hours : null,
+    fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
   };
 }
 
