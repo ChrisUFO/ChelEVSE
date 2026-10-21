@@ -11,43 +11,72 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 - **History**: daily kWh chart for the last 30 days and the 20 most recent charging sessions, with cost at your electricity rate.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.
-- **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for rate/currency and the rate schedule, notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
+- **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for the all-other-times rate, seasons and currency, notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
 - **Simple**: no backend server to write or run — Firestore carries the data, Hosting serves the app, the free tier covers a household many times over.
 
 ## Screens
 
-| Tab          | What it shows                                                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                     |
-| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                      |
-| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                      |
-| **Config**   | Charger configuration with secrets redacted, App settings (fallback rate, rate schedule, currency), and the notification opt-in card. |
-| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                               |
+| Tab          | What it shows                                                                                                                                      |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                  |
+| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                                   |
+| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                   |
+| **Config**   | Charger configuration with secrets redacted, App settings (all-other-times rate, seasons and windows, currency), and the notification opt-in card. |
+| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                            |
 
 ## Electricity rates
 
-App settings hold an optional **rate schedule** on top of the fallback rate:
+App settings hold one **all-other-times** rate plus an optional plan of **seasons** (month periods)
+and daily **windows**:
 
-- The **fallback rate** prices every moment no window covers, so a flat rate keeps working with no
-  schedule at all.
-- A **rate window** sets a rate for a set of weekdays, a local `HH:MM` start and end, and either the
-  whole year or a month range. Up to 24 windows.
+- **All other times** is the base rate. It prices every moment no window covers, so a flat rate
+  keeps working with no plan at all. The currency is shared by every price.
+- A **season** owns a month scope: all year, a contiguous range such as November → February, or any
+  custom set such as January + June. There is one month editor per season; the windows inside it
+  inherit those months and show no month control of their own.
+- A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
+  windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
+  Custom reveals the individual day chips for an exact choice.
+- **Whole-plan view.** Each season header shows its months, window count, price range and any error
+  even when collapsed, plus a small seven-day coverage strip. Expanding it shows the month chips, a
+  complete 24-hour table for each distinct day pattern, and the windows themselves. Every table is a
+  full 24-hour partition with **Other times** rows wherever the base rate applies.
+- **Other months** is the derived season for months no window covers. It has no windows of its own,
+  shows the all-other-times price, and offers **Add window** if you want to give those months their
+  own prices.
+- **Price bands** (Peak / Off-peak / Shoulder / Same price) are derived from the plan's relative
+  prices for display only; no band or season name is stored.
+- **What applies at** checks a local date and time against the current draft — saved or not — and
+  names the winning window or the fallback. It never writes. **Now** fills in the current moment.
+- **Duplicate** copies a season's windows into the months it does not cover, a quick start for the
+  other half of the year.
+
+The stored document is unchanged: one flat `rates` list. Seasons are a presentation over each
+window's stored `months` value, so the editor never adds fields, reorders rows, or rewrites a month
+list it did not edit.
+
+Technical rules:
+
 - Weekdays use `0` = Monday … `6` = Sunday, the same convention as the charging schedule. The editor
   shows the day names, so the numbers only matter in the stored document.
 - Times are local wall clock. An end at or before the start wraps past midnight (22:00 → 06:00 is a
   night window), and a window's after-midnight hours belong to the day it started.
-- A month range is inclusive and may wrap the year: November → February means November, December,
-  January and February. "All year" stores no month limit.
+- A month scope is an inclusive list that may wrap the year: November → February means November,
+  December, January and February. A non-contiguous list such as January + June is valid and is shown
+  as month chips, not repaired. "All year" stores no month limit (`null`).
 - Windows must not overlap. Two windows that share a day, a month and a time would make the rate
-  ambiguous, so the editor rejects the schedule instead of silently choosing one. A document written
-  outside the editor (hand-edited, or by an older client) can still hold overlaps: there the **last
-  matching window wins**, and the editor asks you to resolve the overlap before it will save again.
-- Saving writes the fallback rate, currency, and the window list. With no windows, the document keeps
-  exactly its two flat fields.
+  ambiguous, so the editor rejects the plan instead of silently choosing one and names both windows
+  in the error. A document written outside the editor (hand-edited, or by an older client) can still
+  hold overlaps: there the **last matching window wins**, and the editor asks you to resolve the
+  overlap before it will save again.
+- A malformed stored row stays visible with its error and blocks saving until it is fixed or
+  removed; loading never deletes or repairs it.
+- Saving writes the all-other-times rate, currency, and the window list in its original order. With
+  no windows, the document keeps exactly its two flat fields.
 
 ### How costs are worked out
 
-Costs are calculated whenever a screen is shown, never saved, so editing the schedule re-prices the
+Costs are calculated whenever a screen is shown, never saved, so editing the plan re-prices the
 live session and the whole history immediately.
 
 - **Live session** cost covers the snapshot's `updated_at - elapsed` to `updated_at`, and only while
@@ -71,11 +100,10 @@ live session and the whole history immediately.
   separate the two, so such a session can read under or over its true cost (the error is bounded by
   the rate difference across the gap). Issue #37 accepts this as the best available signal until the
   bridge stores the real charging intervals.
-- **The 30-day total and the daily bar cost are hidden when a schedule exists**, because a history
+- **The 30-day total and the daily bar cost are hidden when a rate plan exists**, because a history
   document holds a single kWh figure per day and it cannot be split across the windows it was drawn
   in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary
-  says so. With no schedule, every total and bar cost is exactly what it was before schedules
-  existed.
+  says so. With no plan, every total and bar cost is exactly what it was before rate plans existed.
 
 ## How it works
 
