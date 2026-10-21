@@ -352,9 +352,7 @@ function renderHistory() {
               title: `Couldn't load ${descriptor.noun}.`,
               line: 'Check your connection and refresh.',
             }
-          : historyState === 'no-intraday'
-            ? { title: descriptor.noIntradayTitle, line: descriptor.noIntradayLine }
-            : NO_HISTORY_COPY;
+          : NO_HISTORY_COPY;
     showChartEmpty(copy.title, copy.line);
     setHistoryNote('');
     return;
