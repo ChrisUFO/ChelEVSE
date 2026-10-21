@@ -70,10 +70,14 @@ schedule.
 - **Uncovered dates cost 0.00.** A line under the seasons lists the dates no season covers and
   offers **Fill N gaps**. Filling creates an empty base season for each gap, opens the first one and
   focuses its base rate; nothing is silently repriced. With every date covered and a base already
-  present, **Add a season** is not offered. A season with windows but no base shows “No base rate —
+  present, **Add a season** is disabled and the reason is printed beside it (edit a season's dates to
+  make room); it is never silently absent. A season with windows but no base shows “No base rate —
   hours outside the windows have no price” and **Add base rate**; adding it uses the stored One rate
   value, visibly. If another season's base already overlaps those dates, the add action is withheld
   because two bases on one date are invalid.
+- **Switching One rate → Seasons seeds the current month**, not the whole year: the flat price
+  becomes a date-bounded base season, a note says so, the rest of the year stays an uncovered gap
+  (0.00 until covered) and **Add a season** is immediately usable for a Summer/Winter split.
 - **Warnings do not block Save.** Uncovered dates, a base-less season and a base-less hour are
   warnings, not errors. Saving stays enabled, and the checker and history say which moments are
   0.00. An empty base or invalid row is a normal field error and does block Save.
@@ -151,8 +155,8 @@ live session and the whole history immediately.
   so under the "Charger offline" banner the last known energy is shown without a scheduled cost.
   Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
   price yet). For a flat rate the figure is still `kWh × rate`, exactly as before. When any slice
-  of the live interval has no base/window price, that slice costs 0.00 and the cost line adds
-  **includes unpriced time**; the figure is not hidden.
+  of the live interval has no base/window price, that slice costs 0.00 and the figure gains a
+  warning-coloured **understates cost** line (tooltip: the 0.00 slices); the figure is not hidden.
 - **History session** costs use the session's own stored start and end. A schedule with any
   unpriced dates or base-less hours also shows a plan banner above history saying those moments are
   shown at 0.00, with a link back to settings.

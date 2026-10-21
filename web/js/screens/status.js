@@ -107,9 +107,14 @@ function renderCost() {
   if (cost) {
     el.append(document.createTextNode(cost));
     if (statusCostUncovered(status, settings)) {
+      // Its own line under the figure, in the warning colour: "includes unpriced
+      // time" was a 10.5 px footnote that wrapped mid-phrase under a green zero.
+      // "Understates cost" says what the caveat does to the number.
       const marker = document.createElement('span');
       marker.className = 'cost-unpriced';
-      marker.textContent = ' · includes unpriced time';
+      marker.textContent = 'understates cost';
+      marker.title =
+        'Some hours in this session have no price and count as 0.00, so this cost is lower than the real one.';
       el.append(marker);
     }
   }

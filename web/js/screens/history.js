@@ -84,10 +84,18 @@ function setCostNote(visible) {
   if (note) note.hidden = !visible;
 }
 
+// A saved plan with any unpriced instant advertises it on History: with a
+// schedule, some sessions can be priced at 0.00 without any other signal. Kept as
+// a pure predicate so the wiring is testable without a DOM.
+export function showPlanBanner(data) {
+  const normalized = costSettings(data);
+  return hasRateSchedule(normalized) && planHasUnpriced(normalized.rates);
+}
+
 function renderPlanBanner() {
   const banner = $('history-plan-banner');
   if (!banner) return;
-  banner.hidden = !(hasRateSchedule(settings) && planHasUnpriced(settings && settings.rates));
+  banner.hidden = !showPlanBanner(settings);
 }
 
 function renderSummary() {

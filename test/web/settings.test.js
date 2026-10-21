@@ -33,11 +33,10 @@ import {
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
-  isSeasonRatePeriod,
-  isSeasonRateRow,
   largestDateScope,
   mergeDateRanges,
   minutesToClock,
+  monthEditorIsLegacy,
   monthScopeBounds,
   nextWindowPreset,
   normalizeSettings,
@@ -49,15 +48,11 @@ import {
   periodHasDates,
   periodBaseRate,
   periodHasBaseOverlap,
-  periodNeedsBase,
-  periodRateMode,
   periodRowScope,
-  planGapCount,
   planHasUnpriced,
   previewBlocker,
   planProblemText,
   previewRate,
-  largestMonthRun,
   rateIsUsable,
   rateMonthsText,
   rateMonthScope,
@@ -92,7 +87,6 @@ import {
   toggledMonthScope,
   uncoveredDateRanges,
   uncoveredGapScopes,
-  uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
   validationProblemCount,
@@ -996,7 +990,7 @@ test('the flat list groups into stable month periods without reordering rows', (
     [
       ['All year', 'all', null, [0]],
       ['Winter', 'months', [1, 2, 11, 12], [1]],
-      ['Season rate', 'months', [3, 4, 5, 6, 7, 8, 9, 10], [2]],
+      ['Summer', 'months', [3, 4, 5, 6, 7, 8, 9, 10], [2]],
     ],
   );
   // There is no synthetic season for the months a window does not cover; the
@@ -1309,9 +1303,11 @@ test('coverage is the effective week for a month, with owners and named siblings
     siblingNote({ kind: 'dates', title: 'Season', monthText: 'Jun 15–Sep 15' }),
     'Season Jun 15–Sep 15 also applies here.',
   );
+  // The title is scope-derived now, so a stray stored title cannot invent a
+  // second name for a date season.
   assert.equal(
     siblingNote({ kind: 'dates', title: 'Season rate', monthText: 'Jun 15–Sep 15' }),
-    'Season rate Jun 15–Sep 15 also applies here.',
+    'Season Jun 15–Sep 15 also applies here.',
   );
 
   const summerCoverage = periodCoverage(rows, 0.31, summer, periods, 2026);
@@ -1370,28 +1366,6 @@ test('the header range is effective for the representative month, not just the o
   );
 });
 
-test('uncovered months are a fallback line, not a season', () => {
-  const winterOnly = [rateRowFields(winterPeak)];
-  const periods = ratePeriods(winterOnly);
-  assert.deepEqual(
-    periods.map((period) => [period.title, period.monthText, period.rows.length]),
-    [['Winter', 'Nov–Feb', 1]],
-  );
-  assert.deepEqual(uncoveredMonths(winterOnly), [3, 4, 5, 6, 7, 8, 9, 10]);
-  assert.equal(rateMonthsText(uncoveredMonths(winterOnly)), 'Mar–Oct');
-
-  // An all-year row covers everything: no fallback line.
-  assert.deepEqual(uncoveredMonths([rateRowFields(nightEveryDay)]), []);
-  // Non-contiguous scopes leave the other months uncovered.
-  assert.deepEqual(uncoveredMonths([rateRowFields(nightEveryDay), rateRowFields(winterPeak)]), []);
-  const loose = [
-    rateRowFields({ ...nightEveryDay, months: [1, 6] }),
-    rateRowFields({ ...winterPeak, months: [11, 12] }),
-  ];
-  assert.deepEqual(uncoveredMonths(loose), [2, 3, 4, 5, 7, 8, 9, 10]);
-  assert.equal(rateMonthsText(uncoveredMonths(loose)), 'Feb–May, Jul–Oct');
-});
-
 test('the exact-date checker names the winning row and the source of the price', () => {
   const rows = [rateRowFields(nightEveryDay), rateRowFields(winterPeak), rateRowFields(winterBase)];
   const at = (year, month, day, hours, minutes = 0) =>
@@ -1402,7 +1376,6 @@ test('the exact-date checker names the winning row and the source of the price',
   assert.equal(peak.window.id, 'winter-peak');
   assert.equal(peak.tier, 'Peak');
   assert.equal(peak.source, 'window');
-  assert.equal(peak.fallback, false);
   assert.match(peak.summary, /Weekdays · 16:00–19:00/);
   assert.equal(peak.monthsText, 'Nov–Feb');
 
@@ -1410,8 +1383,6 @@ test('the exact-date checker names the winning row and the source of the price',
   assert.equal(noon.rate, 0.31);
   assert.equal(noon.source, 'base');
   assert.equal(noon.tier, 'Base');
-  assert.equal(noon.seasonRate, true);
-  assert.equal(noon.fallback, false);
   assert.equal(at(2026, 1, 15, 18, 59).rate, 0.32);
   assert.equal(at(2026, 1, 15, 19, 0).source, 'base');
   // Month boundaries: 31 Dec is winter, 1 Mar leaves the winter base behind.
@@ -1556,7 +1527,7 @@ test('Save stays submit-capable while a plan is blocked', () => {
 // Stand-ins for the rendered window cards the focus adapter touches. The screen's
 // cards carry the same fields, so the adapter is exercised as the production
 // path rather than through a parallel fake.
-function cardStub() {
+function cardStub({ monthEditor = false } = {}) {
   const calls = [];
   const focus = (name) => () => calls.push(name);
   return {
@@ -1566,6 +1537,17 @@ function cardStub() {
       allYear: { focus: focus('months') },
       dateFocus: { focus: focus('dates') },
       node: { scrollIntoView: () => calls.push('reveal-period') },
+      // The month chips are the legacy path: absent or hidden unless the period
+      // is a non-contiguous month scope.
+      ...(monthEditor
+        ? {
+            advancedMonths: { hidden: false, open: false },
+            monthChips: {
+              querySelector: (selector) =>
+                selector === '[aria-pressed="true"]' ? { focus: focus('month-chip') } : null,
+            },
+          }
+        : { advancedMonths: { hidden: true, open: false } }),
     },
     rateInput: { focus: focus('rate') },
     startInput: { focus: focus('start') },
@@ -1679,7 +1661,7 @@ test('a document blocker with no accused row falls back to the table sentence', 
   assert.deepEqual(cards[0].calls, ['rate', 'reveal-row']);
 });
 
-test('a month problem focuses the season control, not a window field', () => {
+test('a month problem lands on the chips only where they are offered', () => {
   const fields = blockedFields([{ ...rateRowFields(nightEveryDay), months: 3 }]);
   const attempt = submitSettingsPlan({
     fields,
@@ -1687,11 +1669,20 @@ test('a month problem focuses the season control, not a window field', () => {
   });
   assert.deepEqual(attempt.target, { kind: 'row', index: 0, focus: 'months' });
 
-  const cards = [cardStub()];
-  const view = viewStub(cards);
-  applySubmitFocus(attempt.target, view);
-  assert.deepEqual(view.calls, ['expand']);
-  assert.deepEqual(cards[0].calls, ['reveal-period', 'months']);
+  // A legacy non-contiguous scope shows the chips, so the submit lands on one.
+  const legacy = [cardStub({ monthEditor: true })];
+  const legacyView = viewStub(legacy);
+  applySubmitFocus(attempt.target, legacyView);
+  assert.deepEqual(legacyView.calls, ['expand']);
+  assert.deepEqual(legacy[0].calls, ['reveal-period', 'month-chip']);
+
+  // A date or contiguous month season hides them: the scope is the date fields,
+  // and focus must not be dropped into a hidden editor.
+  const dates = [cardStub()];
+  const dateView = viewStub(dates);
+  applySubmitFocus(attempt.target, dateView);
+  assert.deepEqual(dateView.calls, ['expand']);
+  assert.deepEqual(dates[0].calls, ['reveal-period', 'dates']);
 });
 
 test('the checker withholds a definitive answer while the plan is incomplete', () => {
@@ -1720,11 +1711,7 @@ test('an all-day window is recognised from its stored start and end', () => {
   assert.equal(isAllDayWindow(null), false);
 });
 
-test('the longest uncovered run seeds a new season, and the plan range ignores bad prices', () => {
-  assert.deepEqual(largestMonthRun([3, 4, 5, 6, 7, 8, 9, 10]), [3, 4, 5, 6, 7, 8, 9, 10]);
-  assert.deepEqual(largestMonthRun([1, 2, 11, 12]), [11, 12, 1, 2]);
-  assert.deepEqual(largestMonthRun([1, 6, 7, 8]), [6, 7, 8]);
-  assert.deepEqual(largestMonthRun([]), []);
+test('the plan range ignores bad prices', () => {
   // Bare rows have no scope, so the plan reports the uncovered 0.00 minimum;
   // the malformed 9 and empty prices still do not widen the maximum.
   assert.deepEqual(ratePlanRange([{ rate: '0.1' }, { rate: 9 }, { rate: '' }, { rate: 0.32 }]), {
@@ -1815,18 +1802,26 @@ test('date seasons group by their dates, not by a stale months hint', () => {
       period.title,
       period.dateText,
       period.monthText,
-      period.seasonRate,
+      period.mode,
       period.rows.map((entry) => entry.index),
     ]),
     [
-      ['dates:06-15-09-15', 'dates', 'Season', 'Jun 15–Sep 15', 'Jun 15–Sep 15', false, [0, 1]],
+      [
+        'dates:06-15-09-15',
+        'dates',
+        'Season',
+        'Jun 15–Sep 15',
+        'Jun 15–Sep 15',
+        'base+windows',
+        [0, 1],
+      ],
       [
         'dates:09-16-06-14',
         'dates',
         'Season',
         'Sep 16–Jun 14 (wraps)',
         'Sep 16–Jun 14 (wraps)',
-        false,
+        'windows',
         [2],
       ],
     ],
@@ -2135,36 +2130,27 @@ test('uncovered dates are a day-level line that collapses whole months', () => {
   );
 });
 
-test('the checker names a date season and recognises a season rate', () => {
+test('the checker names a date season and the price source', () => {
   const seasonRateRow = rateRowFields(summerDates);
   const inside = previewRate([seasonRateRow], '0.31', new Date(2026, 7, 1, 12, 0));
   assert.equal(inside.rate, 0.2);
-  assert.equal(inside.fallback, false);
-  assert.equal(inside.seasonRate, true);
   assert.equal(inside.scopeText, 'Jun 15–Sep 15');
   assert.equal(inside.dateText, 'Jun 15–Sep 15');
   assert.equal(inside.summary, 'Every day · All day');
   // Outside the season the date is uncovered and costs 0; there is no scope.
   const outside = previewRate([seasonRateRow], '0.31', new Date(2026, 5, 14, 12, 0));
-  assert.equal(outside.fallback, false);
   assert.equal(outside.rate, 0);
   assert.equal(outside.source, 'uncovered');
   assert.equal(outside.uncoveredDate, true);
-  assert.equal(outside.seasonRate, false);
   assert.equal(outside.scopeText, '');
-  assert.equal(outside.noSeason, true);
   const nightOnly = [rateRowFields(nightEveryDay)];
   const hourGap = previewRate(nightOnly, '0.31', new Date(2026, 0, 15, 12, 0));
-  assert.equal(hourGap.fallback, false);
   assert.equal(hourGap.unpricedHour, true);
-  assert.equal(hourGap.noSeason, false);
-  assert.equal(previewRate(nightOnly, '0.31', new Date(2026, 0, 15, 3, 0)).noSeason, false);
 
   // A date-season TOU tail is still attributed to the start day.
   const tou = rateRowFields({ ...summerDates, rate: 0.1, start: '22:00', end: '06:00' });
   const tail = previewRate([tou], '0.31', new Date(2026, 8, 16, 1, 0));
   assert.equal(tail.rate, 0.1);
-  assert.equal(tail.seasonRate, false);
   assert.equal(tail.scopeText, 'Jun 15–Sep 15');
 });
 
@@ -2209,13 +2195,13 @@ test('the date editor derives its mode, seed, and disabled reason from the rows'
   assert.equal(dateRangeHint('06-15', '09-15'), '');
   assert.equal(dateRangeHint('02-30', '09-15'), '');
 
-  assert.equal(periodRateMode(ratePeriods([rateRowFields(summerDates)])[0]), 'base');
-  assert.equal(periodRateMode(ratePeriods([rateRowFields(winterDates)])[0]), 'windows');
+  assert.equal(ratePeriods([rateRowFields(summerDates)])[0].mode, 'base');
+  assert.equal(ratePeriods([rateRowFields(winterDates)])[0].mode, 'windows');
   const mixed = ratePeriods([
     rateRowFields(summerDates),
     rateRowFields({ ...summerDates, id: 'peak', start: '16:00', end: '19:00' }),
   ])[0];
-  assert.equal(periodRateMode(mixed), 'base+windows');
+  assert.equal(mixed.mode, 'base+windows');
 
   assert.deepEqual(largestDateScope([[0, 365]]), {
     from: '01-01',
@@ -2329,16 +2315,13 @@ test('a season base with daily windows is valid; two bases on one date are not',
   // The same mix in disjoint seasons is a plain seasonal plan.
   const winterPeak = rateRowFields({ ...winterDates, id: 'winter-peak' });
   assert.equal(validateRateEditorRows([seasonRate, winterPeak]).valid, true);
-  assert.equal(isSeasonRateRow(seasonRate), true);
-  assert.equal(isSeasonRateRow(julyPeak), false);
+  // A base is recognised by its shape, one name for it everywhere.
+  assert.equal(isBaseWindow(seasonRate), true);
+  assert.equal(isBaseWindow(julyPeak), false);
   assert.equal(
-    isSeasonRateRow({ ...seasonRate, days: [0, 1, 2, 3, 4, 5, 6], start: '07:00', end: '07:00' }),
+    isBaseWindow({ ...seasonRate, days: [0, 1, 2, 3, 4, 5, 6], start: '07:00', end: '07:00' }),
     true,
   );
-  assert.equal(isSeasonRateRow({ ...seasonRate, start: '06:00', end: '07:00' }), false);
-  assert.equal(isSeasonRatePeriod({ rows: [{ row: seasonRate }] }), true);
-  assert.equal(isSeasonRatePeriod({ rows: [{ row: seasonRate }, { row: julyPeak }] }), false);
-  assert.equal(isSeasonRatePeriod(null), false);
 });
 
 test('date rows obey the editor cap and the helper text names both seasons', () => {
@@ -2420,18 +2403,16 @@ test('Add window picks a preset the season does not already contain', () => {
 });
 
 test('a date season covers its months even when the stored hint is missing or stale', () => {
-  // Defect guard: uncoveredMonths is the seed for a month-mode season, so it
-  // must read the derived scope. A null or stale hint used to report the whole
-  // year (or eleven months) as free and seed over the date season.
-  assert.deepEqual(
-    uncoveredMonths([{ ...summerDates, months: null }]),
-    [1, 2, 3, 4, 5, 10, 11, 12],
-  );
-  assert.deepEqual(uncoveredMonths([{ ...summerDates, months: [1] }]), [1, 2, 3, 4, 5, 10, 11, 12]);
-  assert.deepEqual(
-    uncoveredMonths([{ ...summerDates, months: [6, 7, 8, 9] }]),
-    [1, 2, 3, 4, 5, 10, 11, 12],
-  );
+  // Defect guard: the gaps a season is seeded into are read from the derived
+  // scope, never the stored months hint. A null or stale hint used to report the
+  // whole year (or eleven months) as free and seed over the date season.
+  for (const months of [null, [1], [6, 7, 8, 9]]) {
+    assert.equal(rateScope({ ...summerDates, months }).kind, 'dates');
+    assert.deepEqual(
+      dateSetText(uncoveredDateRanges([{ ...summerDates, months }])),
+      'Sep 16–Jun 14 (wraps)',
+    );
+  }
 });
 
 test('the coverage caption names the scope, and a one-date season is not a weekday', () => {
@@ -2509,7 +2490,7 @@ test('a months target opens the advanced month panel and focuses a chip', () => 
 
 // ---------- unified base + daily-window model ----------
 
-test('rateEditorMode is derived from rows, and the flat seed is one All-year base', () => {
+test('rateEditorMode is derived from rows, and the flat seed is a workable season', () => {
   assert.equal(rateEditorMode([]), 'flat');
   assert.equal(rateEditorMode({ rates: [] }), 'flat');
   assert.equal(rateEditorMode({ rates: [summerDates] }), 'seasons');
@@ -2527,7 +2508,11 @@ test('rateEditorMode is derived from rows, and the flat seed is one All-year bas
     to: '02-29',
   });
   assert.equal(baseRateRow('empty', '', null, null).rate, '');
-  assert.deepEqual(Object.keys(flatToScheduleRow('flat', '0.31')), [
+  // Gap guard: the flat -> Seasons seed is the current month at the flat rate,
+  // never an All-year base. An All-year seed covers every date, so the first
+  // "Add a season" a new Seasons owner sees is disabled.
+  const seed = flatToScheduleRow('flat', '0.31', new Date(2026, 9, 21));
+  assert.deepEqual(Object.keys(seed), [
     'id',
     'rate',
     'days',
@@ -2537,7 +2522,45 @@ test('rateEditorMode is derived from rows, and the flat seed is one All-year bas
     'from',
     'to',
   ]);
-  assert.equal(flatToScheduleRow('flat', '0.31').months, null);
+  assert.equal(seed.from, '10-01');
+  assert.equal(seed.to, '10-31');
+  assert.deepEqual(seed.months, [10]);
+  assert.equal(seed.rate, '0.31');
+  assert.equal(isBaseWindow(seed), true);
+  assert.equal(isAllDayWindow(seed), true);
+  // The rest of the year is an uncovered gap: it is where the next season goes,
+  // and the plan says the dates cost 0.00 until they are covered.
+  // October is covered, so the uncovered rest of the year reads as one wrapping
+  // run rather than two fragments.
+  assert.equal(dateSetText(uncoveredDateRanges([seed])), 'Nov–Sep');
+  assert.equal(planHasUnpriced([seed]), true);
+  const periods = ratePeriods([seed]);
+  assert.equal(periods.length, 1);
+  assert.equal(periods[0].base.row.id, 'flat');
+  assert.equal(periods[0].kind, 'dates');
+  assert.equal(periods[0].monthText, 'Oct 1–Oct 31');
+  // Seed shape is never a leap-day accident: February 2024 still ends on the 29th.
+  const february = flatToScheduleRow('feb', '0.2', new Date(2026, 1, 2));
+  assert.equal(february.from, '02-01');
+  assert.equal(february.to, '02-29');
+
+  // Round trip: flat rate -> seeded season -> back to One rate is not dirty
+  // (Gap 3). The row is built and read back through the same helpers the screen
+  // uses, so a lost scope or a drifted price shows up here.
+  const flat = { rate: '0.31', currency: 'USD', rates: [] };
+  const seeded = { ...flat, rates: [flatToScheduleRow('round-trip', flat.rate)] };
+  assert.equal(settingsDraftMatches(seeded, flat), false);
+  // A one-month season is not "the price everywhere", so the switch back keeps
+  // the stored flat rate rather than widening a month's price to the year.
+  const back = scheduleToFlatRate(seeded.rates, flat.rate);
+  assert.equal(Number(back), 0.31);
+  assert.equal(
+    settingsDraftMatches(
+      { rate: String(back), currency: 'USD', rates: [] },
+      { rate: 0.31, currency: 'USD' },
+    ),
+    true,
+  );
 });
 
 test('Seasons to One rate reuses only a single All-year base price', () => {
@@ -2575,10 +2598,8 @@ test('periods expose one base, its overrides and any extra repair rows', () => {
   const period = ratePeriods([base, peak, weekend])[0];
   assert.equal(period.mode, 'base+windows');
   assert.equal(period.title, 'Season');
-  assert.equal(period.seasonRate, false);
   assert.equal(period.base.row.id, 'summer-dates');
   assert.equal(periodBaseRate(period), 0.2);
-  assert.equal(periodNeedsBase(period), false);
   assert.deepEqual(
     period.overrides.map((entry) => entry.row.id),
     ['summer-peak', 'summer-weekend'],
@@ -2588,17 +2609,29 @@ test('periods expose one base, its overrides and any extra repair rows', () => {
     ['summer-peak', 'summer-weekend'],
   );
 
+  // The title names the scope only, so one base and a base plus windows read
+  // the same way for the same dates.
   const baseOnly = ratePeriods([base])[0];
   assert.equal(baseOnly.mode, 'base');
-  assert.equal(baseOnly.title, 'Season rate');
+  assert.equal(baseOnly.title, 'Season');
   assert.equal(baseOnly.base.row.id, base.id);
-  assert.equal(periodNeedsBase(baseOnly), false);
 
   const windowsOnly = ratePeriods([peak])[0];
   assert.equal(windowsOnly.mode, 'windows');
   assert.equal(windowsOnly.base, null);
   assert.equal(periodBaseRate(windowsOnly), null);
-  assert.equal(periodNeedsBase(windowsOnly), true);
+  assert.equal(windowsOnly.title, 'Season');
+
+  // An all-year base is "All year", not a second name for the same shape.
+  const allYearBase = ratePeriods([rateRowFields(baseRateRow('all', '0.3', null, null))])[0];
+  assert.equal(allYearBase.mode, 'base');
+  assert.equal(allYearBase.title, 'All year');
+  const allYearMixed = ratePeriods([
+    rateRowFields(baseRateRow('all', '0.3', null, null)),
+    rateRowFields({ ...nightEveryDay, id: 'all-peak', rate: 0.1, start: '22:00', end: '06:00' }),
+  ])[0];
+  assert.equal(allYearMixed.mode, 'base+windows');
+  assert.equal(allYearMixed.title, 'All year');
 });
 
 test('plan warnings separate uncovered dates from a base-less season', () => {
@@ -2616,9 +2649,9 @@ test('plan warnings separate uncovered dates from a base-less season', () => {
   assert.equal(planHasUnpriced([allYearBase, dateWindow]), false);
   assert.equal(planHasUnpriced([dateBase]), true); // uncovered dates off-season
   assert.equal(planHasUnpriced([dateWindow]), true); // no base
-  assert.equal(planGapCount([dateBase]), 1);
-  assert.equal(planGapCount([allYearBase]), 0);
-  assert.equal(planGapCount([]), 1);
+  assert.equal(mergeDateRanges(uncoveredDateRanges([dateBase])).length, 1);
+  assert.equal(mergeDateRanges(uncoveredDateRanges([allYearBase])).length, 0);
+  assert.equal(mergeDateRanges(uncoveredDateRanges([])).length, 1);
 
   const gaps = uncoveredGapScopes([dateBase]);
   assert.equal(gaps.length, 1);
@@ -2664,7 +2697,6 @@ test('previewRate reports base, override, uncovered date and unpriced hour', () 
   assert.equal(baseHit.rate, 0.2);
   assert.equal(baseHit.tier, 'Base');
   assert.equal(baseHit.baseRate, 0.2);
-  assert.equal(baseHit.seasonRate, true);
   assert.equal(baseHit.uncoveredDate, false);
 
   const peakHit = at(new Date(2026, 6, 15, 17, 0));
@@ -2798,4 +2830,79 @@ test('Add base is withheld when another base already overlaps the season', () =>
     ]),
     false,
   );
+});
+
+test('a row that became the season base is not "another season’s base"', () => {
+  // Defect guard: editing a window into the all-day, every-day shape moves it out
+  // of the window list and into the Base rate block. The overlap check asks
+  // "would another season's base collide?", so it must not count the season's own
+  // new base and tell the owner a sibling prices these hours.
+  const allYear = rateRowFields(baseRateRow('other-base', '0.3', null, null));
+  const becomingBase = rateRowFields({
+    ...summerDates,
+    id: 'becoming-base',
+    start: '00:00',
+    end: '00:00',
+    days: [0, 1, 2, 3, 4, 5, 6],
+  });
+  const period = ratePeriods([becomingBase])[0];
+  assert.equal(period.mode, 'base');
+  assert.equal(period.base.index, 0);
+  assert.equal(periodHasBaseOverlap(period, [becomingBase]), false);
+  assert.equal(periodHasBaseOverlap(period, [allYear, becomingBase]), true);
+
+  // A malformed all-day row repaired into the base shape keeps its own place.
+  const malformed = rateRowFields({ ...summerDates, id: 'malformed', start: '00:00', end: '' });
+  const beforeRepair = ratePeriods([malformed])[0];
+  assert.equal(beforeRepair.mode, 'windows');
+  assert.equal(periodHasBaseOverlap(beforeRepair, [malformed]), false);
+});
+
+test('month chips are the legacy path, not the normal scope editor', () => {
+  // M4 guard: dates are the only normal path. The month disclosure is offered
+  // only where dates cannot express the stored scope.
+  const dateSeason = ratePeriods([rateRowFields(summerDates)])[0];
+  assert.equal(monthEditorIsLegacy(dateSeason), false);
+
+  const allYear = ratePeriods([rateRowFields(nightEveryDay)])[0];
+  assert.equal(monthEditorIsLegacy(allYear), false);
+
+  // A contiguous legacy month range reaches its scope through the date fields.
+  const contiguous = ratePeriods([rateRowFields({ ...nightEveryDay, months: [11, 12, 1, 2] })])[0];
+  assert.equal(contiguous.kind, 'months');
+  assert.notEqual(periodDateSeed(contiguous), null);
+  assert.equal(monthEditorIsLegacy(contiguous), false);
+
+  // A non-contiguous list has no single date range: the chips are the only
+  // editor that can show it.
+  const split = ratePeriods([rateRowFields({ ...nightEveryDay, months: [1, 6] })])[0];
+  assert.equal(periodDateSeed(split), null);
+  assert.equal(monthEditorIsLegacy(split), true);
+
+  // A malformed month value has to be repaired with the chips too.
+  const malformed = ratePeriods([rateRowFields({ ...nightEveryDay, months: 3 })])[0];
+  assert.equal(malformed.kind, 'invalid');
+  assert.equal(monthEditorIsLegacy(malformed), true);
+});
+
+test('plan edits never change the stored flat rate', () => {
+  // Gap 3 guard: the flat `rate` is the One-rate price, and the season editors
+  // only ever touch the rows. A scope edit therefore cannot reprice One rate.
+  const rows = [rateRowFields(nightEveryDay), rateRowFields(winterPeak)];
+  const reScoped = applyPeriodDates(applyPeriodMonths(rows, [0], [6, 7]), [0], '06-01', '08-31');
+  const days = reScoped.map((row, index) =>
+    index === 0 ? { ...row, days: [5, 6], start: '22:00', end: '06:00' } : row,
+  );
+  const payload = settingsPayload(
+    validateSettings({ rate: '0.31', currency: 'USD', rates: days }).values,
+  );
+  assert.equal(payload.rate, 0.31);
+  assert.equal(payload.currency, 'USD');
+  assert.equal(payload.rates.length, 2);
+
+  // A flat payload stays byte-identical: two fields, no empty `rates` key.
+  assert.deepEqual(settingsPayload(validateSettings({ rate: '0.31', currency: 'USD' }).values), {
+    rate: 0.31,
+    currency: 'USD',
+  });
 });

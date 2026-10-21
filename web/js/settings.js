@@ -233,11 +233,23 @@ export function periodDateBounds(period) {
   return { from: null, to: null };
 }
 
-// Whether the period is in date mode. A one-sided or unreal pair still counts:
+// Whether a period is in date mode. A one-sided or unreal pair still counts:
 // the owner needs the date fields to see and fix the stored value.
 export function periodHasDates(period) {
   const bounds = periodDateBounds(period);
   return bounds.from != null || bounds.to != null;
+}
+
+// The month-chip editor is a compatibility path, not a normal editor: dates are
+// the scope for every season the owner creates. It is offered only where dates
+// cannot express the stored scope — a legacy non-contiguous month list (Jan +
+// Jun), or a month scope that has to be repaired. A contiguous month range and a
+// date season both reach their scope through the date fields.
+export function monthEditorIsLegacy(period) {
+  if (!period || period.kind === 'all' || periodHasDates(period)) return false;
+  if (period.kind === 'invalid') return true;
+  if (period.kind !== 'months') return false;
+  return monthRuns(period.months).length !== 1;
 }
 
 // A month scope as the contiguous run the date editor can seed, or null when it
@@ -286,21 +298,10 @@ export function dateRangeHint(from, to) {
   return startKey > endKey ? 'This range wraps the year.' : '';
 }
 
-// How a period prices: one base, a base plus overrides, or windows with no base.
-// A base is the all-day, every-day row; its day-restricted siblings are
-// overrides.
 // A base the editor can present as one price: the shape plus valid equal times.
 // A malformed all-day row stays in the window list where it can be repaired.
 function isUiBaseRow(row) {
   return isBaseWindow(row) && isAllDayWindow(row);
-}
-
-export function periodRateMode(period) {
-  const entries = (period && period.rows) || [];
-  if (entries.length === 0) return 'windows';
-  const bases = entries.filter((entry) => isUiBaseRow(entry.row)).length;
-  if (bases === 0) return 'windows';
-  return bases === entries.length ? 'base' : 'base+windows';
 }
 
 // The flat rate reference a season's overrides are compared with. A base-less
@@ -309,10 +310,6 @@ export function periodBaseRate(period) {
   const row = period && period.base && period.base.row;
   const rate = parseRateValue(row && row.rate);
   return rateIsUsable(rate) ? rate : null;
-}
-
-export function periodNeedsBase(period) {
-  return Boolean(period && period.mode === 'windows');
 }
 
 // Two modes only: no rows is One rate; any rows is Seasons & time-of-use. The
@@ -342,10 +339,15 @@ export function baseRateRow(id, rate, months = null, dates = null) {
   };
 }
 
-// Flat -> Seasons: one All-year base at the current flat rate, visible as a
-// season rather than an invisible schedule row.
-export function flatToScheduleRow(id, rate) {
-  return baseRateRow(id, rate, null, null);
+// Flat -> Seasons: a date-bounded season covering the current month at the
+// current flat rate. It is deliberately not an All-year base: a base covering
+// every date leaves nowhere non-overlapping to add the next season, which
+// dead-ends "Add a season" on the first thing a new Seasons owner sees. The rest
+// of the year stays an uncovered gap the owner can fill with a season (or with
+// Fill gaps), and the plan says so on screen.
+export function flatToScheduleRow(id, rate, now = new Date()) {
+  const seed = periodDateSeed({ kind: 'all' }, now);
+  return baseRateRow(id, rate, monthsCovering(seed.from, seed.to), seed);
 }
 
 // Seasons -> One rate: reuse the single All-year base's price when the plan is
@@ -378,20 +380,22 @@ export function uncoveredGapScopes(rows) {
 
 // Whether adding a base to this season would collide with a base that already
 // covers part of its dates. A base in another season can price this season's
-// uncovered hours, but two bases on the same date are invalid.
+// uncovered hours, but two bases on the same date are invalid. The period's own
+// rows are excluded: a row that has just become this season's base is the base
+// the block is showing, not another season's.
 export function periodHasBaseOverlap(period, rows) {
   const first = period && period.rows && period.rows[0] && period.rows[0].row;
   if (!first) return false;
   const dates = seasonDateSet(rateScope(first));
   if (dates.length === 0) return false;
+  const own = new Set(
+    ((period && period.rows) || []).map((entry) => entry.row && entry.row.id).filter(Boolean),
+  );
   return (Array.isArray(rows) ? rows : []).some((row) => {
+    if (!row || own.has(row.id)) return false;
     if (!isBaseWindow(row)) return false;
     return intersectDateSets(dates, seasonDateSet(rateScope(row)));
   });
-}
-
-export function planGapCount(rows) {
-  return mergeDateRanges(uncoveredDateRanges(rows)).length;
 }
 
 // Whether a non-empty plan has any instant with no price. A date outside every
@@ -565,7 +569,7 @@ export function dateSetText(ranges) {
 
 // The days no stored season covers, as leap-ring intervals. "No window" means
 // days with no season, not hours: hourly gaps are shown by the tables and the
-// checker. This is the date-mode counterpart of `uncoveredMonths`.
+// checker.
 export function uncoveredDateRanges(rows) {
   const covered = [];
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -589,16 +593,6 @@ export function complementScope(value) {
   const from = monthDayText(annualMonthDay(gaps[0][0]));
   const to = monthDayText(annualMonthDay(gaps[0][1]));
   return { kind: 'dates', from, to, months: monthsCovering(from, to) };
-}
-
-// The old season-rate name is the base row now. Kept as a compatibility alias
-// for callers/tests that still speak the pre-#76 vocabulary.
-export function isSeasonRateRow(row) {
-  return isBaseWindow(row);
-}
-
-export function isSeasonRatePeriod(period) {
-  return periodRateMode(period) === 'base';
 }
 
 function monthRuns(months) {
@@ -669,24 +663,6 @@ export function ratePlanRange(rows) {
   return planHasUnpriced(list) ? { ...range, min: 0 } : range;
 }
 
-// The longest contiguous run in a month set, used to give a new season a
-// sensible default scope (the months no other season owns).
-export function largestMonthRun(months) {
-  const runs = monthRuns(Array.isArray(months) ? months : []);
-  if (runs.length === 0) return [];
-  const length = (run) => ((run.end - run.start + 12) % 12) + 1;
-  let best = runs[0];
-  for (const run of runs) if (length(run) > length(best)) best = run;
-  const out = [];
-  let month = best.start;
-  for (;;) {
-    out.push(month);
-    if (month === best.end) break;
-    month = month === 12 ? 1 : month + 1;
-  }
-  return out;
-}
-
 function periodOrder(period) {
   if (period.kind === 'invalid') return -1;
   if (period.kind === 'all') return 0;
@@ -747,11 +723,16 @@ export function ratePeriods(rows) {
       // The band reads as dates for a date period and as months otherwise; the
       // old month-only view renders this same field.
       monthText: period.kind === 'dates' ? dateText : rateMonthsText(period.months, period.kind),
+      // The title names the scope only, so the same shape always reads the same
+      // way: one base and a base-plus-windows all-year season are both "All
+      // year", and every date season is a "Season" whose band carries its
+      // dates. Whether the season has a base is what the Base rate block and
+      // the meta ("1 rate" vs "1 window") say.
       title:
         period.kind === 'invalid'
           ? 'Needs attention'
-          : mode === 'base'
-            ? 'Season rate'
+          : period.kind === 'all'
+            ? 'All year'
             : period.kind === 'dates'
               ? 'Season'
               : ratePeriodTitle(period.months, period.kind),
@@ -759,9 +740,6 @@ export function ratePeriods(rows) {
       base,
       overrides,
       windows,
-      // The old name is retained for UI/tests that still need "one price for
-      // the whole season"; a base+windows season is not one.
-      seasonRate: mode === 'base',
     };
   });
 
@@ -815,22 +793,6 @@ function periodAppliesOn(period, date) {
   return scopeMatches(scopeOf(period), date);
 }
 
-// Months no stored window covers: the line where nothing but the all-other-times
-// rate applies. This is not a period and is never counted as one. The scope is
-// derived with `rateScope`, never the stored `months` hint, so a date row with a
-// missing or stale hint still covers the months its dates actually reach.
-export function uncoveredMonths(rows) {
-  const covered = new Set();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const scope = rateScope(row);
-    if (scope.kind === 'all') for (const month of ALL_MONTHS) covered.add(month);
-    // A date scope carries the months it reaches as its compatibility hint, so
-    // the same line covers both shapes.
-    else if (Array.isArray(scope.months)) for (const month of scope.months) covered.add(month);
-  }
-  return ALL_MONTHS.filter((month) => !covered.has(month));
-}
-
 // The effective price range a period header should advertise for its
 // representative sample (a month, or the dates of a date season): every base and
 // daily window that can apply there (own, inherited and all-year). An uncovered
@@ -862,10 +824,9 @@ export function periodEffectiveRange(rows, fallbackRate, period, year = new Date
 export function siblingNote(sibling) {
   if (!sibling) return '';
   if (sibling.kind === 'all') return 'All year windows also apply here.';
-  if (sibling.kind === 'dates') {
-    const label = sibling.title === 'Season rate' ? 'Season rate' : 'Season';
-    return `${label} ${sibling.monthText} also applies here.`;
-  }
+  // A date season is always titled "Season"; its dates are what tell two of
+  // them apart.
+  if (sibling.kind === 'dates') return `Season ${sibling.monthText} also applies here.`;
   if (sibling.title === 'Custom months') return `${sibling.monthText} windows also apply here.`;
   return `${sibling.title} also applies in ${sibling.monthText}.`;
 }
@@ -1032,9 +993,9 @@ export function dayPresetFor(days) {
 
 // Peak / Off-peak / Shoulder are derived from relative price for display only.
 // Two window prices split into the two ends; three or more put the middle in
-// Shoulder. A single price is described against the all-other-times rate, which
-// is the comparison the owner actually makes. `Same price` is honest rather
-// than calling an equal price a bargain.
+// Shoulder. A single price is described against its season's base rate, which is
+// the comparison the owner actually makes. `Same price` is honest rather than
+// calling an equal price a bargain.
 export function rateTierFor(rate, windowRates, fallbackRate) {
   const price = parseRateValue(rate);
   if (!Number.isFinite(price)) return '';
@@ -1583,9 +1544,6 @@ export function previewRate(rows, fallbackRate, date) {
     source: entry.source,
     uncoveredDate: Boolean(entry.uncoveredDate),
     unpricedHour: Boolean(entry.unpricedHour),
-    // Kept for older callers; new copy keys off `source`.
-    fallback: entry.source === 'flat',
-    noSeason: Boolean(entry.uncoveredDate),
     tier,
     baseRate,
     summary: entry.window ? rateWindowSummary(entry.window) : '',
@@ -1593,7 +1551,6 @@ export function previewRate(rows, fallbackRate, date) {
     dateText:
       entry.window && scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '',
     scopeText: entry.window ? rateScopeText(entry.window) : '',
-    seasonRate: entry.source === 'base',
   };
 }
 

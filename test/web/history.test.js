@@ -15,6 +15,7 @@ import {
   sectionView,
   sumSeries,
 } from '../../web/js/history.js';
+import { showPlanBanner } from '../../web/js/screens/history.js';
 
 test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 0, 5, 12)), '2026-01-05');
@@ -195,4 +196,40 @@ test('sectionView never presents an unreached read as current data', () => {
     assert.equal(sectionView(state, true).showData, false, state);
     assert.equal(sectionView(state, true).claimEmpty, false, state);
   }
+});
+
+test('the plan banner appears exactly when a saved plan has an unpriced instant', () => {
+  // Gap 3: the banner is the only signal that a stored plan prices some hours or
+  // dates at 0.00 before the owner opens settings. Its condition is a pure
+  // predicate so it is covered without a DOM.
+  const base = { id: 'b', rate: 0.3, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00' };
+  const summer = {
+    ...base,
+    id: 'summer',
+    months: [6, 7, 8, 9],
+    from: '06-15',
+    to: '09-15',
+  };
+  const peak = {
+    ...base,
+    id: 'peak',
+    rate: 0.4,
+    months: [6, 7, 8, 9],
+    from: '06-15',
+    to: '09-15',
+    start: '16:00',
+    end: '19:00',
+  };
+  const settings = (rates) => ({ rate: 0.3, currency: 'USD', rates });
+
+  // No schedule: the flat rate prices every hour, so there is nothing to warn
+  // about.
+  assert.equal(showPlanBanner(settings([])), false);
+  assert.equal(showPlanBanner(null), false);
+  // A plan that covers the year with a base is priced everywhere.
+  assert.equal(showPlanBanner(settings([base])), false);
+  // A base-less season leaves hours at 0.00 even though its dates are covered.
+  assert.equal(showPlanBanner(settings([peak])), true);
+  // A date season leaves the rest of the year uncovered.
+  assert.equal(showPlanBanner(settings([summer])), true);
 });

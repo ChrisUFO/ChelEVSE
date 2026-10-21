@@ -644,9 +644,11 @@ button {
   color: var(--ok);
 }
 .cost-unpriced {
-  color: var(--muted);
-  font-size: 10.5px;
+  display: block;
+  color: color-mix(in oklab, var(--warn) 88%, var(--text));
+  font-size: 11px;
   line-height: 1.3;
+  white-space: nowrap;
 }
 .temp-sensors {
   display: grid;
@@ -1609,7 +1611,7 @@ input[aria-invalid='true'] {
   gap: 14px;
 }
 
-/* rate plan editor — the all-other-times price first, then month periods and
+/* rate plan editor — the flat price first, then the season plan and
    a draft-live checker. Periods are the only nesting level. */
 .rate-editor {
   display: grid;
@@ -1686,14 +1688,25 @@ input[aria-invalid='true'] {
   font-size: 12px;
   line-height: 1.45;
 }
-.rate-mode-confirm button {
+.rate-mode-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.rate-mode-confirm-actions .btn {
   justify-self: start;
 }
+/* Cancel is the safe action and the loudest control in the panel; the
+   destructive switch is deliberately secondary — a tinted outline, not a
+   filled button. */
 .rate-mode-confirm .btn.small.danger {
-  border-color: color-mix(in oklab, var(--err) 50%, var(--line));
-  background: color-mix(in oklab, var(--err) 12%, var(--surface));
-  color: var(--err);
-  font-weight: 650;
+  border-color: color-mix(in oklab, var(--err) 42%, var(--line));
+  background: transparent;
+  color: color-mix(in oklab, var(--err) 76%, var(--muted));
+  font-weight: 600;
+}
+.rate-mode-confirm .btn.small.danger:hover {
+  background: color-mix(in oklab, var(--err) 10%, transparent);
 }
 .rate-mode-confirm[hidden] {
   display: none;
@@ -1928,7 +1941,7 @@ input[aria-invalid='true'] {
   min-width: 1px;
 }
 .strip-seg.base {
-  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+  background: color-mix(in oklab, var(--accent) 52%, var(--surface));
 }
 .strip-seg.off {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
@@ -1942,12 +1955,17 @@ input[aria-invalid='true'] {
 .strip-seg.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
-.strip-seg.base {
-  background: color-mix(in oklab, var(--accent) 52%, var(--surface));
+/* A priced window whose season has no base: its own band and legend entry, so
+   it is never labelled with a tier it cannot have. */
+.strip-seg.window {
+  background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
+/* Uncovered is 0.00, not a price: the only band that is not a colour of the
+   plan. It reads as the warning it is, and grey no longer stands for both it and
+   a priced window. */
 .strip-seg.uncovered {
-  background: transparent;
-  border: 1px dashed var(--muted);
+  background: color-mix(in oklab, var(--err) 22%, transparent);
+  border: 1px dashed color-mix(in oklab, var(--err) 60%, var(--line));
 }
 .strip-axis {
   display: flex;
@@ -1976,7 +1994,7 @@ input[aria-invalid='true'] {
   border-radius: 2px;
 }
 .legend-dot.base {
-  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+  background: color-mix(in oklab, var(--accent) 58%, var(--surface));
 }
 .legend-dot.off {
   background: color-mix(in oklab, var(--ok) 62%, var(--surface));
@@ -1990,12 +2008,12 @@ input[aria-invalid='true'] {
 .legend-dot.same {
   background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
-.legend-dot.base {
-  background: color-mix(in oklab, var(--accent) 58%, var(--surface));
+.legend-dot.window {
+  background: color-mix(in oklab, var(--muted) 62%, var(--surface));
 }
 .legend-dot.uncovered {
   background: transparent;
-  border: 1px dashed var(--muted);
+  border: 1px dashed color-mix(in oklab, var(--err) 70%, var(--line));
 }
 .period-body {
   display: grid;
@@ -2303,6 +2321,32 @@ input[aria-invalid='true'] {
   line-height: 1.45;
   color: var(--muted);
 }
+/* What the mode switch seeded, said in words so the uncovered remainder is not
+   a surprise and the next step is named. */
+.plan-seed-note {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 2px solid color-mix(in oklab, var(--accent) 45%, var(--line));
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.plan-seed-note[hidden] {
+  display: none;
+}
+/* Why Add a season is refused, in the same place the action lives. */
+.plan-action-note {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.plan-action-note[hidden] {
+  display: none;
+}
 .uncovered-line {
   display: flex;
   align-items: center;
@@ -2319,6 +2363,9 @@ input[aria-invalid='true'] {
 }
 .uncovered-copy {
   min-width: 0;
+}
+.uncovered-dates {
+  display: block;
 }
 .uncovered-copy strong {
   color: var(--text);
@@ -2457,9 +2504,6 @@ input[aria-invalid='true'] {
 .coverage-table td.band {
   color: var(--muted);
 }
-.coverage-table tr.other-times td.band {
-  color: var(--muted);
-}
 .coverage-table tr.uncovered td.band {
   color: var(--muted);
   font-style: italic;
@@ -2497,18 +2541,21 @@ input[aria-invalid='true'] {
 .tier.same {
   color: var(--muted);
 }
+.tier.window {
+  color: color-mix(in oklab, var(--muted) 86%, var(--text));
+}
 .tier.base {
   color: color-mix(in oklab, var(--accent) 82%, var(--text));
 }
 .tier.uncovered {
-  color: var(--muted);
+  color: color-mix(in oklab, var(--err) 74%, var(--text));
 }
 .tier.uncovered::before {
   background: transparent;
-  border: 1px dashed var(--muted);
+  border: 1px dashed currentColor;
 }
-/* The table band for a season rate: the same green as its strip and legend dot,
-   so one dot never carries two names in a card. */
+/* The table band for a price: the same colour as its strip segment and legend
+   dot, so one band never carries two names in a card. */
 .period-actions {
   display: flex;
   align-items: center;
