@@ -858,7 +858,10 @@ function sampleDate(month, day, year) {
   return date;
 }
 
-function isLeapYear(year) {
+// The one leap-year rule in the app. The coverage ring uses it to keep 29
+// February a real slot; the season date pickers use it to render a stored
+// 29 February in a year that has one.
+export function isLeapYear(year) {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
 

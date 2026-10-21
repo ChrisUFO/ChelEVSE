@@ -33,6 +33,7 @@ import {
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
+  isLeapYear,
   largestDateScope,
   mergeDateRanges,
   minutesToClock,
@@ -92,7 +93,13 @@ import {
   validationProblemCount,
   windowLabel,
 } from '../../web/js/settings.js';
-import { applySubmitFocus } from '../../web/js/screens/settings.js';
+import {
+  applySubmitFocus,
+  boundFromDateInput,
+  dateInputBounds,
+  dateInputForBound,
+  referenceStartYear,
+} from '../../web/js/screens/settings.js';
 import {
   isBaseWindow,
   normalizeRateSchedule,
@@ -1465,6 +1472,60 @@ test('the checker fields parse local dates by parts and format for people', () =
   assert.equal(minutesToClock(1440), '24:00');
   assert.equal(minutesToClock(425), '07:05');
   assert.equal(minutesToClock(-1), '');
+});
+
+test('the season date picker opens on the current year and runs four years forward', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(referenceStartYear(now), 2026);
+  assert.deepEqual(dateInputBounds(now), { min: '2026-01-01', max: '2029-12-31' });
+  // A leap-year start uses the same four-year span.
+  assert.deepEqual(dateInputBounds(new Date(2028, 0, 1)), {
+    min: '2028-01-01',
+    max: '2031-12-31',
+  });
+  // Every span contains a leap year, so 29 February is reachable and the
+  // reference no longer has to pin a past one. Four years normally hold exactly
+  // one; the century window 2097–2100 holds none, so the span reaches to 2104.
+  for (let year = 2024; year <= 2100; year += 1) {
+    const bounds = dateInputBounds(new Date(year, 0, 1));
+    const last = Number(bounds.max.slice(0, 4));
+    const leaps = [];
+    for (let candidate = year; candidate <= last; candidate += 1) {
+      if (isLeapYear(candidate)) leaps.push(candidate);
+    }
+    assert.ok(leaps.length >= 1, `span starting ${year}`);
+  }
+  assert.deepEqual(dateInputBounds(new Date(2097, 0, 1)), {
+    min: '2097-01-01',
+    max: '2104-12-31',
+  });
+  assert.equal(dateInputForBound('02-29', new Date(2097, 0, 1)), '2104-02-29');
+});
+
+test('a stored 29 February renders in the span leap year, not as a blank field', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(dateInputForBound('02-29', now), '2028-02-29');
+  assert.equal(dateInputForBound('02-29', new Date(2028, 0, 1)), '2028-02-29');
+  assert.equal(dateInputForBound('02-29', new Date(2024, 0, 1)), '2024-02-29');
+  // Every other day renders in the current year: the year is a reference only.
+  assert.equal(dateInputForBound('10-15', now), '2026-10-15');
+  assert.equal(dateInputForBound('01-01', now), '2026-01-01');
+  assert.equal(dateInputForBound('', now), '');
+  assert.equal(dateInputForBound('02-30', now), '');
+  assert.equal(dateInputForBound('2026-10-15', now), '');
+});
+
+test('a picked date stores its month and day and round-trips through the picker', () => {
+  const now = new Date(2026, 9, 21);
+  assert.equal(boundFromDateInput('2026-10-15'), '10-15');
+  assert.equal(boundFromDateInput('2028-02-29'), '02-29');
+  assert.equal(boundFromDateInput('2029-12-31'), '12-31');
+  assert.equal(boundFromDateInput(dateInputForBound('02-29', now)), '02-29');
+  assert.equal(boundFromDateInput(dateInputForBound('10-15', now)), '10-15');
+  // A blank or impossible pick keeps date mode with the sentinel so validation
+  // can explain the missing half instead of dropping the bound.
+  assert.equal(boundFromDateInput(''), '00-00');
+  assert.equal(boundFromDateInput('2026-02-30'), '00-00');
 });
 
 test('the save row and plan summary count affected rows, not collisions', () => {

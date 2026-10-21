@@ -31,6 +31,7 @@ import {
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
+  isLeapYear,
   largestDateScope,
   mergeDateRanges,
   minutesToClock,
@@ -354,23 +355,55 @@ function newWindowRow(months, preset, dates = null) {
 }
 
 // The date inputs are real date pickers, but only a month and day are stored.
-// 2024 is a leap reference year so 29 February is representable; any year the
-// owner picks is discarded, and the visible hint says the year is a reference.
-const DATE_REFERENCE_YEAR = 2024;
+// The picker still needs a year to render a month-day, and the old fixed
+// reference year (2024) opened the calendar years in the past and refused every
+// date forward of it. The reference span now starts at the current local year
+// and runs four years forward. Four consecutive years normally contain exactly
+// one leap year (2097–2100 is the century exception), so 29 February stays
+// selectable without pinning the picker to a past leap year; the span reaches
+// to the next leap year only in that exception. Any year the owner picks is
+// still discarded on save.
+export function referenceStartYear(now = new Date()) {
+  return now.getFullYear();
+}
 
-function dateInputForBound(value) {
+// The first leap year at or after `startYear`, used to render a stored
+// 29 February. Four consecutive years normally contain exactly one leap year,
+// but a century that is not divisible by 400 breaks that: 2097–2100 contains
+// none, while 2104 does. Reaching to the next leap year keeps the picker on the
+// current year without ever losing the leap day (and without pinning a past one).
+function leapYearFrom(startYear) {
+  let year = startYear;
+  while (!isLeapYear(year)) year += 1;
+  return year;
+}
+
+// The picker's `min`/`max`: this year through three years on, extended to the
+// next leap year only when that window has none (2097–2100), so a stored
+// 29 February always has a real date to render.
+export function dateInputBounds(now = new Date()) {
+  const start = referenceStartYear(now);
+  const end = Math.max(start + 3, leapYearFrom(start));
+  return { min: `${start}-01-01`, max: `${end}-12-31` };
+}
+
+// A stored `MM-DD` as a native date value. The year is a rendering reference and
+// is discarded on save. A stored 02-29 renders in the span's leap year: any
+// other year would be an invalid date, and the browser blanks the field.
+export function dateInputForBound(value, now = new Date()) {
   const parsed = parseMonthDay(value);
   if (!parsed) return '';
-  return `${DATE_REFERENCE_YEAR}-${String(parsed.month).padStart(2, '0')}-${String(
-    parsed.day,
-  ).padStart(2, '0')}`;
+  const start = referenceStartYear(now);
+  const year = parsed.month === 2 && parsed.day === 29 ? leapYearFrom(start) : start;
+  return `${year}-${String(parsed.month).padStart(2, '0')}-${String(parsed.day).padStart(2, '0')}`;
 }
 
 // A native date value is YYYY-MM-DD. The year is deliberately discarded: the
-// season repeats annually. A blank value becomes the 00-00 sentinel so date
-// mode survives until validation explains the missing half, instead of the
-// period silently falling back to an old month scope.
-function boundFromDateInput(value) {
+// season repeats annually, so a picked 2026-10-15 and a picked 2028-02-29 store
+// `10-15` and `02-29`. A blank value becomes the 00-00 sentinel so date mode
+// survives until validation explains the missing half, instead of the period
+// silently falling back to an old month scope.
+export function boundFromDateInput(value) {
   const match = /^\d{4}-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
   if (!match) return '00-00';
   const monthDay = `${match[1]}-${match[2]}`;
@@ -776,10 +809,19 @@ function paintScopeEditor(card) {
   const values = state.values;
   card.allYear.checked = state.allYear;
 
-  // Always normalize the visible year back to the reference year. A native
-  // picker may have produced 2025; only its month and day are kept.
-  const fromValue = dateInputForBound(values.from);
-  const toValue = dateInputForBound(values.to);
+  // Normalize the visible year back to the reference span. A native picker may
+  // have produced any year in it; only the month and day are kept. The span
+  // follows the calendar (this year through three years on), so the picker
+  // always opens on the current year and can go forward, while a stored 29
+  // February renders in the span's leap year rather than blanking.
+  const now = new Date();
+  const bounds = dateInputBounds(now);
+  card.fromDate.min = bounds.min;
+  card.fromDate.max = bounds.max;
+  card.toDate.min = bounds.min;
+  card.toDate.max = bounds.max;
+  const fromValue = dateInputForBound(values.from, now);
+  const toValue = dateInputForBound(values.to, now);
   if (card.fromDate.value !== fromValue) card.fromDate.value = fromValue;
   if (card.toDate.value !== toValue) card.toDate.value = toValue;
 
@@ -1461,7 +1503,7 @@ function createPeriodCard(period, index) {
   const reference = el(
     'p',
     'season-dates-reference',
-    'Repeats every year. The year is only a reference — 2024 is a leap year, so 29 February is available.',
+    'Repeats every year. The year only picks a month and day — the picker includes a leap year, so 29 February is available.',
   );
   reference.id = referenceId;
 
@@ -1480,16 +1522,12 @@ function createPeriodCard(period, index) {
   const fromDate = el('input', 'season-date-input');
   fromDate.type = 'date';
   fromDate.id = fromDateId;
-  fromDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
-  fromDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
   fromDate.dataset.field = 'from-date';
   fromDate.setAttribute('aria-label', 'Season start date');
   fromDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
   const toDate = el('input', 'season-date-input');
   toDate.type = 'date';
   toDate.id = toDateId;
-  toDate.min = `${DATE_REFERENCE_YEAR}-01-01`;
-  toDate.max = `${DATE_REFERENCE_YEAR}-12-31`;
   toDate.dataset.field = 'to-date';
   toDate.setAttribute('aria-label', 'Season end date');
   toDate.setAttribute('aria-describedby', `${referenceId} ${statusId} ${storedId} ${errorId}`);
