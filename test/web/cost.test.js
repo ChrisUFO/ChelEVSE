@@ -406,18 +406,147 @@ test('absent, empty or malformed intervals fall back byte-identically', () => {
 test('sessionIntervalsValid is the fallback rule on its own', () => {
   const start = date(2026, 1, 5, 5, 0);
   const end = date(2026, 1, 5, 6, 0);
-  assert.equal(sessionIntervalsValid([{ started_at: start, ended_at: end, wh: 1000 }]), true);
-  assert.equal(sessionIntervalsValid([]), false);
-  assert.equal(sessionIntervalsValid(undefined), false);
-  assert.equal(sessionIntervalsValid(null), false);
-  assert.equal(sessionIntervalsValid('x'), false);
-  assert.equal(sessionIntervalsValid([{ started_at: start, ended_at: end, wh: 0 }]), false);
+  const one = (wh) => [{ started_at: start, ended_at: end, wh }];
+  // Shape and the energy agreement, together.
+  assert.equal(sessionIntervalsValid(one(1000), 1000), true);
+  assert.equal(sessionIntervalsValid(one(1000), 1125), true, 'inside the floor');
+  assert.equal(sessionIntervalsValid(one(1000), 1250), true, 'exactly the 250 Wh floor');
+  assert.equal(sessionIntervalsValid(one(1000), 1251), false, 'one Wh past the floor');
+  assert.equal(sessionIntervalsValid(one(1000), 750), true, 'exactly the floor, short');
+  assert.equal(sessionIntervalsValid(one(1000), 749), false, 'one Wh past it, short');
+  // 2% takes over on a big session: 20 kWh tolerates 400 Wh.
+  assert.equal(sessionIntervalsValid(one(20400), 20000), true, 'exactly 2%');
+  assert.equal(sessionIntervalsValid(one(20401), 20000), false, 'over by one Wh');
+  assert.equal(sessionIntervalsValid(one(19600), 20000), true, 'exactly 2%, short');
+  assert.equal(sessionIntervalsValid(one(19599), 20000), false, 'short by one Wh');
+  // The PR's own two divergence shapes are far outside it.
+  assert.equal(sessionIntervalsValid(one(2000), 6000), false, 'restart orphan');
+  assert.equal(sessionIntervalsValid(one(2800), 900), false, 'reset overshoot');
+  // An unusable aggregate cannot reconcile: the legacy path decides.
+  for (const wh of [undefined, null, 0, -1000, 'x', ' ', true, Number.NaN]) {
+    assert.equal(sessionIntervalsValid(one(1000), wh), false, String(wh));
+  }
+  // Shape alone still rejects.
+  assert.equal(sessionIntervalsValid([], 0), false);
+  assert.equal(sessionIntervalsValid(undefined, 0), false);
+  assert.equal(sessionIntervalsValid(null, 0), false);
+  assert.equal(sessionIntervalsValid('x', 0), false);
+  assert.equal(sessionIntervalsValid(one(0), 0), false);
   assert.equal(
-    sessionIntervalsValid([
-      { started_at: start, ended_at: end, wh: 1000 },
-      { started_at: end, ended_at: end, wh: 1000 },
-    ]),
+    sessionIntervalsValid([{ started_at: start, ended_at: end, wh: 0 }], 0),
     false,
+    'zero-wh interval',
+  );
+  assert.equal(
+    sessionIntervalsValid(
+      [
+        { started_at: start, ended_at: end, wh: 1000 },
+        { started_at: end, ended_at: end, wh: 0 },
+      ],
+      1000,
+    ),
+    false,
+    'one bad entry',
+  );
+});
+
+test('a restart-orphaned interval list prices by the fallback', () => {
+  // Mid-charge bridge restart: the seeded baseline keeps the 4 kWh drawn before
+  // it out of the only interval, while the aggregate covers the whole plug-in.
+  const orphan = {
+    wh: 6000,
+    elapsed: 5400,
+    started_at: date(2026, 1, 5, 1, 0),
+    ended_at: date(2026, 1, 5, 2, 30),
+    intervals: [
+      { started_at: date(2026, 1, 5, 2, 0), ended_at: date(2026, 1, 5, 2, 30), wh: 2000 },
+    ],
+  };
+  const legacy = { ...orphan, intervals: undefined };
+  // 6 kWh off-peak, not the 2 kWh the interval alone accounts for.
+  assert.equal(sessionCostLabel(orphan, nightly()), 'GBP 0.60');
+  assert.equal(sessionCostLabel(orphan, nightly()), sessionCostLabel(legacy, nightly()));
+});
+
+test('a counter-reset overshoot prices by the fallback', () => {
+  // 2.8 kWh of intervals against a 0.9 kWh aggregate: the reset made the list
+  // exceed the session, the mirror image of the restart case.
+  const overshoot = {
+    wh: 900,
+    elapsed: 1800,
+    started_at: date(2026, 1, 5, 12, 0),
+    ended_at: date(2026, 1, 5, 12, 30),
+    intervals: [
+      { started_at: date(2026, 1, 5, 12, 0), ended_at: date(2026, 1, 5, 12, 30), wh: 2800 },
+    ],
+  };
+  const legacy = { ...overshoot, intervals: undefined };
+  assert.equal(sessionCostLabel(overshoot, nightly()), 'GBP 0.27');
+  assert.equal(sessionCostLabel(overshoot, nightly()), sessionCostLabel(legacy, nightly()));
+});
+
+test('the energy tolerance is inclusive on both sides and a fallback beyond it', () => {
+  // 20 kWh aggregate: the 2% band is 400 Wh, and the interval span (03:00–05:00)
+  // prices differently from the aggregate span (03:00–07:00), so the two paths
+  // are distinguishable by their figure.
+  const session20 = (sum) => {
+    const first = Math.floor(sum / 2);
+    return {
+      wh: 20000,
+      elapsed: 4 * 3600,
+      started_at: date(2026, 1, 5, 3, 0),
+      ended_at: date(2026, 1, 5, 7, 0),
+      intervals: [
+        {
+          started_at: date(2026, 1, 5, 3, 0),
+          ended_at: date(2026, 1, 5, 4, 0),
+          wh: first,
+        },
+        {
+          started_at: date(2026, 1, 5, 4, 0),
+          ended_at: date(2026, 1, 5, 5, 0),
+          wh: sum - first,
+        },
+      ],
+    };
+  };
+  assert.equal(sessionCostLabel(session20(20400), nightly()), 'GBP 2.04', 'over, at 2%');
+  assert.equal(sessionCostLabel(session20(20401), nightly()), 'GBP 3.00', 'over, past 2%');
+  assert.equal(sessionCostLabel(session20(19600), nightly()), 'GBP 1.96', 'short, at 2%');
+  assert.equal(sessionCostLabel(session20(19599), nightly()), 'GBP 3.00', 'short, past 2%');
+});
+
+test('a tiny session one poll short still prices per interval', () => {
+  // 0.2 kWh over four hours, its only interval a single 32 Wh poll short
+  // (11.5 kW for 10 s): inside the 250 Wh floor, so the interval figure stands.
+  const tiny = {
+    wh: 200,
+    elapsed: 4 * 3600,
+    started_at: date(2026, 1, 5, 3, 0),
+    ended_at: date(2026, 1, 5, 7, 0),
+    intervals: [{ started_at: date(2026, 1, 5, 3, 0), ended_at: date(2026, 1, 5, 3, 10), wh: 168 }],
+  };
+  assert.equal(sessionCostLabel(tiny, nightly()), 'GBP 0.02');
+  // The pro-rated aggregate would read 0.03 — the figures differ, so the
+  // assertion above really is the interval path.
+  assert.equal(sessionCostLabel({ ...tiny, intervals: undefined }, nightly()), 'GBP 0.03');
+});
+
+test('an unusable aggregate keeps the legacy path, intervals or not', () => {
+  const start = date(2026, 1, 5, 5, 0);
+  const end = date(2026, 1, 5, 7, 0);
+  const intervals = [{ started_at: start, ended_at: end, wh: 4000 }];
+  for (const wh of [undefined, null, 'x', -1]) {
+    assert.equal(
+      sessionCostLabel({ wh, started_at: start, ended_at: end, intervals }, nightly()),
+      sessionCostLabel({ wh, started_at: start, ended_at: end }, nightly()),
+      String(wh),
+    );
+  }
+  // A zero aggregate is a real number: the legacy path prices it at 0.00.
+  assert.equal(
+    sessionCostLabel({ wh: 0, started_at: start, ended_at: end, intervals }, nightly()),
+    'GBP 0.00',
   );
 });
 
