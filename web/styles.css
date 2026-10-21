@@ -2322,6 +2322,13 @@ input[aria-invalid='true'] {
 .coverage-table .price-amount {
   white-space: nowrap;
 }
+/* "— needs attention" is a status, not a money figure: muted, and free to wrap
+   inside the 30% price column at 320 px. */
+.coverage-table .price.needs-attention {
+  color: var(--muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 /* A price, a range or "other times USD 0.31" is one unbreakable run: breaking
    after the en dash reads as two different numbers. */
 .nowrap {
