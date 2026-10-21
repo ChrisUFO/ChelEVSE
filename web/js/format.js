@@ -171,24 +171,51 @@ export function formatDuration(seconds) {
   return `${h}:${String(m).padStart(2, '0')}`;
 }
 
-// Money is shown with the owner's currency string. Short strings are treated
-// as symbols ("$", "€") and attached; longer ones as codes ("USD 1.23").
+// Money is shown with the owner's currency string. A symbol ("$", "€") is
+// attached to the amount; a lettered code ("USD", "US cents") gets a space.
 // Intl handles decimal rounding (2.945 -> 2.95) and thousands separators.
 const MONEY = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
 
+// A currency that is made of letters is a word ("USD", "US cents") and needs a
+// space before the amount, or the two run together. Symbols ("$", "£") attach.
+// The 8-character limit on a currency code allows descriptive labels, so this is
+// not only the ISO-code case.
+function withCurrency(code, amount) {
+  return /[A-Za-z]/.test(code) ? `${code} ${amount}` : `${code}${amount}`;
+}
+
 export function fmtMoney(value, currency) {
   if (value == null || !Number.isFinite(Number(value))) return '—';
   const amount = MONEY.format(Number(value));
   const code = typeof currency === 'string' ? currency.trim() : '';
   if (!code) return amount;
-  return /^[A-Za-z]{2,}$/.test(code) ? `${code} ${amount}` : `${code}${amount}`;
+  return withCurrency(code, amount);
 }
 
 // Cost for an energy amount at the configured rate. Returns null when either
 // input is missing/invalid — callers hide the cost line entirely in that case.
+// A per-kWh price keeps the precision the settings schema allows: rates are
+// 0–5 to three decimals, so 0.245 must not render as "0.25" the way a rounded
+// cost would. Same currency convention as fmtMoney.
+const RATE = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 3,
+});
+
+export function fmtRate(value, currency) {
+  // An empty input is "no price yet", not a free rate: Number('') is 0, which
+  // used to print USD 0.00 on the first-run path. An explicit 0 still formats.
+  if (typeof value === 'string' && value.trim() === '') return '—';
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const amount = RATE.format(Number(value));
+  const code = typeof currency === 'string' ? currency.trim() : '';
+  if (!code) return amount;
+  return withCurrency(code, amount);
+}
+
 export function fmtCost(kwh, rate, currency) {
   if (kwh == null || rate == null) return null;
   const energy = Number(kwh);

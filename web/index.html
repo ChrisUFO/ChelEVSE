@@ -555,62 +555,121 @@
               <div class="rate-editor" role="group" aria-labelledby="rates-heading">
                 <div class="rate-head">
                   <div class="rate-head-copy">
-                    <h3 id="rates-heading">Time-of-use rates</h3>
-                    <p class="block-sub">
-                      Window rates override the fallback for set days, times and months. Times are
-                      local.
-                    </p>
+                    <h3 id="rates-heading">Electricity price</h3>
+                    <p class="block-sub">Times are local, and every price is per kWh.</p>
                   </div>
-                  <span class="section-note" id="rates-count">0 of 24</span>
                 </div>
-                <div class="rate-list" id="rate-list"></div>
-                <p class="rate-empty" id="rates-empty">
-                  No rate windows yet. All other times use the fallback rate below.
-                </p>
-                <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
-                <button class="btn add-rule" id="add-rate" type="button">
-                  <span class="add-plus" aria-hidden="true">+</span><span>Add rate window</span>
-                </button>
-              </div>
-              <div class="settings-grid">
-                <div class="field">
-                  <label class="field-label" for="setting-rate">Fallback rate</label>
-                  <div class="input-wrap">
-                    <input
-                      id="setting-rate"
-                      class="text-input"
-                      type="number"
-                      min="0"
-                      max="5"
-                      step="0.001"
-                      inputmode="decimal"
-                      placeholder="0.000"
-                      autocomplete="off"
-                      aria-describedby="rate-hint rate-error"
-                    />
-                    <span class="input-suffix" aria-hidden="true">/ kWh</span>
+
+                <div class="fallback-card">
+                  <div class="fallback-head">
+                    <h4 class="fallback-title">All other times</h4>
+                    <p class="fallback-note">The price for every other hour.</p>
                   </div>
-                  <span class="field-hint" id="rate-hint">0 to 5 · used for all other times</span>
-                  <span class="field-error" id="rate-error" hidden></span>
+                  <div class="settings-grid">
+                    <div class="field">
+                      <label class="field-label" for="setting-rate">Rate</label>
+                      <div class="input-wrap">
+                        <input
+                          id="setting-rate"
+                          class="text-input"
+                          type="number"
+                          min="0"
+                          max="5"
+                          step="0.001"
+                          inputmode="decimal"
+                          placeholder="0.000"
+                          autocomplete="off"
+                          aria-describedby="rate-hint rate-error"
+                        />
+                        <span class="input-suffix" aria-hidden="true">/ kWh</span>
+                      </div>
+                      <span class="field-hint" id="rate-hint">0–5 per kWh</span>
+                      <span class="field-error" id="rate-error" hidden></span>
+                    </div>
+                    <div class="field">
+                      <label class="field-label" for="setting-currency">Currency</label>
+                      <input
+                        id="setting-currency"
+                        class="text-input"
+                        type="text"
+                        placeholder="USD"
+                        autocomplete="off"
+                        autocapitalize="characters"
+                        spellcheck="false"
+                        aria-describedby="currency-hint currency-error"
+                      />
+                      <span class="field-hint" id="currency-hint">1–8 characters</span>
+                      <span class="field-error" id="currency-error" hidden></span>
+                    </div>
+                  </div>
                 </div>
-                <div class="field">
-                  <label class="field-label" for="setting-currency">Currency</label>
-                  <input
-                    id="setting-currency"
-                    class="text-input"
-                    type="text"
-                    placeholder="USD"
-                    autocomplete="off"
-                    autocapitalize="characters"
-                    spellcheck="false"
-                    aria-describedby="currency-hint currency-error"
-                  />
-                  <span class="field-hint" id="currency-hint">1–8 characters</span>
-                  <span class="field-error" id="currency-error" hidden></span>
+
+                <div class="flat-state" id="rates-flat">
+                  <p class="flat-hint">
+                    Have a cheaper overnight or weekend rate? Add the hours it applies.
+                  </p>
+                  <button class="btn add-rule" id="add-cheap-hours" type="button">
+                    <span class="add-plus" aria-hidden="true">+</span><span>Add cheap hours</span>
+                  </button>
+                </div>
+
+                <div class="rate-plan" id="rates-plan" hidden>
+                  <div class="plan-head">
+                    <div class="plan-head-copy">
+                      <h4 class="plan-title">Your plan</h4>
+                      <p class="plan-summary" id="plan-summary">
+                        <span id="plan-summary-text"></span>
+                        <span class="plan-problem" id="plan-problem" hidden></span>
+                      </p>
+                    </div>
+                  </div>
+                  <p class="plan-help" id="plan-help">
+                    Months can carry windows from more than one season. Each table shows this
+                    season's own windows and names any other season that applies; the checker shows
+                    the combined price.
+                  </p>
+                  <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
+                  <div class="rate-periods" id="rate-periods"></div>
+                  <p class="other-times-line" id="other-times-line" hidden></p>
+                  <div class="plan-actions">
+                    <button class="btn small" id="add-season" type="button">
+                      <span class="add-plus" aria-hidden="true">+</span><span>Add a season</span>
+                    </button>
+                  </div>
+
+                  <section class="preview-card" id="preview-card" aria-labelledby="preview-heading">
+                    <div class="preview-head">
+                      <h4 id="preview-heading">What applies at</h4>
+                      <p class="block-sub">
+                        Check any moment against this plan. It reads your edits, saved or not.
+                      </p>
+                    </div>
+                    <div class="preview-controls">
+                      <label class="field preview-date">
+                        <span class="field-label">Date</span>
+                        <input id="preview-date" type="date" autocomplete="off" />
+                      </label>
+                      <label class="field preview-time">
+                        <span class="field-label">Time</span>
+                        <input id="preview-time" type="time" step="60" autocomplete="off" />
+                      </label>
+                      <button class="btn preview-now" id="preview-now" type="button">Now</button>
+                    </div>
+                    <table class="preview-table" id="preview-table">
+                      <caption class="sr-only">
+                        Price that applies at the chosen date and time
+                      </caption>
+                      <tbody id="preview-rows"></tbody>
+                    </table>
+                    <p class="preview-empty" id="preview-empty">Choose a date and time to check.</p>
+                    <p class="preview-note" id="preview-note" hidden></p>
+                    <p class="sr-only" id="preview-live" role="status" aria-live="polite"></p>
+                  </section>
                 </div>
               </div>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+                <span class="save-blockers" id="save-blockers" hidden></span>
                 <button id="save-settings" class="btn solid" type="submit" disabled>
                   Save settings
                 </button>

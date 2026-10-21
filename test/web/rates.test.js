@@ -10,10 +10,8 @@ import {
   MAX_RATE_WINDOWS,
   costForInterval,
   costForSession,
-  monthsToRange,
   normalizeRateSchedule,
   overlappingWindowPairs,
-  rangeToMonths,
   rateAt,
   validateRateWindows,
   windowMatches,
@@ -291,56 +289,6 @@ test('validateRateWindows rejects overlapping windows on shared days, months and
     ]).valid,
     true,
   );
-});
-
-// ---------- month ranges ----------
-
-test('rangeToMonths expands the editor range inclusively, wrapping the year', () => {
-  assert.deepEqual(rangeToMonths(11, 2), [11, 12, 1, 2]);
-  assert.deepEqual(rangeToMonths(12, 1), [12, 1]);
-  assert.deepEqual(rangeToMonths(1, 12), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-  assert.deepEqual(rangeToMonths(3, 3), [3]);
-  for (const [from, to] of [
-    [0, 5],
-    [1, 13],
-    [1.5, 2],
-    ['1', 2],
-    [null, 2],
-  ]) {
-    assert.deepEqual(rangeToMonths(from, to), [], `${from} → ${to}`);
-  }
-});
-
-test('monthsToRange finds the inclusive run, or reports a set it cannot express', () => {
-  assert.deepEqual(monthsToRange([11, 12, 1, 2]), { from: 11, to: 2 });
-  assert.deepEqual(monthsToRange([2, 11, 12, 1]), { from: 11, to: 2 });
-  assert.deepEqual(monthsToRange([1, 2, 3]), { from: 1, to: 3 });
-  assert.deepEqual(monthsToRange([3]), { from: 3, to: 3 });
-  assert.deepEqual(monthsToRange([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), { from: 1, to: 12 });
-  // Every month keeps the anchor the editor wrote: November → October is the
-  // same set as January → December but must not jump back on screen.
-  assert.deepEqual(monthsToRange([11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), {
-    from: 11,
-    to: 10,
-  });
-  // A shuffled full set has no honest anchor; use the canonical pair.
-  assert.deepEqual(monthsToRange([1, 3, 5, 7, 9, 11, 2, 4, 6, 8, 10, 12]), { from: 1, to: 12 });
-  // A loose or malformed set is not one range: the editor keeps it visible and
-  // asks the owner to choose.
-  for (const months of [[1, 6], [1, 1], [0, 1], [13], [], null, 3]) {
-    assert.equal(monthsToRange(months), null, JSON.stringify(months));
-  }
-
-  // Every range the editor can produce reads back as the same range.
-  for (const [from, to] of [
-    [1, 1],
-    [1, 12],
-    [6, 9],
-    [11, 2],
-    [12, 1],
-  ]) {
-    assert.deepEqual(monthsToRange(rangeToMonths(from, to)), { from, to });
-  }
 });
 
 // ---------- overlap pairs ----------
