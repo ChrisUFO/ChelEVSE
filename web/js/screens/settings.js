@@ -406,8 +406,8 @@ function priceText(rate) {
 
 // A price cell breaks between the currency code and the amount rather than
 // running under the band column: the code can be CURRENCY_MAX (8) characters
-// and the 30% price column at 320 px cannot hold "US cents" and "0.315" on one
-// line. Each half stays unbreakable, so a number never splits.
+// and the 30% price column at 320 px cannot hold "US cents" and "0.15303" on
+// one line. Each half stays unbreakable, so a number never splits.
 function priceCell(rate) {
   const td = el('td', 'price');
   const text = priceText(rate);

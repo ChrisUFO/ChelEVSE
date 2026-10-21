@@ -323,6 +323,14 @@ test('fmtRate keeps the precision a per-kWh price allows', () => {
   assert.equal(fmtRate(0, 'USD'), 'USD 0.00');
   assert.equal(fmtRate(0.1), '0.10');
   assert.equal(fmtRate(0.245, '$'), '$0.245');
+  // Utility bills quote five decimals; the label shows them all.
+  assert.equal(fmtRate(0.15303, 'USD'), 'USD 0.15303');
+  assert.equal(fmtRate('0.11270'), '0.1127');
+  // Five is the display ceiling; money itself still stops at two decimals.
+  assert.equal(fmtRate(0.123456), '0.12346');
+  // A round price keeps its cents: 0.30, not 0.3.
+  assert.equal(fmtRate(0.3), '0.30');
+  assert.equal(fmtRate('0.30', '$'), '$0.30');
   assert.equal(fmtRate(0.31, 'USD'), 'USD 0.31');
   assert.equal(fmtRate(0, '€'), '€0.00');
   assert.equal(fmtRate(5, 'USD'), 'USD 5.00');
