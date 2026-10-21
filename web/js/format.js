@@ -189,6 +189,22 @@ export function fmtMoney(value, currency) {
 
 // Cost for an energy amount at the configured rate. Returns null when either
 // input is missing/invalid — callers hide the cost line entirely in that case.
+// A per-kWh price keeps the precision the settings schema allows: rates are
+// 0–5 to three decimals, so 0.245 must not render as "0.25" the way a rounded
+// cost would. Same currency convention as fmtMoney.
+const RATE = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 3,
+});
+
+export function fmtRate(value, currency) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const amount = RATE.format(Number(value));
+  const code = typeof currency === 'string' ? currency.trim() : '';
+  if (!code) return amount;
+  return /^[A-Za-z]{2,}$/.test(code) ? `${code} ${amount}` : `${code}${amount}`;
+}
+
 export function fmtCost(kwh, rate, currency) {
   if (kwh == null || rate == null) return null;
   const energy = Number(kwh);

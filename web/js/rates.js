@@ -181,7 +181,7 @@ function validateWindow(window) {
   const months = window && window.months;
   if (months !== null && months !== undefined) {
     if (!Array.isArray(months) || months.length === 0) {
-      errors.months = 'Pick at least one month, or all year.';
+      errors.months = 'Pick at least one month, or choose All year.';
     } else if (months.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) {
       errors.months = 'Months must be whole numbers from 1 to 12.';
     } else if (new Set(months).size !== months.length) {
@@ -291,18 +291,24 @@ export function normalizeRateSchedule(data) {
   };
 }
 
-function rateFor(schedule, date) {
-  let rate = null;
-  // Last matching window wins. Validation rejects overlapping windows on a
-  // calendar-segment basis (a wrapping window's tail is compared against the
-  // next weekday, with the possible months its start day implies), so a
-  // schedule it accepts never matches one instant twice; this only decides
-  // between rows stored by an older or hand-edited writer, keeping the result
-  // deterministic instead of depending on the read order.
+// The window that prices one local instant, or null when the flat fallback does.
+// Last matching window wins: validation rejects overlapping windows on a
+// calendar-segment basis (a wrapping window's tail is compared against the next
+// weekday, with the possible months its start day implies), so a schedule it
+// accepts never matches one instant twice. This only decides between rows
+// stored by an older or hand-edited writer, keeping the result deterministic
+// instead of depending on the read order.
+function matchingWindow(schedule, date) {
+  let match = null;
   for (const window of schedule.rates) {
-    if (windowMatches(window, date)) rate = window.rate;
+    if (windowMatches(window, date)) match = window;
   }
-  return rate == null ? schedule.rate : rate;
+  return match;
+}
+
+function rateFor(schedule, date) {
+  const window = matchingWindow(schedule, date);
+  return window ? window.rate : schedule.rate;
 }
 
 // The rate for one local instant: the last matching window, else the flat rate.
@@ -310,6 +316,56 @@ function rateFor(schedule, date) {
 export function rateAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   return rateFor(normalizeRateSchedule(schedule), date);
+}
+
+// The same lookup with the winning row attached, so a preview can name the
+// window (or say the fallback applies) instead of showing an unexplained price.
+// `window` is the normalized row, so it carries the stored months and times.
+export function rateEntryAt(date, schedule) {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
+  const normalized = normalizeRateSchedule(schedule);
+  const window = matchingWindow(normalized, date);
+  return { rate: window ? window.rate : normalized.rate, window };
+}
+
+// One local day as a complete, contiguous partition: every minute from 00:00 to
+// 24:00 belongs to exactly one segment, carrying the winning window (or null for
+// the flat fallback). Boundaries are every window start/end plus midnight, and
+// matching cannot change between two boundaries, so one probe per interval is
+// exact for the wall clock. A wrapping window's tail lands at the start of the
+// day and its main part at the end; both refer to the same stored row.
+export function rateDayPartition(schedule, date) {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return [];
+  const normalized = normalizeRateSchedule(schedule);
+  const boundaries = new Set([0, MINUTES_PER_DAY]);
+  for (const window of normalized.rates) {
+    const start = parseTime(window.start);
+    const end = parseTime(window.end);
+    if (start != null) boundaries.add(start);
+    if (end != null) boundaries.add(end);
+  }
+  const marks = [...boundaries].sort((a, b) => a - b);
+  const segments = [];
+  for (let i = 1; i < marks.length; i += 1) {
+    const from = marks[i - 1];
+    const to = marks[i];
+    if (to <= from) continue;
+    const at = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      Math.floor(from / 60),
+      from % 60,
+    );
+    const window = matchingWindow(normalized, at);
+    const rate = window ? window.rate : normalized.rate;
+    const last = segments[segments.length - 1];
+    // Merge only the same row at the same price: two rows with an equal rate
+    // stay separate so the partition can still name their different scopes.
+    if (last && last.window === window && last.rate === rate) last.to = to;
+    else segments.push({ from, to, rate, window });
+  }
+  return segments;
 }
 
 // ---------- overlap validation ----------
