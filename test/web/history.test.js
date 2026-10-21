@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 import {
-  CHART_SLOTS,
   CHART_VIEW_W,
+  DEFAULT_PERIOD,
+  PERIODS,
   chartIndexAt,
   dayId,
   dayLabel,
@@ -12,6 +13,11 @@ import {
   historySeries,
   lastDayIds,
   maxSeries,
+  monthId,
+  monthLabel,
+  periodBounds,
+  periodById,
+  periodSeries,
   sectionView,
   sumSeries,
 } from '../../web/js/history.js';
@@ -88,21 +94,284 @@ test('dayId uses local calendar components under UTC+14', () => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test('chartIndexAt maps a pointer to the nearest chart slot', () => {
+test('PERIODS describes every chart range as data', () => {
+  // The contract #61 extends: one descriptor per range, and the chart reads the
+  // series length rather than any period-specific slot constant.
+  assert.deepEqual(
+    PERIODS.map((period) => period.id),
+    ['week', 'month', 'year'],
+  );
+  assert.equal(DEFAULT_PERIOD, 'month');
+  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.slots])), {
+    week: 7,
+    month: 30,
+    year: 12,
+  });
+  for (const period of PERIODS) {
+    assert.ok(['day', 'month'].includes(period.bucket), period.id);
+    for (const key of [
+      'label',
+      'summaryLabel',
+      'noun',
+      'chartLabel',
+      'emptyTitle',
+      'emptyLine',
+      'loadingLine',
+      'offlineLine',
+    ]) {
+      assert.equal(typeof period[key], 'string', `${period.id}.${key}`);
+      assert.ok(period[key].length > 0, `${period.id}.${key}`);
+    }
+  }
+  assert.equal(periodById('year'), PERIODS[2]);
+  // Unknown ids fall back to today's default, never to an unrelated range.
+  assert.equal(periodById('nope').id, DEFAULT_PERIOD);
+});
+
+test('periodBounds returns one contiguous local range for each period', () => {
+  const today = new Date(2026, 9, 18, 12);
+  assert.deepEqual(periodBounds('week', today), {
+    startId: '2026-10-12',
+    endId: '2026-10-18',
+  });
+  assert.deepEqual(periodBounds('month', today), {
+    startId: '2026-09-19',
+    endId: '2026-10-18',
+  });
+  assert.deepEqual(periodBounds('year', today), {
+    startId: '2025-11-01',
+    endId: '2026-10-18',
+  });
+  // A descriptor works as well as an id — the screen passes the descriptor.
+  assert.deepEqual(periodBounds(periodById('week'), today), periodBounds('week', today));
+});
+
+test('periodBounds crosses month and year boundaries', () => {
+  // A month boundary: the 30-day window still reads as one day-id range.
+  assert.deepEqual(periodBounds('month', new Date(2026, 2, 1, 12)), {
+    startId: '2026-01-31',
+    endId: '2026-03-01',
+  });
+  assert.deepEqual(periodBounds('week', new Date(2026, 2, 1, 12)), {
+    startId: '2026-02-23',
+    endId: '2026-03-01',
+  });
+  // A year rollover: twelve months ending with January 2026 start in February.
+  assert.deepEqual(periodBounds('year', new Date(2026, 0, 3, 12)), {
+    startId: '2025-02-01',
+    endId: '2026-01-03',
+  });
+});
+
+test('periodBounds keeps 29 February inside a leap-year range', () => {
+  const today = new Date(2028, 2, 1, 12);
+  // The 30-day window that ends on 1 March covers all 29 February days.
+  assert.deepEqual(periodBounds('month', today), {
+    startId: '2028-02-01',
+    endId: '2028-03-01',
+  });
+  assert.deepEqual(periodBounds('year', today), {
+    startId: '2027-04-01',
+    endId: '2028-03-01',
+  });
+});
+
+test('periodBounds stays on local calendar days across a DST change (fixed America/Denver)', () => {
+  // Same child-process pattern as lastDayIds: a UTC runner must still exercise
+  // the spring-forward boundary, and a 00:30 fixture catches midnight arithmetic.
+  const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
+  const script = `
+    import { periodBounds } from ${JSON.stringify(moduleUrl)};
+    if (new Date(2026, 2, 9, 12).getTimezoneOffset() !== 360) {
+      console.error('unexpected offset', new Date(2026, 2, 9, 12).getTimezoneOffset());
+      process.exit(1);
+    }
+    const today = new Date(2026, 2, 9, 0, 30);
+    const expected = {
+      week: { startId: '2026-03-03', endId: '2026-03-09' },
+      month: { startId: '2026-02-08', endId: '2026-03-09' },
+      year: { startId: '2025-04-01', endId: '2026-03-09' },
+    };
+    for (const [period, want] of Object.entries(expected)) {
+      const got = periodBounds(period, today);
+      if (JSON.stringify(got) !== JSON.stringify(want)) {
+        console.error(period, JSON.stringify(got));
+        process.exit(1);
+      }
+    }
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    env: { ...process.env, TZ: 'America/Denver' },
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('monthId and monthLabel use the local calendar month', () => {
+  assert.equal(monthId(new Date(2026, 0, 1, 0, 30)), '2026-01');
+  assert.equal(monthId(new Date(2026, 11, 31, 23)), '2026-12');
+  assert.equal(monthLabel('2026-10'), 'Oct 2026');
+  assert.equal(monthLabel('2025-01'), 'Jan 2025');
+  assert.equal(monthLabel('2026-13'), '2026-13');
+  assert.equal(monthLabel('nope'), 'nope');
+});
+
+test('periodSeries renders one point per slot for a week, with gaps as zero bars', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-10-12', kwh: 3 },
+      { id: '2026-10-15', kwh: '2.5' },
+      { id: '2026-10-18', kwh: 1.25 },
+      { id: '2026-10-11', kwh: 99 },
+      { id: '2026-10-16', kwh: -4 },
+    ],
+    today,
+  );
+  assert.deepEqual(
+    points.map((point) => point.id),
+    [
+      '2026-10-12',
+      '2026-10-13',
+      '2026-10-14',
+      '2026-10-15',
+      '2026-10-16',
+      '2026-10-17',
+      '2026-10-18',
+    ],
+  );
+  assert.deepEqual(
+    points.map((point) => point.kwh),
+    [3, 0, 0, 2.5, 0, 0, 1.25],
+  );
+  assert.equal(points[0].label, 'Mon 12 Oct');
+  assert.deepEqual(
+    points.map((point) => point.isCurrent),
+    [false, false, false, false, false, false, true],
+  );
+});
+
+test('periodSeries keeps the 30-day month window and marks today', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'month',
+    [
+      { id: '2026-09-19', kwh: 2 },
+      { id: '2026-10-18', kwh: 4 },
+    ],
+    today,
+  );
+  assert.equal(points.length, 30);
+  assert.equal(points[0].id, '2026-09-19');
+  assert.equal(points[0].label, 'Sat 19 Sep');
+  assert.equal(points[0].kwh, 2);
+  assert.equal(points[29].id, '2026-10-18');
+  assert.equal(points[29].kwh, 4);
+  assert.equal(points.filter((point) => point.isCurrent).length, 1);
+  assert.equal(points[29].isCurrent, true);
+  // Month is the default, so these are identically the old 30-day ids.
+  assert.deepEqual(
+    points.map((point) => point.id),
+    lastDayIds(30, today),
+  );
+});
+
+test('periodSeries sums a year into 12 monthly points ending with the current month', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'year',
+    [
+      { id: '2025-10-31', kwh: 99 },
+      { id: '2025-11-01', kwh: 1 },
+      { id: '2025-11-30', kwh: 2 },
+      { id: '2026-02-28', kwh: 3 },
+      { id: '2026-02-01', kwh: 4 },
+      { id: '2026-10-02', kwh: 5 },
+      { id: '2026-10-18', kwh: 6 },
+    ],
+    today,
+  );
+  assert.equal(points.length, 12);
+  assert.equal(points[0].id, '2025-11');
+  assert.equal(points[0].label, 'Nov 2025');
+  assert.equal(points[11].id, '2026-10');
+  assert.equal(points[0].kwh, 3);
+  assert.equal(points.find((point) => point.id === '2026-02').kwh, 7);
+  // The current month is the partial sum of the days recorded so far; the
+  // series stops with it (no zero-padded next month).
+  assert.equal(points[11].kwh, 11);
+  assert.equal(points[11].label, 'Oct 2026');
+  assert.deepEqual(points.map((point) => point.isCurrent).filter(Boolean), [true]);
+  assert.equal(points[11].isCurrent, true);
+  // Twelve months is the whole window, including the one before the range.
+  assert.equal(sumSeries(points), 21);
+});
+
+test('periodSeries folds 29 February into its month', () => {
+  const today = new Date(2028, 2, 15, 12);
+  const points = periodSeries(
+    'year',
+    [
+      { id: '2028-02-01', kwh: 1 },
+      { id: '2028-02-29', kwh: 2.5 },
+    ],
+    today,
+  );
+  const february = points.find((point) => point.id === '2028-02');
+  assert.equal(february.kwh, 3.5);
+  assert.equal(february.label, 'Feb 2028');
+  assert.equal(february.isCurrent, false);
+});
+
+test('periodSeries without documents is a full run of zero points, not an empty list', () => {
+  const today = new Date(2026, 9, 18, 12);
+  for (const [period, count] of [
+    ['week', 7],
+    ['month', 30],
+    ['year', 12],
+  ]) {
+    const points = periodSeries(period, [], today);
+    assert.equal(points.length, count, period);
+    assert.equal(sumSeries(points), 0, period);
+    assert.equal(points[count - 1].isCurrent, true, period);
+  }
+  // Malformed documents are ignored rather than throwing.
+  const points = periodSeries(
+    'year',
+    [null, { kwh: 5 }, { id: 42, kwh: 5 }, { id: '2026-10', kwh: 'nope' }],
+    today,
+  );
+  assert.equal(sumSeries(points), 0);
+});
+
+test('chartIndexAt maps a pointer to exactly the visible slots', () => {
   const rect = { left: 20, width: CHART_VIEW_W };
-  assert.equal(CHART_SLOTS, 30);
+  // 30 slots: today's mapping is unchanged.
   assert.equal(chartIndexAt(20, rect, 30), 0);
   assert.equal(chartIndexAt(25, rect, 30), 0);
   assert.equal(chartIndexAt(35, rect, 30), 1);
   assert.equal(chartIndexAt(319.9, rect, 30), 29);
+  // Every visible point owns an equal share of the same viewBox, so 7 and 12
+  // bars have no dead slots — and a 24-point Day period needs no new mapping.
+  assert.equal(chartIndexAt(20, rect, 7), 0);
+  assert.equal(chartIndexAt(63, rect, 7), 1);
+  assert.equal(chartIndexAt(319.9, rect, 7), 6);
+  assert.equal(chartIndexAt(20, rect, 12), 0);
+  assert.equal(chartIndexAt(45, rect, 12), 1);
+  assert.equal(chartIndexAt(319.9, rect, 12), 11);
+  assert.equal(chartIndexAt(20, rect, 24), 0);
+  assert.equal(chartIndexAt(319.9, rect, 24), 23);
   // The hit test scales with the rendered width.
   assert.equal(chartIndexAt(75, { left: 0, width: 150 }, 30), 15);
-  // Outside the plot, missing geometry, or fewer points than slots.
+  // Outside the plot or invalid geometry.
   assert.equal(chartIndexAt(19, rect, 30), null);
   assert.equal(chartIndexAt(321, rect, 30), null);
+  assert.equal(chartIndexAt(320, rect, 7), null);
   assert.equal(chartIndexAt(20, { left: 0, width: 0 }, 30), null);
   assert.equal(chartIndexAt(Number.NaN, rect, 30), null);
-  assert.equal(chartIndexAt(220, rect, 10), null);
+  assert.equal(chartIndexAt(20, rect, 0), null);
 });
 
 test('dayLabel is stable and rejects malformed ids', () => {
