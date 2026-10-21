@@ -1,9 +1,10 @@
-// History screen: a Week / Month / Year energy chart over hand-rolled SVG bars,
-// plus the 20 most recent sessions. One-shot reads on first tab activation, on
-// Refresh and on a period switch — deliberately no realtime listener here.
+// History screen: a Day / Week / Month / Year energy chart over hand-rolled SVG
+// bars, plus the 20 most recent sessions. One-shot reads on first tab
+// activation, on Refresh and on a period switch — deliberately no realtime
+// listener here.
 
 import { $, setText } from '../ui.js';
-import { fetchHistory, fetchSessions } from '../store.js';
+import { fetchHistory, fetchHistoryDay, fetchSessions } from '../store.js';
 import {
   CHART_VIEW_W,
   DEFAULT_PERIOD,
@@ -12,6 +13,9 @@ import {
   dayId,
   dayLabel,
   historyReadState,
+  hourRange,
+  hourReadFailure,
+  hourReadState,
   maxSeries,
   periodBounds,
   periodById,
@@ -30,8 +34,12 @@ const TOP = 10;
 const BASE = 118;
 const PLOT_H = BASE - TOP;
 // A bar keeps this share of its slot. 0.56 reproduces the 5.6-unit bar of the
-// original 30-slot chart at VIEW_W / 30 and fills the viewBox for 7 or 12 bars.
+// original 30-slot chart at VIEW_W / 30 and fills the viewBox for 7, 12 or 24
+// bars.
 const BAR_RATIO = 0.56;
+// A partial current slot says so in its accessible name: a month holds only its
+// recorded days, and an hour holds only what has been recorded so far.
+const PARTIAL_SUFFIX = { month: ' (current month)', hour: ' (this hour so far)' };
 
 let active = false;
 let loaded = false;
@@ -171,10 +179,7 @@ function showChartEmpty(title, line) {
 function buildBar(point, index, slot, barW) {
   const descriptor = currentPeriod();
   const cost = seriesCost(point.kwh);
-  // The current month is partial (only recorded days exist), so its accessible
-  // label says so; day buckets already announce themselves via "Today ·" in the
-  // readout.
-  const suffix = point.isCurrent && descriptor.bucket === 'month' ? ' (current month)' : '';
+  const suffix = point.isCurrent ? PARTIAL_SUFFIX[descriptor.bucket] || '' : '';
   const group = svgEl('g', {
     class: 'bar',
     role: 'button',
@@ -253,10 +258,11 @@ function paintSelection(index) {
   const point = series[x];
   selectedId = point.id;
   const cost = seriesCost(point.kwh);
-  // "Today ·" only names a whole-day bucket; a month bucket is the current month
-  // and keeps its month label.
+  // The Day period names the selected hour's span; every other period names its
+  // bucket (a day or a month). "Today ·" only prefixes a whole-day bucket.
+  const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
   const prefix = descriptor.prefixToday && point.isCurrent ? 'Today · ' : '';
-  setText($('chart-day'), `${prefix}${point.label}`);
+  setText($('chart-day'), `${prefix}${label}`);
   setText($('chart-kwh'), fmtK(point.kwh));
   $('chart-cost').hidden = !cost;
   setText($('chart-cost'), cost || '');
@@ -310,7 +316,9 @@ function renderHistory() {
   }
   if (!view.showData) {
     // Nothing current to draw: never paint zeroes for a read that did not reach
-    // the server, or a cache miss would read as "no energy recorded".
+    // the server, or a cache miss would read as "no energy recorded". A day with
+    // a total but no hourly buckets is a message for the same reason — its hours
+    // were never recorded and must not be drawn as 24 empty bars.
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
@@ -323,7 +331,9 @@ function renderHistory() {
               title: `Couldn't load ${descriptor.noun}.`,
               line: 'Check your connection and refresh.',
             }
-          : NO_HISTORY_COPY;
+          : historyState === 'no-intraday'
+            ? { title: descriptor.noIntradayTitle, line: descriptor.noIntradayLine }
+            : NO_HISTORY_COPY;
     showChartEmpty(copy.title, copy.line);
     setHistoryNote('');
     return;
@@ -478,24 +488,42 @@ function reloadIfWindowStale() {
   loadAll();
 }
 
-// The range read for the selected period. `today` is captured once per read so
-// the bounds and the points are derived from the same local date.
+// The window for the selected period. `today` is captured once per read so the
+// bounds, the points and the midnight check are derived from the same local
+// date. The Day period's window is exactly today, which is also the document its
+// read targets.
 function periodRange(descriptor, today = new Date()) {
   const bounds = periodBounds(descriptor, today);
   todayId = bounds.endId;
   return bounds;
 }
 
-// Apply one settled history read. A failed read (null) and an offline cache miss
-// set the state only: points already on screen must never be relabelled as the
-// newly selected period.
-function applyHistory(descriptor, result, today) {
-  historyState = result ? historyReadState(result) : 'error';
+// The selected period's read, chosen by the descriptor: the Day period reads its
+// one document, every other period its contiguous day-id range. Both resolve to
+// the input applyHistory classifies, so no caller special-cases a period id.
+function fetchPeriod(descriptor, bounds) {
+  return descriptor.source === 'day'
+    ? fetchHistoryDay(bounds.endId)
+    : fetchHistory(bounds.startId, bounds.endId);
+}
+
+// Apply one settled history read. A failed read and an offline cache miss set
+// the state only: points already on screen must never be relabelled as the newly
+// selected period.
+function applyHistory(descriptor, result, failure, today) {
+  const day = descriptor.source === 'day';
+  if (result) historyState = day ? hourReadState(result) : historyReadState(result);
+  else historyState = day ? hourReadFailure(failure) : 'error';
   if (historyState === 'offline' || historyState === 'error') return;
-  series = periodSeries(descriptor, result.docs, today);
+  // A Day read's payload is the day document itself; a range read's is its list
+  // of daily documents.
+  series = periodSeries(descriptor, day ? result : result.docs, today);
   historyServer = historyState === 'fresh' || historyState === 'empty';
   if (!series.some((point) => point.id === selectedId)) {
-    selectedId = series.length ? series[series.length - 1].id : null;
+    // Prefer the slot the series marks as current (today, this month, the hour
+    // in progress), else the newest slot.
+    const current = series.findIndex((point) => point.isCurrent);
+    selectedId = series.length ? series[current >= 0 ? current : series.length - 1].id : null;
   }
 }
 
@@ -514,13 +542,14 @@ async function readHistory() {
   historyState = 'loading';
   renderHistory();
   let result = null;
+  let failure = null;
   try {
-    result = await fetchHistory(bounds.startId, bounds.endId);
-  } catch {
-    result = null;
+    result = await fetchPeriod(descriptor, bounds);
+  } catch (err) {
+    failure = err;
   }
   if (gen !== generation || seq !== historySeq) return;
-  applyHistory(descriptor, result, today);
+  applyHistory(descriptor, result, failure, today);
   renderHistory();
   reloadIfWindowStale();
 }
@@ -551,10 +580,7 @@ async function loadAll() {
   const descriptor = currentPeriod();
   const today = new Date();
   const bounds = periodRange(descriptor, today);
-  const [hist, sess] = await Promise.allSettled([
-    fetchHistory(bounds.startId, bounds.endId),
-    fetchSessions(),
-  ]);
+  const [hist, sess] = await Promise.allSettled([fetchPeriod(descriptor, bounds), fetchSessions()]);
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
 
@@ -563,7 +589,12 @@ async function loadAll() {
   // A period switch during the read owns the chart; this payload belongs to the
   // superseded range and must not be painted.
   if (seq === historySeq) {
-    applyHistory(descriptor, hist.status === 'fulfilled' ? hist.value : null, today);
+    applyHistory(
+      descriptor,
+      hist.status === 'fulfilled' ? hist.value : null,
+      hist.status === 'rejected' ? hist.reason : null,
+      today,
+    );
   }
   sessionsState = sess.status === 'fulfilled' ? historyReadState(sess.value) : 'error';
   // Only a read that returned rows (fresh or cached) replaces the payload; an
