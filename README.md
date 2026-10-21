@@ -32,9 +32,29 @@ App settings hold one **all other times** rate plus an optional plan of **season
 - **All other times** is the base rate. It prices every moment no window covers, so a flat rate keeps
   working with no plan at all. The currency is shared by every price.
 - **Starting a plan** uses **Add season or time-of-use**, which offers **Season rate** or
-  **Time-of-use windows**. A season rate creates an All-year season with one all-day, every-day
-  window awaiting a price. Time-of-use creates the everyday overnight window (00:00–07:00) as a
-  starting point. Both start with an empty price so the plan cannot be saved by accident.
+  **Time-of-use windows**. Either choice creates the season with the current month as a visible date
+  range, opens **Season dates**, and focuses **Starts**; it never starts as an invisible All-year
+  scope. The price stays empty until entered, so the new season cannot be saved by accident.
+- **Every season opens with Season dates**, above its price and windows: **Starts** and **Ends** use
+  native date pickers, with **All year** beside the heading and **Edit dates** on a collapsed header.
+  The season repeats every year; the year in the picker is only a reference year (2024 includes 29
+  February). Only the month and day are stored.
+- **All year** clears the start and end dates and stores no month limit. While checked, the two
+  pickers are replaced by a read-only “All year — every day of the year” value. Unchecking it seeds
+  the current month as a real date range. The picker range is inclusive, may wrap the year, and may be a
+  single day. A range whose end is before its start prints a wrap hint and `(wraps)` wherever the
+  range appears. An invalid stored date (for example 30 February) cannot be represented in a native
+  picker, so it shows as a stored value beside the error and blocks saving until corrected.
+- **Months are advanced**, under **Advanced: month ranges** inside Season dates. A legacy month
+  scope still loads with its month chips, and its date controls show the derived first and last day
+  with a “stored as a month range” note. Editing a date makes the season day-precise; editing a
+  month chip rounds it back to whole months. A non-contiguous month set such as January + June cannot
+  be represented by one start/end pair: the date fields give way to a short “No single start and
+  end” note, the status says why, and the month editor opens for editing. All year is the canonical no-month state (`months: null`).
+- Editing a date applies to every row in the season at once. The season repaints in place, so the
+  Tab or click that ended the edit is delivered — opening **Advanced**, **All year** or **Duplicate**
+  works on the first press. A commit that merges or splits the season rebuilds on the next task and
+  returns focus to that season's own date control.
 - **Season rate** is one price for every hour in its season. The season hides the day/time controls
   and **Add window**, says “One price for every hour in this season”, and shows a single
   **Every day · 00:00–24:00** row in its table, and the row is titled **Season rate** — never a
@@ -42,30 +62,6 @@ App settings hold one **all other times** rate plus an optional plan of **season
   turns it into the everyday 00:00–07:00 window; **Convert to one season rate** turns a single
   time-of-use window back into one price. Converting in either direction needs exactly one window in
   the season, so the action is not offered otherwise.
-- A **season** owns a month or date scope. **Months** mode has the 12 month chips and **All year**;
-  chips apply immediately to every window in the season, and each chip is a toggle: on an All-year
-  season every month is pressed, so clicking one removes that month and leaves the other eleven (the
-  last remaining month is kept).
-- **Specific dates** mode uses **From** and **To** month + day controls. The day is a number input,
-  so an invalid stored day stays visible and the error names the field. The mode is derived from the
-  rows, never stored:
-  - Months → dates, one continuous run: first day 1 to the last day of the last month (29 February in
-    the leap-year shape). A wrapping run such as November–February keeps its order.
-  - All year → dates: seeds the current month.
-  - A non-contiguous month set (January + June) cannot become one date range: Specific dates is
-    disabled with “Specific dates need one continuous range”.
-  - Dates → Months derives the months the range covers, clears the dates, and rounds to whole months;
-    the date panel says so. **Use all year** clears both dates and stores no month limit.
-  - Date bounds are inclusive and repeat every year. A range may wrap the year; a same-month reversed
-    range wraps too, the hint says “This range wraps the year.” and every place the range is printed
-    marks it (`Jun 20–Jun 10 (wraps)`). `from === to` is one day, printed `Jun 15 (one day)` and
-    tabulated as **One day · Jun 15** rather than a weekday that moves each year. Missing or unreal
-    values block saving and point at From or To.
-  - Editing a date commits to every row in the season at once. The season is repainted in place, so
-    the Tab or click that ended the edit is still delivered — typing a day and then pressing
-    Months, Use all year or Duplicate works on the first press. A commit that merges the season into
-    another or splits it apart rebuilds the plan on the next task and returns focus to that season's
-    own date control, never to the first matching field in an earlier season.
 - A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
   windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
   Custom reveals the individual day chips for an exact choice. A window whose start equals its end
@@ -78,8 +74,8 @@ App settings hold one **all other times** rate plus an optional plan of **season
   representative month (`Jan example USD 0.10–0.32`; January for an all-year season, otherwise the
   first month of its scope), while a date season shows its dates and no example month. The range
   includes the fallback and any season that also applies on those days. The header keeps a
-  coverage strip and any error even when collapsed. Expanding shows the scope editor, one complete
-  24-hour table per day pattern for the same sample, and the windows themselves. The table caption
+  coverage strip and any error even when collapsed. Expanding shows Season dates and the Advanced month
+  ranges, one complete 24-hour table per day pattern for the same sample, and the windows themselves. The table caption
   marks a sample month as one when the season covers more of the year (`Every day · June · example`),
   so a four-month season is never tabulated as if June were its whole scope. The table highlights
   that season's own rows and labels a row from another season by band and season, keeping its band
@@ -89,8 +85,8 @@ App settings hold one **all other times** rate plus an optional plan of **season
 - **No season — other times** is a line under the seasons for days no season covers. It is where the
   all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
   summary. A month-only gap collapses to whole months; a date season leaves the exact day range
-  (marked `(wraps)` when it crosses the year). At 320 px the title breaks after the dash, never
-  mid-phrase and never with a dangling `·`. The checker keeps `Other times` for hours and says
+  (marked `(wraps)` when it crosses the year). At 320 px each date run stays unbroken at the en dash;
+  the line wraps only between runs, never with a dangling `·`. The checker keeps `Other times` for hours and says
   `No season —` when the day itself has no season.
 - **Price bands** (Peak / Off-peak / Shoulder / Same price) are derived from the plan's relative
   prices for display only; no band or season name is stored. A season rate is the exception: it is
@@ -142,9 +138,10 @@ Technical rules:
 - A month scope is an inclusive list that may wrap the year: November → February means November,
   December, January and February. A non-contiguous list such as January + June is valid and is shown
   as month chips, not repaired. "All year" stores no month limit (`null`).
-- Date matching compares `MM-DD` keys on the local calendar. Bounds are inclusive; `from === to` is a
-  single day; a reversed range wraps. Leap day is a real annual day (the stored ring always includes
-  29 February); a non-leap year simply has no instant there.
+- Date matching compares `MM-DD` keys on the local calendar. The editor uses native date pickers with
+  2024 as a reference year; only the month and day are stored. Bounds are inclusive; `from === to`
+  is a single day; a reversed range wraps. Leap day is a real annual day (the stored ring always
+  includes 29 February); a non-leap year simply has no instant there.
 - Windows must not overlap. Two windows that share a day, a season day and a time would make the rate
   ambiguous, so the editor rejects the plan instead of silently choosing one and names both windows
   in the error. Adjacent date seasons that share a month but no day (ending 15 June, starting 16 June)
@@ -153,7 +150,7 @@ Technical rules:
   overlap before it will save again.
 - A malformed stored row stays visible with its error and blocks saving until it is fixed or
   removed; loading never deletes or repairs it. A non-contiguous legacy month scope stays editable in
-  Months mode.
+  Advanced: month ranges.
 - Saving writes the all-other-times rate, currency, and the window list in its original order. With
   no windows, the document keeps exactly its two flat fields.
 
