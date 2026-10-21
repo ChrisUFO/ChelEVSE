@@ -2144,15 +2144,19 @@ test('the settings screen applies a date edit in place (source tripwire)', () =>
   // Deliberate tripwire, not a behaviour test. The screen has no DOM harness, so
   // the call site is read from source the way test/web/sw-shell.test.js reads
   // web/sw.js. The pure tests above prove the in-place edit preserves identity;
-  // this pins the screen to calling it. Reverting `applyDates` to the
-  // copy-on-write `applyPeriodDates(` (the PR #78 regression) must fail here.
+  // this pins the screen to taking that path — `applyDates` calls
+  // `applyPeriodDatesInPlace(` and never the copy-on-write `applyPeriodDates(`.
+  // The call, not the assignment form: `const next = applyPeriodDatesInPlace(...)`
+  // then `draftRates = next` keeps the guarded property and must still pass.
+  // Reverting `applyDates` to the copy-on-write helper (the PR #78 regression)
+  // must fail here.
   const source = readFileSync(new URL('../../web/js/screens/settings.js', import.meta.url), 'utf8');
   const start = source.indexOf('function applyDates(');
   assert.ok(start >= 0, 'screens/settings.js declares applyDates');
   const end = source.indexOf('\n}\n', start);
   assert.ok(end > start, 'screens/settings.js closes applyDates');
   const body = source.slice(start, end + 2);
-  assert.match(body, /draftRates = applyPeriodDatesInPlace\(/);
+  assert.match(body, /applyPeriodDatesInPlace\(/);
   assert.doesNotMatch(body, /applyPeriodDates\(/);
 });
 
