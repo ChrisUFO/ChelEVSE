@@ -10,11 +10,23 @@ import {
   MAX_RATE_WINDOWS,
   costForInterval,
   costForSession,
+  intersectDateSets,
+  monthsCovering,
   normalizeRateSchedule,
+  normalizeWindow,
   overlappingWindowPairs,
+  parseMonthDay,
   rateAt,
+  rateWindowsKey,
+  scopeMatches,
+  seasonDateSet,
+  seasonMatches,
+  seasonScope,
+  shiftDateSet,
   validateRateWindows,
+  validateWindow,
   windowMatches,
+  windowSegments,
   windowsOverlap,
 } from '../../web/js/rates.js';
 
@@ -92,6 +104,8 @@ test('normalizeRateSchedule keeps the flat fallback and drops invalid rows only'
     start: '22:00',
     end: '06:00',
     months: null,
+    from: null,
+    to: null,
   });
   assert.deepEqual(normalized.rates[1].months, [6, 7, 8]);
   // The flat fallback survives a corrupt list.
@@ -562,4 +576,652 @@ test('costForSession reads a sessions document', () => {
   close(costForSession(session, s), 0.4, 'session');
   assert.equal(costForSession(null, s), null);
   assert.equal(costForSession({ wh: 2000, started_at: date(2026, 10, 19, 21, 0) }, s), null);
+});
+
+// ---------- date-mode seasons ----------
+
+test('date bounds normalize both-or-neither, and the date grammar is strict', () => {
+  const dated = normalizeWindow({ ...windowRow(), from: '06-15', to: '09-15' });
+  assert.equal(dated.from, '06-15');
+  assert.equal(dated.to, '09-15');
+  // A blank bound is absent, not an invalid date.
+  assert.equal(normalizeWindow({ ...windowRow(), from: '', to: '' }).from, null);
+  assert.equal(normalizeWindow({ ...windowRow(), from: '', to: '' }).to, null);
+  // Invalid values are carried through for validation to report.
+  assert.equal(normalizeWindow({ ...windowRow(), from: '6-15' }).from, '6-15');
+  assert.equal(normalizeWindow({ ...windowRow(), to: 42 }).to, 42);
+
+  assert.deepEqual(parseMonthDay('06-15'), { month: 6, day: 15 });
+  assert.deepEqual(parseMonthDay('02-29'), { month: 2, day: 29 });
+  for (const value of [
+    '6-15',
+    '06-5',
+    '02-30',
+    '02-31',
+    '04-31',
+    '13-01',
+    '00-10',
+    '06/15',
+    '',
+    ' 06-15',
+  ]) {
+    assert.equal(parseMonthDay(value), null, JSON.stringify(value));
+  }
+  for (const value of [null, undefined, 615, { from: '06-15' }]) {
+    assert.equal(parseMonthDay(value), null, String(value));
+  }
+});
+
+test('the compatibility month hint covers a range chronologically, wrapping the year', () => {
+  assert.deepEqual(monthsCovering('06-15', '09-15'), [6, 7, 8, 9]);
+  assert.deepEqual(monthsCovering('10-15', '04-15'), [10, 11, 12, 1, 2, 3, 4]);
+  assert.deepEqual(monthsCovering('02-29', '02-29'), [2]);
+  assert.deepEqual(monthsCovering('12-31', '01-01'), [12, 1]);
+  // A reversed range inside one month wraps the whole year, so every month is
+  // covered; only the shared month is not the answer.
+  assert.deepEqual(monthsCovering('06-20', '06-10'), [6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5]);
+  assert.deepEqual(monthsCovering('12-31', '12-30'), [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(monthsCovering('02-29', '02-28'), [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1]);
+  assert.deepEqual(monthsCovering('02-30', '03-01'), []);
+  assert.deepEqual(monthsCovering(null, '03-01'), []);
+});
+
+test('the compatibility month hint contains every month a date range matches', () => {
+  const bounds = [
+    '01-01',
+    '01-31',
+    '02-28',
+    '02-29',
+    '03-01',
+    '04-15',
+    '06-10',
+    '06-15',
+    '06-20',
+    '07-04',
+    '09-15',
+    '10-15',
+    '11-30',
+    '12-30',
+    '12-31',
+  ];
+  for (const from of bounds) {
+    for (const to of bounds) {
+      const scope = seasonScope(windowRow({ months: null, from, to }));
+      const hint = monthsCovering(from, to);
+      for (const year of [2024, 2025]) {
+        for (let month = 1; month <= 12; month += 1) {
+          const daysInMonth = new Date(year, month, 0).getDate();
+          let matched = false;
+          for (let day = 1; day <= daysInMonth && !matched; day += 1) {
+            matched = scopeMatches(scope, date(year, month, day, 12));
+          }
+          if (matched) {
+            assert.ok(
+              hint.includes(month),
+              `${from}→${to} matches ${year}-${String(month).padStart(2, '0')} but the hint is [${hint}]`,
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
+test('date validation requires both real bounds and ignores the months hint', () => {
+  const dated = windowRow({ months: null, from: '06-15', to: '09-15' });
+  assert.deepEqual(validateWindow(dated), {});
+
+  // Both absent is month mode.
+  assert.deepEqual(validateWindow(windowRow({ months: [6, 7] })), {});
+  // One-sided bounds are an error on the missing side, whatever months says.
+  const fromOnly = validateWindow(windowRow({ months: [6, 7], from: '06-15' }));
+  assert.ok(fromOnly.to);
+  assert.equal(fromOnly.months, undefined);
+  const toOnly = validateWindow(windowRow({ months: [6, 7], to: '09-15' }));
+  assert.ok(toOnly.from);
+  assert.equal(toOnly.months, undefined);
+  // An unreal date is rejected and named on its own field.
+  const unreal = validateWindow(windowRow({ months: null, from: '02-30', to: '03-15' }));
+  assert.ok(unreal.from);
+  assert.equal(unreal.to, undefined);
+  // 29 February is real.
+  assert.deepEqual(validateWindow(windowRow({ months: null, from: '02-29', to: '03-15' })), {});
+  // Date mode outranks months: even a malformed months value is ignored, because
+  // the dates are what matching uses.
+  assert.deepEqual(validateWindow(windowRow({ months: 3, from: '06-15', to: '09-15' })), {});
+  assert.deepEqual(validateWindow(windowRow({ months: [], from: '06-15', to: '09-15' })), {});
+
+  // A row with a bad date is dropped from costing exactly like any invalid row.
+  const schedule = normalizeRateSchedule({
+    rate: 0.3,
+    currency: 'USD',
+    rates: [windowRow({ id: 'bad-date', months: null, from: '02-30', to: '03-15' })],
+  });
+  assert.deepEqual(schedule.rates, []);
+});
+
+test('scope matching is exact on the local calendar date, leap included', () => {
+  const summer = seasonScope(windowRow({ months: [6, 7, 8, 9], from: '06-15', to: '09-15' }));
+  assert.equal(summer.kind, 'dates');
+  assert.equal(summer.fromKey, 615);
+  assert.equal(summer.toKey, 915);
+  for (const [month, day, expected] of [
+    [6, 14, false],
+    [6, 15, true],
+    [9, 15, true],
+    [9, 16, false],
+    [12, 1, false],
+  ]) {
+    assert.equal(scopeMatches(summer, date(2026, month, day, 12)), expected, `${month}-${day}`);
+  }
+  // A wrapped range reads across New Year.
+  const wrap = seasonScope(windowRow({ months: null, from: '10-15', to: '04-15' }));
+  for (const [month, day, expected] of [
+    [10, 14, false],
+    [10, 15, true],
+    [12, 31, true],
+    [1, 1, true],
+    [4, 15, true],
+    [4, 16, false],
+  ]) {
+    assert.equal(scopeMatches(wrap, date(2027, month, day, 12)), expected, `${month}-${day}`);
+  }
+  // One day.
+  const leapDay = seasonScope(windowRow({ months: null, from: '02-29', to: '02-29' }));
+  assert.equal(scopeMatches(leapDay, date(2024, 2, 29, 12)), true);
+  assert.equal(scopeMatches(leapDay, date(2025, 2, 28, 12)), false);
+  assert.equal(scopeMatches(leapDay, date(2025, 3, 1, 12)), false);
+  // An invalid pair matches nothing: fail closed, never the stale hint.
+  const invalid = seasonScope(windowRow({ months: [6], from: '06-15' }));
+  assert.equal(invalid.kind, 'invalid');
+  assert.equal(scopeMatches(invalid, date(2026, 6, 20, 12)), false);
+  assert.equal(
+    seasonMatches(windowRow({ months: [6], from: '02-30', to: '03-01' }), date(2026, 2, 28, 12)),
+    false,
+  );
+});
+
+test('a date season prices the June and September edge days exactly', () => {
+  const summer = windowRow({
+    months: [6, 7, 8, 9],
+    from: '06-15',
+    to: '09-15',
+    start: '22:00',
+    end: '06:00',
+  });
+  for (const [day, expected] of [
+    [14, false],
+    [15, true],
+    [16, true],
+  ]) {
+    assert.equal(windowMatches(summer, date(2026, 6, day, 23, 0)), expected, `June ${day}`);
+  }
+  for (const [day, expected] of [
+    [14, true],
+    [15, true],
+    [16, false],
+  ]) {
+    assert.equal(windowMatches(summer, date(2026, 9, day, 23, 0)), expected, `September ${day}`);
+  }
+  // The post-midnight tail belongs to the day the window started: 16 September
+  // 01:00 is 15 September's nightly window, 17 September's is not.
+  assert.equal(windowMatches(summer, date(2026, 9, 16, 1, 0)), true);
+  assert.equal(windowMatches(summer, date(2026, 9, 17, 1, 0)), false);
+  // 15 June's early hours are 14 June's tail, and 14 June is outside the season.
+  assert.equal(windowMatches(summer, date(2026, 6, 15, 5, 0)), false);
+  assert.equal(windowMatches(summer, date(2026, 6, 15, 1, 0)), false);
+
+  // An inclusive range: both edge days are whole days.
+  const allDay = windowRow({
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowMatches(allDay, date(2026, 6, 15, 0, 0)), true);
+  assert.equal(windowMatches(allDay, date(2026, 9, 15, 23, 59)), true);
+  assert.equal(windowMatches(allDay, date(2026, 6, 14, 23, 59)), false);
+  assert.equal(windowMatches(allDay, date(2026, 9, 16, 0, 0)), false);
+});
+
+test('a wrapped date season, a single day and 29 February all behave annually', () => {
+  const winter = windowRow({
+    months: null,
+    from: '10-15',
+    to: '04-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowMatches(winter, date(2026, 10, 14, 12)), false);
+  assert.equal(windowMatches(winter, date(2026, 10, 15, 0, 0)), true);
+  assert.equal(windowMatches(winter, date(2027, 1, 15, 12)), true);
+  assert.equal(windowMatches(winter, date(2027, 4, 15, 23, 59)), true);
+  assert.equal(windowMatches(winter, date(2027, 4, 16, 0, 0)), false);
+
+  const oneDay = windowRow({
+    months: null,
+    from: '06-15',
+    to: '06-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowMatches(oneDay, date(2026, 6, 15, 12)), true);
+  assert.equal(windowMatches(oneDay, date(2026, 6, 16, 0, 0)), false);
+
+  // 29 February exists in 2024 and not in 2025.
+  const leapDay = windowRow({
+    months: null,
+    from: '02-29',
+    to: '02-29',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowMatches(leapDay, date(2024, 2, 29, 12)), true);
+  assert.equal(windowMatches(leapDay, date(2025, 2, 28, 12)), false);
+  assert.equal(windowMatches(leapDay, date(2025, 3, 1, 12)), false);
+
+  // 28 February → 29 February includes the leap day only when it exists; in a
+  // common year the range is just 28 February.
+  const leapEdge = windowRow({
+    months: null,
+    from: '02-28',
+    to: '02-29',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowMatches(leapEdge, date(2023, 2, 28, 12)), true);
+  assert.equal(windowMatches(leapEdge, date(2023, 3, 1, 12)), false);
+  assert.equal(windowMatches(leapEdge, date(2024, 2, 28, 12)), true);
+  assert.equal(windowMatches(leapEdge, date(2024, 2, 29, 12)), true);
+  assert.equal(windowMatches(leapEdge, date(2024, 3, 1, 12)), false);
+});
+
+test('a date-season tail crosses New Year on the day the window started', () => {
+  const december = windowRow({
+    months: [12],
+    from: '12-01',
+    to: '12-31',
+    start: '22:00',
+    end: '06:00',
+  });
+  // New Year's early hours belong to 31 December.
+  assert.equal(windowMatches(december, date(2027, 1, 1, 1, 0)), true);
+  assert.equal(windowMatches(december, date(2027, 1, 1, 5, 59)), true);
+  assert.equal(windowMatches(december, date(2027, 1, 1, 6, 0)), false);
+  // A later January night is not December's.
+  assert.equal(windowMatches(december, date(2027, 1, 2, 1, 0)), false);
+
+  // A season that itself wraps New Year still attributes the tail to its start
+  // day: 11 January 01:00 is 10 January's window, which is in season.
+  const wrapSeason = windowRow({
+    months: null,
+    from: '12-20',
+    to: '01-10',
+    start: '22:00',
+    end: '06:00',
+  });
+  assert.equal(windowMatches(wrapSeason, date(2027, 1, 5, 22, 0)), true);
+  assert.equal(windowMatches(wrapSeason, date(2027, 1, 11, 1, 0)), true);
+  assert.equal(windowMatches(wrapSeason, date(2027, 1, 11, 22, 0)), false);
+  assert.equal(windowMatches(wrapSeason, date(2027, 1, 12, 1, 0)), false);
+});
+
+// ---------- date-aware overlap ----------
+
+test('the leap ring models whole months, date ranges and the day after 28 February', () => {
+  const february = seasonDateSet(seasonScope({ months: [2] }));
+  assert.deepEqual(february, [[31, 59]]); // 1 February … 29 February
+  const juneDay = seasonDateSet(seasonScope({ from: '06-15', to: '06-15' }));
+  assert.deepEqual(juneDay, [[166, 166]]);
+  const summer = seasonDateSet(seasonScope({ from: '06-15', to: '09-15' }));
+  assert.deepEqual(summer, [[166, 258]]);
+  const wrapped = seasonDateSet(seasonScope({ from: '10-15', to: '04-15' }));
+  assert.deepEqual(wrapped, [
+    [0, 105],
+    [288, 365],
+  ]);
+  assert.deepEqual(seasonDateSet(seasonScope({ months: null })), [[0, 365]]);
+  assert.deepEqual(seasonDateSet(seasonScope({ from: '02-30', to: '03-01' })), []);
+
+  // 28 February's next day is 29 February in a leap year and 1 March otherwise,
+  // so both slots are possible.
+  assert.deepEqual(shiftDateSet([[58, 58]]), [[59, 60]]);
+  // 29 February's next day is only 1 March (no common-year instant exists).
+  assert.deepEqual(shiftDateSet([[59, 59]]), [[60, 60]]);
+  // 31 December wraps to 1 January.
+  assert.deepEqual(shiftDateSet([[365, 365]]), [[0, 0]]);
+
+  assert.equal(intersectDateSets([[0, 10]], [[10, 20]]), true);
+  assert.equal(intersectDateSets([[0, 10]], [[11, 20]]), false);
+  assert.equal(intersectDateSets([], [[0, 365]]), false);
+});
+
+test('adjacent date seasons pass and same-day or overlapping ones fail', () => {
+  const summer = windowRow({ id: 'summer', months: null, from: '06-15', to: '09-15' });
+  const winter = windowRow({ id: 'winter', months: null, from: '09-16', to: '06-14' });
+  assert.equal(windowsOverlap(summer, winter), false);
+  assert.equal(validateRateWindows([summer, winter]).valid, true);
+
+  const sameDay = windowRow({ id: 'same-day', months: null, from: '09-15', to: '06-14' });
+  assert.equal(windowsOverlap(summer, sameDay), true);
+  const overlapping = windowRow({ id: 'overlap', months: null, from: '09-01', to: '10-01' });
+  assert.equal(windowsOverlap(summer, overlapping), true);
+  assert.equal(validateRateWindows([summer, overlapping]).valid, false);
+
+  // The month hint on either row is irrelevant when both are date mode.
+  const staleHint = windowRow({ id: 'stale', months: [1, 2], from: '09-16', to: '06-14' });
+  assert.equal(windowsOverlap(summer, staleHint), false);
+});
+
+test('month and date scopes are compared on the same annual date sets', () => {
+  const summer = windowRow({ id: 'summer', months: [6, 7, 8, 9], from: '06-15', to: '09-15' });
+  assert.equal(windowsOverlap(summer, windowRow({ id: 'june', months: [6] })), true);
+  assert.equal(windowsOverlap(summer, windowRow({ id: 'september', months: [9] })), true);
+  assert.equal(windowsOverlap(summer, windowRow({ id: 'october', months: [10] })), false);
+  // A date that the month set contains but the dates do not: no collision.
+  const leapOnly = windowRow({ id: 'leap', months: null, from: '02-29', to: '02-29' });
+  assert.equal(windowsOverlap(leapOnly, windowRow({ id: 'feb', months: [2] })), true);
+  assert.equal(windowsOverlap(leapOnly, windowRow({ id: 'jan', months: [1] })), false);
+  // Month adjacency is unchanged.
+  assert.equal(
+    windowsOverlap(
+      windowRow({ months: [6, 7, 8, 9] }),
+      windowRow({ months: [10, 11, 12, 1, 2, 3, 4, 5] }),
+    ),
+    false,
+  );
+});
+
+test('the leap four-case table keeps tail/tail apart and main/tail together', () => {
+  // Both are wrapping windows whose tails touch 1 March — in different year
+  // types, so no instant has both.
+  const leapTail = windowRow({
+    id: 'leap-tail',
+    months: null,
+    from: '02-29',
+    to: '02-29',
+    start: '22:00',
+    end: '06:00',
+  });
+  const commonTail = windowRow({
+    id: 'common-tail',
+    months: null,
+    from: '02-28',
+    to: '02-28',
+    start: '22:00',
+    end: '06:00',
+  });
+  assert.equal(windowsOverlap(leapTail, commonTail), false);
+  assert.equal(validateRateWindows([leapTail, commonTail]).valid, true);
+
+  // A 29 February main segment does meet the 28 February tail in a leap year.
+  const leapMain = windowRow({
+    id: 'leap-main',
+    months: null,
+    from: '02-29',
+    to: '02-29',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowsOverlap(leapMain, commonTail), true);
+  assert.equal(validateRateWindows([leapMain, commonTail]).valid, false);
+
+  // A 28 February main and a 29 February tail never meet: the tail's instant is
+  // 1 March (leap) and the main is 28 February.
+  assert.equal(windowsOverlap(commonTail, leapMain), true); // symmetric: commonTail's tail meets leapMain
+  const feb28Main = windowRow({
+    id: 'feb28-main',
+    months: null,
+    from: '02-28',
+    to: '02-28',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowsOverlap(feb28Main, leapTail), false);
+});
+
+test('a season rate is an all-day row and overlaps every TOU window in its season', () => {
+  const seasonRate = windowRow({
+    id: 'season-rate',
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  const julyPeak = windowRow({
+    id: 'july-peak',
+    months: null,
+    from: '07-01',
+    to: '07-31',
+    start: '16:00',
+    end: '19:00',
+  });
+  const winterPeak = windowRow({
+    id: 'winter-peak',
+    months: null,
+    from: '11-01',
+    to: '12-31',
+    start: '16:00',
+    end: '19:00',
+  });
+  assert.equal(windowsOverlap(seasonRate, julyPeak), true);
+  assert.equal(windowsOverlap(seasonRate, winterPeak), false);
+  // The mix is rejected with the row names, not a special-case message.
+  const result = validateRateWindows([seasonRate, julyPeak]);
+  assert.equal(result.valid, false);
+  assert.match(result.errors.general.join(' '), /season-rate.*july-peak/);
+  // Adjacent seasons with a season rate each pass.
+  const winterRate = windowRow({
+    id: 'winter-rate',
+    months: null,
+    from: '09-16',
+    to: '06-14',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(validateRateWindows([seasonRate, winterRate]).valid, true);
+});
+
+test('two season-rate seasons partition the year with no fallback use', () => {
+  const summer = windowRow({
+    id: 'summer',
+    rate: 0.2,
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  const winter = windowRow({
+    id: 'winter',
+    rate: 0.1,
+    months: null,
+    from: '09-16',
+    to: '06-14',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(windowsOverlap(summer, winter), false);
+  const schedule = { rate: 0.9, currency: 'USD', rates: [summer, winter] };
+  let fallbackDays = 0;
+  for (let index = 0; index < 366; index += 1) {
+    if (rateAt(new Date(2024, 0, 1 + index, 12), schedule) === 0.9) fallbackDays += 1;
+  }
+  assert.equal(fallbackDays, 0);
+  assert.equal(rateAt(date(2026, 6, 14, 23, 59), schedule), 0.1);
+  assert.equal(rateAt(date(2026, 6, 15, 0, 0), schedule), 0.2);
+  assert.equal(rateAt(date(2026, 9, 15, 23, 59), schedule), 0.2);
+  assert.equal(rateAt(date(2026, 9, 16, 0, 0), schedule), 0.1);
+});
+
+test('date rows obey the 24-window cap and the last-match tie-break', () => {
+  const dayRow = (index) =>
+    windowRow({
+      id: `day-${index}`,
+      months: null,
+      from: `01-${String(index + 1).padStart(2, '0')}`,
+      to: `01-${String(index + 1).padStart(2, '0')}`,
+    });
+  const rows = Array.from({ length: MAX_RATE_WINDOWS + 1 }, (_, index) => dayRow(index));
+  const result = validateRateWindows(rows);
+  assert.equal(result.valid, false);
+  assert.match(result.errors.general[0], new RegExp(String(MAX_RATE_WINDOWS)));
+  // The first 24 are distinct single days, so only the cap is wrong.
+  assert.equal(validateRateWindows(rows.slice(0, MAX_RATE_WINDOWS)).valid, true);
+
+  // A hand-edited overlap is deterministic: the later date row wins.
+  const monthRow = windowRow({ id: 'june', rate: 0.1, months: [6], start: '00:00', end: '00:00' });
+  const dateRow = windowRow({
+    id: 'june-late',
+    rate: 0.2,
+    months: null,
+    from: '06-01',
+    to: '06-30',
+    start: '00:00',
+    end: '00:00',
+  });
+  assert.equal(rateAt(date(2026, 6, 10, 12), { rate: 0.3, rates: [monthRow, dateRow] }), 0.2);
+  assert.equal(rateAt(date(2026, 6, 10, 12), { rate: 0.3, rates: [dateRow, monthRow] }), 0.1);
+});
+
+test('windowSegments carries the season scope, including the tail', () => {
+  const window = windowRow({
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    days: [0],
+    start: '22:00',
+    end: '06:00',
+  });
+  const segments = windowSegments(window);
+  assert.equal(segments.length, 2);
+  const [main, tail] = segments;
+  assert.equal(main.tail, undefined);
+  assert.equal(tail.tail, true);
+  assert.equal(tail.day, 1);
+  assert.equal(main.season.kind, 'dates');
+  assert.equal(main.season, tail.season);
+  assert.equal(main.season.from, '06-15');
+});
+
+test('rateWindowsKey ignores the months hint in date mode but not the dates', () => {
+  const summer = windowRow({ months: [6, 7, 8, 9], from: '06-15', to: '09-15' });
+  const staleHint = windowRow({ months: [1, 2], from: '06-15', to: '09-15' });
+  assert.equal(rateWindowsKey([summer]), rateWindowsKey([staleHint]));
+  assert.notEqual(rateWindowsKey([summer]), rateWindowsKey([{ ...summer, from: '06-16' }]));
+  // A month row still compares its months, and a blank date pair is absent.
+  assert.notEqual(
+    rateWindowsKey([windowRow({ months: [6] })]),
+    rateWindowsKey([windowRow({ months: [7] })]),
+  );
+  assert.equal(
+    rateWindowsKey([windowRow({ months: [6], from: '', to: '' })]),
+    rateWindowsKey([windowRow({ months: [6], from: null, to: null })]),
+  );
+});
+
+// ---------- date-mode costing ----------
+
+test('costForInterval splits a session at a date-season edge', () => {
+  const season = windowRow({
+    id: 'summer',
+    rate: 0.2,
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  const next = windowRow({
+    id: 'winter',
+    rate: 0.1,
+    months: null,
+    from: '09-16',
+    to: '06-14',
+    start: '00:00',
+    end: '00:00',
+  });
+  const summerFirst = { rate: 0.9, rates: [season, next] };
+  // 4 kWh over four hours across the edge: two hours at 0.2, two at 0.1.
+  close(
+    costForInterval(4000, date(2026, 9, 15, 22, 0), date(2026, 9, 16, 2, 0), summerFirst),
+    0.4 + 0.2,
+    'September edge',
+  );
+  close(
+    costForInterval(4000, date(2026, 6, 14, 22, 0), date(2026, 6, 15, 2, 0), summerFirst),
+    0.2 + 0.4,
+    'June edge',
+  );
+});
+
+test('costForInterval is leap-exact and follows a date-season tail over New Year', () => {
+  // 29 February 2024 is one whole day of the 0.2 season.
+  const leapOnly = windowRow({
+    id: 'leap',
+    rate: 0.2,
+    months: null,
+    from: '02-29',
+    to: '02-29',
+    start: '00:00',
+    end: '00:00',
+  });
+  close(
+    costForInterval(1000, date(2024, 2, 29, 0, 0), date(2024, 2, 29, 24, 0), {
+      rate: 0.3,
+      rates: [leapOnly],
+    }),
+    0.2,
+    'leap day',
+  );
+  // The same day a year later does not exist; 28 February pays the fallback.
+  close(
+    costForInterval(1000, date(2025, 2, 28, 12, 0), date(2025, 2, 28, 13, 0), {
+      rate: 0.3,
+      rates: [leapOnly],
+    }),
+    0.3,
+    'common year',
+  );
+
+  const december = windowRow({
+    id: 'dec',
+    rate: 0.1,
+    months: [12],
+    from: '12-01',
+    to: '12-31',
+    start: '22:00',
+    end: '06:00',
+  });
+  // 31 December 23:00 → 1 January 02:00 is all 31 December's window.
+  close(
+    costForInterval(3000, date(2026, 12, 31, 23, 0), date(2027, 1, 1, 2, 0), {
+      rate: 0.3,
+      rates: [december],
+    }),
+    0.3,
+    'New Year tail',
+  );
+});
+
+test('a date-season window crosses the fall-back hour like a month window', () => {
+  // 2026-11-01: 00:00 → 03:00 is four real hours. A season of Oct 15 – Apr 15
+  // keeps its 01:00–02:00 window, which covers the repeated hour too.
+  const winter = windowRow({
+    months: null,
+    from: '10-15',
+    to: '04-15',
+    start: '01:00',
+    end: '02:00',
+  });
+  close(
+    costForInterval(4000, date(2026, 11, 1, 0, 0), date(2026, 11, 1, 3, 0), {
+      rate: 0.3,
+      rates: [winter],
+    }),
+    0.8,
+    'fall back inside a date season',
+  );
 });

@@ -13,11 +13,15 @@ import {
   CHECK_BLOCKED_MESSAGE,
   CHECK_CAP_MESSAGE,
   CHECK_CONFLICT_MESSAGE,
+  applyPeriodDates,
   applyPeriodMonths,
   canDuplicatePeriod,
   complementMonths,
+  complementScope,
   copyPeriodRows,
   dateInputValue,
+  dateRangeText,
+  dateSetText,
   dayPresetFor,
   dayTypeLabel,
   dayTypesForWeek,
@@ -25,6 +29,9 @@ import {
   defaultRateRow,
   formatPreviewWhen,
   isAllDayWindow,
+  isSeasonRatePeriod,
+  isSeasonRateRow,
+  mergeDateRanges,
   minutesToClock,
   normalizeSettings,
   parseLocalDateTime,
@@ -41,10 +48,12 @@ import {
   ratePeriodTitle,
   ratePeriods,
   rateRowFields,
+  rateScope,
   rateSegmentLabel,
   rateTierFor,
   rateWeek,
   rateWindowSummary,
+  representativeDates,
   representativeMonth,
   reconcileSettingsSave,
   sameSettingsInput,
@@ -60,6 +69,7 @@ import {
   timeFieldsVisible,
   timeInputValue,
   toggledMonthScope,
+  uncoveredDateRanges,
   uncoveredMonths,
   validateRateEditorRows,
   validateSettings,
@@ -67,7 +77,7 @@ import {
   windowLabel,
 } from '../../web/js/settings.js';
 import { applySubmitFocus } from '../../web/js/screens/settings.js';
-import { normalizeRateSchedule, validateRateWindows } from '../../web/js/rates.js';
+import { normalizeRateSchedule, rateWindowsKey, validateRateWindows } from '../../web/js/rates.js';
 
 test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
@@ -112,7 +122,7 @@ test('validateSettings carries and validates the optional rate windows', () => {
   };
   const scheduled = validateSettings({ rate: '0.31', currency: 'USD', rates: [night] });
   assert.equal(scheduled.valid, true);
-  assert.deepEqual(scheduled.values.rates, [night]);
+  assert.deepEqual(scheduled.values.rates, [{ ...night, from: null, to: null }]);
 
   // A malformed row blocks the save. The rate editor owns the row- and
   // document-level messages, so this validator reports no error of its own: the
@@ -171,8 +181,9 @@ test('the stored rate schedule survives normalization and reaches the form field
     months: null,
   };
   const stored = { rate: 0.31, currency: 'USD', rates: [night] };
-  assert.deepEqual(normalizeSettings(stored), stored);
-  assert.deepEqual(settingsFields(stored).rates, [night]);
+  const normalized = { ...night, from: null, to: null };
+  assert.deepEqual(normalizeSettings(stored), { ...stored, rates: [normalized] });
+  assert.deepEqual(settingsFields(stored).rates, [normalized]);
 });
 
 test('the editor keeps a malformed stored row that the costing layer drops', () => {
@@ -226,7 +237,7 @@ test('rateRowFields makes stored rows editable without repairing their values', 
     end: '06:00',
     months: null,
   };
-  assert.deepEqual(rateRowFields(night), { ...night, rate: '0.12' });
+  assert.deepEqual(rateRowFields(night), { ...night, rate: '0.12', from: null, to: null });
   assert.deepEqual(
     rateRowFields({
       id: 'broken',
@@ -236,7 +247,7 @@ test('rateRowFields makes stored rows editable without repairing their values', 
       end: null,
       months: 3,
     }),
-    { id: 'broken', rate: '', days: [], start: '', end: '', months: 3 },
+    { id: 'broken', rate: '', days: [], start: '', end: '', months: 3, from: null, to: null },
   );
   // Month lists are copied so editing one form cannot mutate a snapshot.
   const months = [11, 12, 1];
@@ -254,6 +265,8 @@ test('a fresh rate row is an everyday overnight window waiting for a price', () 
     start: '00:00',
     end: '07:00',
     months: null,
+    from: null,
+    to: null,
   });
   // Each call owns its arrays.
   row.days.pop();
@@ -386,7 +399,7 @@ test('a rate-table save writes numeric rows, and an empty table stays flat', () 
   };
   const editable = rateRowFields({ ...night, rate: '0.120' });
   const values = validateSettings({ rate: '0.31', currency: ' USD ', rates: [editable] }).values;
-  assert.deepEqual(values.rates, [night]);
+  assert.deepEqual(values.rates, [{ ...night, from: null, to: null }]);
   assert.deepEqual(settingsPayload(values), { rate: 0.31, currency: 'USD', rates: [night] });
 
   const flat = validateSettings({ rate: '0.31', currency: 'USD', rates: [] }).values;
@@ -632,8 +645,8 @@ test('a save and its rollback carry the rate schedule', () => {
   const values = validateSettings(draft).values;
 
   const settled = reconcileSettingsSave({ ok: true, values, previous: null, draft });
-  assert.deepEqual(settled.confirmed.rates, [night]);
-  assert.deepEqual(settled.fields.rates, [night]);
+  assert.deepEqual(settled.confirmed.rates, [{ ...night, from: null, to: null }]);
+  assert.deepEqual(settled.fields.rates, [{ ...night, from: null, to: null }]);
   assert.equal(settled.saved, true);
   assert.equal(settled.dirty, false);
 
@@ -1615,4 +1628,486 @@ test('the longest uncovered run seeds a new season, and the plan range ignores b
     max: 0.32,
   });
   assert.equal(ratePlanRange([]), null);
+});
+
+// ---------- date-precision seasons ----------
+
+const summerDates = {
+  id: 'summer-dates',
+  rate: 0.2,
+  days: [0, 1, 2, 3, 4, 5, 6],
+  start: '00:00',
+  end: '00:00',
+  months: [6, 7, 8, 9],
+  from: '06-15',
+  to: '09-15',
+};
+const winterDates = {
+  id: 'winter-dates',
+  rate: 0.32,
+  days: [0, 1, 2, 3, 4],
+  start: '16:00',
+  end: '19:00',
+  months: [9, 10, 11, 12, 1, 2, 3, 4, 5, 6],
+  from: '09-16',
+  to: '06-14',
+};
+
+test('a stored season resolves to a date scope that outranks its months hint', () => {
+  assert.deepEqual(rateScope({ months: null }), { kind: 'all', months: null });
+  assert.deepEqual(rateScope({ months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] }), {
+    kind: 'all',
+    months: null,
+  });
+  assert.deepEqual(rateScope({ months: [11, 12, 1, 2] }), {
+    kind: 'months',
+    months: [1, 2, 11, 12],
+  });
+  // Blank bounds are absent, so the months stay authoritative.
+  assert.deepEqual(rateScope({ months: [6], from: '', to: '' }), {
+    kind: 'months',
+    months: [6],
+  });
+  // The dates win, and the months become the derived hint.
+  assert.deepEqual(rateScope({ months: 3, from: '06-15', to: '09-15' }), {
+    kind: 'dates',
+    from: '06-15',
+    to: '09-15',
+    fromKey: 615,
+    toKey: 915,
+    months: [6, 7, 8, 9],
+  });
+  assert.deepEqual(rateScope({ months: null, from: '02-29', to: '02-29' }).months, [2]);
+  // A half-written or unreal pair is unusable, never a silent fallback.
+  assert.deepEqual(rateScope({ months: [6], from: '06-15' }), { kind: 'invalid', months: [] });
+  assert.deepEqual(rateScope({ months: [6], from: '02-30', to: '03-01' }), {
+    kind: 'invalid',
+    months: [],
+  });
+});
+
+test('date seasons group by their dates, not by a stale months hint', () => {
+  const stale = { ...summerDates, id: 'stale', months: [1, 2] };
+  const periods = ratePeriods([
+    rateRowFields(summerDates),
+    rateRowFields(stale),
+    rateRowFields(winterDates),
+  ]);
+  assert.deepEqual(
+    periods.map((period) => [
+      period.key,
+      period.kind,
+      period.title,
+      period.dateText,
+      period.monthText,
+      period.seasonRate,
+      period.rows.map((entry) => entry.index),
+    ]),
+    [
+      ['dates:06-15-09-15', 'dates', 'Season rate', 'Jun 15–Sep 15', 'Jun 15–Sep 15', true, [0, 1]],
+      ['dates:09-16-06-14', 'dates', 'Season', 'Sep 16–Jun 14', 'Sep 16–Jun 14', false, [2]],
+    ],
+  );
+  // The derived months stay available for the old month controls.
+  assert.deepEqual(periods[0].months, [6, 7, 8, 9]);
+
+  // Identical dates with different hints merge; the same hint with different
+  // dates does not.
+  const sameHint = ratePeriods([
+    rateRowFields(summerDates),
+    rateRowFields({ ...winterDates, from: '06-01', to: '06-30', months: [6, 7, 8, 9] }),
+  ]);
+  assert.equal(sameHint.length, 2);
+  // Stale hints are not reported as a month error: the dates are authoritative.
+  assert.equal(validateRateEditorRows([rateRowFields(stale)]).valid, true);
+});
+
+test('month and date edits convert explicitly, and a month edit clears dates', () => {
+  const rows = [rateRowFields(summerDates), rateRowFields(winterDates)];
+  const dated = applyPeriodDates(rows, [1], '10-15', '04-15');
+  assert.equal(dated[0], rows[0]);
+  assert.equal(dated[1].from, '10-15');
+  assert.equal(dated[1].to, '04-15');
+  assert.deepEqual(dated[1].months, [10, 11, 12, 1, 2, 3, 4]);
+
+  // An invalid value stays visible and blocks a save instead of being repaired.
+  const broken = applyPeriodDates(rows, [0], '02-30', '03-01');
+  assert.equal(broken[0].from, '02-30');
+  assert.deepEqual(broken[0].months, summerDates.months);
+  const invalid = validateRateEditorRows(broken);
+  assert.ok(invalid.rows[0].from);
+  assert.equal(invalid.valid, false);
+
+  // Switching back to months drops the bounds, so the chosen months are what
+  // matching will use.
+  const monthly = applyPeriodMonths(rows, [0], [11, 12]);
+  assert.equal(monthly[0].from, null);
+  assert.equal(monthly[0].to, null);
+  assert.deepEqual(monthly[0].months, [11, 12]);
+  assert.equal(monthly[1], rows[1]);
+});
+
+test('a date row saves its derived months and appends from/to after them', () => {
+  const draft = rateRowFields({ ...summerDates, months: [1, 2] });
+  const payload = settingsPayload({ rate: 0.31, currency: 'USD', rates: [draft] });
+  const [row] = payload.rates;
+  assert.deepEqual(Object.keys(row), [
+    'id',
+    'rate',
+    'days',
+    'start',
+    'end',
+    'months',
+    'from',
+    'to',
+  ]);
+  assert.deepEqual(row.months, [6, 7, 8, 9]);
+  assert.equal(row.from, '06-15');
+  assert.equal(row.to, '09-15');
+
+  // A month row keeps the old key order and carries no date keys at all.
+  const monthRow = settingsPayload({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [rateRowFields(nightEveryDay)],
+  }).rates[0];
+  assert.deepEqual(Object.keys(monthRow), ['id', 'rate', 'days', 'start', 'end', 'months']);
+  assert.equal('from' in monthRow, false);
+  assert.equal('to' in monthRow, false);
+
+  // A flat save is still exactly two fields.
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [] }), {
+    rate: 0.31,
+    currency: 'USD',
+  });
+  // Row order survives grouping, date rows included.
+  const ordered = settingsPayload({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [rateRowFields(winterDates), rateRowFields(summerDates)],
+  });
+  assert.deepEqual(
+    ordered.rates.map((row) => row.id),
+    ['winter-dates', 'summer-dates'],
+  );
+});
+
+test('the dirty comparison ignores a stale date hint but not the dates', () => {
+  const stored = { rate: 0.25, currency: 'USD', rates: [summerDates] };
+  const draft = {
+    rate: '0.25',
+    currency: 'USD',
+    rates: [rateRowFields({ ...summerDates, months: [1, 2] })],
+  };
+  assert.equal(settingsDraftMatches(draft, stored), true);
+  assert.equal(rateWindowsKey([{ ...summerDates, months: [1, 2] }]), rateWindowsKey([summerDates]));
+  assert.equal(
+    settingsDraftMatches(
+      { ...draft, rates: [rateRowFields({ ...summerDates, from: '06-16' })] },
+      stored,
+    ),
+    false,
+  );
+  // The derived hint written by the payload is the same draft, not a change.
+  assert.equal(
+    settingsDraftMatches(
+      { ...draft, rates: [rateRowFields({ ...summerDates, months: [6, 7, 8, 9] })] },
+      stored,
+    ),
+    true,
+  );
+});
+
+test('a date season duplicates into its wrapping complement in one call', () => {
+  assert.deepEqual(complementScope({ kind: 'dates', from: '06-15', to: '09-15' }), {
+    kind: 'dates',
+    from: '09-16',
+    to: '06-14',
+    months: [9, 10, 11, 12, 1, 2, 3, 4, 5, 6],
+  });
+  // A period object works too.
+  const periods = ratePeriods([rateRowFields(winterDates)]);
+  assert.deepEqual(complementScope(periods[0]), {
+    kind: 'dates',
+    from: '06-15',
+    to: '09-15',
+    months: [6, 7, 8, 9],
+  });
+  // Month scopes keep their month complement; an all-year or unusable scope has
+  // nowhere to duplicate into.
+  assert.deepEqual(complementScope({ kind: 'months', months: [11, 12, 1, 2] }), {
+    kind: 'months',
+    months: [3, 4, 5, 6, 7, 8, 9, 10],
+  });
+  assert.equal(complementScope({ kind: 'all', months: null }), null);
+  assert.equal(complementScope({ kind: 'invalid', months: [] }), null);
+  assert.equal(complementScope({ months: null }), null);
+
+  const complement = complementScope({ kind: 'dates', from: '06-15', to: '09-15' });
+  let nextId = 0;
+  const copied = copyPeriodRows(
+    [rateRowFields(summerDates)],
+    [0],
+    complement.months,
+    () => `copy-${++nextId}`,
+    complement,
+  );
+  assert.equal(copied[1].from, '09-16');
+  assert.equal(copied[1].to, '06-14');
+  // The copy stores its month hint sorted; the payload derives it from the dates.
+  assert.deepEqual(copied[1].months, [1, 2, 3, 4, 5, 6, 9, 10, 11, 12]);
+  // A month copy never inherits stale dates that would outrank it.
+  const monthCopy = copyPeriodRows([rateRowFields(summerDates)], [0], [1, 2], () => 'copy-month');
+  assert.equal(monthCopy[1].from, null);
+  assert.equal(monthCopy[1].to, null);
+  assert.deepEqual(monthCopy[1].months, [1, 2]);
+});
+
+test('a date season is sampled at its own dates, not at a month', () => {
+  const summer = ratePeriods([rateRowFields(summerDates)])[0];
+  const dates = representativeDates(summer);
+  assert.equal(dates.length, 7);
+  // Centred in Jun 15 – Sep 15: 28 July – 3 August.
+  assert.deepEqual(dates, [
+    { month: 7, day: 28 },
+    { month: 7, day: 29 },
+    { month: 7, day: 30 },
+    { month: 7, day: 31 },
+    { month: 8, day: 1 },
+    { month: 8, day: 2 },
+    { month: 8, day: 3 },
+  ]);
+  // A week or less is shown whole; one day is one sample.
+  const short = ratePeriods([rateRowFields({ ...summerDates, from: '06-15', to: '06-20' })])[0];
+  assert.deepEqual(
+    representativeDates(short).map((entry) => entry.day),
+    [15, 16, 17, 18, 19, 20],
+  );
+  const oneDay = ratePeriods([rateRowFields({ ...summerDates, from: '06-15', to: '06-15' })])[0];
+  assert.deepEqual(representativeDates(oneDay), [{ month: 6, day: 15 }]);
+  // A month period still answers by month.
+  assert.deepEqual(representativeDates(ratePeriods([rateRowFields(winterPeak)])[0]), []);
+  assert.equal(representativeMonth(ratePeriods([rateRowFields(winterPeak)])[0]), 1);
+  // A wrapping range's sample stays inside the season.
+  const wrap = ratePeriods([rateRowFields({ ...summerDates, from: '12-20', to: '01-10' })])[0];
+  const wrapDates = representativeDates(wrap);
+  assert.equal(wrapDates.length, 7);
+  assert.ok(wrapDates.some((entry) => entry.month === 12 || entry.month === 1));
+});
+
+test('date coverage reads as its dates, with one all-day row for a season rate', () => {
+  const rows = [
+    rateRowFields(nightEveryDay),
+    rateRowFields(summerDates),
+    rateRowFields(winterDates),
+  ];
+  const periods = ratePeriods(rows);
+  const summer = periods.find((period) => period.from === '06-15');
+  const coverage = periodCoverage(rows, 0.31, summer, periods, 2026);
+  assert.equal(coverage.monthName, 'Jun 15–Sep 15');
+  assert.equal(coverage.dateText, 'Jun 15–Sep 15');
+  assert.equal(coverage.month, 7);
+  assert.deepEqual(
+    coverage.siblings.map((period) => period.title),
+    ['All year'],
+  );
+  // The summer period is one all-day, every-day price: one Every day row for the
+  // whole day, never a weekday/time grid.
+  assert.deepEqual(
+    coverage.types.map((type) => [type.label, type.segments.map((segment) => segment.rate)]),
+    [['Every day', [0.2]]],
+  );
+  // That price covers the whole day, so the fallback never widens the range.
+  assert.deepEqual(periodEffectiveRange(rows, 0.31, summer, 2026), {
+    min: 0.2,
+    max: 0.2,
+    month: 7,
+  });
+  // A season rate is one Every day type and one 00:00–24:00 row even when the
+  // sample is short.
+  const shortSeason = ratePeriods([rateRowFields({ ...summerDates, from: '06-15', to: '06-16' })]);
+  const shortCoverage = periodCoverage(
+    [rateRowFields({ ...summerDates, from: '06-15', to: '06-16' })],
+    0.31,
+    shortSeason[0],
+    shortSeason,
+    2026,
+  );
+  assert.deepEqual(
+    shortCoverage.types.map((type) => [type.label, type.days]),
+    [['Every day', [0, 1, 2, 3, 4, 5, 6]]],
+  );
+  assert.deepEqual(
+    shortCoverage.types[0].segments.map((segment) => [segment.from, segment.to, segment.rate]),
+    [[0, 1440, 0.2]],
+  );
+
+  // A TOU date season keeps its hours and names its sibling seasons.
+  const touSeason = ratePeriods([rateRowFields({ ...winterDates, from: '09-16', to: '06-14' })]);
+  const touCoverage = periodCoverage(
+    [rateRowFields(nightEveryDay), rateRowFields(winterDates)],
+    0.31,
+    touSeason[0],
+    [ratePeriods([rateRowFields(nightEveryDay)])[0], touSeason[0]],
+    2026,
+  );
+  assert.equal(
+    touCoverage.types.some((type) => type.label === 'Weekdays'),
+    true,
+  );
+  const peak = touCoverage.types
+    .flatMap((type) => type.segments)
+    .find((segment) => segment.window && segment.window.id === 'winter-dates');
+  assert.equal(peak.rate, 0.32);
+  assert.equal(
+    touCoverage.siblings.some((period) => period.title === 'All year'),
+    true,
+  );
+});
+
+test('uncovered dates are a day-level line that collapses whole months', () => {
+  // A full partition hides the line.
+  assert.deepEqual(
+    uncoveredDateRanges([rateRowFields(summerDates), rateRowFields(winterDates)]),
+    [],
+  );
+  assert.equal(dateSetText([]), '');
+  // Winter leaves the rest of the year; 29 February is a real uncovered day.
+  const winterOnly = ratePeriods([rateRowFields({ ...winterDates, from: '11-01', to: '02-28' })]);
+  const uncovered = uncoveredDateRanges([
+    rateRowFields({ ...winterDates, from: '11-01', to: '02-28' }),
+  ]);
+  assert.equal(dateSetText(uncovered), 'Feb 29–Oct 31');
+  assert.equal(complementScope(winterOnly[0]).from, '02-29');
+  // A gap between two seasons.
+  const gap = [
+    rateRowFields({ ...summerDates, id: 'spring', from: '03-01', to: '05-31', months: [3, 4, 5] }),
+    rateRowFields({ ...summerDates, id: 'autumn', from: '08-01', to: '10-31', months: [8, 9, 10] }),
+  ];
+  assert.equal(dateSetText(uncoveredDateRanges(gap)), 'Nov–Feb, Jun–Jul');
+  // A single season's complement reads as one wrapping range.
+  assert.equal(dateSetText(uncoveredDateRanges([rateRowFields(summerDates)])), 'Sep 16–Jun 14');
+  // Month scopes use the same ring: whole months collapse.
+  assert.equal(
+    dateSetText(uncoveredDateRanges([rateRowFields({ ...winterPeak, months: [11, 12, 1, 2] })])),
+    'Mar–Oct',
+  );
+  // The label vocabulary itself.
+  assert.equal(dateSetText([[0, 365]]), 'All year');
+  assert.equal(dateSetText([[91, 181]]), 'Apr–Jun');
+  assert.equal(dateSetText([[91, 165]]), 'Apr 1–Jun 14');
+  assert.equal(dateSetText([[166, 166]]), 'Jun 15');
+  assert.deepEqual(
+    mergeDateRanges([
+      [0, 59],
+      [305, 365],
+      [100, 120],
+    ]),
+    [
+      [305, 59],
+      [100, 120],
+    ],
+  );
+});
+
+test('the checker names a date season and recognises a season rate', () => {
+  const seasonRateRow = rateRowFields(summerDates);
+  const inside = previewRate([seasonRateRow], '0.31', new Date(2026, 7, 1, 12, 0));
+  assert.equal(inside.rate, 0.2);
+  assert.equal(inside.fallback, false);
+  assert.equal(inside.seasonRate, true);
+  assert.equal(inside.scopeText, 'Jun 15–Sep 15');
+  assert.equal(inside.dateText, 'Jun 15–Sep 15');
+  assert.equal(inside.summary, 'Every day · All day');
+  // Outside the season the fallback applies and there is no scope to name.
+  const outside = previewRate([seasonRateRow], '0.31', new Date(2026, 5, 14, 12, 0));
+  assert.equal(outside.fallback, true);
+  assert.equal(outside.rate, 0.31);
+  assert.equal(outside.seasonRate, false);
+  assert.equal(outside.scopeText, '');
+
+  // A date-season TOU tail is still attributed to the start day.
+  const tou = rateRowFields({ ...summerDates, rate: 0.1, start: '22:00', end: '06:00' });
+  const tail = previewRate([tou], '0.31', new Date(2026, 8, 16, 1, 0));
+  assert.equal(tail.rate, 0.1);
+  assert.equal(tail.seasonRate, false);
+  assert.equal(tail.scopeText, 'Jun 15–Sep 15');
+});
+
+test('a date problem focuses the season dates; the old month focus is unchanged', () => {
+  const dateErrors = validateRateEditorRows([{ ...rateRowFields(summerDates), from: '02-30' }]);
+  assert.ok(dateErrors.rows[0].from);
+  assert.deepEqual(submitFocusTarget({ rateValidation: dateErrors }), {
+    kind: 'row',
+    index: 0,
+    focus: 'dates',
+  });
+  const monthErrors = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), months: 3 }]);
+  assert.deepEqual(submitFocusTarget({ rateValidation: monthErrors }), {
+    kind: 'row',
+    index: 0,
+    focus: 'months',
+  });
+
+  const commits = [];
+  const attempt = submitSettingsPlan({
+    fields: { rate: '0.31', currency: 'USD', rates: [{ ...rateRowFields(summerDates), to: '' }] },
+    onCommit: (values) => commits.push(values),
+  });
+  assert.equal(attempt.blocked, true);
+  assert.deepEqual(commits, []);
+  assert.deepEqual(attempt.target, { kind: 'row', index: 0, focus: 'dates' });
+});
+
+test('a season rate mixed with TOU windows is rejected; different seasons may coexist', () => {
+  const seasonRate = rateRowFields(summerDates);
+  const julyPeak = rateRowFields({
+    ...summerDates,
+    id: 'july-peak',
+    rate: 0.32,
+    months: [7],
+    from: '07-01',
+    to: '07-31',
+    start: '16:00',
+    end: '19:00',
+  });
+  const mix = validateRateEditorRows([seasonRate, julyPeak]);
+  assert.equal(mix.valid, false);
+  assert.deepEqual(mix.overlaps, [[0, 1]]);
+  assert.match(mix.general.join(' '), /Jun 15–Sep 15/);
+  // The same mix in disjoint seasons is a plain seasonal plan.
+  const winterPeak = rateRowFields({ ...winterDates, id: 'winter-peak' });
+  assert.equal(validateRateEditorRows([seasonRate, winterPeak]).valid, true);
+  assert.equal(isSeasonRateRow(seasonRate), true);
+  assert.equal(isSeasonRateRow(julyPeak), false);
+  assert.equal(
+    isSeasonRateRow({ ...seasonRate, days: [0, 1, 2, 3, 4, 5, 6], start: '07:00', end: '07:00' }),
+    true,
+  );
+  assert.equal(isSeasonRateRow({ ...seasonRate, start: '06:00', end: '07:00' }), false);
+  assert.equal(isSeasonRatePeriod({ rows: [{ row: seasonRate }] }), true);
+  assert.equal(isSeasonRatePeriod({ rows: [{ row: seasonRate }, { row: julyPeak }] }), false);
+  assert.equal(isSeasonRatePeriod(null), false);
+});
+
+test('date rows obey the editor cap and the helper text names both seasons', () => {
+  const rows = Array.from({ length: 25 }, (_, index) =>
+    rateRowFields({
+      ...summerDates,
+      id: `d${index}`,
+      from: `01-${String(index + 1).padStart(2, '0')}`,
+      to: `01-${String(index + 1).padStart(2, '0')}`,
+    }),
+  );
+  const capped = validateRateEditorRows(rows);
+  assert.equal(capped.capped, true);
+  assert.deepEqual(capped.general, [RATE_CAP_MESSAGE, RATE_CAP_REMEDY]);
+
+  // Date rows are named by their dates in an overlap sentence.
+  const label = windowLabel(summerDates, [0.2, 0.32], 0.31);
+  assert.equal(label, 'Off-peak 0.2 · Every day · All day · Jun 15–Sep 15');
+  assert.equal(dateRangeText('06-15', '09-15'), 'Jun 15–Sep 15');
+  assert.equal(dateRangeText('02-29', '02-29'), 'Feb 29');
+  assert.equal(dateRangeText('10-15', '04-15'), 'Oct 15–Apr 15');
+  assert.equal(dateRangeText('02-30', '03-01'), '');
 });
