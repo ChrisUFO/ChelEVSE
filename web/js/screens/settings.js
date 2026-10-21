@@ -15,6 +15,7 @@ import {
   DAY_PRESETS,
   MONTH_NAMES,
   OFFLINE_MESSAGE,
+  RATE_CAP_REMEDY,
   applyPeriodMonths,
   canDuplicatePeriod,
   complementMonths,
@@ -47,6 +48,7 @@ import {
   settingsFields,
   settingsSaveState,
   siblingNote,
+  submitSettingsPlan,
   timeFieldsVisible,
   timeInputValue,
   toggledMonthScope,
@@ -488,8 +490,12 @@ function paintPeriodHeader(card) {
   // stray word at 320.
   const meta = [el('span', null, `${countText} · ${example ? `${example} ` : ''}`)];
   if (period.kind === 'invalid') meta.push(el('span', null, 'needs months'));
-  else if (range) meta.push(nowrapEl(`${priceRangeText(range)} effective`));
-  else meta.push(el('span', null, 'rate not set'));
+  else if (range) {
+    // "effective" only qualifies a range: a single price has nothing to qualify
+    // and reads as a stray adjective.
+    const rangeText = priceRangeText(range);
+    meta.push(nowrapEl(range.min === range.max ? rangeText : `${rangeText} effective`));
+  } else meta.push(el('span', null, 'rate not set'));
   card.meta.replaceChildren(...meta);
   paintMonthEditor(card);
 }
@@ -666,15 +672,21 @@ function paintCoverage(card) {
         // An inherited row keeps the band dot (so the legend still matches the
         // row) and names the season it came from; the column heading covers
         // "Season · band". The band leads so the dot always sits on the first
-        // line — a long custom month list ("Jan–Feb, Jun–Jul") then wraps under
-        // it instead of orphaning the dot on a line of its own at 320 px.
+        // line. There is no separator glyph between the band and the months: a
+        // `·` left at the end of the band's line dangles when the months wrap at
+        // 320 px, so the two are only separated by a break opportunity. Each
+        // month range is its own nowrap run — `Jan–Feb` must not split at the en
+        // dash when the cell is narrow.
         const tier = rateTierFor(segment.rate, windowRates(), readFields().rate);
         const label = el('span', 'sibling-band');
-        label.append(
-          el('span', `tier ${tierClass(tier)}`, tier || 'Window'),
-          el('span', 'sibling-sep', ' · '),
-          el('span', 'sibling-owner', owner ? periodName(owner) : 'Other season'),
-        );
+        label.append(el('span', `tier ${tierClass(tier)}`, tier || 'Window'), ' ');
+        const ownerLabel = el('span', 'sibling-owner');
+        const runs = (owner ? periodName(owner) : 'Other season').split(', ');
+        runs.forEach((run, index) => {
+          if (index > 0) ownerLabel.append(', ');
+          ownerLabel.append(nowrapEl(run));
+        });
+        label.append(ownerLabel);
         band.append(label);
       } else {
         band.textContent = 'Other times';
@@ -1298,7 +1310,12 @@ function paintFeedback() {
   // The value comparison is the only dirty rule; keep the flag in step.
   settingsDirty = view.dirty;
   feedback.className = `feedback${view.busy ? ' busy' : ''}${view.kind ? ` ${view.kind}` : ''}`;
-  setText(feedback, view.text);
+  // An over-cap plan has no field-error sentence, so the save row's left column
+  // would sit empty while its chip says `· cap`. The cap's remedy belongs next
+  // to the button the owner is trying to use.
+  const capped = draftRates.length > MAX_RATE_WINDOWS;
+  const problems = validationProblemCount(rateValidation, draftRates.length);
+  setText(feedback, view.text || (capped && problems > 0 ? RATE_CAP_REMEDY : ''));
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
   // saved: the same count as the save-row chip relabels the button and marks it
@@ -1306,7 +1323,6 @@ function paintFeedback() {
   // purpose — it is the form's only submit button, so disabling it would also
   // swallow Enter in the rate fields and with it the jump to the first problem.
   // Pressing it validates, paints the errors and focuses that row.
-  const problems = validationProblemCount(rateValidation, draftRates.length);
   const save = $('save-settings');
   const saveState = saveButtonState({ canSave: view.canSave, saving: settingsSaving, problems });
   save.disabled = saveState.disabled;
@@ -1429,24 +1445,33 @@ function finishSave(generation, ok, values, previous) {
 async function submit(event) {
   event.preventDefault();
   if (settingsSaving) return;
-  // A valid save is the shared document validation plus the table's own rule.
-  // Both paint their errors, so nothing blocks the save without saying why.
-  const result = validateSettings(readFields());
-  rateValidation = validateRateEditorRows(draftRates, $('setting-rate').value);
+  // A valid save is the shared document validation plus the table's own rule,
+  // both inside `submitSettingsPlan`; it calls back only for a saveable plan, so
+  // a blocked Enter can never reach the write.
+  let start = null;
+  const attempt = submitSettingsPlan({
+    fields: readFields(),
+    onCommit: (values) => {
+      start = beginSave(values);
+    },
+  });
+  rateValidation = attempt.rateValidation;
   paintRateValidation();
-  renderErrors(result.errors);
-  if (!result.valid || !rateValidation.valid) {
+  renderErrors(attempt.errors);
+  if (attempt.blocked) {
     settingsSaved = false;
-    settingsError = 'Fix the highlighted fields before saving.';
+    settingsError = attempt.message;
     paintFeedback();
-    if (result.errors.rate) $('setting-rate').focus();
-    else if (result.errors.currency) $('setting-currency').focus();
-    else focusFirstRateError();
+    applySubmitFocus(attempt.target, focusView);
     return;
   }
+  await start;
+}
 
+// The write itself, after the gate has accepted the draft. Kept separate so the
+// gate returns before a single Firestore call is made.
+async function beginSave(values) {
   const previous = confirmedSettings;
-  const values = result.values;
   // Do not hand a write to Firestore while offline: it would queue until the
   // connection returns, leaving the form locked on "Saving…". Keep the draft
   // and ask the user to retry once they are back.
@@ -1492,55 +1517,62 @@ async function submit(event) {
   finishSave(generation, outcome.status === 'ok', values, previous);
 }
 
-function firstRateError() {
-  return windowCards.find(
-    (card) => card && Object.keys(rateValidation.rows[card.index] || {}).length > 0,
-  );
+// Turn the gate's target into the reveal/focus the keyboard path needs. The
+// target decision lives in the shared module; this adapter is the only part
+// that touches rendered cards. `view` is injected so the same function is used
+// by the screen and by its tests.
+export function applySubmitFocus(target, view) {
+  if (!target || target.kind === 'save') return;
+  if (target.kind === 'field') {
+    view.focusField(target.field);
+    return;
+  }
+  const card = target.kind === 'doc' ? view.firstCard() : view.card(target.index);
+  if (!card) {
+    // A blocker with no row to point at: the sentence is the only explanation.
+    view.revealDocumentError();
+    return;
+  }
+  const focus = target.kind === 'doc' ? 'rate' : target.focus;
+  // A month problem belongs to the season, not the window: the chips live in
+  // the season card and an inherited row has no month control.
+  if (focus === 'months') {
+    view.expand(card.periodCard);
+    view.reveal(card.periodCard.node);
+    card.periodCard.allYear.focus({ preventScroll: true });
+    return;
+  }
+  view.expand(card.periodCard);
+  let control = card.rateInput;
+  if (focus === 'start') control = card.startInput;
+  else if (focus === 'end') control = card.endInput;
+  else if (focus === 'days') {
+    control =
+      card.daysEl.querySelector('[aria-pressed="true"]') ||
+      card.presetEls[0] ||
+      card.daysEl.querySelector('button');
+  }
+  if (control) control.focus({ preventScroll: true });
+  view.reveal(card.node);
 }
 
-function revealCard(card) {
-  card.node.scrollIntoView({
+const focusView = {
+  card: (index) => windowCards[index],
+  firstCard: () => windowCards.find(Boolean),
+  expand: (periodCard) => setExpanded(periodCard, true),
+  reveal: (node) => revealNode(node),
+  focusField: (field) => $(`setting-${field}`).focus(),
+  revealDocumentError: () => {
+    const docError = $('rates-error');
+    if (!docError.hidden) docError.scrollIntoView({ block: 'center', behavior: 'auto' });
+  },
+};
+
+function revealNode(node) {
+  node.scrollIntoView({
     block: 'center',
     behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
   });
-}
-
-function focusFirstRateError() {
-  const card = firstRateError();
-  if (!card) {
-    // A document-level problem (an overlap, or more rows than the cap) has no
-    // field of its own. Expand the first accused row, focus it, and let the
-    // row's own note plus its aria-describedby carry the explanation.
-    const accused =
-      rateValidation.overlaps.length > 0 ? windowCards[rateValidation.overlaps[0][0]] : null;
-    const fallback = accused || windowCards.find(Boolean);
-    if (fallback) {
-      setExpanded(fallback.periodCard, true);
-      revealCard(fallback);
-      fallback.rateInput.focus({ preventScroll: true });
-      return;
-    }
-    const docError = $('rates-error');
-    if (!docError.hidden) docError.scrollIntoView({ block: 'center', behavior: 'auto' });
-    return;
-  }
-  const periodCard = card.periodCard;
-  if (periodCard) setExpanded(periodCard, true);
-  const errors = rateValidation.rows[card.index] || {};
-  if (errors.months && periodCard) {
-    periodCard.allYear.focus({ preventScroll: true });
-    revealCard(periodCard);
-    return;
-  }
-  if (errors.rate) card.rateInput.focus({ preventScroll: true });
-  else if (errors.days) {
-    const pressed = card.daysEl.querySelector('[aria-pressed="true"]');
-    const target = pressed || card.presetEls[0] || card.daysEl.querySelector('button');
-    if (target) target.focus({ preventScroll: true });
-  } else if (errors.start) card.startInput.focus({ preventScroll: true });
-  else if (errors.end) card.endInput.focus({ preventScroll: true });
-  else card.rateInput.focus({ preventScroll: true });
-  revealCard(card);
 }
 
 // ---------- screen lifecycle ----------

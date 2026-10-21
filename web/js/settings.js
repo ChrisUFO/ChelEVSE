@@ -637,6 +637,64 @@ export function saveButtonState({ canSave = false, saving = false, problems = 0 
   };
 }
 
+// What a blocked submit leaves in the save row. Short on purpose: the row shares
+// its width with the count chip and Save, so a full sentence stacks into a list
+// of fragments at 320 px.
+export const BLOCKED_SAVE_MESSAGE = 'Fix the highlighted fields.';
+
+// The first problem a blocked submit must reveal. Field errors come first (they
+// sit above the plan and carry their own message), then the first row with a
+// field error, then the first row an overlap names. `doc` is a blocker with no
+// row of its own — the window cap — and lands on the first row so the user is
+// in the table that fixes it. `save` means nothing blocks the write.
+export function submitFocusTarget({ errors = {}, rateValidation } = {}) {
+  if (errors.rate) return { kind: 'field', field: 'rate' };
+  if (errors.currency) return { kind: 'field', field: 'currency' };
+  const rows = (rateValidation && rateValidation.rows) || [];
+  const index = rows.findIndex((row) => row && Object.keys(row).length > 0);
+  if (index >= 0) {
+    const row = rows[index];
+    const focus = row.months
+      ? 'months'
+      : row.rate
+        ? 'rate'
+        : row.days
+          ? 'days'
+          : row.start
+            ? 'start'
+            : row.end
+              ? 'end'
+              : 'rate';
+    return { kind: 'row', index, focus };
+  }
+  const overlaps = (rateValidation && rateValidation.overlaps) || [];
+  if (overlaps.length > 0) return { kind: 'row', index: overlaps[0][0], focus: 'rate' };
+  if (rateValidation && rateValidation.valid === false) return { kind: 'doc' };
+  return { kind: 'save' };
+}
+
+// The form's submit gate, extracted from the screen so the keyboard recovery
+// path is testable without a DOM. A blocked plan never reaches `onCommit` — the
+// screen's only route to the persistence layer — and the returned target is what
+// it reveals and focuses.
+export function submitSettingsPlan({ fields, onCommit = () => {} } = {}) {
+  const result = validateSettings(fields);
+  const rateValidation = validateRateEditorRows(fields.rates, fields.rate);
+  const blocked = !result.valid || !rateValidation.valid;
+  const target = blocked
+    ? submitFocusTarget({ errors: result.errors, rateValidation })
+    : { kind: 'save' };
+  if (!blocked) onCommit(result.values);
+  return {
+    blocked,
+    errors: result.errors,
+    values: result.values,
+    rateValidation,
+    message: blocked ? BLOCKED_SAVE_MESSAGE : '',
+    target,
+  };
+}
+
 // A definitive checker answer is withheld while the plan has anything blocking:
 // the invalid row would otherwise be dropped and the fallback claimed for a
 // moment it may actually price.

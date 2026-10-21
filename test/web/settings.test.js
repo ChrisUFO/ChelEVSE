@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   DAY_PRESETS,
+  BLOCKED_SAVE_MESSAGE,
   OFFLINE_MESSAGE,
   RATE_CAP_MESSAGE,
   RATE_CAP_REMEDY,
@@ -54,6 +55,8 @@ import {
   settingsPayload,
   settingsSaveState,
   siblingNote,
+  submitFocusTarget,
+  submitSettingsPlan,
   timeFieldsVisible,
   timeInputValue,
   toggledMonthScope,
@@ -63,6 +66,7 @@ import {
   validationProblemCount,
   windowLabel,
 } from '../../web/js/settings.js';
+import { applySubmitFocus } from '../../web/js/screens/settings.js';
 import { normalizeRateSchedule, validateRateWindows } from '../../web/js/rates.js';
 
 test('validateSettings mirrors the rules shape', () => {
@@ -1438,6 +1442,146 @@ test('Save stays submit-capable while a plan is blocked', () => {
   assert.equal(saving.disabled, true);
   assert.equal(saving.label, 'Saving…');
   assert.equal(saving.blocked, false);
+});
+
+// Stand-ins for the rendered window cards the focus adapter touches. The screen's
+// cards carry the same fields, so the adapter is exercised as the production
+// path rather than through a parallel fake.
+function cardStub() {
+  const calls = [];
+  const focus = (name) => () => calls.push(name);
+  return {
+    calls,
+    node: { scrollIntoView: () => calls.push('reveal-row') },
+    periodCard: {
+      allYear: { focus: focus('months') },
+      node: { scrollIntoView: () => calls.push('reveal-period') },
+    },
+    rateInput: { focus: focus('rate') },
+    startInput: { focus: focus('start') },
+    endInput: { focus: focus('end') },
+    daysEl: {
+      querySelector: (selector) =>
+        selector === '[aria-pressed="true"]' ? { focus: focus('days') } : null,
+    },
+    presetEls: [{ focus: focus('preset') }],
+  };
+}
+
+function viewStub(cards) {
+  const calls = [];
+  return {
+    calls,
+    card: (index) => cards[index],
+    firstCard: () => cards.find(Boolean),
+    expand: () => calls.push('expand'),
+    reveal: (node) => node.scrollIntoView(),
+    focusField: (field) => calls.push(`field:${field}`),
+    revealDocumentError: () => calls.push('doc-error'),
+  };
+}
+
+const blockedFields = (rates) => ({ rate: '0.31', currency: 'USD', rates });
+
+test('a blocked submit writes nothing and moves focus to the first bad row', () => {
+  const fields = blockedFields([
+    rateRowFields(nightEveryDay),
+    rateRowFields({ ...nightEveryDay, id: 'empty', rate: '' }),
+  ]);
+  const commits = [];
+  const attempt = submitSettingsPlan({ fields, onCommit: (values) => commits.push(values) });
+
+  // The Enter/submit path stops here: the screen's only route to persistence is
+  // `onCommit`, which a blocked plan never reaches.
+  assert.equal(attempt.blocked, true);
+  assert.equal(attempt.message, BLOCKED_SAVE_MESSAGE);
+  assert.deepEqual(commits, []);
+  assert.deepEqual(attempt.target, { kind: 'row', index: 1, focus: 'rate' });
+
+  const cards = [cardStub(), cardStub()];
+  const view = viewStub(cards);
+  applySubmitFocus(attempt.target, view);
+  assert.deepEqual(view.calls, ['expand']);
+  assert.deepEqual(cards[1].calls, ['rate', 'reveal-row']);
+  assert.deepEqual(cards[0].calls, [], 'the first clean row is not touched');
+});
+
+test('a blocked submit lands on the first row an overlap names', () => {
+  const fields = blockedFields([
+    rateRowFields(nightEveryDay),
+    rateRowFields(winterPeak),
+    rateRowFields({ ...winterPeak, id: 'winter-copy' }),
+  ]);
+  const commits = [];
+  const attempt = submitSettingsPlan({ fields, onCommit: (values) => commits.push(values) });
+
+  assert.equal(attempt.blocked, true);
+  assert.deepEqual(commits, []);
+  assert.deepEqual(attempt.rateValidation.overlaps, [[1, 2]]);
+  assert.deepEqual(attempt.target, { kind: 'row', index: 1, focus: 'rate' });
+
+  const cards = [cardStub(), cardStub(), cardStub()];
+  const view = viewStub(cards);
+  applySubmitFocus(attempt.target, view);
+  assert.deepEqual(cards[1].calls, ['rate', 'reveal-row']);
+  assert.deepEqual(cards[0].calls, []);
+  assert.deepEqual(cards[2].calls, []);
+});
+
+test('a field error outranks a row error and focuses its own input', () => {
+  const fields = { ...blockedFields([rateRowFields({ ...nightEveryDay, rate: '' })]), rate: '' };
+  const commits = [];
+  const attempt = submitSettingsPlan({ fields, onCommit: (values) => commits.push(values) });
+
+  assert.equal(attempt.blocked, true);
+  assert.deepEqual(commits, []);
+  assert.deepEqual(attempt.target, { kind: 'field', field: 'rate' });
+
+  const view = viewStub([]);
+  applySubmitFocus(attempt.target, view);
+  assert.deepEqual(view.calls, ['field:rate']);
+});
+
+test('a saveable plan commits once and focuses nothing', () => {
+  const fields = blockedFields([rateRowFields(nightEveryDay)]);
+  const commits = [];
+  const attempt = submitSettingsPlan({ fields, onCommit: (values) => commits.push(values) });
+
+  assert.equal(attempt.blocked, false);
+  assert.equal(attempt.message, '');
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].rates.length, 1);
+
+  const view = viewStub([]);
+  applySubmitFocus(attempt.target, view);
+  assert.deepEqual(view.calls, []);
+});
+
+test('a document blocker with no accused row falls back to the table sentence', () => {
+  const view = viewStub([]);
+  applySubmitFocus({ kind: 'doc' }, view);
+  assert.deepEqual(view.calls, ['doc-error']);
+  // With a card to land in, the first row is the target instead.
+  const cards = [cardStub()];
+  const withCard = viewStub(cards);
+  applySubmitFocus({ kind: 'doc' }, withCard);
+  assert.deepEqual(withCard.calls, ['expand']);
+  assert.deepEqual(cards[0].calls, ['rate', 'reveal-row']);
+});
+
+test('a month problem focuses the season control, not a window field', () => {
+  const fields = blockedFields([{ ...rateRowFields(nightEveryDay), months: 3 }]);
+  const attempt = submitSettingsPlan({
+    fields,
+    onCommit: () => assert.fail('wrote a blocked plan'),
+  });
+  assert.deepEqual(attempt.target, { kind: 'row', index: 0, focus: 'months' });
+
+  const cards = [cardStub()];
+  const view = viewStub(cards);
+  applySubmitFocus(attempt.target, view);
+  assert.deepEqual(view.calls, ['expand']);
+  assert.deepEqual(cards[0].calls, ['reveal-period', 'months']);
 });
 
 test('the checker withholds a definitive answer while the plan is incomplete', () => {

@@ -2530,6 +2530,10 @@ input[aria-invalid='true']:focus-visible {
   border-color: var(--line);
   background: var(--surface-2);
   color: var(--muted);
+  /* `.btn:disabled` dims to 45% opacity, which took the label to ~2.3:1. Every
+     blocked reason — not dirty, field error, over the cap — uses this one
+     readable style instead. */
+  opacity: 1;
 }
 /* The blocked button stays submit-capable: pressing it validates and jumps to
    the first problem, so it keeps the pointer, not the disabled cursor. */
@@ -3040,6 +3044,13 @@ input[aria-invalid='true']:focus-visible {
   }
   .settings-grid {
     grid-template-columns: 1fr;
+  }
+  /* At 320 the hint shares the row with the count chip and Save, leaving it a
+     ~45 px column that stacks one word per line. Give it the full width above
+     the chip and button instead. */
+  .settings-actions .feedback {
+    flex: 1 1 100%;
+    order: -1;
   }
   .config-card {
     padding: 12px 12px 3px;

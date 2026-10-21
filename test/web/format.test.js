@@ -306,6 +306,11 @@ test('fmtMoney respects symbols vs currency codes', () => {
   assert.equal(fmtMoney(1.234, 'USD'), 'USD 1.23');
   assert.equal(fmtMoney(1.235, 'USD'), 'USD 1.24');
   assert.equal(fmtMoney(1234.5, '$'), '$1,234.50');
+  // A descriptive currency is a word, not a symbol: it needs the same separator
+  // as an ISO code, at the 8-character limit the settings schema allows.
+  assert.equal(fmtMoney(1.2, 'US cents'), 'US cents 1.20');
+  assert.equal(fmtMoney(1.2, 'abcdefgh'), 'abcdefgh 1.20');
+  assert.equal(fmtMoney(1.2, '£'), '£1.20');
 });
 
 test('fmtRate keeps the precision a per-kWh price allows', () => {
@@ -322,6 +327,10 @@ test('fmtRate keeps the precision a per-kWh price allows', () => {
   assert.equal(fmtRate(0, '€'), '€0.00');
   assert.equal(fmtRate(5, 'USD'), 'USD 5.00');
   assert.equal(fmtRate('0.1', '$'), '$0.10');
+  // The reported fusion case: no space meant `US cents0.10`.
+  assert.equal(fmtRate('0.10', 'US cents'), 'US cents 0.10');
+  assert.equal(fmtRate('0.1', 'abcdefgh'), 'abcdefgh 0.10');
+  assert.equal(fmtRate(0.31, '£'), '£0.31');
 });
 
 test('fmtCost is null until both energy and rate exist', () => {

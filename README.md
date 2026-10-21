@@ -51,8 +51,9 @@ and daily **windows**:
   any season that also applies in that month. The header keeps a coverage strip and any error even
   when collapsed. Expanding shows the month chips, one complete 24-hour table per day pattern for
   that same month, and the windows themselves. The table highlights that season's own rows and
-  labels a row from another season by band and season (for example “Peak · Winter”), keeping its
-  band dot on the first line so the legend still matches, instead of calling it the fallback. A
+  labels a row from another season by band and season (for example “Peak Winter”), keeping its
+  band dot on the first line so the legend still matches, instead of calling it the fallback; a long
+  month list wraps under the band without splitting a range and without a dangling separator. A
   sibling note names the other seasons that also apply there (for example “Winter also applies in
   Nov–Feb”), and the checker shows the combined price.
 - **No window — other times** is a line under the seasons for months no window covers. It is where the
