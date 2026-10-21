@@ -12,6 +12,7 @@ import {
   liveCostLabel,
   sessionCostLabel,
   statusCostLabel,
+  statusCostUncovered,
 } from '../../web/js/cost.js';
 import { fmtCost } from '../../web/js/format.js';
 
@@ -140,6 +141,55 @@ function liveStatus(state, updated, elapsed, wh = 1000, overrides = {}) {
     ...overrides,
   };
 }
+
+// A base-less season: the window prices 16:00–19:00 and every other hour of the
+// day prices 0.00, which is the slice the live marker reports.
+function windowOnly(overrides = {}) {
+  return {
+    rate: 0.3,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'peak',
+        rate: 0.32,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '16:00',
+        end: '19:00',
+        months: null,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+test('the live "understates cost" marker follows the interval it describes', () => {
+  const inWindow = date(2026, 1, 5, 17, 0).getTime();
+  const outside = date(2026, 1, 5, 12, 0).getTime();
+  // A plan with a base prices every slice of the interval.
+  assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), nightly()), false);
+  // A base-less window prices only its own hours.
+  assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), windowOnly()), false);
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnly()), true);
+  // An interval that straddles the window edge includes an unpriced slice, and
+  // the figure it caveats is still shown: the marker never stands alone.
+  const straddle = date(2026, 1, 5, 16, 30).getTime();
+  assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnly()), true);
+  assert.notEqual(statusCostLabel(liveStatus(3, straddle, 3600), windowOnly()), null);
+  // The marker shares the cost's gate: nothing to caveat when the figure is
+  // hidden (not charging, missing write time or elapsed, flat config).
+  for (const status of [
+    liveStatus(1, outside, 3600),
+    liveStatus(3, null, 3600),
+    liveStatus(3, outside, null),
+    liveStatus(3, outside, 0),
+    liveStatus(3, outside, -60),
+    liveStatus(3, outside, 3600, 1000, { charger_online: false }),
+  ]) {
+    assert.equal(statusCostUncovered(status, windowOnly()), false);
+  }
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), FLAT), false);
+  assert.equal(statusCostUncovered(null, windowOnly()), false);
+});
 
 test('live cost ends at the snapshot write, not the render instant', () => {
   // 1 kWh over the hour ending 06:30: half at 0.10, half at the fallback 0.30.

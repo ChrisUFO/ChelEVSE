@@ -35,7 +35,8 @@ const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 let status = null;
 let schedule = null;
 // Full cost settings ({rate, currency, rates}); the schedule prices a session
-// over its elapsed interval and the flat rate is the fallback.
+// over its elapsed interval, and the stored flat rate applies only when no row
+// exists at all.
 let settings = null;
 let active = false;
 let ampsTouched = false;
@@ -377,8 +378,8 @@ export function showCommands(cmds) {
 }
 
 // settings/current — null until an owner saves a rate. The whole document is
-// kept so the live cost can use the optional schedule; the flat rate remains the
-// fallback for any moment no window covers.
+// kept so the live cost can use the optional schedule; once it holds any row the
+// stored flat rate is ignored and an uncovered moment prices at 0.00.
 export function showSettings(data) {
   settings = costSettings(data);
   renderCost();

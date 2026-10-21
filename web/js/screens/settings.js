@@ -1,5 +1,5 @@
-// App-settings card: the all-other-times rate first, then an optional plan of
-// month or date seasons with daily windows, and a checker that reads the draft.
+// App-settings card: one rate, or a plan of date/month seasons each with a base
+// rate and optional daily windows, plus a checker that reads the draft.
 //
 // The stored document keeps one flat `rates` list; periods are a presentation
 // over each row's shared scope (`months`, or `from`/`to`), so grouping never
@@ -46,6 +46,7 @@ import {
   periodHasBaseOverlap,
   periodHasDates,
   periodRowScope,
+  planHasUnpriced,
   planProblemText,
   previewBlocker,
   previewRate,
@@ -118,6 +119,9 @@ let removeConfirmKey = null;
 // The period key of the season the mode switch seeded, while the plan note that
 // explains the seed still applies. Empty when there is nothing to explain.
 let seedNoticeKey = '';
+// Whether the draft leaves any instant with no price. Recomputed once per paint
+// so every card's base block can describe the same plan without re-walking it.
+let planUnpriced = false;
 let rateValidation = validateRateEditorRows([]);
 
 function readFields() {
@@ -158,6 +162,12 @@ function paintRateMode() {
   $('fallback-rate-field').hidden = hiddenOnSeasons;
   $('rates-plan').hidden = !seasons;
   if (!seasons) $('rate-mode-confirm').hidden = true;
+  // The panel names the price it would apply, and RATE/CURRENCY stay editable
+  // while it is open, so the sentence is rewritten from the current draft on
+  // every repaint: the price the owner reads is the price confirm applies.
+  if (!$('rate-mode-confirm').hidden) {
+    setText($('rate-mode-confirm-text'), oneRateConfirmText());
+  }
 }
 
 function focusBaseRate() {
@@ -193,7 +203,9 @@ function switchToSeasons() {
 
 // The confirmation has to name the price it would apply: Seasons mode hides the
 // RATE field and the plan summary quotes the season's range, so without the
-// number the owner consents to a price they cannot see.
+// number the owner consents to a price they cannot see. `paintRateMode` rewrites
+// it while the panel is open, so an edit made during the confirmation cannot
+// leave a stale number on screen.
 function oneRateConfirmText() {
   const flat = scheduleToFlatRate(draftRates, $('setting-rate').value);
   const price = rateIsUsable(flat) ? priceText(flat) : '';
@@ -205,7 +217,6 @@ function oneRateConfirmText() {
 function requestOneRate() {
   if (settingsSaving || currentRateMode() === 'flat') return;
   const confirm = $('rate-mode-confirm');
-  setText($('rate-mode-confirm-text'), oneRateConfirmText());
   confirm.hidden = false;
   paintRateMode();
   $('cancel-one-rate').focus({ preventScroll: true });
@@ -404,7 +415,7 @@ function priceRangeText(range) {
   return `${priceText(range.min)}–${fmtRate(range.max, '')}`;
 }
 
-// Keep "other times USD 0.31" and "USD 0.10–0.32" together when a summary
+// Keep "USD 0.10–0.32" and the plan's other price runs together when a summary
 // wraps; breaking inside a price reads as two different numbers. A class, not an
 // NBSP substitution, so a break after the en dash is prevented too.
 function nowrapEl(text) {
@@ -1010,7 +1021,7 @@ function paintCoverage(card) {
   }
   // A row whose price is not usable (empty, or finite but outside the accepted
   // range) is rejected by the validator, so the resolved week drops it: its
-  // hours fall back to "Other times" and the table would quote a resolved price
+  // hours fall back to Uncovered and the table would quote a resolved price
   // the plan, the card meta and the checker all deny. Resolve a copy with a
   // stand-in price so the row keeps its place and its band, then put the real
   // (unusable) price back and let the table say the price is missing.
@@ -1293,11 +1304,17 @@ function paintBaseBlock(card) {
     const covered = periodHasBaseOverlap(card.period, draftRates);
     card.addBaseButton.hidden = covered;
     if (card.baseWarning) {
+      // The base-less warning is about a plan that leaves hours at 0.00. A plan
+      // whose windows between them price the whole year has nothing to warn
+      // about, so the sentence states that instead of promising a gap that the
+      // strip, the table and History all deny.
       setText(
         card.baseWarning,
         covered
           ? 'No base rate in this season — another season’s base prices these hours.'
-          : 'No base rate — hours outside the windows have no price unless another season’s base covers them.',
+          : planUnpriced
+            ? 'No base rate — hours outside the windows have no price unless another season’s base covers them.'
+            : 'No base rate — every hour of these dates has a price.',
       );
     }
     // Short visible label: `Add base rate (CAD 0.31 from One rate)` wrapped
@@ -1711,12 +1728,17 @@ function applyMonths(card, months, { focusMonth = null, focusCheckbox = false } 
   if (focusCheckbox) {
     next.allYear.focus({ preventScroll: true });
   } else if (focusMonth != null) {
-    // The chips live in the advanced disclosure; a target must reveal the chip
-    // before trying to focus it.
-    next.advancedMonths.open = true;
-    const chip = next.monthChips.querySelector(`[data-month="${focusMonth}"]`);
-    if (chip) chip.focus({ preventScroll: true });
-    else next.toggle.focus({ preventScroll: true });
+    // The chips live in the advanced disclosure, which this edit can hide: a
+    // removal that leaves one contiguous run hands the scope to the date fields.
+    // Focus what is on screen — a hidden chip would leave focus on <body> and
+    // restart the next Tab at the top of the page.
+    if (next.advancedMonths.hidden) {
+      (next.dateFocus || next.editDates).focus({ preventScroll: true });
+    } else {
+      next.advancedMonths.open = true;
+      const chip = next.monthChips.querySelector(`[data-month="${focusMonth}"]`);
+      (chip || next.toggle).focus({ preventScroll: true });
+    }
   } else {
     next.toggle.focus({ preventScroll: true });
   }
@@ -2060,13 +2082,17 @@ function paintPlan() {
   if (mode === 'flat') {
     planPeriods = [];
     seedNoticeKey = '';
+    planUnpriced = false;
     $('rates-plan').hidden = true;
     $('uncovered-line').hidden = true;
-    $('plan-seed-note').hidden = true;
+    $('plan-seed').hidden = true;
     return;
   }
 
   planPeriods = ratePeriodsForDraft();
+  // One walk of the draft per paint: the plan summary's 0.00 minimum and each
+  // base block's warning both ask whether any instant is unpriced.
+  planUnpriced = planHasUnpriced(draftRates);
   // Only rows that can match and pass validation set a meaningful range; an
   // invalid row is shown and fixed but its price never applies. A base-less
   // season and a date gap both put 0 in the range, so the plan cannot advertise
@@ -2097,17 +2123,17 @@ function paintPlan() {
 
   // The seed note explains the workable season the mode switch created, and
   // retires itself as soon as that seed stops being the whole plan (dates
-  // edited, a window or another season added, cleared, or saved away).
+  // edited, a window or another season added, or the plan emptied).
   const seeded = seedNoticeKey
     ? planPeriods.find((period) => period.key === seedNoticeKey && period.base)
     : null;
   if (!seeded || planPeriods.length !== 1 || seeded.rows.length !== 1) seedNoticeKey = '';
-  const seedNote = $('plan-seed-note');
+  const seedNote = $('plan-seed');
   seedNote.hidden = !seedNoticeKey;
   setText(
-    seedNote,
+    $('plan-seed-note'),
     seedNoticeKey && seeded
-      ? `Seeded ${seeded.monthText} at your flat rate. Edit the season dates or add another season — dates outside it cost 0.00.`
+      ? `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost 0.00 until you cover them.`
       : '',
   );
 
@@ -2278,9 +2304,9 @@ function paintPreview() {
   const note = $('preview-note');
   const blocker = previewBlocker(rateValidation);
   if (blocker) {
-    // Never claim "Other times" while a window is incomplete or two windows
-    // collide: the invalid row is omitted from the lookup, so the answer could
-    // be wrong. The checker resumes as soon as the plan is fixable.
+    // Never claim a price while a window is incomplete or two windows collide:
+    // the invalid row is omitted from the lookup, so the answer could be wrong.
+    // The checker resumes as soon as the plan is fixable.
     table.hidden = true;
     empty.hidden = true;
     note.hidden = false;
@@ -2710,6 +2736,7 @@ export function initSettings() {
     if (event.key === 'Escape') cancelOneRate();
   });
   $('fill-gaps').addEventListener('click', fillGaps);
+  $('seed-cover').addEventListener('click', fillGaps);
   $('add-season').addEventListener('click', addSeason);
   $('preview-date').addEventListener('input', paintPreview);
   $('preview-time').addEventListener('input', paintPreview);

@@ -624,7 +624,6 @@
                           max="5"
                           step="0.001"
                           inputmode="decimal"
-                          placeholder="0.000"
                           autocomplete="off"
                           aria-describedby="rate-hint rate-error"
                         />
@@ -665,7 +664,12 @@
                     A season repeats every year. Give each season a base rate, then add daily
                     windows where the price changes. Dates outside every season cost 0.00.
                   </p>
-                  <p class="plan-seed-note" id="plan-seed-note" role="status" hidden></p>
+                  <div class="plan-seed" id="plan-seed" hidden>
+                    <p class="plan-seed-note" id="plan-seed-note" role="status"></p>
+                    <button class="btn small solid" id="seed-cover" type="button">
+                      Cover the rest of the year
+                    </button>
+                  </div>
                   <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
                   <div class="rate-periods" id="rate-periods"></div>
                   <div
@@ -685,7 +689,7 @@
                     <button class="btn small" id="add-season" type="button">
                       <span class="add-plus" aria-hidden="true">+</span><span>Add a season</span>
                     </button>
-                    <p class="plan-action-note" id="add-season-note" hidden></p>
+                    <p class="plan-action-note" id="add-season-note" role="status" hidden></p>
                   </div>
 
                   <section class="preview-card" id="preview-card" aria-labelledby="preview-heading">

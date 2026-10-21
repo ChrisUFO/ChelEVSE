@@ -1527,7 +1527,7 @@ test('Save stays submit-capable while a plan is blocked', () => {
 // Stand-ins for the rendered window cards the focus adapter touches. The screen's
 // cards carry the same fields, so the adapter is exercised as the production
 // path rather than through a parallel fake.
-function cardStub({ monthEditor = false } = {}) {
+function cardStub({ monthEditor = false, base = false } = {}) {
   const calls = [];
   const focus = (name) => () => calls.push(name);
   return {
@@ -1537,6 +1537,7 @@ function cardStub({ monthEditor = false } = {}) {
       allYear: { focus: focus('months') },
       dateFocus: { focus: focus('dates') },
       node: { scrollIntoView: () => calls.push('reveal-period') },
+      baseBlock: { scrollIntoView: () => calls.push('reveal-base') },
       // The month chips are the legacy path: absent or hidden unless the period
       // is a non-contiguous month scope.
       ...(monthEditor
@@ -1548,6 +1549,11 @@ function cardStub({ monthEditor = false } = {}) {
             },
           }
         : { advancedMonths: { hidden: true, open: false } }),
+      ...(base
+        ? {
+            baseInput: { focus: focus('base-rate') },
+          }
+        : {}),
     },
     rateInput: { focus: focus('rate') },
     startInput: { focus: focus('start') },
@@ -2488,6 +2494,30 @@ test('a months target opens the advanced month panel and focuses a chip', () => 
   assert.equal(focused, true);
 });
 
+test('a months target with the chips hidden lands on the date field', () => {
+  // A contiguous or malformed scope repairs through the dates: the chips are not
+  // on screen, so focus must not be sent to a display:none control.
+  const card = cardStub();
+  const view = viewStub([card]);
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'months' }, view);
+  assert.deepEqual(view.calls, ['expand']);
+  assert.deepEqual(card.calls, ['reveal-period', 'dates']);
+});
+
+test('a base-rate target reveals the Base rate block and focuses its field', () => {
+  const card = cardStub({ base: true });
+  const view = viewStub([card]);
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'base-rate' }, view);
+  assert.deepEqual(view.calls, ['expand']);
+  assert.deepEqual(card.calls, ['reveal-base', 'base-rate']);
+
+  // A malformed all-day row that never became the base keeps its own window
+  // card: its price lives in that row's rate field.
+  const windowOnly = cardStub();
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'base-rate' }, viewStub([windowOnly]));
+  assert.deepEqual(windowOnly.calls, ['reveal-base', 'rate']);
+});
+
 // ---------- unified base + daily-window model ----------
 
 test('rateEditorMode is derived from rows, and the flat seed is a workable season', () => {
@@ -2659,6 +2689,48 @@ test('plan warnings separate uncovered dates from a base-less season', () => {
   assert.equal(gaps[0].to, '06-14');
   assert.deepEqual(gaps[0].months, [9, 10, 11, 12, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(uncoveredGapScopes([]), [{ months: null, from: null, to: null }]);
+});
+
+test('a plan whose hours are all covered by overrides is priced everywhere', () => {
+  // "Unpriced" is about the union of the matching segments, not about whether a
+  // row happens to have the base shape. Both of these plans price every instant
+  // of the year, so neither may advertise a 0.00 minimum or a History banner.
+  const dayEvening = rateRowFields({
+    id: 'day',
+    rate: 0.3,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '06:00',
+    end: '22:00',
+    months: null,
+  });
+  const overnight = rateRowFields({
+    id: 'overnight',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  });
+  assert.equal(planHasUnpriced([dayEvening, overnight]), false);
+  assert.deepEqual(ratePlanRange([dayEvening, overnight]), { min: 0.12, max: 0.3 });
+
+  // A weekday/weekend all-day pair covers the same 24 h with no base row at all.
+  const weekdays = rateRowFields({
+    ...baseRateRow('weekday', '0.3', null, null),
+    days: [0, 1, 2, 3, 4],
+  });
+  const weekend = rateRowFields({ ...baseRateRow('weekend', '0.2', null, null), days: [5, 6] });
+  assert.equal(planHasUnpriced([weekdays, weekend]), false);
+  assert.deepEqual(ratePlanRange([weekdays, weekend]), { min: 0.2, max: 0.3 });
+
+  // The hours a base-less window leaves open are still unpriced...
+  assert.equal(planHasUnpriced([dayEvening]), true);
+  assert.deepEqual(ratePlanRange([dayEvening]), { min: 0, max: 0.3 });
+  // ...and a base makes the same window fully priced.
+  const allYearBase = rateRowFields(baseRateRow('base', '0.25', null, null));
+  assert.equal(planHasUnpriced([allYearBase, dayEvening]), false);
+  // A row with no usable price prices nothing, however wide its shape.
+  assert.equal(planHasUnpriced([rateRowFields(baseRateRow('empty', '', null, null))]), true);
 });
 
 test('the advertised plan range includes 0 exactly when some instant is unpriced', () => {
@@ -2883,6 +2955,26 @@ test('month chips are the legacy path, not the normal scope editor', () => {
   const malformed = ratePeriods([rateRowFields({ ...nightEveryDay, months: 3 })])[0];
   assert.equal(malformed.kind, 'invalid');
   assert.equal(monthEditorIsLegacy(malformed), true);
+
+  // A malformed stored list whose valid entries are contiguous: the scope
+  // sanitizes to one run (months [1, 13] reads as January), so the run-count test
+  // alone would hide the only editor that can rewrite it.
+  for (const months of [
+    [1, 13],
+    [1, 1],
+    [0, 5],
+    [5, 'x'],
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1],
+  ]) {
+    const period = ratePeriods([rateRowFields({ ...nightEveryDay, months })])[0];
+    assert.equal(monthEditorIsLegacy(period), true, JSON.stringify(months));
+  }
+  // The canonical all-year list and the stored All-year value are not malformed.
+  const canonical = ratePeriods([
+    rateRowFields({ ...nightEveryDay, months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] }),
+  ])[0];
+  assert.equal(canonical.kind, 'all');
+  assert.equal(monthEditorIsLegacy(canonical), false);
 });
 
 test('plan edits never change the stored flat rate', () => {

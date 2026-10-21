@@ -24,6 +24,7 @@ import {
   seasonDateSet,
   seasonScope,
   validateRateWindows,
+  windowSegments,
 } from './rates.js';
 import { DAY_NAMES } from './schedule.js';
 
@@ -240,14 +241,37 @@ export function periodHasDates(period) {
   return bounds.from != null || bounds.to != null;
 }
 
+// Whether a period's stored month values are not the canonical set the scope
+// derives from them: an entry outside 1–12, a duplicate, a non-list, or a list
+// that repeats an all-year scope. Such a row is rejected by validation, and no
+// date range can repair it — only the chips can rewrite the months.
+function monthsNeedRepair(period) {
+  const entries = (period && period.rows) || [];
+  return entries.some((entry) => {
+    const raw = entry && entry.row ? entry.row.months : null;
+    if (raw == null) return false;
+    if (!Array.isArray(raw)) return true;
+    const scope = rateMonthScope({ months: raw });
+    if (scope.kind === 'invalid') return true;
+    if (scope.kind === 'all') return raw.length !== 12 || new Set(raw).size !== 12;
+    return (
+      raw.length !== scope.months.length || !scope.months.every((month) => raw.includes(month))
+    );
+  });
+}
+
 // The month-chip editor is a compatibility path, not a normal editor: dates are
 // the scope for every season the owner creates. It is offered only where dates
 // cannot express the stored scope — a legacy non-contiguous month list (Jan +
 // Jun), or a month scope that has to be repaired. A contiguous month range and a
 // date season both reach their scope through the date fields.
 export function monthEditorIsLegacy(period) {
-  if (!period || period.kind === 'all' || periodHasDates(period)) return false;
+  if (!period || periodHasDates(period)) return false;
   if (period.kind === 'invalid') return true;
+  // A malformed stored list outranks the shape tests: its canonical set can be a
+  // single contiguous run (months [1, 13] reads as January), so the run count
+  // alone would hide the only editor that can repair it.
+  if (monthsNeedRepair(period)) return true;
   if (period.kind !== 'months') return false;
   return monthRuns(period.months).length !== 1;
 }
@@ -398,27 +422,80 @@ export function periodHasBaseOverlap(period, rows) {
   });
 }
 
-// Whether a non-empty plan has any instant with no price. A date outside every
-// scope is uncovered. Inside the covered year, a usable all-day every-day row
-// on every date means every hour has a base; date-specific bases that together
-// cover the year do too. A window-only stretch of dates has no base for the
-// hours it does not cover. These are warnings, not validation blockers.
+// Whether a non-empty plan has any instant with no price. The engine prices an
+// instant from the union of the rows that match it: a row's season decides the
+// date, and its weekday segment decides the minutes — a window that wraps
+// midnight also prices the next day's early hours from the day it started. A
+// plan is therefore fully priced exactly when, for every date and weekday, the
+// matching segments cover the whole day. Counting base rows alone declared a
+// plan whose hours are all covered by overrides "unpriced"; a window-only
+// stretch of dates still is unpriced for the hours it does not cover. These are
+// warnings, not validation blockers.
+const MINUTES_PER_DAY = 1440;
+// A leap reference year, so slot 59 is a real 29 February and every slot has a
+// well-defined weekday; only the month and day are read.
+const COVERAGE_YEAR = 2024;
+
+function slotDate(slot, dayOffset = 0) {
+  const { month, day } = annualMonthDay(slot);
+  return new Date(COVERAGE_YEAR, month - 1, day + dayOffset, 12, 0, 0, 0);
+}
+
+// Whether the rows in `main` (segments on the instant's own day) and `tail`
+// (early hours of a window that started the previous day) cover one weekday.
+function dayCovered(segments, main, tail, weekday) {
+  const spans = [];
+  for (const index of main) {
+    for (const segment of segments[index]) {
+      if (segment.day !== weekday || segment.tail) continue;
+      spans.push([segment.from, segment.to]);
+    }
+  }
+  for (const index of tail) {
+    for (const segment of segments[index]) {
+      if (segment.day !== weekday || !segment.tail) continue;
+      spans.push([segment.from, segment.to]);
+    }
+  }
+  if (spans.length === 0) return false;
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let covered = 0;
+  for (const [from, to] of spans) {
+    if (from > covered) return false;
+    if (to > covered) covered = to;
+    if (covered >= MINUTES_PER_DAY) return true;
+  }
+  return covered >= MINUTES_PER_DAY;
+}
+
 export function planHasUnpriced(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length === 0) return false;
-  const covered = new Uint8Array(ANNUAL_DAYS);
-  const based = new Uint8Array(ANNUAL_DAYS);
-  for (const row of list) {
-    const ranges = seasonDateSet(rateScope(row));
-    const isBase = isBaseWindow(row);
-    for (const [start, end] of ranges) {
-      covered.fill(1, start, end + 1);
-      if (isBase) based.fill(1, start, end + 1);
+  // A row whose own price is unusable is rejected by the validator and dropped
+  // by the engine, so it cannot make an instant priced.
+  const segments = list.map((row) => (rateIsUsable(row && row.rate) ? windowSegments(row) : []));
+  if (segments.every((entry) => entry.length === 0)) return true;
+  const scopes = list.map((row) => seasonScope(row));
+  // Dates with the same matching rows share an answer; a month- or all-year
+  // scope collapses the 366 slots to one or two probes.
+  const seen = new Set();
+  for (let slot = 0; slot < ANNUAL_DAYS; slot += 1) {
+    const date = slotDate(slot);
+    const previous = slotDate(slot, -1);
+    const main = [];
+    const tail = [];
+    scopes.forEach((scope, index) => {
+      if (scopeMatches(scope, date)) main.push(index);
+      if (scopeMatches(scope, previous)) tail.push(index);
+    });
+    const key = `${main.join(',')}|${tail.join(',')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (let weekday = 0; weekday < 7; weekday += 1) {
+      if (!dayCovered(segments, main, tail, weekday)) return true;
     }
   }
-  const allDates = covered.every((value) => value === 1);
-  if (!allDates) return true;
-  return !based.every((value) => value === 1);
+  return false;
 }
 
 // Whether two scopes can match the same date. Duplicating a season into its
