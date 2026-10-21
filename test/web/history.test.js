@@ -100,16 +100,25 @@ test('PERIODS describes every chart range as data', () => {
   // series length rather than any period-specific slot constant.
   assert.deepEqual(
     PERIODS.map((period) => period.id),
-    ['week', 'month', 'year'],
+    ['day', 'week', 'month', 'year'],
   );
   assert.equal(DEFAULT_PERIOD, 'month');
   assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.slots])), {
+    day: 24,
     week: 7,
     month: 30,
     year: 12,
   });
+  // `source` decides the read (one day document or a day-id range) and `bucket`
+  // the series derivation; both are data, so the screen has no period-id branch.
+  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.source])), {
+    day: 'day',
+    week: 'range',
+    month: 'range',
+    year: 'range',
+  });
   for (const period of PERIODS) {
-    assert.ok(['day', 'month'].includes(period.bucket), period.id);
+    assert.ok(['hour', 'day', 'month'].includes(period.bucket), period.id);
     for (const key of [
       'label',
       'summaryLabel',
@@ -124,7 +133,16 @@ test('PERIODS describes every chart range as data', () => {
       assert.ok(period[key].length > 0, `${period.id}.${key}`);
     }
   }
-  assert.equal(periodById('year'), PERIODS[2]);
+  // Only a day without hourly buckets uses the "no intraday detail" copy.
+  const day = periodById('day');
+  for (const key of ['noIntradayTitle', 'noIntradayLine']) {
+    assert.equal(typeof day[key], 'string', `day.${key}`);
+    assert.ok(day[key].length > 0, `day.${key}`);
+  }
+  for (const period of PERIODS.filter((candidate) => candidate.source !== 'day')) {
+    assert.equal(period.noIntradayTitle, undefined, period.id);
+  }
+  assert.equal(periodById('year'), PERIODS[3]);
   // Unknown ids fall back to today's default, never to an unrelated range.
   assert.equal(periodById('nope').id, DEFAULT_PERIOD);
 });
@@ -518,14 +536,20 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
     for (const period of PERIODS) {
       mock.timers.setTime(before);
       const bounds = periodBounds(period);
-      const points = periodSeries(period, []);
+      const data = period.source === 'day' ? {} : [];
+      const points = periodSeries(period, data);
       // The window and its current-slot flag come from the captured date: at
       // 23:59:30 on 18 Oct the last point is the current one, built for that day
-      // (the year's last point is its month, Oct 2026).
+      // (the year's last point is its month, Oct 2026; the day period's last
+      // point is the hour in progress, 23).
       assert.equal(bounds.endId, '2026-10-18', period.id);
       const last = points[points.length - 1];
       assert.equal(last.isCurrent, true, period.id);
-      assert.equal(last.id, period.bucket === 'month' ? '2026-10' : '2026-10-18', period.id);
+      assert.equal(
+        last.id,
+        period.bucket === 'month' ? '2026-10' : period.bucket === 'hour' ? '23' : '2026-10-18',
+        period.id,
+      );
       // Settled 20 s later, still on 18 Oct: the window is current, no re-read.
       mock.timers.setTime(before + 20_000);
       assert.equal(bounds.endId, dayId(new Date()), period.id);
@@ -534,6 +558,11 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
       mock.timers.setTime(before + 60_000);
       assert.equal(dayId(new Date()), '2026-10-19', period.id);
       assert.notEqual(bounds.endId, dayId(new Date()), period.id);
+      // A series rebuilt for the new day starts at its own current slot: the
+      // hour period restarts at 00, every range period ends on the new day.
+      const rebuilt = periodSeries(period, data);
+      const current = rebuilt.findIndex((point) => point.isCurrent);
+      assert.equal(current, period.bucket === 'hour' ? 0 : rebuilt.length - 1, period.id);
     }
   } finally {
     mock.timers.reset();
