@@ -394,6 +394,21 @@ def _pilot(value):
     return None
 
 
+def _interval_clock():
+    """Seconds on the clock the charging-interval gap is measured with.
+
+    ``CLOCK_BOOTTIME`` advances across suspend, which is what the gap needs:
+    ``time.monotonic()`` stops while the Pi sleeps, so a charge that suspends
+    mid-session would report a shorter gap than the time actually elapsed and
+    the time-aware step allowance could judge a legitimate step impossible.
+    Linux provides it; the monotonic fallback keeps every other platform (and a
+    test run without the constant) working, simply excluding suspend there.
+    """
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic()
+
+
 def _interval_step_allowance(gap):
     """Energy one attribution step may carry, given seconds since the last one.
 
@@ -499,10 +514,12 @@ class StatusTracker:
         state = data.get("state")
         previous_energy = self.interval_energy
         # Seconds between the two charging readings a step is measured across.
-        # A monotonic clock, so a wall-clock jump cannot inflate the allowance;
-        # it spans an outage on purpose, because the energy drawn during one
-        # legitimately lands in the recovering tick.
-        now = time.monotonic()
+        # A monotonic timebase, so a wall-clock jump cannot inflate the
+        # allowance; boottime on Linux, so a suspend mid-charge is included and
+        # the gap stays the elapsed time rather than the awake time. It spans an
+        # outage on purpose, because the energy drawn during one legitimately
+        # lands in the recovering tick.
+        now = _interval_clock()
         gap = None if self.interval_seen_at is None else now - self.interval_seen_at
         if state == 3:
             energy = data.get("session_energy")
