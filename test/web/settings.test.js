@@ -97,7 +97,6 @@ import {
 import {
   applySubmitFocus,
   boundFromDateInput,
-  dateInputBounds,
   dateInputForBound,
   referenceStartYear,
 } from '../../web/js/screens/settings.js';
@@ -1528,45 +1527,45 @@ test('the checker fields parse local dates by parts and format for people', () =
   assert.equal(minutesToClock(-1), '');
 });
 
-test('the season date picker opens on the current year and runs four years forward', () => {
+test('the season date picker opens on the current year and accepts any year', () => {
   const now = new Date(2026, 9, 21);
   assert.equal(referenceStartYear(now), 2026);
-  assert.deepEqual(dateInputBounds(now), { min: '2026-01-01', max: '2029-12-31' });
-  // A leap-year start uses the same four-year span.
-  assert.deepEqual(dateInputBounds(new Date(2028, 0, 1)), {
-    min: '2028-01-01',
-    max: '2031-12-31',
-  });
-  // Every span contains a leap year, so 29 February is reachable and the
-  // reference no longer has to pin a past one. Four years normally hold exactly
-  // one; the century window 2097–2100 holds none, so the span reaches to 2104.
-  for (let year = 2024; year <= 2100; year += 1) {
-    const bounds = dateInputBounds(new Date(year, 0, 1));
-    const last = Number(bounds.max.slice(0, 4));
-    const leaps = [];
-    for (let candidate = year; candidate <= last; candidate += 1) {
-      if (isLeapYear(candidate)) leaps.push(candidate);
-    }
-    assert.ok(leaps.length >= 1, `span starting ${year}`);
-  }
-  assert.deepEqual(dateInputBounds(new Date(2097, 0, 1)), {
-    min: '2097-01-01',
-    max: '2104-12-31',
-  });
-  assert.equal(dateInputForBound('02-29', new Date(2097, 0, 1)), '2104-02-29');
+  // The default rendering year is the current local year: the picker opens in
+  // the present and forward navigation has no ceiling.
+  assert.equal(dateInputForBound('10-15', now), '2026-10-15');
+  assert.equal(dateInputForBound('01-01', now), '2026-01-01');
+  // Every year names the same month and day. A far-future and a past year both
+  // round-trip through the picker to their MM-DD, with the year dropped.
+  assert.equal(boundFromDateInput('2031-05-01'), '05-01');
+  assert.equal(boundFromDateInput('2025-11-30'), '11-30');
+  assert.equal(dateInputForBound(boundFromDateInput('2031-05-01'), now), '2026-05-01');
+  assert.equal(dateInputForBound(boundFromDateInput('2025-11-30'), now), '2026-11-30');
+  // Only a month-day can render; a blank or malformed stored value stays blank.
+  assert.equal(dateInputForBound('', now), '');
+  assert.equal(dateInputForBound('02-30', now), '');
+  assert.equal(dateInputForBound('2026-10-15', now), '');
 });
 
-test('a stored 29 February renders in the span leap year, not as a blank field', () => {
+test('a stored 29 February renders in a leap year, not as a blank field', () => {
   const now = new Date(2026, 9, 21);
   assert.equal(dateInputForBound('02-29', now), '2028-02-29');
   assert.equal(dateInputForBound('02-29', new Date(2028, 0, 1)), '2028-02-29');
   assert.equal(dateInputForBound('02-29', new Date(2024, 0, 1)), '2024-02-29');
+  // Every rendering year is a real leap year, including across the century
+  // window 2097–2100, which has none: the field reaches to 2104.
+  for (let year = 2024; year <= 2100; year += 1) {
+    const value = dateInputForBound('02-29', new Date(year, 0, 1));
+    assert.ok(isLeapYear(Number(value.slice(0, 4))), `renders for start ${year}`);
+  }
+  for (let year = 2097; year <= 2100; year += 1) {
+    assert.equal(dateInputForBound('02-29', new Date(year, 0, 1)), '2104-02-29');
+  }
   // Every other day renders in the current year: the year is a reference only.
   assert.equal(dateInputForBound('10-15', now), '2026-10-15');
   assert.equal(dateInputForBound('01-01', now), '2026-01-01');
-  assert.equal(dateInputForBound('', now), '');
-  assert.equal(dateInputForBound('02-30', now), '');
-  assert.equal(dateInputForBound('2026-10-15', now), '');
+  // A picked 29 February stores its month and day, whichever leap year renders.
+  assert.equal(boundFromDateInput(dateInputForBound('02-29', now)), '02-29');
+  assert.equal(boundFromDateInput(dateInputForBound('02-29', new Date(2101, 0, 1))), '02-29');
 });
 
 test('a picked date stores its month and day and round-trips through the picker', () => {

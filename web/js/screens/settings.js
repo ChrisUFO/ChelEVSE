@@ -357,12 +357,11 @@ function newWindowRow(months, preset, dates = null) {
 // The date inputs are real date pickers, but only a month and day are stored.
 // The picker still needs a year to render a month-day, and the old fixed
 // reference year (2024) opened the calendar years in the past and refused every
-// date forward of it. The reference span now starts at the current local year
-// and runs four years forward. Four consecutive years normally contain exactly
-// one leap year (2097–2100 is the century exception), so 29 February stays
-// selectable without pinning the picker to a past leap year; the span reaches
-// to the next leap year only in that exception. Any year the owner picks is
-// still discarded on save.
+// date forward of it. The reference year is now the current local year, so the
+// picker opens in the present and forward navigation works. No `min`/`max` is
+// set: a native date input would reject a typed or picked year outside those
+// bounds (`rangeOverflow`), and any year is a valid way to name a month and day.
+// Any year the owner picks is still discarded on save.
 export function referenceStartYear(now = new Date()) {
   return now.getFullYear();
 }
@@ -370,26 +369,17 @@ export function referenceStartYear(now = new Date()) {
 // The first leap year at or after `startYear`, used to render a stored
 // 29 February. Four consecutive years normally contain exactly one leap year,
 // but a century that is not divisible by 400 breaks that: 2097–2100 contains
-// none, while 2104 does. Reaching to the next leap year keeps the picker on the
-// current year without ever losing the leap day (and without pinning a past one).
+// none, while 2104 does. Reaching to the next leap year keeps the field on the
+// current calendar while never losing the leap day.
 function leapYearFrom(startYear) {
   let year = startYear;
   while (!isLeapYear(year)) year += 1;
   return year;
 }
 
-// The picker's `min`/`max`: this year through three years on, extended to the
-// next leap year only when that window has none (2097–2100), so a stored
-// 29 February always has a real date to render.
-export function dateInputBounds(now = new Date()) {
-  const start = referenceStartYear(now);
-  const end = Math.max(start + 3, leapYearFrom(start));
-  return { min: `${start}-01-01`, max: `${end}-12-31` };
-}
-
 // A stored `MM-DD` as a native date value. The year is a rendering reference and
-// is discarded on save. A stored 02-29 renders in the span's leap year: any
-// other year would be an invalid date, and the browser blanks the field.
+// is discarded on save. A stored 02-29 renders in the next leap year: any other
+// year would be an invalid date, and the browser blanks the field.
 export function dateInputForBound(value, now = new Date()) {
   const parsed = parseMonthDay(value);
   if (!parsed) return '';
@@ -816,17 +806,12 @@ function paintScopeEditor(card) {
   const values = state.values;
   card.allYear.checked = state.allYear;
 
-  // Normalize the visible year back to the reference span. A native picker may
-  // have produced any year in it; only the month and day are kept. The span
-  // follows the calendar (this year through three years on), so the picker
-  // always opens on the current year and can go forward, while a stored 29
-  // February renders in the span's leap year rather than blanking.
+  // Normalize the visible year back to the reference year. A native picker may
+  // have produced any year at all; only the month and day are kept. The field
+  // opens on the current local year and has no `min`/`max`, so any year can be
+  // typed or picked, while a stored 29 February renders in the next leap year
+  // rather than blanking.
   const now = new Date();
-  const bounds = dateInputBounds(now);
-  card.fromDate.min = bounds.min;
-  card.fromDate.max = bounds.max;
-  card.toDate.min = bounds.min;
-  card.toDate.max = bounds.max;
   const fromValue = dateInputForBound(values.from, now);
   const toValue = dateInputForBound(values.to, now);
   if (card.fromDate.value !== fromValue) card.fromDate.value = fromValue;
@@ -1513,7 +1498,7 @@ function createPeriodCard(period, index) {
   const reference = el(
     'p',
     'season-dates-reference',
-    'Repeats every year. The year only picks a month and day — the picker includes a leap year, so 29 February is available.',
+    'Repeats every year. The year only picks a month and day — any year works, and 29 February renders in a leap year.',
   );
   reference.id = referenceId;
 
