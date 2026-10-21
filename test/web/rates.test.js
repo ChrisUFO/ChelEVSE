@@ -10,6 +10,8 @@ import {
   MAX_RATE_WINDOWS,
   costForInterval,
   costForSession,
+  intervalUncovered,
+  isBaseWindow,
   intersectDateSets,
   lastDayOfMonth,
   monthsCovering,
@@ -18,6 +20,8 @@ import {
   overlappingWindowPairs,
   parseMonthDay,
   rateAt,
+  rateDayPartition,
+  rateEntryAt,
   rateWindowsKey,
   scopeMatches,
   seasonDateSet,
@@ -54,6 +58,24 @@ function windowRow(overrides = {}) {
   };
 }
 
+// A season base: the all-day, every-day row. Cost tests that used to rely on
+// settings.rate as an invisible fallback now add the visible base explicitly.
+function baseRow(rate = 0.3, overrides = {}) {
+  return windowRow({
+    id: 'base',
+    rate,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '00:00',
+    end: '00:00',
+    months: null,
+    ...overrides,
+  });
+}
+
+function withBase(rates, rate = 0.3) {
+  return schedule([baseRow(rate), ...rates], rate);
+}
+
 function close(actual, expected, message) {
   assert.ok(Number.isFinite(actual), `${message}: expected a number, got ${actual}`);
   assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual} != ${expected}`);
@@ -66,7 +88,7 @@ test('the test process runs in a DST-observing local timezone', () => {
 
 // ---------- normalization ----------
 
-test('normalizeRateSchedule keeps the flat fallback and drops invalid rows only', () => {
+test('normalizeRateSchedule keeps the stored flat rate and drops invalid rows only', () => {
   assert.deepEqual(normalizeRateSchedule(null), { rate: null, currency: null, rates: [] });
 
   const flat = normalizeRateSchedule({ rate: 0.31, currency: 'USD' });
@@ -377,7 +399,7 @@ test('window days use 0 = Monday, matching the schedule editor chips', () => {
   assert.equal(windowMatches(sunday, date(2026, 10, 19, 10, 30)), false);
 });
 
-test('rateAt falls back to the flat rate and documents last-match precedence', () => {
+test('rateAt keeps the flat price only for an empty schedule and documents precedence', () => {
   const flat = schedule([], 0.4);
   assert.equal(rateAt(date(2026, 10, 19, 12, 0), flat), 0.4);
   assert.equal(rateAt(new Date('nope'), flat), null);
@@ -393,15 +415,25 @@ test('rateAt falls back to the flat rate and documents last-match precedence', (
   assert.equal(rateAt(date(2026, 10, 19, 5, 0), rate), 0.1);
   // Both match at 07:00; the later row wins deterministically.
   assert.equal(rateAt(date(2026, 10, 19, 7, 0), rate), 0.2);
-  assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0.3);
+  // Once any row exists, settings.rate is ignored: the uncovered hour is 0.
+  assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0);
 
-  // A weekday window's post-midnight tail is priced on the next day.
+  // A visible base covers the ordinary hours; an override wins over it.
+  const visible = withBase(
+    [windowRow({ id: 'peak', rate: 0.2, start: '16:00', end: '19:00' })],
+    0.3,
+  );
+  assert.equal(rateAt(date(2026, 10, 19, 12, 0), visible), 0.3);
+  assert.equal(rateAt(date(2026, 10, 19, 17, 0), visible), 0.2);
+
+  // A weekday window's post-midnight tail is priced on the next day; the gap
+  // before the tail is 0, not the stored flat rate.
   const mondayNight = schedule(
     [windowRow({ id: 'monday', rate: 0.1, days: [0], start: '22:00', end: '06:00' })],
     0.3,
   );
   assert.equal(rateAt(date(2026, 10, 20, 1, 0), mondayNight), 0.1);
-  assert.equal(rateAt(date(2026, 10, 19, 1, 0), mondayNight), 0.3);
+  assert.equal(rateAt(date(2026, 10, 19, 1, 0), mondayNight), 0);
 });
 
 // ---------- costing ----------
@@ -418,7 +450,7 @@ test('costForInterval prices a flat configuration exactly as before', () => {
 });
 
 test('costForInterval pro-rates a session that spans two windows', () => {
-  const s = schedule([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.3);
   // 2 kWh over two hours → 1 kWh in each hour.
   close(
     costForInterval(2000, date(2026, 10, 19, 21, 0), date(2026, 10, 19, 23, 0), s),
@@ -434,7 +466,7 @@ test('costForInterval pro-rates a session that spans two windows', () => {
 });
 
 test('costForInterval follows a window across midnight', () => {
-  const s = schedule([windowRow({ rate: 0.1, start: '22:00', end: '06:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '06:00' })], 0.3);
   close(
     costForInterval(2000, date(2026, 10, 19, 23, 0), date(2026, 10, 20, 1, 0), s),
     0.2,
@@ -449,7 +481,7 @@ test('costForInterval follows a window across midnight', () => {
 
 test('a weekday-limited wrap is costed on the night it started', () => {
   // `days` is 0 = Monday: a Monday-night window.
-  const s = schedule([windowRow({ rate: 0.1, days: [0], start: '22:00', end: '06:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, days: [0], start: '22:00', end: '06:00' })], 0.3);
   // Monday 22:00 → Tuesday 02:00 is one Monday-night window.
   close(
     costForInterval(2000, date(2026, 10, 19, 22, 0), date(2026, 10, 20, 2, 0), s),
@@ -471,7 +503,7 @@ test('a weekday-limited wrap is costed on the night it started', () => {
 });
 
 test('a month-limited wrap is costed into the next month', () => {
-  const s = schedule([windowRow({ rate: 0.1, months: [12], start: '22:00', end: '06:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, months: [12], start: '22:00', end: '06:00' })], 0.3);
   // 31 December 23:00 → 1 January 02:00: three hours of December's window.
   close(
     costForInterval(3000, date(2026, 12, 31, 23, 0), date(2027, 1, 1, 2, 0), s),
@@ -487,7 +519,7 @@ test('a month-limited wrap is costed into the next month', () => {
 });
 
 test('costForInterval splits at a month boundary', () => {
-  const s = schedule([windowRow({ rate: 0.1, months: [12], start: '00:00', end: '00:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, months: [12], start: '00:00', end: '00:00' })], 0.3);
   close(
     costForInterval(2000, date(2026, 12, 31, 23, 0), date(2027, 1, 1, 1, 0), s),
     0.4,
@@ -497,7 +529,7 @@ test('costForInterval splits at a month boundary', () => {
 
 test('costForInterval splits at a weekday boundary', () => {
   // A Monday window (0 = Monday), 00:00–12:00.
-  const s = schedule([windowRow({ rate: 0.1, days: [0], start: '00:00', end: '12:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, days: [0], start: '00:00', end: '12:00' })], 0.3);
   // Monday 11:00 → 13:00: one hour in the Monday window, one at the fallback.
   close(
     costForInterval(2000, date(2026, 10, 19, 11, 0), date(2026, 10, 19, 13, 0), s),
@@ -512,7 +544,7 @@ test('costForInterval handles the spring-forward gap with local boundaries', () 
   const end = date(2026, 3, 8, 4, 0);
   assert.equal(end - start, 2 * HOUR_MS);
 
-  const s = schedule([windowRow({ rate: 0.1, start: '00:00', end: '02:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, start: '00:00', end: '02:00' })], 0.3);
   // The 02:00 boundary lands on the first instant that exists (03:00 MDT), so
   // the interval is one hour at 0.1 and one hour at 0.3.
   close(costForInterval(2000, start, end, s), 0.4, 'spring forward');
@@ -526,13 +558,13 @@ test('costForInterval handles the fall-back repeated hour with local boundaries'
   const end = date(2026, 11, 1, 3, 0);
   assert.equal(end - start, 4 * HOUR_MS);
 
-  const s = schedule([windowRow({ rate: 0.1, start: '01:00', end: '02:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, start: '01:00', end: '02:00' })], 0.3);
   // 4 kWh over four hours: 1 h fallback + 2 h window + 1 h fallback.
   close(costForInterval(4000, start, end, s), 0.8, 'fall back');
 });
 
 test('costForInterval returns null for unusable inputs', () => {
-  const s = schedule([windowRow()], 0.3);
+  const s = withBase([windowRow()], 0.3);
   const start = date(2026, 10, 19, 12, 0);
   assert.equal(costForInterval(null, start, date(2026, 10, 19, 13, 0), s), null);
   assert.equal(costForInterval(-1, start, date(2026, 10, 19, 13, 0), s), null);
@@ -544,11 +576,13 @@ test('costForInterval returns null for unusable inputs', () => {
   assert.equal(costForInterval(1000, date(2026, 10, 19, 13, 0), start, s), null);
   // No flat rate and no window covering 12:00: the cost is unknown.
   assert.equal(costForInterval(1000, start, date(2026, 10, 19, 13, 0), { rates: [] }), null);
+  // A non-empty schedule has no flat fallback: the unmatched hour costs 0,
+  // while an empty list with no flat rate is still unknown.
   assert.equal(
     costForInterval(1000, start, date(2026, 10, 19, 13, 0), {
       rates: [windowRow({ start: '22:00', end: '23:00' })],
     }),
-    null,
+    0,
   );
 });
 
@@ -567,7 +601,7 @@ test('costForInterval accepts session timestamp shapes', () => {
 });
 
 test('costForSession reads a sessions document', () => {
-  const s = schedule([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.3);
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.3);
   const session = {
     id: 's1',
     wh: 2000,
@@ -577,6 +611,171 @@ test('costForSession reads a sessions document', () => {
   close(costForSession(session, s), 0.4, 'session');
   assert.equal(costForSession(null, s), null);
   assert.equal(costForSession({ wh: 2000, started_at: date(2026, 10, 19, 21, 0) }, s), null);
+});
+
+// ---------- base and override model ----------
+
+test('isBaseWindow recognises only the all-day, every-day shape', () => {
+  assert.equal(isBaseWindow(baseRow()), true);
+  assert.equal(isBaseWindow(baseRow(0.2, { start: '07:00', end: '07:00' })), true);
+  assert.equal(isBaseWindow(baseRow(0.2, { days: [0, 1, 2, 3, 4] })), false);
+  assert.equal(isBaseWindow(windowRow({ start: '00:00', end: '06:00' })), false);
+  assert.equal(isBaseWindow(windowRow({ start: '16:00', end: '19:00' })), false);
+  assert.equal(isBaseWindow(null), false);
+});
+
+test('rateEntryAt names a base, an override, an uncovered date and an unpriced hour', () => {
+  const rows = [
+    baseRow(0.3),
+    windowRow({ id: 'peak', rate: 0.2, start: '16:00', end: '19:00', months: [1] }),
+  ];
+  const peak = rateEntryAt(date(2026, 1, 15, 17, 0), schedule(rows, 0.9));
+  assert.equal(peak.rate, 0.2);
+  assert.equal(peak.source, 'window');
+  assert.equal(peak.window.id, 'peak');
+  assert.equal(peak.uncoveredDate, undefined);
+  assert.equal(peak.unpricedHour, undefined);
+
+  const base = rateEntryAt(date(2026, 1, 15, 12, 0), schedule(rows, 0.9));
+  assert.equal(base.rate, 0.3);
+  assert.equal(base.source, 'base');
+  assert.equal(base.window.id, 'base');
+
+  // A base-less window covers its hours, not the rest of the date.
+  const baseLess = schedule([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.9);
+  const gap = rateEntryAt(date(2026, 1, 15, 12, 0), baseLess);
+  assert.equal(gap.rate, 0);
+  assert.equal(gap.source, 'uncovered');
+  assert.equal(gap.uncoveredDate, false);
+  assert.equal(gap.unpricedHour, true);
+
+  const outside = rateEntryAt(
+    date(2026, 7, 15, 12, 0),
+    schedule([windowRow({ months: [1] })], 0.9),
+  );
+  assert.equal(outside.rate, 0);
+  assert.equal(outside.uncoveredDate, true);
+  assert.equal(outside.unpricedHour, false);
+
+  const flat = rateEntryAt(date(2026, 1, 15, 12, 0), schedule([], 0.4));
+  assert.equal(flat.rate, 0.4);
+  assert.equal(flat.source, 'flat');
+  assert.equal(rateEntryAt(new Date('nope'), flat), null);
+});
+
+test('a base and an override resolve by tier, not by list order', () => {
+  const peak = windowRow({ id: 'peak', rate: 0.2, start: '16:00', end: '19:00' });
+  const base = baseRow(0.3);
+  for (const rows of [
+    [peak, base],
+    [base, peak],
+  ]) {
+    const s = schedule(rows, 0.9);
+    assert.equal(rateAt(date(2026, 1, 15, 17, 0), s), 0.2);
+    assert.equal(rateAt(date(2026, 1, 15, 12, 0), s), 0.3);
+  }
+  // Last match within a tier remains the deterministic tie-break for
+  // hand-edited duplicates; overrides still win over bases.
+  const overlap = schedule(
+    [
+      windowRow({ id: 'first', rate: 0.1, start: '16:00', end: '19:00' }),
+      baseRow(0.3),
+      windowRow({ id: 'last', rate: 0.4, start: '17:00', end: '18:00' }),
+    ],
+    0.9,
+  );
+  assert.equal(rateAt(date(2026, 1, 15, 17, 30), overlap), 0.4);
+});
+
+test('base plus override is valid; two bases or two overrides on one date are not', () => {
+  const base = baseRow(0.3, { from: '01-01', to: '12-31' });
+  const override = windowRow({ id: 'peak', rate: 0.2, start: '16:00', end: '19:00', months: [1] });
+  assert.equal(validateRateWindows([base, override]).valid, true);
+  assert.deepEqual(overlappingWindowPairs([base, override]), []);
+
+  const secondBase = baseRow(0.4, { id: 'second-base', from: '06-01', to: '08-31' });
+  const baseClash = validateRateWindows([base, secondBase]);
+  assert.equal(baseClash.valid, false);
+  assert.match(baseClash.errors.general.join(' '), /Base rates.*Keep one base per date/);
+
+  const secondOverride = windowRow({
+    id: 'second-peak',
+    rate: 0.4,
+    start: '18:00',
+    end: '20:00',
+    months: [1],
+  });
+  assert.equal(validateRateWindows([override, secondOverride]).valid, false);
+  assert.deepEqual(overlappingWindowPairs([override, secondOverride]), [[0, 1]]);
+});
+
+test('rateDayPartition marks base, override and uncovered slices', () => {
+  const rows = [baseRow(0.3), windowRow({ id: 'peak', rate: 0.2, start: '16:00', end: '19:00' })];
+  const segments = rateDayPartition(schedule(rows, 0.9), date(2026, 1, 15, 12, 0));
+  assert.deepEqual(
+    segments.map((segment) => [segment.from, segment.to, segment.rate, segment.source]),
+    [
+      [0, 960, 0.3, 'base'],
+      [960, 1140, 0.2, 'window'],
+      [1140, 1440, 0.3, 'base'],
+    ],
+  );
+
+  const baseLess = rateDayPartition(
+    schedule([windowRow({ rate: 0.1, start: '00:00', end: '06:00' })], 0.9),
+    date(2026, 1, 15, 12, 0),
+  );
+  assert.deepEqual(
+    baseLess.map((segment) => [segment.from, segment.to, segment.rate, segment.source]),
+    [
+      [0, 360, 0.1, 'window'],
+      [360, 1440, 0, 'uncovered'],
+    ],
+  );
+});
+
+test('intervalUncovered distinguishes flat, fully based and unpriced schedules', () => {
+  const start = date(2026, 1, 15, 12, 0);
+  const end = date(2026, 1, 15, 14, 0);
+  assert.equal(intervalUncovered(start, end, schedule([], 0.3)), false);
+  assert.equal(intervalUncovered(start, end, schedule([baseRow(0.3)], 0.9)), false);
+  assert.equal(
+    intervalUncovered(start, end, schedule([windowRow({ start: '00:00', end: '06:00' })], 0.9)),
+    true,
+  );
+  assert.equal(
+    intervalUncovered(
+      date(2026, 1, 15, 5, 0),
+      date(2026, 1, 15, 6, 0),
+      schedule([windowRow({ start: '00:00', end: '06:00' })], 0.9),
+    ),
+    false,
+  );
+  assert.equal(intervalUncovered(start, end, null), false);
+  assert.equal(intervalUncovered(start, start, schedule([baseRow()], 0.9)), false);
+});
+
+test('costing a base plus override and an uncovered date', () => {
+  const s = withBase([windowRow({ id: 'peak', rate: 0.1, start: '12:00', end: '13:00' })], 0.3);
+  close(
+    costForInterval(2000, date(2026, 1, 15, 12, 0), date(2026, 1, 15, 14, 0), s),
+    0.4,
+    'base plus override',
+  );
+  const dateGap = schedule([baseRow(0.3, { from: '06-15', to: '09-15' })], 0.9);
+  close(
+    costForInterval(1000, date(2026, 1, 15, 12, 0), date(2026, 1, 15, 13, 0), dateGap),
+    0,
+    'uncovered date',
+  );
+  close(
+    costForSession(
+      { wh: 2000, started_at: date(2026, 1, 15, 12, 0), ended_at: date(2026, 1, 15, 14, 0) },
+      s,
+    ),
+    0.4,
+    'base plus override session',
+  );
 });
 
 // ---------- date-mode seasons ----------
@@ -976,7 +1175,21 @@ test('the leap four-case table keeps tail/tail apart and main/tail together', ()
     end: '00:00',
   });
   assert.equal(windowsOverlap(leapMain, commonTail), true);
-  assert.equal(validateRateWindows([leapMain, commonTail]).valid, false);
+  // A base plus an override may overlap: the override prices only its hours.
+  assert.equal(validateRateWindows([leapMain, commonTail]).valid, true);
+  assert.deepEqual(overlappingWindowPairs([leapMain, commonTail]), []);
+  // Two bases covering the same date are still ambiguous.
+  const secondBase = windowRow({
+    id: 'second-base',
+    months: null,
+    from: '02-29',
+    to: '02-29',
+    start: '00:00',
+    end: '00:00',
+  });
+  const baseClash = validateRateWindows([leapMain, secondBase]);
+  assert.equal(baseClash.valid, false);
+  assert.match(baseClash.errors.general.join(' '), /Base rates.*Keep one base per date/);
 
   // A 28 February main and a 29 February tail never meet: the tail's instant is
   // 1 March (leap) and the main is 28 February.
@@ -1019,10 +1232,23 @@ test('a season rate is an all-day row and overlaps every TOU window in its seaso
   });
   assert.equal(windowsOverlap(seasonRate, julyPeak), true);
   assert.equal(windowsOverlap(seasonRate, winterPeak), false);
-  // The mix is rejected with the row names, not a special-case message.
+  // A base plus an override is the supported model; the override wins for its
+  // hours and the base covers the rest.
   const result = validateRateWindows([seasonRate, julyPeak]);
-  assert.equal(result.valid, false);
-  assert.match(result.errors.general.join(' '), /season-rate.*july-peak/);
+  assert.equal(result.valid, true);
+  assert.deepEqual(overlappingWindowPairs([seasonRate, julyPeak]), []);
+  // Two bases on the same date are rejected with a base-specific sentence.
+  const secondBase = windowRow({
+    id: 'second-base',
+    months: null,
+    from: '06-15',
+    to: '09-15',
+    start: '00:00',
+    end: '00:00',
+  });
+  const baseClash = validateRateWindows([seasonRate, secondBase]);
+  assert.equal(baseClash.valid, false);
+  assert.match(baseClash.errors.general.join(' '), /Base rates.*Keep one base per date/);
   // Adjacent seasons with a season rate each pass.
   const winterRate = windowRow({
     id: 'winter-rate',
@@ -1187,14 +1413,14 @@ test('costForInterval is leap-exact and follows a date-season tail over New Year
     0.2,
     'leap day',
   );
-  // The same day a year later does not exist; 28 February pays the fallback.
+  // The same day a year later does not exist; with no base the day is 0.
   close(
     costForInterval(1000, date(2025, 2, 28, 12, 0), date(2025, 2, 28, 13, 0), {
       rate: 0.3,
       rates: [leapOnly],
     }),
-    0.3,
-    'common year',
+    0,
+    'common year uncovered',
   );
 
   const december = windowRow({
@@ -1228,10 +1454,12 @@ test('a date-season window crosses the fall-back hour like a month window', () =
     end: '02:00',
   });
   close(
-    costForInterval(4000, date(2026, 11, 1, 0, 0), date(2026, 11, 1, 3, 0), {
-      rate: 0.3,
-      rates: [winter],
-    }),
+    costForInterval(
+      4000,
+      date(2026, 11, 1, 0, 0),
+      date(2026, 11, 1, 3, 0),
+      withBase([winter], 0.3),
+    ),
     0.8,
     'fall back inside a date season',
   );

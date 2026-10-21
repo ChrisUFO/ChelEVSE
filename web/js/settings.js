@@ -9,6 +9,7 @@ import {
   annualDayIndex,
   annualMonthDay,
   intersectDateSets,
+  isBaseWindow,
   lastDayOfMonth,
   monthsCovering,
   normalizeRateSchedule,
@@ -33,7 +34,7 @@ export { RATE_MAX, RATE_MIN } from './rates.js';
 // A rate the engine can actually use: finite once parsed and inside the
 // documented bounds. The validators and the resolver both reject anything else,
 // so any view asking "does this row have a price?" must ask it the same way —
-// otherwise it quotes a fallback the rest of the screen denies.
+// otherwise it quotes a price the rest of the screen denies.
 export function rateIsUsable(value) {
   const rate = parseRateValue(value);
   return Number.isFinite(rate) && rate >= RATE_MIN && rate <= RATE_MAX;
@@ -41,8 +42,9 @@ export function rateIsUsable(value) {
 
 // Mirror firestore.rules: a write must carry both flat fields, rate is a number
 // from 0 to 5, currency is a string of 1–8 characters. The optional `rates`
-// list keeps the flat rate as its fallback; its rows are validated by
-// validateRateWindows (rules only guard the container).
+// list is a season plan; the stored flat rate is used only when no usable row
+// remains. Its rows are validated by validateRateWindows (rules only guard the
+// container).
 export const CURRENCY_MAX = 8;
 
 // The form trims the currency, so a stray space cannot produce a string that
@@ -84,7 +86,8 @@ export function validateSettings(draft) {
 // values included: the editor has to show a malformed stored row with its error
 // rather than delete it silently on the next save. The costing layer
 // (normalizeRateSchedule) still drops unusable rows, so a partially corrupt
-// document prices what it can with the flat fallback.
+// document prices what it can; the flat rate remains only when no usable row is
+// left.
 export function normalizeSettings(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const normalized = normalizeRateSchedule(data);
@@ -283,23 +286,136 @@ export function dateRangeHint(from, to) {
   return startKey > endKey ? 'This range wraps the year.' : '';
 }
 
-// How a period prices: one season rate (every day, all day), daily windows, or
-// a hand-edited mix the editor rejects.
-export function periodRateMode(period) {
-  const entries = (period && period.rows) || [];
-  if (entries.length === 0) return 'tou';
-  const seasonRates = entries.filter((entry) => isSeasonRateRow(entry.row)).length;
-  if (seasonRates === entries.length) return 'season';
-  if (seasonRates === 0) return 'tou';
-  return 'mixed';
+// How a period prices: one base, a base plus overrides, or windows with no base.
+// A base is the all-day, every-day row; its day-restricted siblings are
+// overrides.
+// A base the editor can present as one price: the shape plus valid equal times.
+// A malformed all-day row stays in the window list where it can be repaired.
+function isUiBaseRow(row) {
+  return isBaseWindow(row) && isAllDayWindow(row);
 }
 
-export const SEASON_RATE_MIX_MESSAGE =
-  'A season rate and daily windows cannot share a season. Remove the all-day row or change it to a time window.';
-// The coverage table and the checker refuse a mixed season instead of drawing
-// the resolved schedule: the resolver would show a base-plus-override result the
-// editor rejects, so the screen would claim the mix works.
-export const MIX_COVERAGE_MESSAGE = 'Fix the mix to see coverage.';
+export function periodRateMode(period) {
+  const entries = (period && period.rows) || [];
+  if (entries.length === 0) return 'windows';
+  const bases = entries.filter((entry) => isUiBaseRow(entry.row)).length;
+  if (bases === 0) return 'windows';
+  return bases === entries.length ? 'base' : 'base+windows';
+}
+
+// The flat rate reference a season's overrides are compared with. A base-less
+// season has no reference, so its windows stay simply "Window".
+export function periodBaseRate(period) {
+  const row = period && period.base && period.base.row;
+  const rate = parseRateValue(row && row.rate);
+  return rateIsUsable(rate) ? rate : null;
+}
+
+export function periodNeedsBase(period) {
+  return Boolean(period && period.mode === 'windows');
+}
+
+// Two modes only: no rows is One rate; any rows is Seasons & time-of-use. The
+// stored `rate` remains in both, but is ignored for pricing once rows exist.
+export function rateEditorMode(value) {
+  const rates = Array.isArray(value)
+    ? value
+    : Array.isArray(value && value.rates)
+      ? value.rates
+      : [];
+  return rates.length > 0 ? 'seasons' : 'flat';
+}
+
+// A fresh base row: all-day, every-day, with the scope's month/date hint. Used
+// for a new season, a gap fill (empty rate) and the flat -> Seasons seed.
+export function baseRateRow(id, rate, months = null, dates = null) {
+  const usable = rateIsUsable(rate);
+  return {
+    id,
+    rate: usable ? String(parseRateValue(rate)) : '',
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '00:00',
+    end: '00:00',
+    months: Array.isArray(months) ? [...months] : months,
+    from: dates && dates.from != null ? dates.from : null,
+    to: dates && dates.to != null ? dates.to : null,
+  };
+}
+
+// Flat -> Seasons: one All-year base at the current flat rate, visible as a
+// season rather than an invisible schedule row.
+export function flatToScheduleRow(id, rate) {
+  return baseRateRow(id, rate, null, null);
+}
+
+// Seasons -> One rate: reuse the single All-year base's price when the plan is
+// exactly that, otherwise keep the stored flat rate. The schedule's other rows
+// are intentionally dropped only after the confirmation.
+export function scheduleToFlatRate(rows, storedRate) {
+  const list = Array.isArray(rows) ? rows.map(normalizeWindow) : [];
+  if (list.length !== 1) return storedRate;
+  const only = list[0];
+  const scope = seasonScope(only);
+  if (isBaseWindow(only) && scope.kind === 'all' && rateIsUsable(only.rate)) {
+    return parseRateValue(only.rate);
+  }
+  return storedRate;
+}
+
+// The date gaps with no season at all, as rows a Fill gaps action can create.
+// A partial gap is a date season; a whole-year gap is the canonical All-year
+// base. The price stays empty so nothing is silently repriced.
+export function uncoveredGapScopes(rows) {
+  return mergeDateRanges(uncoveredDateRanges(rows)).map(([start, end]) => {
+    if (start === 0 && end === ANNUAL_DAYS - 1) {
+      return { months: null, from: null, to: null };
+    }
+    const from = monthDayText(annualMonthDay(start));
+    const to = monthDayText(annualMonthDay(end));
+    return { months: monthsCovering(from, to), from, to };
+  });
+}
+
+// Whether adding a base to this season would collide with a base that already
+// covers part of its dates. A base in another season can price this season's
+// uncovered hours, but two bases on the same date are invalid.
+export function periodHasBaseOverlap(period, rows) {
+  const first = period && period.rows && period.rows[0] && period.rows[0].row;
+  if (!first) return false;
+  const dates = seasonDateSet(rateScope(first));
+  if (dates.length === 0) return false;
+  return (Array.isArray(rows) ? rows : []).some((row) => {
+    if (!isBaseWindow(row)) return false;
+    return intersectDateSets(dates, seasonDateSet(rateScope(row)));
+  });
+}
+
+export function planGapCount(rows) {
+  return mergeDateRanges(uncoveredDateRanges(rows)).length;
+}
+
+// Whether a non-empty plan has any instant with no price. A date outside every
+// scope is uncovered. Inside the covered year, a usable all-day every-day row
+// on every date means every hour has a base; date-specific bases that together
+// cover the year do too. A window-only stretch of dates has no base for the
+// hours it does not cover. These are warnings, not validation blockers.
+export function planHasUnpriced(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) return false;
+  const covered = new Uint8Array(ANNUAL_DAYS);
+  const based = new Uint8Array(ANNUAL_DAYS);
+  for (const row of list) {
+    const ranges = seasonDateSet(rateScope(row));
+    const isBase = isBaseWindow(row);
+    for (const [start, end] of ranges) {
+      covered.fill(1, start, end + 1);
+      if (isBase) based.fill(1, start, end + 1);
+    }
+  }
+  const allDates = covered.every((value) => value === 1);
+  if (!allDates) return true;
+  return !based.every((value) => value === 1);
+}
 
 // Whether two scopes can match the same date. Duplicating a season into its
 // complement is only a clean action while that complement is still free.
@@ -307,7 +423,7 @@ export function scopesOverlap(left, right) {
   return intersectDateSets(seasonDateSet(scopeOf(left)), seasonDateSet(scopeOf(right)));
 }
 
-// The largest uncovered annual range, for seeding a new season rate. Ranges are
+// The largest uncovered annual range, for seeding a new season base. Ranges are
 // leap-ring intervals; the result is an owner-facing MM-DD pair and says whether
 // it is the whole year.
 export function largestDateScope(ranges) {
@@ -475,15 +591,14 @@ export function complementScope(value) {
   return { kind: 'dates', from, to, months: monthsCovering(from, to) };
 }
 
-// A season rate is an ordinary all-day, every-day row: one price for every hour
-// of the season, with no new stored field.
+// The old season-rate name is the base row now. Kept as a compatibility alias
+// for callers/tests that still speak the pre-#76 vocabulary.
 export function isSeasonRateRow(row) {
-  return isAllDayWindow(row) && dayPresetFor(row && row.days) === 'every';
+  return isBaseWindow(row);
 }
 
 export function isSeasonRatePeriod(period) {
-  const entries = (period && period.rows) || [];
-  return entries.length > 0 && entries.every((entry) => isSeasonRateRow(entry.row));
+  return periodRateMode(period) === 'base';
 }
 
 function monthRuns(months) {
@@ -545,7 +660,13 @@ function rateRangeFor(rows) {
 // The price range a plan summary advertises. Invalid rates are not allowed to
 // widen it; the row's own error says what is wrong.
 export function ratePlanRange(rows) {
-  return rateRangeFor(Array.isArray(rows) ? rows : []);
+  const list = Array.isArray(rows) ? rows : [];
+  const range = rateRangeFor(list);
+  if (!range) return null;
+  // Uncovered dates and base-less hours price at 0, so an advertised minimum
+  // above 0 would hide the fact that some instants are free/stale rather than
+  // priced by the plan.
+  return planHasUnpriced(list) ? { ...range, min: 0 } : range;
 }
 
 // The longest contiguous run in a month set, used to give a new season a
@@ -610,7 +731,14 @@ export function ratePeriods(rows) {
   });
   const periods = [...groups.values()].map((period) => {
     const dateText = period.kind === 'dates' ? dateRangeText(period.from, period.to) : '';
-    const seasonRate = isSeasonRatePeriod(period);
+    const baseEntries = period.rows.filter((entry) => isUiBaseRow(entry.row));
+    const base = baseEntries[0] || null;
+    const overrides = period.rows.filter((entry) => !isUiBaseRow(entry.row));
+    // Every row except the one shown in the Base rate block: ordinary overrides
+    // plus any extra malformed/duplicate base rows that still need a control.
+    const windows = period.rows.filter((entry) => !base || entry.index !== base.index);
+    const mode =
+      baseEntries.length === 0 ? 'windows' : period.rows.length === 1 ? 'base' : 'base+windows';
     return {
       ...period,
       // `all` months are represented as null everywhere else in the form.
@@ -620,12 +748,20 @@ export function ratePeriods(rows) {
       // old month-only view renders this same field.
       monthText: period.kind === 'dates' ? dateText : rateMonthsText(period.months, period.kind),
       title:
-        period.kind === 'dates'
-          ? seasonRate
+        period.kind === 'invalid'
+          ? 'Needs attention'
+          : mode === 'base'
             ? 'Season rate'
-            : 'Season'
-          : ratePeriodTitle(period.months, period.kind),
-      seasonRate,
+            : period.kind === 'dates'
+              ? 'Season'
+              : ratePeriodTitle(period.months, period.kind),
+      mode,
+      base,
+      overrides,
+      windows,
+      // The old name is retained for UI/tests that still need "one price for
+      // the whole season"; a base+windows season is not one.
+      seasonRate: mode === 'base',
     };
   });
 
@@ -696,18 +832,17 @@ export function uncoveredMonths(rows) {
 }
 
 // The effective price range a period header should advertise for its
-// representative sample (a month, or the dates of a date season): every window
-// that can apply there (own, inherited and all-year) plus the all-other-times
-// fallback. It answers "what could this season cost", while the window count
-// stays the period's own.
+// representative sample (a month, or the dates of a date season): every base and
+// daily window that can apply there (own, inherited and all-year). An uncovered
+// hour is 0.00, never the stored flat rate; this answers "what could this season
+// cost", while the row count stays the period's own.
 export function periodEffectiveRange(rows, fallbackRate, period, year = new Date().getFullYear()) {
   const dated = Boolean(period && period.kind === 'dates');
   const dates = dated ? representativeDates(period) : [];
   const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
-  // Resolve the representative sample from the whole plan, so a sibling window
-  // that also prices these dates is included. The fallback only appears when
-  // some hour of the sample is genuinely uncovered (an all-day window can cover
-  // the season completely, in which case advertising the fallback would lie).
+  // Resolve the representative sample from the whole plan, so a sibling base or
+  // window that also prices these dates is included. Uncovered hours contribute
+  // 0.00 instead of a stored fallback.
   const week = dated
     ? rateWeekForDates(rows, fallbackRate, dates, year)
     : rateWeek(rows, fallbackRate, month, year);
@@ -975,12 +1110,10 @@ export function rateScopeText(row) {
 // A full name for an error that has to distinguish two rows ("Off-peak Weekdays
 // · 16:00–19:00 · Nov–Feb"). The season is included because that is what
 // decides whether two rows can actually collide; a date season reads as its
-// dates. A season rate is named "Season rate" rather than a price tier, the
-// same name its card and table row carry.
+// dates. A base is named Base rather than a relative price tier, the same name
+// its card and table row carry.
 export function windowLabel(row, windowRates, fallbackRate, { months = true } = {}) {
-  const tier = isSeasonRateRow(row)
-    ? 'Season rate'
-    : rateTierFor(row && row.rate, windowRates, fallbackRate);
+  const tier = isBaseWindow(row) ? 'Base' : rateTierFor(row && row.rate, windowRates, fallbackRate);
   const price = parseRateValue(row && row.rate);
   const head = [tier, Number.isFinite(price) ? String(price) : ''].filter(Boolean).join(' ');
   const summary = rateWindowSummary(row);
@@ -1002,6 +1135,7 @@ export function validateRateEditorRows(rows, fallbackRate) {
   const list = Array.isArray(rows) ? rows : [];
   const rowErrors = base.errors.rows.map((errors) => ({ ...errors }));
   const overlaps = overlappingWindowPairs(list);
+  const bases = list.map((row) => isBaseWindow(row));
   const capped = list.length > MAX_RATE_WINDOWS;
   const general = [];
   // A plan over the cap gets one cap-only message and the cap remedy. The
@@ -1011,7 +1145,14 @@ export function validateRateEditorRows(rows, fallbackRate) {
   if (capped) general.push(RATE_CAP_MESSAGE, RATE_CAP_REMEDY);
   else if (overlaps.length > 0) general.push(rateOverlapMessage(overlaps, list, fallbackRate));
   const valid = rowErrors.every((errors) => Object.keys(errors).length === 0);
-  return { valid: valid && general.length === 0, general, rows: rowErrors, overlaps, capped };
+  return {
+    valid: valid && general.length === 0,
+    general,
+    rows: rowErrors,
+    overlaps,
+    bases,
+    capped,
+  };
 }
 
 // One document-level sentence naming both rows in every collision. Months are
@@ -1031,11 +1172,22 @@ export function rateOverlapMessage(pairs, rows, fallbackRate) {
         : `Window ${index + 1}`;
     const left = label(a);
     const right = label(b);
-    clauses.push(
-      left === right ? `Two windows are identical: “${left}”` : `“${left}” overlaps “${right}”`,
-    );
+    if (isBaseWindow(list[a]) && isBaseWindow(list[b])) {
+      clauses.push(
+        `“${left}” and “${right}” are both base rates and cover some of the same dates. Keep one base per date`,
+      );
+    } else {
+      clauses.push(
+        left === right ? `Two windows are identical: “${left}”` : `“${left}” overlaps “${right}”`,
+      );
+    }
   }
-  return `${clauses.join('; ')}. Change one of them so no moment has two rates.`;
+  const baseOnly = (Array.isArray(pairs) ? pairs : []).every(
+    ([a, b]) => isBaseWindow(list[a]) && isBaseWindow(list[b]),
+  );
+  return baseOnly
+    ? `${clauses.join('; ')}.`
+    : `${clauses.join('; ')}. Change one of them so no moment has two rates.`;
 }
 
 // How many rows the edit has to fix. Counts affected rows (not collision
@@ -1098,20 +1250,25 @@ export function submitFocusTarget({ errors = {}, rateValidation } = {}) {
   const index = rows.findIndex((row) => row && Object.keys(row).length > 0);
   if (index >= 0) {
     const row = rows[index];
+    const isBase = Boolean(rateValidation && rateValidation.bases && rateValidation.bases[index]);
     const focus =
       row.from || row.to
         ? 'dates'
         : row.months
           ? 'months'
           : row.rate
-            ? 'rate'
+            ? isBase
+              ? 'base-rate'
+              : 'rate'
             : row.days
               ? 'days'
               : row.start
                 ? 'start'
                 : row.end
                   ? 'end'
-                  : 'rate';
+                  : isBase
+                    ? 'base-rate'
+                    : 'rate';
     return { kind: 'row', index, focus };
   }
   const overlaps = (rateValidation && rateValidation.overlaps) || [];
@@ -1143,8 +1300,8 @@ export function submitSettingsPlan({ fields, onCommit = () => {} } = {}) {
 }
 
 // A definitive checker answer is withheld while the plan has anything blocking:
-// the invalid row would otherwise be dropped and the fallback claimed for a
-// moment it may actually price. The remedy names the cause: an unpriced row
+// the invalid row would otherwise be dropped and a price claimed for a moment
+// it may actually price. The remedy names the cause: an unpriced row
 // needs a price, not its windows repaired.
 export const CHECK_BLOCKED_MESSAGE = 'Fix the incomplete windows to check this moment.';
 export const CHECK_RATE_MESSAGE = 'Add a rate to check this moment.';
@@ -1260,8 +1417,8 @@ function segmentSignature(segment) {
   const window = segment.window;
   const source = window
     ? [window.id, window.start, window.end, window.rate].join('|')
-    : 'other-times';
-  return [segment.from, segment.to, segment.rate, source].join(';');
+    : segment.source || 'uncovered';
+  return [segment.from, segment.to, segment.rate, segment.source || '', source].join(';');
 }
 
 // Weekdays with an identical complete day partition are one row group. The
@@ -1287,9 +1444,9 @@ export function dayTypesForWeek(week) {
 }
 
 // One period's own layer for a representative sample in its own scope. The table
-// is deliberately not the union: it shows this period's windows and the
-// fallback, and names the sibling periods that also apply in that sample. The
-// checker is the place that resolves the union. For an all-year period the
+// is deliberately not the union: it shows this period's rows, prices an
+// uncovered hour at 0.00, and names the sibling periods that also apply in that
+// sample. The checker is the place that resolves the union. For an all-year period the
 // representative month is January; otherwise it is the first month of the
 // scope; a date period is sampled at its own dates, so the caption can never
 // disagree with the season.
@@ -1304,8 +1461,8 @@ export function periodCoverage(
   const dates = dated ? representativeDates(period) : [];
   const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
   // The table is the effective sample, but every segment keeps its owner: own
-  // rows are the period's windows, sibling rows are named in the band column
-  // instead of being mislabelled as the fallback.
+  // rows are the period's rows, sibling rows are named in the band column
+  // instead of being mislabelled as the base.
   const week = dated
     ? rateWeekForDates(rows, fallbackRate, dates, year)
     : rateWeek(rows, fallbackRate, month, year);
@@ -1323,11 +1480,11 @@ export function periodCoverage(
         ? samples.some((date) => periodAppliesOn(other, date))
         : periodAppliesInMonth(other, month)),
   );
-  // A season rate is one price for every day and hour of the season: it is
+  // A base-only season is one price for every day and hour of the season: it is
   // shown as one Every day type and one 00:00–24:00 row, however short the
   // representative sample is.
   let types = dayTypesForWeek(week);
-  if (period && period.seasonRate && types.length > 0) {
+  if (period && period.mode === 'base' && types.length > 0) {
     types = [{ days: [0, 1, 2, 3, 4, 5, 6], label: 'Every day', segments: types[0].segments }];
   }
   // A one-date season is sampled on one weekday. Printing that weekday ("Mon")
@@ -1365,13 +1522,14 @@ export function periodCoverage(
   };
 }
 
-// The band name for a resolved segment, or "Other times" for the fallback. A
-// season rate is named for what it is: its price tier is an artefact of
-// comparing one season-wide price with the others, not a band the owner chose.
-export function rateSegmentLabel(segment, windowRates, fallbackRate) {
-  if (!segment || !segment.window) return 'Other times';
-  if (isSeasonRateRow(segment.window)) return 'Season rate';
-  return rateTierFor(segment.rate, windowRates, fallbackRate) || 'Window';
+// The band name for a resolved segment. A base is named Base; an hour with no
+// row is Uncovered (0.00), not a fallback. Overrides keep their relative tier
+// only when their season has a base to compare against.
+export function rateSegmentLabel(segment, windowRates, baseRate) {
+  if (!segment || !segment.window) return 'Uncovered';
+  if (segment.source === 'base' || isBaseWindow(segment.window)) return 'Base';
+  if (!rateIsUsable(baseRate)) return 'Window';
+  return rateTierFor(segment.rate, windowRates, baseRate) || 'Window';
 }
 
 // How a wrap reads in a partition: the tail says where it came from and the
@@ -1388,13 +1546,10 @@ export function segmentNote(segment) {
   return `continues to ${window.end} the next day`;
 }
 
-// The exact-date checker: the winning row for one local instant, with the
-// derived band and the row's own name. It reads the same draft array the editor
-// shows, so unsaved edits are checked without a save. `scopeText` is the season
-// in owner language and `seasonRate` says whether the winning row is one
-// all-day, every-day price. `noSeason` separates the two reasons the fallback
-// wins: no season covers the day at all, or a season covers the day but no
-// window covers that hour.
+// The exact-date checker: the winning row for one local instant and why. A base
+// prices the season's ordinary hours, an override wins over it, and both
+// unmatched cases are 0: an uncovered date (no season) or an unpriced hour (a
+// season with neither a base nor a window for that time).
 export function previewRate(rows, fallbackRate, date) {
   const base = parseRateValue(fallbackRate);
   const list = Array.isArray(rows) ? rows : [];
@@ -1403,20 +1558,42 @@ export function previewRate(rows, fallbackRate, date) {
     rates: rows,
   });
   if (!entry) return null;
-  const rates = list.map((row) => row && row.rate);
+  const periods = ratePeriods(list);
+  const winningPeriod = entry.window
+    ? periods.find((period) =>
+        period.rows.some((row) => row.row && row.row.id === entry.window.id),
+      ) || null
+    : null;
+  const baseRate = winningPeriod ? periodBaseRate(winningPeriod) : null;
+  const referenceRates = winningPeriod
+    ? winningPeriod.rows.map((row) => row.row && row.row.rate)
+    : list.map((row) => row && row.rate);
   const scope = entry.window ? rateScope(entry.window) : null;
-  const dateText = scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '';
+  const tier =
+    entry.source === 'base'
+      ? 'Base'
+      : entry.source === 'window'
+        ? baseRate != null
+          ? rateTierFor(entry.window.rate, referenceRates, baseRate) || 'Window'
+          : 'Window'
+        : '';
   return {
     rate: entry.rate,
     window: entry.window,
-    fallback: entry.window == null,
-    noSeason: entry.window == null && !list.some((row) => scopeMatches(rateScope(row), date)),
-    tier: entry.window ? rateTierFor(entry.window.rate, rates, base) : '',
+    source: entry.source,
+    uncoveredDate: Boolean(entry.uncoveredDate),
+    unpricedHour: Boolean(entry.unpricedHour),
+    // Kept for older callers; new copy keys off `source`.
+    fallback: entry.source === 'flat',
+    noSeason: Boolean(entry.uncoveredDate),
+    tier,
+    baseRate,
     summary: entry.window ? rateWindowSummary(entry.window) : '',
     monthsText: entry.window ? rateMonthsText(entry.window.months) : '',
-    dateText,
+    dateText:
+      entry.window && scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '',
     scopeText: entry.window ? rateScopeText(entry.window) : '',
-    seasonRate: entry.window ? isSeasonRateRow(entry.window) : false,
+    seasonRate: entry.source === 'base',
   };
 }
 

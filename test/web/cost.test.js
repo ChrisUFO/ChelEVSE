@@ -24,12 +24,21 @@ function date(year, month, day, hours = 0, minutes = 0) {
 
 const FLAT = { rate: 0.245, currency: 'GBP' };
 
-// A nightly off-peak window (00:00–06:00) at 0.10 and a 0.30 fallback.
+// A nightly off-peak window (00:00–06:00) at 0.10 over a visible all-day base
+// at 0.30. The stored rate is no longer an invisible fallback.
 function nightly(overrides = {}) {
   return {
     rate: 0.3,
     currency: 'GBP',
     rates: [
+      {
+        id: 'base',
+        rate: 0.3,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: null,
+      },
       {
         id: 'night',
         rate: 0.1,
@@ -287,21 +296,23 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
       },
     ],
   };
-  // The day before the season pays the fallback; the first day pays the season.
+  // The day before the season is outside every season and costs 0; the first
+  // day pays the season.
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 14, 12, 0), date(2026, 6, 14, 13, 0), 1000), summer),
-    'GBP 0.30',
+    'GBP 0.00',
   );
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 15, 12, 0), date(2026, 6, 15, 13, 0), 1000), summer),
     'GBP 0.20',
   );
-  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge.
+  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge into
+  // the uncovered 0.00 hour.
   assert.equal(
     sessionCostLabel(session(date(2026, 9, 15, 23, 0), date(2026, 9, 16, 1, 0), 2000), summer),
-    'GBP 0.50',
+    'GBP 0.20',
   );
   // The season rate prices any hour, live included.
   assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.30');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.00');
 });

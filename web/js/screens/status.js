@@ -16,7 +16,7 @@ import {
   stateFor,
   toNumber,
 } from '../format.js';
-import { costSettings, statusCostLabel } from '../cost.js';
+import { costSettings, statusCostLabel, statusCostUncovered } from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -103,7 +103,16 @@ function renderCost() {
   const cost = statusCostLabel(status, settings);
   const el = $('session-cost');
   el.hidden = !cost;
-  setText(el, cost || '');
+  el.replaceChildren();
+  if (cost) {
+    el.append(document.createTextNode(cost));
+    if (statusCostUncovered(status, settings)) {
+      const marker = document.createElement('span');
+      marker.className = 'cost-unpriced';
+      marker.textContent = ' · includes unpriced time';
+      el.append(marker);
+    }
+  }
   // The tile is half-width: the cost replaces the caption rather than wrapping.
   $('session-sub').hidden = Boolean(cost);
 }

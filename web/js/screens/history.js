@@ -18,6 +18,7 @@ import {
   sumSeries,
 } from '../history.js';
 import { aggregateCostLabel, costSettings, hasRateSchedule, sessionCostLabel } from '../cost.js';
+import { planHasUnpriced } from '../settings.js';
 import { fmtK, formatDuration, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -83,7 +84,14 @@ function setCostNote(visible) {
   if (note) note.hidden = !visible;
 }
 
+function renderPlanBanner() {
+  const banner = $('history-plan-banner');
+  if (!banner) return;
+  banner.hidden = !(hasRateSchedule(settings) && planHasUnpriced(settings && settings.rates));
+}
+
 function renderSummary() {
+  renderPlanBanner();
   if (!series.length) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
@@ -536,6 +544,7 @@ export function activateHistory() {
 // decides that the aggregate cost is hidden.
 export function showHistorySettings(data) {
   settings = costSettings(data);
+  renderPlanBanner();
   if (series.length) {
     const hadFocus = $('history-chart').contains(document.activeElement);
     renderHistory();
@@ -553,6 +562,8 @@ export function resetHistory() {
   loaded = false;
   loading = false;
   settings = null;
+  const planBanner = $('history-plan-banner');
+  if (planBanner) planBanner.hidden = true;
   series = [];
   selectedId = null;
   todayId = null;
