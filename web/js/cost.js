@@ -11,10 +11,16 @@
 //   - live session   [updated_at - elapsed, updated_at] of the status snapshot
 //   - finished session its stored started_at/ended_at
 //
-// Sessions store only a total `wh`, so `costForInterval` pro-rates it uniformly
-// across the span (see rates.js) — an approximation the UI inherits. For a
-// merged pause-then-resume record the stored span also covers the idle gap, so
-// the pro-rating is over the plug-in span, not the charging intervals.
+// A finished session carries `intervals: [{started_at, ended_at, wh}]`, one per
+// contiguous charging block (the bridge writes them since #57). Those are priced
+// one interval at a time, so a pause over an expensive window no longer dilutes
+// the energy that was actually drawn off-peak. A session without intervals —
+// everything recorded before #57, and a restart that never measured growth —
+// falls back to the aggregate: `costForInterval` pro-rates the stored `wh`
+// uniformly across started_at…ended_at (see rates.js), an approximation the UI
+// inherits. Either way the rule is all-or-nothing and hide-not-misprice: a
+// malformed interval list falls back, and a *valid* list with one unpriceable
+// interval hides the figure rather than pro-rating over a tariff it cannot read.
 //
 // A day's history document stores one kWh total, not the shape of the intervals
 // behind it, so a daily/period cost cannot be re-costed under a schedule.
@@ -31,8 +37,10 @@
 import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
 import {
   costForInterval,
+  costForIntervals,
   costForSession,
   intervalUncovered,
+  intervalUsable,
   normalizeRateSchedule,
 } from './rates.js';
 
@@ -116,12 +124,60 @@ export function statusCostUncovered(status, settings) {
   return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
 }
 
-// Finished session cost: its own stored interval under the schedule, or the flat
-// rate. A session with unusable endpoints hides (costForSession returns null).
+// ---------- interval reconciliation ----------
+
+// A session can carry well-shaped intervals whose energy does not add up to its
+// aggregate: a mid-charge bridge restart seeds the counter baseline, so the
+// energy drawn before the restart is in `wh` but in no interval (short); an
+// in-block counter reset leaves the intervals summing above the reset aggregate
+// (long). Pricing on either list moves real money, so the label only takes the
+// interval path when the two agree within the tolerance below.
+//
+// The one legitimate divergence is the session's first charging tick, which
+// supplies the baseline only. That costs at most one observation gap of energy:
+// the bridge's widest gap is a 60 s MQTT reconcile, and at the charger's 48 A
+// ceiling (~11.5 kW) it is 11.5 kW × 60 s ≈ 192 Wh. A 250 Wh floor covers that
+// with margin (2.5× the 10 s HTTP poll's 32 Wh) and keeps a small session's
+// single-poll loss inside the rule; 2% of `wh` then scales it with the session
+// (600 Wh at 30 kWh) so ordinary counter jitter never forces a fallback.
+// Everything larger is a defect, not jitter: the restart orphan in this PR's
+// own fixture is 4 kWh and the reset overshoot 1.9 kWh.
+const INTERVAL_ENERGY_FLOOR_WH = 250;
+const INTERVAL_ENERGY_SHARE = 0.02;
+
+function intervalEnergyTolerance(wh) {
+  return Math.max(INTERVAL_ENERGY_FLOOR_WH, INTERVAL_ENERGY_SHARE * wh);
+}
+
+// Whether a session's stored intervals can be priced as they are: a non-empty
+// list of usable intervals that also accounts for the session's energy. The
+// second argument is the session's own `wh`; anything else (absent, not a list,
+// one bad entry, too little or too much energy, an unusable aggregate) is the
+// legacy path, so the whole fallback rule is testable here on its own.
+export function sessionIntervalsValid(intervals, wh) {
+  if (!Array.isArray(intervals) || intervals.length === 0) return false;
+  if (!intervals.every(intervalUsable)) return false;
+  const aggregate = toNumber(wh);
+  // An unusable aggregate cannot reconcile anything: keep the pre-interval
+  // behaviour for such a document (costForSession, which hides a bad `wh`)
+  // instead of pricing a list that nothing can check.
+  if (!Number.isFinite(aggregate) || aggregate <= 0) return false;
+  const total = intervals.reduce((sum, interval) => sum + Number(interval.wh), 0);
+  return Math.abs(total - aggregate) <= intervalEnergyTolerance(aggregate);
+}
+
+// Finished session cost: its charging intervals when they are usable *and* add
+// up to the session's energy, else its own stored span, else the flat rate. A
+// session with unusable endpoints and no intervals hides (costForSession
+// returns null). Both directions of a divergence fall back — an under-priced or
+// over-priced interval sum is never shown.
 export function sessionCostLabel(session, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return flatCostLabel(session && session.wh, normalized);
-  const cost = costForSession(session, normalized);
+  const intervals = session && session.intervals;
+  const cost = sessionIntervalsValid(intervals, session && session.wh)
+    ? costForIntervals(intervals, normalized)
+    : costForSession(session, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 

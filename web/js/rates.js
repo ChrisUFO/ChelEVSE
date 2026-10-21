@@ -824,12 +824,14 @@ function intervalBoundaries(startMs, endMs, schedule) {
 
 // Cost for an energy amount over one interval.
 //
-// Sessions store only `wh` plus their endpoints, so the energy an interval used
-// is assumed to have been drawn at a constant power: each slice between rate
-// boundaries gets `wh × slice duration / interval duration`. This is an
-// approximation (a charger that ramps or pauses inside a slice is mispriced by
-// no more than the rate difference across that slice), and it is documented
-// because the stored data cannot do better.
+// The stored value is one `wh` for the span, so the energy is assumed to have
+// been drawn at a constant power: each slice between rate boundaries gets
+// `wh × slice duration / interval duration`. This is an approximation (a charger
+// that ramps or pauses inside a slice is mispriced by no more than the rate
+// difference across that slice), and it is documented because a document without
+// charging intervals cannot do better. A session that carries `intervals` is
+// priced per interval by `costForIntervals` instead, which leaves only the
+// interval-level assumption (constant power inside one contiguous block).
 //
 // Returns null when the interval or rate information is unusable — callers hide
 // the cost line instead of showing a made-up number.
@@ -863,4 +865,38 @@ export function costForInterval(wh, start, end, schedule) {
 export function costForSession(session, schedule) {
   if (!session || typeof session !== 'object') return null;
   return costForInterval(session.wh, session.started_at, session.ended_at, schedule);
+}
+
+// Whether one stored charging interval carries the shape a cost needs: a
+// positive energy and two usable endpoints that span time. A zero-wh interval,
+// a hand-edited timestamp or a reversed pair is unusable, not free.
+export function intervalUsable(interval) {
+  if (!interval || typeof interval !== 'object' || Array.isArray(interval)) return false;
+  const wh = interval.wh;
+  if (typeof wh === 'boolean' || wh == null) return false;
+  if (typeof wh === 'string' && wh.trim() === '') return false;
+  const energy = Number(wh);
+  if (!Number.isFinite(energy) || energy <= 0) return false;
+  const startMs = toMillis(interval.started_at);
+  const endMs = toMillis(interval.ended_at);
+  return startMs != null && endMs != null && endMs > startMs;
+}
+
+// Cost for a session's charging intervals: one slice per interval, so energy
+// drawn in a cheap window stays cheap even when a long idle gap sits inside the
+// plug-in span. All-or-nothing: if any interval is unusable or any of its slices
+// has no rate, the whole figure is null and the caller hides it — a partial sum
+// would understate the cost of a session that did draw the energy. An empty list
+// is not a price of zero either; callers fall back to the aggregate.
+export function costForIntervals(intervals, schedule) {
+  if (!Array.isArray(intervals) || intervals.length === 0) return null;
+  const normalized = normalizeRateSchedule(schedule);
+  let cost = 0;
+  for (const interval of intervals) {
+    if (!intervalUsable(interval)) return null;
+    const part = costForInterval(interval.wh, interval.started_at, interval.ended_at, normalized);
+    if (part == null) return null;
+    cost += part;
+  }
+  return cost;
 }
