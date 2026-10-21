@@ -17,6 +17,7 @@ const SHELL = [
   './',
   './index.html',
   './app.js',
+  './js/boot.js',
   './js/firebase.js',
   './js/auth.js',
   './js/store.js',

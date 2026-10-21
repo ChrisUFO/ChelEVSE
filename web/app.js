@@ -10,6 +10,7 @@ import {
   signOutUser,
   subscribeAuth,
 } from './js/auth.js';
+import { createBootGuard } from './js/boot.js';
 import { startStore, stopStore } from './js/store.js';
 import { $, initNetwork, initTabbar, routeFor, setCached, setText } from './js/ui.js';
 import { createPushDeduper, notificationFromPush } from './js/push.js';
@@ -67,14 +68,9 @@ const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 let activeUser = null;
 let currentScreen = 'booting';
 const BOOT_TIMEOUT_MS = 12000;
-let bootTimer = null;
-
-function clearBootTimeout() {
-  if (bootTimer !== null) {
-    clearTimeout(bootTimer);
-    bootTimer = null;
-  }
-}
+// Created by main() so boot owns the timer start; showScreen stops it on every
+// exit from the boot screen.
+let bootGuard = null;
 
 function wireBootRetry() {
   const retry = $('boot-retry');
@@ -84,7 +80,7 @@ function wireBootRetry() {
 function showScreen(id) {
   const changed = currentScreen !== id;
   currentScreen = id;
-  if (id !== 'booting') clearBootTimeout();
+  if (id !== 'booting') bootGuard?.clear();
   for (const name of SCREENS) $(name).hidden = name !== id;
   return changed;
 }
@@ -93,6 +89,7 @@ function bootFail(title, body) {
   setText($('boot-title'), title);
   setText($('boot-body'), body);
   showScreen('boot-error');
+  $('boot-title').focus({ preventScroll: true });
 }
 
 // If the redirect fallback never navigates (installed PWAs and some in-app
@@ -339,13 +336,16 @@ function wireUi() {
 
 async function main() {
   wireBootRetry();
-  bootTimer = setTimeout(() => {
-    if (currentScreen !== 'booting') return;
-    bootFail(
-      'Still starting…',
-      'The app could not finish starting. Check your connection and reload this page.',
-    );
-  }, BOOT_TIMEOUT_MS);
+  bootGuard = createBootGuard({
+    timeoutMs: BOOT_TIMEOUT_MS,
+    isBooting: () => currentScreen === 'booting',
+    onTimeout: () =>
+      bootFail(
+        'Still starting…',
+        'The app could not finish starting. Check your connection and reload this page.',
+      ),
+  });
+  bootGuard.arm();
   try {
     await initFirebase();
   } catch (err) {
@@ -385,7 +385,8 @@ async function main() {
   if (redirectError) setText($('signin-error'), redirectError);
 }
 
-main().catch(() => {
+main().catch((err) => {
+  console.error('ChelEVSE failed to start', err);
   if (currentScreen === 'booting') {
     bootFail(
       'Could not start',
