@@ -239,18 +239,11 @@ export async function readScheduleBaseline() {
   }
 }
 
-// The daily history range: zero-padded day ids sort lexicographically in
-// calendar order, so an inclusive documentId() range is a date range.
-export function historyBounds(ids) {
-  const list = Array.isArray(ids) ? ids : [];
-  if (!list.length) return null;
-  return { startId: list[0], endId: list[list.length - 1] };
-}
-
-// History is a one-shot read: daily docs use their date as the document id.
-// The SDK resolves an offline read with cached docs (often empty) instead of
-// rejecting, so `fromCache` travels with the result: the screen must not read a
-// cached empty range as "no history".
+// History is a one-shot read: daily docs use their date as the document id, and
+// zero-padded day ids sort lexicographically in calendar order, so an inclusive
+// documentId() range is a date range. The SDK resolves an offline read with
+// cached docs (often empty) instead of rejecting, so `fromCache` travels with
+// the result: the screen must not read a cached empty range as "no history".
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
     query(
