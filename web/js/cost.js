@@ -11,11 +11,16 @@
 //   - live session   [updated_at - elapsed, updated_at] of the status snapshot
 //   - finished session its stored started_at/ended_at
 //
-// Sessions store only a total `wh`, so `costForInterval` pro-rates it uniformly
-// across the span (see rates.js) — an approximation the UI inherits. For a
-// merged pause-then-resume record the stored span also covers the idle gap, so
-// the pro-rating is over the plug-in span, not the charging intervals.
-//
+// A finished session carries `intervals: [{started_at, ended_at, wh}]`, one per
+// contiguous charging block (the bridge writes them since #57). Those are priced
+// one interval at a time, so a pause over an expensive window no longer dilutes
+// the energy that was actually drawn off-peak. A session without intervals —
+// everything recorded before #57, and a restart that never measured growth —
+// falls back to the aggregate: `costForInterval` pro-rates the stored `wh`
+// uniformly across started_at…ended_at (see rates.js), an approximation the UI
+// inherits. Either way the rule is all-or-nothing and hide-not-misprice: a
+// malformed interval list falls back, and a *valid* list with one unpriceable
+// interval hides the figure rather than pro-rating over a tariff it cannot read.
 // A day's history document stores one kWh total, not the shape of the intervals
 // behind it, so a daily/period cost cannot be re-costed under a schedule.
 // `aggregateCostLabel` therefore returns null whenever a schedule exists and the
@@ -31,8 +36,10 @@
 import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
 import {
   costForInterval,
+  costForIntervals,
   costForSession,
   intervalUncovered,
+  intervalUsable,
   normalizeRateSchedule,
 } from './rates.js';
 
@@ -116,12 +123,23 @@ export function statusCostUncovered(status, settings) {
   return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
 }
 
-// Finished session cost: its own stored interval under the schedule, or the flat
-// rate. A session with unusable endpoints hides (costForSession returns null).
+// Whether a session's stored intervals can be priced as they are: a non-empty
+// list of usable intervals. Anything else (absent, not a list, one bad entry)
+// is the legacy path, so the fallback rule is testable on its own.
+export function sessionIntervalsValid(intervals) {
+  return Array.isArray(intervals) && intervals.length > 0 && intervals.every(intervalUsable);
+}
+
+// Finished session cost: its charging intervals when it has usable ones, else
+// its own stored span, else the flat rate. A session with unusable endpoints and
+// no intervals hides (costForSession returns null).
 export function sessionCostLabel(session, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return flatCostLabel(session && session.wh, normalized);
-  const cost = costForSession(session, normalized);
+  const intervals = session && session.intervals;
+  const cost = sessionIntervalsValid(intervals)
+    ? costForIntervals(intervals, normalized)
+    : costForSession(session, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
