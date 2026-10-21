@@ -9,8 +9,10 @@ import assert from 'node:assert/strict';
 import {
   MAX_RATE_WINDOWS,
   costForInterval,
+  costForIntervals,
   costForSession,
   intervalUncovered,
+  intervalUsable,
   isBaseWindow,
   intersectDateSets,
   lastDayOfMonth,
@@ -611,6 +613,122 @@ test('costForSession reads a sessions document', () => {
   close(costForSession(session, s), 0.4, 'session');
   assert.equal(costForSession(null, s), null);
   assert.equal(costForSession({ wh: 2000, started_at: date(2026, 10, 19, 21, 0) }, s), null);
+});
+
+// ---------- charging intervals ----------
+
+test('costForIntervals sums one price per charging interval', () => {
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '06:00' })], 0.3);
+  const intervals = [
+    { started_at: date(2026, 10, 19, 18, 0), ended_at: date(2026, 10, 19, 19, 0), wh: 2000 },
+    { started_at: date(2026, 10, 19, 23, 0), ended_at: date(2026, 10, 20, 0, 0), wh: 2000 },
+  ];
+  // 2 kWh at the 0.3 fallback plus 2 kWh in the 0.1 window — no dilution by the
+  // idle hours between them.
+  close(costForIntervals(intervals, s), 0.8, 'two intervals');
+  // One interval is the plain interval price.
+  close(
+    costForIntervals([intervals[1]], s),
+    costForInterval(2000, intervals[1].started_at, intervals[1].ended_at, s),
+    'single',
+  );
+});
+
+test('costForIntervals splits an interval on a window edge', () => {
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '06:00' })], 0.3);
+  // 05:00–07:00: half the energy off-peak, half at the fallback.
+  const crossing = {
+    started_at: date(2026, 10, 19, 5, 0),
+    ended_at: date(2026, 10, 19, 7, 0),
+    wh: 4000,
+  };
+  close(costForIntervals([crossing], s), 0.8, 'window edge');
+});
+
+test('costForIntervals respects the spring-forward and fall-back clocks', () => {
+  const spring = withBase([windowRow({ rate: 0.1, start: '00:00', end: '02:00' })], 0.3);
+  // 2026-03-08 01:00 → 04:00 is two real hours, one of them in the window.
+  close(
+    costForIntervals(
+      [{ started_at: date(2026, 3, 8, 1, 0), ended_at: date(2026, 3, 8, 4, 0), wh: 2000 }],
+      spring,
+    ),
+    0.4,
+    'spring forward',
+  );
+  const autumn = withBase([windowRow({ rate: 0.1, start: '01:00', end: '02:00' })], 0.3);
+  // 2026-11-01 00:00 → 03:00 is four real hours: 1 + 2 in the window, 1 out.
+  close(
+    costForIntervals(
+      [{ started_at: date(2026, 11, 1, 0, 0), ended_at: date(2026, 11, 1, 3, 0), wh: 4000 }],
+      autumn,
+    ),
+    0.8,
+    'fall back',
+  );
+});
+
+test('costForIntervals is all-or-nothing', () => {
+  const s = withBase([windowRow({ rate: 0.1, start: '22:00', end: '06:00' })], 0.3);
+  const good = {
+    started_at: date(2026, 10, 19, 23, 0),
+    ended_at: date(2026, 10, 20, 0, 0),
+    wh: 1000,
+  };
+  // Nothing to price is not a price of zero.
+  assert.equal(costForIntervals([], s), null);
+  assert.equal(costForIntervals(null, s), null);
+  assert.equal(costForIntervals({ 0: good }, s), null);
+  // One unusable entry hides the whole figure; a partial sum would understate it.
+  const unusable = [
+    { ...good, wh: 0 },
+    { ...good, wh: -5 },
+    { ...good, wh: 'x' },
+    { ...good, wh: null },
+    { ...good, ended_at: null },
+    { ...good, ended_at: good.started_at },
+    { ...good, started_at: date(2026, 10, 20, 1, 0) },
+    null,
+    'junk',
+    [good],
+  ];
+  for (const entry of unusable) {
+    assert.equal(costForIntervals([good, entry], s), null, JSON.stringify(entry));
+  }
+  // An unpriceable slice (no flat rate, no schedule) hides it too.
+  assert.equal(costForIntervals([good], { rates: [] }), null);
+  assert.equal(costForIntervals([good], { rate: null }), null);
+  // A non-empty schedule prices an unmatched slice at 0, exactly as before.
+  assert.equal(
+    costForIntervals([good], { rates: [windowRow({ start: '22:00', end: '23:00' })] }),
+    0,
+  );
+});
+
+test('intervalUsable accepts the shapes the bridge and Firestore produce', () => {
+  const start = date(2026, 10, 19, 22, 0);
+  const end = date(2026, 10, 19, 23, 0);
+  assert.equal(intervalUsable({ started_at: start, ended_at: end, wh: 1000 }), true, 'Date');
+  assert.equal(
+    intervalUsable({ started_at: start.getTime(), ended_at: end.getTime(), wh: '1000' }),
+    true,
+    'milliseconds and numeric text',
+  );
+  assert.equal(
+    intervalUsable({
+      started_at: { toMillis: () => start.getTime() },
+      ended_at: { toDate: () => end },
+      wh: 1000,
+    }),
+    true,
+    'Firestore timestamp',
+  );
+  assert.equal(intervalUsable({ started_at: start, ended_at: end, wh: 0 }), false);
+  assert.equal(intervalUsable({ started_at: start, ended_at: end }), false);
+  assert.equal(intervalUsable({ started_at: start, ended_at: end, wh: true }), false);
+  assert.equal(intervalUsable({ started_at: end, ended_at: start, wh: 1000 }), false);
+  assert.equal(intervalUsable([]), false);
+  assert.equal(intervalUsable(null), false);
 });
 
 // ---------- base and override model ----------

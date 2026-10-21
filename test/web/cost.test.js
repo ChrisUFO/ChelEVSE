@@ -11,6 +11,7 @@ import {
   costSettings,
   liveCostLabel,
   sessionCostLabel,
+  sessionIntervalsValid,
   statusCostLabel,
   statusCostUncovered,
 } from '../../web/js/cost.js';
@@ -316,6 +317,108 @@ test('a December window prices the early hours of 1 January', () => {
   // A day later the window no longer applies and the fallback prices the hour.
   const later = session(date(2026, 1, 1, 23, 0), date(2026, 1, 2, 1, 0), 2000);
   assert.equal(sessionCostLabel(later, december), 'GBP 0.60');
+});
+
+// ---------- charging intervals ----------
+
+// A paused plug-in: an evening peak hour, an idle night, then an off-peak top-up.
+// Aggregate: 18:00 → 06:00 over 5 kWh, so uniform pro-rating spreads the energy
+// across the idle hours — half of it into a cheap window it was never drawn in —
+// and understates the true cost.
+function pausedSession(overrides = {}) {
+  return {
+    wh: 5000,
+    elapsed: 12 * 3600,
+    started_at: date(2026, 1, 5, 18, 0),
+    ended_at: date(2026, 1, 6, 6, 0),
+    intervals: [
+      {
+        started_at: date(2026, 1, 5, 18, 0),
+        ended_at: date(2026, 1, 5, 19, 0),
+        wh: 3000,
+      },
+      {
+        started_at: date(2026, 1, 6, 3, 0),
+        ended_at: date(2026, 1, 6, 4, 0),
+        wh: 2000,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+test('a paused session is priced per interval, not pro-rated over the plug-in', () => {
+  const item = pausedSession();
+  // 3 kWh at the 0.30 fallback plus 2 kWh in the 0.10 window.
+  assert.equal(sessionCostLabel(item, nightly()), 'GBP 1.10');
+  // The aggregate path is what the same document costs without intervals: 2.5
+  // kWh at each rate, which is 0.10 less because the peak hour carried most of
+  // the energy. The two figures must not agree, or the fixture proves nothing.
+  const legacy = { ...item };
+  delete legacy.intervals;
+  assert.equal(sessionCostLabel(legacy, nightly()), 'GBP 1.00');
+  // Flat configs ignore intervals entirely, as before.
+  assert.equal(sessionCostLabel(item, FLAT), 'GBP 1.23');
+});
+
+test('a single interval prices exactly like the aggregate path', () => {
+  const aggregate = session(date(2026, 1, 5, 5, 0), date(2026, 1, 5, 7, 0), 4000);
+  const withInterval = {
+    ...aggregate,
+    intervals: [{ started_at: aggregate.started_at, ended_at: aggregate.ended_at, wh: 4000 }],
+  };
+  assert.equal(sessionCostLabel(withInterval, nightly()), sessionCostLabel(aggregate, nightly()));
+  assert.equal(sessionCostLabel(withInterval, nightly()), 'GBP 0.80');
+});
+
+test('absent, empty or malformed intervals fall back byte-identically', () => {
+  const item = session(date(2026, 1, 5, 5, 0), date(2026, 1, 5, 7, 0), 4000);
+  const expected = sessionCostLabel(item, nightly());
+  const malformed = [
+    [],
+    null,
+    'intervals',
+    42,
+    {},
+    [null],
+    [{}],
+    [{ started_at: item.started_at, ended_at: item.ended_at }],
+    [{ started_at: item.started_at, ended_at: item.ended_at, wh: 0 }],
+    [{ started_at: item.started_at, ended_at: item.ended_at, wh: -1 }],
+    [{ started_at: item.started_at, ended_at: item.ended_at, wh: 'x' }],
+    [{ started_at: null, ended_at: item.ended_at, wh: 1000 }],
+    [{ started_at: item.ended_at, ended_at: item.started_at, wh: 1000 }],
+    // One good interval does not rescue a bad one: the list is unusable.
+    [
+      { started_at: item.started_at, ended_at: item.ended_at, wh: 4000 },
+      { started_at: item.started_at, ended_at: item.started_at, wh: 10 },
+    ],
+  ];
+  for (const intervals of malformed) {
+    assert.equal(
+      sessionCostLabel({ ...item, intervals }, nightly()),
+      expected,
+      JSON.stringify(intervals),
+    );
+  }
+});
+
+test('sessionIntervalsValid is the fallback rule on its own', () => {
+  const start = date(2026, 1, 5, 5, 0);
+  const end = date(2026, 1, 5, 6, 0);
+  assert.equal(sessionIntervalsValid([{ started_at: start, ended_at: end, wh: 1000 }]), true);
+  assert.equal(sessionIntervalsValid([]), false);
+  assert.equal(sessionIntervalsValid(undefined), false);
+  assert.equal(sessionIntervalsValid(null), false);
+  assert.equal(sessionIntervalsValid('x'), false);
+  assert.equal(sessionIntervalsValid([{ started_at: start, ended_at: end, wh: 0 }]), false);
+  assert.equal(
+    sessionIntervalsValid([
+      { started_at: start, ended_at: end, wh: 1000 },
+      { started_at: end, ended_at: end, wh: 1000 },
+    ]),
+    false,
+  );
 });
 
 // ---------- aggregate ----------
