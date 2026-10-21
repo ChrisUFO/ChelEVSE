@@ -20,6 +20,7 @@ import {
   complementScope,
   copyPeriodRows,
   dateInputValue,
+  dateRangeHint,
   dateRangeText,
   dateSetText,
   dayPresetFor,
@@ -31,12 +32,18 @@ import {
   isAllDayWindow,
   isSeasonRatePeriod,
   isSeasonRateRow,
+  largestDateScope,
   mergeDateRanges,
   minutesToClock,
+  monthScopeBounds,
   normalizeSettings,
   parseLocalDateTime,
   periodCoverage,
+  periodDateBounds,
+  periodDateSeed,
   periodEffectiveRange,
+  periodHasDates,
+  periodRateMode,
   previewBlocker,
   planProblemText,
   previewRate,
@@ -58,6 +65,7 @@ import {
   reconcileSettingsSave,
   sameSettingsInput,
   saveButtonState,
+  scopesOverlap,
   segmentNote,
   settingsDraftMatches,
   settingsFields,
@@ -1264,6 +1272,14 @@ test('coverage is the effective week for a month, with owners and named siblings
     siblingNote({ kind: 'months', title: 'Custom months', monthText: 'Jan, Jun' }),
     'Jan, Jun windows also apply here.',
   );
+  assert.equal(
+    siblingNote({ kind: 'dates', title: 'Season', monthText: 'Jun 15–Sep 15' }),
+    'Season Jun 15–Sep 15 also applies here.',
+  );
+  assert.equal(
+    siblingNote({ kind: 'dates', title: 'Season rate', monthText: 'Jun 15–Sep 15' }),
+    'Season rate Jun 15–Sep 15 also applies here.',
+  );
 
   const summerCoverage = periodCoverage(rows, 0.31, summer, periods, 2026);
   assert.equal(summerCoverage.month, 3);
@@ -1468,6 +1484,7 @@ function cardStub() {
     node: { scrollIntoView: () => calls.push('reveal-row') },
     periodCard: {
       allYear: { focus: focus('months') },
+      dateFocus: { focus: focus('dates') },
       node: { scrollIntoView: () => calls.push('reveal-period') },
     },
     rateInput: { focus: focus('rate') },
@@ -2034,6 +2051,75 @@ test('the checker names a date season and recognises a season rate', () => {
   assert.equal(tail.scopeText, 'Jun 15–Sep 15');
 });
 
+test('the date editor derives its mode, seed, and disabled reason from the rows', () => {
+  const summer = ratePeriods([rateRowFields(summerDates)])[0];
+  assert.equal(periodHasDates(summer), true);
+  assert.deepEqual(periodDateBounds(summer), { from: '06-15', to: '09-15' });
+  assert.deepEqual(periodDateSeed(summer), { from: '06-15', to: '09-15' });
+
+  const allYear = ratePeriods([rateRowFields(nightEveryDay)])[0];
+  assert.equal(periodHasDates(allYear), false);
+  assert.deepEqual(periodDateSeed(allYear, new Date(2026, 9, 21)), {
+    from: '10-01',
+    to: '10-31',
+  });
+  assert.deepEqual(periodDateSeed(allYear, new Date(2026, 1, 2)), {
+    from: '02-01',
+    to: '02-29',
+  });
+
+  const winter = ratePeriods([rateRowFields({ ...nightEveryDay, months: [11, 12, 1, 2] })])[0];
+  assert.equal(monthScopeBounds([11, 12, 1, 2]).fromMonth, 11);
+  assert.deepEqual(periodDateSeed(winter), { from: '11-01', to: '02-29' });
+  const february = ratePeriods([rateRowFields({ ...nightEveryDay, months: [2] })])[0];
+  assert.deepEqual(periodDateSeed(february), { from: '02-01', to: '02-29' });
+
+  const split = ratePeriods([rateRowFields({ ...nightEveryDay, months: [1, 6] })])[0];
+  assert.equal(monthScopeBounds([1, 6]), null);
+  assert.equal(periodDateSeed(split), null);
+  const malformedMonths = ratePeriods([rateRowFields({ ...nightEveryDay, months: 3 })])[0];
+  assert.equal(periodDateSeed(malformedMonths), null);
+
+  const brokenDates = ratePeriods([
+    rateRowFields({ ...summerDates, from: '02-30', to: '09-15' }),
+  ])[0];
+  assert.equal(periodHasDates(brokenDates), true);
+  assert.deepEqual(periodDateBounds(brokenDates), { from: '02-30', to: '09-15' });
+  assert.deepEqual(periodDateSeed(brokenDates), { from: '02-30', to: '09-15' });
+
+  assert.equal(dateRangeHint('06-20', '06-10'), 'This range wraps the year.');
+  assert.equal(dateRangeHint('11-01', '02-29'), 'This range wraps the year.');
+  assert.equal(dateRangeHint('06-15', '09-15'), '');
+  assert.equal(dateRangeHint('02-30', '09-15'), '');
+
+  assert.equal(periodRateMode(ratePeriods([rateRowFields(summerDates)])[0]), 'season');
+  assert.equal(periodRateMode(ratePeriods([rateRowFields(winterDates)])[0]), 'tou');
+  const mixed = ratePeriods([
+    rateRowFields(summerDates),
+    rateRowFields({ ...summerDates, id: 'peak', start: '16:00', end: '19:00' }),
+  ])[0];
+  assert.equal(periodRateMode(mixed), 'mixed');
+
+  assert.deepEqual(largestDateScope([[0, 365]]), {
+    from: '01-01',
+    to: '12-31',
+    fullYear: true,
+  });
+  assert.deepEqual(
+    largestDateScope([
+      [100, 120],
+      [180, 200],
+      [0, 10],
+    ]),
+    {
+      from: '04-10',
+      to: '04-30',
+      fullYear: false,
+    },
+  );
+  assert.equal(largestDateScope([]), null);
+});
+
 test('a date problem focuses the season dates; the old month focus is unchanged', () => {
   const dateErrors = validateRateEditorRows([{ ...rateRowFields(summerDates), from: '02-30' }]);
   assert.ok(dateErrors.rows[0].from);
@@ -2057,6 +2143,41 @@ test('a date problem focuses the season dates; the old month focus is unchanged'
   assert.equal(attempt.blocked, true);
   assert.deepEqual(commits, []);
   assert.deepEqual(attempt.target, { kind: 'row', index: 0, focus: 'dates' });
+});
+
+test('scope overlap decides whether a complement is still free to duplicate into', () => {
+  assert.equal(
+    scopesOverlap(
+      { kind: 'dates', from: '09-16', to: '06-14' },
+      { kind: 'dates', from: '06-15', to: '09-15' },
+    ),
+    false,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'dates', from: '09-16', to: '06-14' },
+      { kind: 'dates', from: '05-01', to: '05-31' },
+    ),
+    true,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'months', months: [3, 4, 5, 6, 7, 8, 9, 10] },
+      { kind: 'months', months: [11, 12, 1, 2] },
+    ),
+    false,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'months', months: [3, 4, 5, 6, 7, 8, 9, 10] },
+      { kind: 'months', months: [4] },
+    ),
+    true,
+  );
+  assert.equal(
+    scopesOverlap({ kind: 'all', months: null }, { kind: 'dates', from: '06-15', to: '06-15' }),
+    true,
+  );
 });
 
 test('a season rate mixed with TOU windows is rejected; different seasons may coexist', () => {
@@ -2110,4 +2231,11 @@ test('date rows obey the editor cap and the helper text names both seasons', () 
   assert.equal(dateRangeText('02-29', '02-29'), 'Feb 29');
   assert.equal(dateRangeText('10-15', '04-15'), 'Oct 15–Apr 15');
   assert.equal(dateRangeText('02-30', '03-01'), '');
+});
+
+test('a dates target expands the season and focuses the date control', () => {
+  const card = cardStub();
+  const view = viewStub([card]);
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'dates' }, view);
+  assert.deepEqual(card.calls, ['reveal-period', 'dates']);
 });

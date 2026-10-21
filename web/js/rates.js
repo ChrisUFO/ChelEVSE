@@ -92,6 +92,13 @@ function monthDayKey(month, day) {
   return month * 100 + day;
 }
 
+// The last day of a month in the leap-year shape used by the annual ring
+// (February is 29). A month outside 1–12 has no last day.
+export function lastDayOfMonth(month) {
+  if (!Number.isInteger(month) || month < 1 || month > 12) return 0;
+  return DAYS_IN_MONTH[month - 1];
+}
+
 // The months a date range spans, in calendar order (a wrap goes forward through
 // December). `months` is the coarse compatibility hint: new clients derive it on
 // write, old clients read it and over-apply at the edges.

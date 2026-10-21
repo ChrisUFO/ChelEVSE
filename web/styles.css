@@ -1652,6 +1652,40 @@ input[aria-invalid='true'] {
   line-height: 1.5;
   color: var(--muted);
 }
+.plan-choices {
+  display: grid;
+  gap: 8px;
+}
+.plan-choice {
+  display: grid;
+  gap: 2px;
+  min-height: 60px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  text-align: left;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.plan-choice:hover {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+  background: color-mix(in oklab, var(--accent) 7%, var(--bg));
+}
+.plan-choice-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+.plan-choice-note {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.plan-cancel {
+  justify-self: start;
+}
 .rate-plan {
   display: grid;
   gap: 12px;
@@ -1877,6 +1911,153 @@ input[aria-invalid='true'] {
 .period-body[hidden] {
   display: none;
 }
+.scope-editor {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+}
+.scope-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg);
+}
+.scope-mode {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 6px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.scope-mode:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+}
+.scope-mode[aria-pressed='true'] {
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.scope-mode:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.scope-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.scope-panel {
+  display: grid;
+  gap: 8px;
+}
+.scope-panel[hidden] {
+  display: none;
+}
+.date-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+}
+.date-bound {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.date-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  gap: 5px;
+}
+.date-select,
+.date-day {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+.date-day {
+  padding: 0 5px;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+/* The focused number input's spinner is a different, moving control inside the
+   narrow day field; the value stays an editable number without it. */
+.date-day::-webkit-outer-spin-button,
+.date-day::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+.date-select:focus-visible,
+.date-day:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.date-select[aria-invalid='true'],
+.date-day[aria-invalid='true'] {
+  border-color: color-mix(in oklab, var(--err) 70%, var(--line));
+  background: color-mix(in oklab, var(--err) 5%, var(--bg));
+}
+.date-arrow {
+  padding-bottom: 13px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.scope-date-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.date-error {
+  margin: 0;
+}
+.date-all-year {
+  justify-self: start;
+}
+.period-band.date-range {
+  white-space: nowrap;
+}
+.period-mode-notice {
+  display: grid;
+  gap: 4px;
+}
+.period-mode-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.period-mix {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 2px solid color-mix(in oklab, var(--err) 62%, var(--line));
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--err) 7%, transparent);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.period-mode-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .month-editor {
   display: grid;
   gap: 8px;
@@ -1939,6 +2120,16 @@ input[aria-invalid='true'] {
 @media (max-width: 389px) {
   .month-chips {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .date-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .date-arrow {
+    display: none;
+  }
+  .date-controls {
+    grid-template-columns: minmax(0, 1fr) 80px;
   }
 }
 .month-chip {
@@ -2443,6 +2634,9 @@ input[aria-invalid='true'] {
 }
 .coverage-empty {
   margin: 0;
+  padding: 9px 11px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--muted);

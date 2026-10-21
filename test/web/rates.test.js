@@ -11,6 +11,7 @@ import {
   costForInterval,
   costForSession,
   intersectDateSets,
+  lastDayOfMonth,
   monthsCovering,
   normalizeRateSchedule,
   normalizeWindow,
@@ -609,6 +610,16 @@ test('date bounds normalize both-or-neither, and the date grammar is strict', ()
   }
   for (const value of [null, undefined, 615, { from: '06-15' }]) {
     assert.equal(parseMonthDay(value), null, String(value));
+  }
+});
+
+test('the leap-shape last day of a month drives the date conversion', () => {
+  assert.equal(lastDayOfMonth(1), 31);
+  assert.equal(lastDayOfMonth(2), 29);
+  assert.equal(lastDayOfMonth(4), 30);
+  assert.equal(lastDayOfMonth(12), 31);
+  for (const value of [0, 13, 1.5, '02', null]) {
+    assert.equal(lastDayOfMonth(value), 0, String(value));
   }
 });
 

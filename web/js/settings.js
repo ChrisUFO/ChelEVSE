@@ -8,6 +8,8 @@ import {
   RATE_MIN,
   annualDayIndex,
   annualMonthDay,
+  intersectDateSets,
+  lastDayOfMonth,
   monthsCovering,
   normalizeRateSchedule,
   normalizeWindow,
@@ -196,6 +198,118 @@ function scopeOf(value) {
   if (value.kind === 'dates') return seasonScope({ from: value.from, to: value.to });
   if (value.kind === 'months' || value.kind === 'all' || value.kind === 'invalid') return value;
   return rateScope(value);
+}
+
+// A zero-padded "MM-DD" from a month and day (values are validated by the
+// caller; this is only the storage spelling the editor writes).
+function formatMonthDay(month, day) {
+  return `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+// The raw date bounds a period's rows carry, even when they are invalid. The
+// period's `kind` may be `invalid` for an unusable pair, so the editor reads the
+// stored values here rather than from the derived scope.
+export function periodDateBounds(period) {
+  const entries = (period && period.rows) || [];
+  for (const entry of entries) {
+    const row = entry && entry.row;
+    if (!row) continue;
+    const from = row.from == null || row.from === '' ? null : row.from;
+    const to = row.to == null || row.to === '' ? null : row.to;
+    if (from != null || to != null) return { from, to };
+  }
+  return { from: null, to: null };
+}
+
+// Whether the period is in date mode. A one-sided or unreal pair still counts:
+// the owner needs the date fields to see and fix the stored value.
+export function periodHasDates(period) {
+  const bounds = periodDateBounds(period);
+  return bounds.from != null || bounds.to != null;
+}
+
+// A month scope as the contiguous run the date editor can seed, or null when it
+// is not one run (January + June). All-year is represented by `all`.
+export function monthScopeBounds(months) {
+  const scope = rateMonthScope({ months });
+  if (scope.kind === 'all') return { all: true, fromMonth: null, toMonth: null };
+  if (scope.kind !== 'months') return null;
+  const runs = monthRuns(scope.months);
+  if (runs.length !== 1) return null;
+  return { all: false, fromMonth: runs[0].start, toMonth: runs[0].end };
+}
+
+// The first and last date of a month scope, for the Months -> Specific dates
+// conversion. All-year seeds the current month (the same "start somewhere"
+// rule as unchecking All year); a non-contiguous or unusable scope has no
+// single date range and returns null, which disables the mode.
+export function periodDateSeed(period, now = new Date()) {
+  const bounds = periodDateBounds(period);
+  if (bounds.from != null || bounds.to != null) return bounds;
+  if (!period) return null;
+  if (period.kind === 'all') {
+    const month = now.getMonth() + 1;
+    return {
+      from: formatMonthDay(month, 1),
+      to: formatMonthDay(month, lastDayOfMonth(month)),
+    };
+  }
+  if (period.kind !== 'months') return null;
+  const scope = monthScopeBounds(period.months);
+  if (!scope || scope.all) return null;
+  return {
+    from: formatMonthDay(scope.fromMonth, 1),
+    to: formatMonthDay(scope.toMonth, lastDayOfMonth(scope.toMonth)),
+  };
+}
+
+// A short hint for a range whose end precedes its start: it wraps the annual
+// calendar (the same-month reverse case is the surprising one).
+export function dateRangeHint(from, to) {
+  const start = parseMonthDay(from);
+  const end = parseMonthDay(to);
+  if (!start || !end) return '';
+  const startKey = start.month * 100 + start.day;
+  const endKey = end.month * 100 + end.day;
+  return startKey > endKey ? 'This range wraps the year.' : '';
+}
+
+// How a period prices: one season rate (every day, all day), daily windows, or
+// a hand-edited mix the editor rejects.
+export function periodRateMode(period) {
+  const entries = (period && period.rows) || [];
+  if (entries.length === 0) return 'tou';
+  const seasonRates = entries.filter((entry) => isSeasonRateRow(entry.row)).length;
+  if (seasonRates === entries.length) return 'season';
+  if (seasonRates === 0) return 'tou';
+  return 'mixed';
+}
+
+export const SEASON_RATE_MIX_MESSAGE =
+  'A season rate and daily windows cannot share a season. Remove the all-day row or change it to a time window.';
+
+// Whether two scopes can match the same date. Duplicating a season into its
+// complement is only a clean action while that complement is still free.
+export function scopesOverlap(left, right) {
+  return intersectDateSets(seasonDateSet(scopeOf(left)), seasonDateSet(scopeOf(right)));
+}
+
+// The largest uncovered annual range, for seeding a new season rate. Ranges are
+// leap-ring intervals; the result is an owner-facing MM-DD pair and says whether
+// it is the whole year.
+export function largestDateScope(ranges) {
+  const merged = mergeDateRanges(ranges);
+  if (merged.length === 0) return null;
+  const length = ([start, end]) => (start <= end ? end - start + 1 : ANNUAL_DAYS - start + end + 1);
+  let best = merged[0];
+  for (const range of merged) if (length(range) > length(best)) best = range;
+  const from = annualMonthDay(best[0]);
+  const to = annualMonthDay(best[1]);
+  return {
+    from: formatMonthDay(from.month, from.day),
+    to: formatMonthDay(to.month, to.day),
+    fullYear: best[0] === 0 && best[1] === ANNUAL_DAYS - 1,
+  };
 }
 
 // A stored or draft season bound in owner language: "Jun 15–Sep 15", or one day.
@@ -592,6 +706,10 @@ export function periodEffectiveRange(rows, fallbackRate, period, year = new Date
 export function siblingNote(sibling) {
   if (!sibling) return '';
   if (sibling.kind === 'all') return 'All year windows also apply here.';
+  if (sibling.kind === 'dates') {
+    const label = sibling.title === 'Season rate' ? 'Season rate' : 'Season';
+    return `${label} ${sibling.monthText} also applies here.`;
+  }
   if (sibling.title === 'Custom months') return `${sibling.monthText} windows also apply here.`;
   return `${sibling.title} also applies in ${sibling.monthText}.`;
 }
@@ -733,7 +851,7 @@ export function dayPresetFor(days) {
 // Two window prices split into the two ends; three or more put the middle in
 // Shoulder. A single price is described against the all-other-times rate, which
 // is the comparison the owner actually makes. `Same price` is honest rather
-// than calling an equal price cheap.
+// than calling an equal price a bargain.
 export function rateTierFor(rate, windowRates, fallbackRate) {
   const price = parseRateValue(rate);
   if (!Number.isFinite(price)) return '';
