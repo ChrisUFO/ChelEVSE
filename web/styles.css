@@ -1327,6 +1327,9 @@ input[type='range']::-moz-range-thumb {
 .rule-remove {
   margin-left: auto;
 }
+.rate-remove {
+  min-height: 44px;
+}
 .rule-remove:hover,
 .rate-remove:hover {
   background: color-mix(in oklab, var(--err) 10%, transparent);
@@ -1471,6 +1474,10 @@ input[aria-invalid='true'] {
 }
 .rule-error.doc-error {
   margin: 10px 2px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--err);
+  border-radius: 0 8px 8px 0;
+  background: color-mix(in oklab, var(--err) 7%, transparent);
 }
 .add-rule {
   display: flex;
@@ -1579,10 +1586,11 @@ input[aria-invalid='true'] {
   gap: 14px;
 }
 
-/* rate schedule editor — a stack of compact windows above the fallback pair */
+/* rate plan editor — the all-other-times price first, then month periods and
+   a draft-live checker. Periods are the only nesting level. */
 .rate-editor {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
 }
@@ -1608,9 +1616,523 @@ input[aria-invalid='true'] {
 .rate-head .block-sub {
   margin: 0;
 }
-.rate-head .section-note {
+.fallback-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface-2) 52%, transparent);
+}
+.fallback-head {
+  display: grid;
+  gap: 2px;
+}
+.fallback-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.fallback-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.flat-state {
+  display: grid;
+  gap: 8px;
+}
+.flat-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.rate-plan {
+  display: grid;
+  gap: 12px;
+}
+.plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.plan-head-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.plan-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.plan-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.plan-problem {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--err) 14%, transparent);
+  color: var(--err);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.rate-periods {
+  display: grid;
+  gap: 10px;
+}
+.rate-period {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface-2) 36%, transparent);
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+.rate-period.invalid {
+  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
+}
+.rate-period.invalid .period-toggle {
+  background: color-mix(in oklab, var(--err) 6%, transparent);
+}
+.period-heading {
+  margin: 0;
+  font: inherit;
+}
+.period-toggle {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  padding: 11px 12px 10px;
+  text-align: left;
+  color: var(--text);
+}
+.period-toggle:hover {
+  background: color-mix(in oklab, var(--surface-2) 42%, transparent);
+}
+.period-toggle:focus-visible {
+  outline-offset: -3px;
+}
+.period-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.period-title {
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.period-band {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.period-band.pending {
+  color: var(--warn);
+}
+.period-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 9px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.period-meta .mono {
+  font-family: var(--mono);
+}
+.period-flag {
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--err) 14%, transparent);
+  color: var(--err);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.period-caret {
   flex: none;
-  padding-top: 2px;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+.period-toggle[aria-expanded='true'] .period-caret {
+  transform: rotate(225deg);
+}
+/* A quiet 7-day coverage strip in every period header: shape only, the tables
+   below (and the hidden summary) carry the words. */
+.period-strip {
+  display: grid;
+  gap: 2px;
+  margin-top: 1px;
+}
+.strip-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+}
+.strip-day {
+  font-size: 9px;
+  line-height: 1.1;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.strip-track {
+  display: flex;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--line);
+}
+.strip-seg {
+  flex: 1 1 0;
+  min-width: 1px;
+}
+.strip-seg.base {
+  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+}
+.strip-seg.off {
+  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
+}
+.strip-seg.shoulder {
+  background: color-mix(in oklab, var(--accent) 62%, var(--surface));
+}
+.strip-seg.peak {
+  background: color-mix(in oklab, var(--warn) 72%, var(--surface));
+}
+.strip-seg.same {
+  background: color-mix(in oklab, var(--muted) 62%, var(--surface));
+}
+.strip-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-left: 51px;
+  font-size: 8.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.strip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 9px;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+}
+.legend-dot.base {
+  background: color-mix(in oklab, var(--muted) 34%, var(--line));
+}
+.legend-dot.off {
+  background: color-mix(in oklab, var(--ok) 62%, var(--surface));
+}
+.legend-dot.shoulder {
+  background: color-mix(in oklab, var(--accent) 62%, var(--surface));
+}
+.legend-dot.peak {
+  background: color-mix(in oklab, var(--warn) 72%, var(--surface));
+}
+.legend-dot.same {
+  background: color-mix(in oklab, var(--muted) 62%, var(--surface));
+}
+.period-body {
+  display: grid;
+  gap: 12px;
+  padding: 2px 12px 12px;
+  border-top: 1px solid var(--line);
+}
+.period-body[hidden] {
+  display: none;
+}
+.month-editor {
+  display: grid;
+  gap: 8px;
+  /* The pending rail sits in this gutter, clear of the first chip column. */
+  padding: 0 0 0 10px;
+}
+/* A month selection is not in the draft until Apply; mark the whole editor
+   while it differs, and lift the commit control with it. */
+.month-editor.pending {
+  box-shadow: inset 2px 0 0 var(--warn);
+}
+.month-editor.pending [data-action='apply-months'] {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--line));
+  color: var(--accent);
+}
+.month-actions .btn:disabled {
+  border-color: var(--line);
+  background: transparent;
+  color: var(--faint);
+  opacity: 1;
+}
+.month-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.months-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.months-toggle input {
+  display: grid;
+  place-content: center;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid var(--muted);
+  border-radius: 5px;
+  background: var(--bg);
+  appearance: none;
+  cursor: pointer;
+}
+.months-toggle input::before {
+  content: '';
+  width: 8px;
+  height: 4px;
+  margin-top: -2px;
+  border-left: 2px solid #0b1220;
+  border-bottom: 2px solid #0b1220;
+  transform: rotate(-45deg) scale(0);
+  transition: transform 0.12s ease;
+}
+.months-toggle input:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.months-toggle input:checked::before {
+  transform: rotate(-45deg) scale(1);
+}
+.months-toggle input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.month-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+  gap: 5px;
+}
+.month-chip {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.month-chip:hover {
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--line) 60%, var(--muted));
+}
+.month-chip[aria-pressed='true'] {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.month-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.month-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.month-note.pending {
+  color: var(--warn);
+}
+.month-editor .rule-error {
+  margin: 0;
+}
+.coverage {
+  display: grid;
+  gap: 12px;
+}
+.coverage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.coverage-table caption {
+  padding-bottom: 4px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.coverage-table th,
+.coverage-table td {
+  padding: 5px 3px;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 70%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+.coverage-table thead th {
+  padding-top: 0;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.coverage-table tbody th {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+}
+.coverage-table tbody tr:last-child th,
+.coverage-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.coverage-table .price {
+  font-family: var(--mono);
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+.coverage-table td.band {
+  color: var(--muted);
+}
+.coverage-table tr.other-times td.band {
+  color: var(--muted);
+}
+.coverage-table .segment-note {
+  display: block;
+  font-family: var(--sans);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--muted);
+  white-space: normal;
+}
+.tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.tier::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tier.off {
+  color: color-mix(in oklab, var(--ok) 82%, var(--text));
+}
+.tier.peak {
+  color: color-mix(in oklab, var(--warn) 88%, var(--text));
+}
+.tier.shoulder {
+  color: color-mix(in oklab, var(--accent) 85%, var(--text));
+}
+.tier.same {
+  color: var(--muted);
+}
+.period-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.period-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.period-actions .confirm {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.btn.small {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+  color: var(--text);
+  font-size: 13px;
+}
+.btn.small.danger {
+  border-color: transparent;
+  background: transparent;
+  color: color-mix(in oklab, var(--err) 82%, var(--text));
+}
+.btn.small.danger:hover {
+  background: color-mix(in oklab, var(--err) 10%, transparent);
+}
+.plan-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.plan-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.rate-period .add-rule {
+  margin-top: 0;
 }
 .rate-list {
   display: grid;
@@ -1618,15 +2140,16 @@ input[aria-invalid='true'] {
 }
 .rate-window {
   display: grid;
-  gap: 11px;
-  padding: 12px 12px 10px;
+  gap: 10px;
+  padding: 11px 11px 10px;
   border: 1px solid var(--line);
-  border-radius: 13px;
-  background: color-mix(in oklab, var(--bg) 62%, transparent);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
   transition: border-color 0.15s ease;
 }
 .rate-window.invalid {
-  border-color: color-mix(in oklab, var(--err) 45%, var(--line));
+  border-color: color-mix(in oklab, var(--err) 68%, var(--line));
+  background: color-mix(in oklab, var(--err) 5%, var(--bg));
 }
 .rate-window-head {
   display: grid;
@@ -1641,7 +2164,7 @@ input[aria-invalid='true'] {
   margin: 0;
   font-size: 13px;
   font-weight: 650;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
 }
 .rate-summary {
   margin: 2px 0 0;
@@ -1659,70 +2182,199 @@ input[aria-invalid='true'] {
   margin: 0;
 }
 .rate-amount .text-input {
-  min-height: 40px;
-  padding-right: 54px;
+  min-height: 44px;
+  padding-right: 56px;
 }
 .rate-amount .input-suffix {
   right: 10px;
 }
-.months-row {
-  display: grid;
-  gap: 8px;
+.rate-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
-.months-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  font-size: 12.5px;
-  color: var(--text);
-  cursor: pointer;
-}
-.months-toggle input {
-  width: 16px;
-  height: 16px;
+.rate-input::-webkit-outer-spin-button,
+.rate-input::-webkit-inner-spin-button {
   margin: 0;
-  accent-color: var(--accent);
+  -webkit-appearance: none;
 }
-.month-range {
+.day-presets {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: end;
-  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
 }
-.month-select {
+.preset {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.preset:hover {
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--line) 60%, var(--muted));
+}
+.preset[aria-pressed='true'] {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.plan-days {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 6px;
+}
+.plan-day {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.plan-day:hover {
+  color: var(--text);
+}
+.plan-day[aria-pressed='true'] {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.plan-days.invalid .plan-day {
+  border-color: color-mix(in oklab, var(--err) 35%, var(--line));
+}
+.preview-card {
+  display: grid;
+  gap: 10px;
+  margin-top: 2px;
+  padding: 11px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in oklab, var(--surface-2) 24%, transparent);
+}
+.preview-head {
+  display: grid;
+  gap: 2px;
+}
+.preview-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.preview-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.preview-date {
+  flex: 1 1 120px;
+}
+.preview-time {
+  flex: 0 1 92px;
+}
+.preview-now {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.preview-controls input {
   width: 100%;
   min-width: 0;
-  min-height: 40px;
+  min-height: 44px;
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--sans);
+  font-family: var(--mono);
   font-size: 13px;
   color-scheme: dark;
 }
-.month-select:focus-visible {
+.preview-controls input:focus-visible {
   border-color: transparent;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.month-select[aria-invalid='true'] {
-  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
-}
-.month-select[aria-invalid='true']:focus-visible {
-  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
-  outline-color: var(--err);
-}
-.rate-empty {
-  margin: 0;
-  padding: 12px;
-  border: 1px dashed var(--line);
-  border-radius: 12px;
-  color: var(--muted);
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
   font-size: 12.5px;
-  line-height: 1.5;
+}
+.preview-table th {
+  width: 64px;
+  padding: 6px 0;
+  text-align: left;
+  vertical-align: top;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.preview-table td {
+  padding: 6px 0 6px 6px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.preview-table tr + tr th,
+.preview-table tr + tr td {
+  border-top: 1px solid var(--line);
+}
+.preview-price {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.preview-money {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+.preview-price strong {
+  font-family: var(--mono);
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.preview-price .unit {
+  font-size: 11px;
+  color: var(--muted);
+}
+.preview-empty,
+.preview-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.preview-note.warn {
+  color: var(--warn);
+}
+.coverage-note,
+.coverage-empty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 .settings-grid {
   display: grid;
@@ -2239,17 +2891,46 @@ input[aria-invalid='true']:focus-visible {
     padding: 12px 12px 10px;
   }
   .rate-window {
-    padding: 11px 10px 9px;
+    padding: 10px 9px 9px;
   }
-  .month-select {
-    padding: 0 6px;
-    font-size: 12.5px;
+  .period-toggle {
+    padding: 10px 10px 9px;
+  }
+  .period-body {
+    padding: 2px 10px 10px;
   }
   .rate-amount .text-input {
     padding-right: 48px;
   }
   .day {
     font-size: 10px;
+  }
+  .month-chip,
+  .plan-day {
+    font-size: 10.5px;
+  }
+  /* Four preset labels at 320 leave no slack; two per row keeps each target
+     wide enough for "Weekdays" without shrinking the touch area. */
+  .day-presets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .coverage-table {
+    font-size: 11.5px;
+  }
+  .coverage-table th,
+  .coverage-table td {
+    padding: 4px 2px;
+  }
+  .preview-table th {
+    width: 56px;
+  }
+  .preview-time {
+    flex: 1 1 96px;
+  }
+  /* Three controls do not fit in 230px; a full-width Now is deliberate rather
+     than an orphaned third item. */
+  .preview-now {
+    flex: 1 1 100%;
   }
   .session {
     padding: 11px 12px;
