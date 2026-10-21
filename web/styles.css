@@ -210,6 +210,9 @@ button {
   background: var(--accent);
   animation: breathe 1.6s ease-in-out infinite;
 }
+#boot-retry {
+  margin-top: 14px;
+}
 @keyframes breathe {
   50% {
     opacity: 0.25;
