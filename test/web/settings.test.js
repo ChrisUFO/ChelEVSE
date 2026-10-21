@@ -13,6 +13,8 @@ import {
   CHECK_BLOCKED_MESSAGE,
   CHECK_CAP_MESSAGE,
   CHECK_CONFLICT_MESSAGE,
+  CHECK_RATE_MESSAGE,
+  MIX_COVERAGE_MESSAGE,
   applyPeriodDates,
   applyPeriodMonths,
   canDuplicatePeriod,
@@ -20,6 +22,7 @@ import {
   complementScope,
   copyPeriodRows,
   dateInputValue,
+  dateRangeHint,
   dateRangeText,
   dateSetText,
   dayPresetFor,
@@ -31,12 +34,20 @@ import {
   isAllDayWindow,
   isSeasonRatePeriod,
   isSeasonRateRow,
+  largestDateScope,
   mergeDateRanges,
   minutesToClock,
+  monthScopeBounds,
+  nextWindowPreset,
   normalizeSettings,
   parseLocalDateTime,
   periodCoverage,
+  periodDateBounds,
+  periodDateSeed,
   periodEffectiveRange,
+  periodHasDates,
+  periodRateMode,
+  periodRowScope,
   previewBlocker,
   planProblemText,
   previewRate,
@@ -58,6 +69,7 @@ import {
   reconcileSettingsSave,
   sameSettingsInput,
   saveButtonState,
+  scopesOverlap,
   segmentNote,
   settingsDraftMatches,
   settingsFields,
@@ -1264,6 +1276,14 @@ test('coverage is the effective week for a month, with owners and named siblings
     siblingNote({ kind: 'months', title: 'Custom months', monthText: 'Jan, Jun' }),
     'Jan, Jun windows also apply here.',
   );
+  assert.equal(
+    siblingNote({ kind: 'dates', title: 'Season', monthText: 'Jun 15–Sep 15' }),
+    'Season Jun 15–Sep 15 also applies here.',
+  );
+  assert.equal(
+    siblingNote({ kind: 'dates', title: 'Season rate', monthText: 'Jun 15–Sep 15' }),
+    'Season rate Jun 15–Sep 15 also applies here.',
+  );
 
   const summerCoverage = periodCoverage(rows, 0.31, summer, periods, 2026);
   assert.equal(summerCoverage.month, 3);
@@ -1377,6 +1397,22 @@ test('the exact-date checker names the winning window, fallback and boundaries',
   assert.equal(previewRate(rows, '', new Date(2026, 0, 15, 12, 0)).rate, null);
 });
 
+test('the checker tells a day with no season apart from an hour no window covers', () => {
+  // The fallback wins for two different reasons; the checker has to name the
+  // right one, so the day-level miss is flagged and the hourly gap is not.
+  const rows = [rateRowFields(winterPeak)];
+  const noSeason = previewRate(rows, '0.31', new Date(2026, 6, 15, 12, 0));
+  assert.equal(noSeason.fallback, true);
+  assert.equal(noSeason.noSeason, true);
+  const hourGap = previewRate(rows, '0.31', new Date(2026, 0, 15, 12, 0));
+  assert.equal(hourGap.fallback, true);
+  assert.equal(hourGap.noSeason, false);
+  // A winning season rate is never reported as a day with no season.
+  const priced = previewRate(rows, '0.31', new Date(2026, 0, 15, 17, 0));
+  assert.equal(priced.fallback, false);
+  assert.equal(priced.noSeason, false);
+});
+
 test('the checker fields parse local dates by parts and format for people', () => {
   const date = parseLocalDateTime('2026-12-15', '18:30');
   assert.ok(date instanceof Date);
@@ -1468,6 +1504,7 @@ function cardStub() {
     node: { scrollIntoView: () => calls.push('reveal-row') },
     periodCard: {
       allYear: { focus: focus('months') },
+      dateFocus: { focus: focus('dates') },
       node: { scrollIntoView: () => calls.push('reveal-period') },
     },
     rateInput: { focus: focus('rate') },
@@ -1599,7 +1636,12 @@ test('a month problem focuses the season control, not a window field', () => {
 
 test('the checker withholds a definitive answer while the plan is incomplete', () => {
   assert.equal(previewBlocker(validateRateEditorRows([])), '');
-  const bad = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), rate: '' }]);
+  // An unpriced row has no window to repair: the remedy names its price.
+  const unpriced = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), rate: '' }]);
+  assert.equal(previewBlocker(unpriced), CHECK_RATE_MESSAGE);
+  assert.equal(CHECK_RATE_MESSAGE, 'Add a rate to check this moment.');
+  // A malformed time is the window's problem, so the window remedy stays.
+  const bad = validateRateEditorRows([{ ...rateRowFields(nightEveryDay), start: '25:00' }]);
   assert.equal(previewBlocker(bad), CHECK_BLOCKED_MESSAGE);
   assert.equal(CHECK_BLOCKED_MESSAGE, 'Fix the incomplete windows to check this moment.');
   const overlap = validateRateEditorRows([
@@ -1705,7 +1747,15 @@ test('date seasons group by their dates, not by a stale months hint', () => {
     ]),
     [
       ['dates:06-15-09-15', 'dates', 'Season rate', 'Jun 15–Sep 15', 'Jun 15–Sep 15', true, [0, 1]],
-      ['dates:09-16-06-14', 'dates', 'Season', 'Sep 16–Jun 14', 'Sep 16–Jun 14', false, [2]],
+      [
+        'dates:09-16-06-14',
+        'dates',
+        'Season',
+        'Sep 16–Jun 14 (wraps)',
+        'Sep 16–Jun 14 (wraps)',
+        false,
+        [2],
+      ],
     ],
   );
   // The derived months stay available for the old month controls.
@@ -1986,7 +2036,10 @@ test('uncovered dates are a day-level line that collapses whole months', () => {
   ];
   assert.equal(dateSetText(uncoveredDateRanges(gap)), 'Nov–Feb, Jun–Jul');
   // A single season's complement reads as one wrapping range.
-  assert.equal(dateSetText(uncoveredDateRanges([rateRowFields(summerDates)])), 'Sep 16–Jun 14');
+  assert.equal(
+    dateSetText(uncoveredDateRanges([rateRowFields(summerDates)])),
+    'Sep 16–Jun 14 (wraps)',
+  );
   // Month scopes use the same ring: whole months collapse.
   assert.equal(
     dateSetText(uncoveredDateRanges([rateRowFields({ ...winterPeak, months: [11, 12, 1, 2] })])),
@@ -2025,6 +2078,14 @@ test('the checker names a date season and recognises a season rate', () => {
   assert.equal(outside.rate, 0.31);
   assert.equal(outside.seasonRate, false);
   assert.equal(outside.scopeText, '');
+  // A day no season covers is told apart from an hour no window covers: the
+  // checker explains the right cause instead of blaming a rate window.
+  assert.equal(outside.noSeason, true);
+  const nightOnly = [rateRowFields(nightEveryDay)];
+  const hourGap = previewRate(nightOnly, '0.31', new Date(2026, 0, 15, 12, 0));
+  assert.equal(hourGap.fallback, true);
+  assert.equal(hourGap.noSeason, false);
+  assert.equal(previewRate(nightOnly, '0.31', new Date(2026, 0, 15, 3, 0)).noSeason, false);
 
   // A date-season TOU tail is still attributed to the start day.
   const tou = rateRowFields({ ...summerDates, rate: 0.1, start: '22:00', end: '06:00' });
@@ -2032,6 +2093,75 @@ test('the checker names a date season and recognises a season rate', () => {
   assert.equal(tail.rate, 0.1);
   assert.equal(tail.seasonRate, false);
   assert.equal(tail.scopeText, 'Jun 15–Sep 15');
+});
+
+test('the date editor derives its mode, seed, and disabled reason from the rows', () => {
+  const summer = ratePeriods([rateRowFields(summerDates)])[0];
+  assert.equal(periodHasDates(summer), true);
+  assert.deepEqual(periodDateBounds(summer), { from: '06-15', to: '09-15' });
+  assert.deepEqual(periodDateSeed(summer), { from: '06-15', to: '09-15' });
+
+  const allYear = ratePeriods([rateRowFields(nightEveryDay)])[0];
+  assert.equal(periodHasDates(allYear), false);
+  assert.deepEqual(periodDateSeed(allYear, new Date(2026, 9, 21)), {
+    from: '10-01',
+    to: '10-31',
+  });
+  assert.deepEqual(periodDateSeed(allYear, new Date(2026, 1, 2)), {
+    from: '02-01',
+    to: '02-29',
+  });
+
+  const winter = ratePeriods([rateRowFields({ ...nightEveryDay, months: [11, 12, 1, 2] })])[0];
+  assert.equal(monthScopeBounds([11, 12, 1, 2]).fromMonth, 11);
+  assert.deepEqual(periodDateSeed(winter), { from: '11-01', to: '02-29' });
+  const february = ratePeriods([rateRowFields({ ...nightEveryDay, months: [2] })])[0];
+  assert.deepEqual(periodDateSeed(february), { from: '02-01', to: '02-29' });
+
+  const split = ratePeriods([rateRowFields({ ...nightEveryDay, months: [1, 6] })])[0];
+  assert.equal(monthScopeBounds([1, 6]), null);
+  assert.equal(periodDateSeed(split), null);
+  const malformedMonths = ratePeriods([rateRowFields({ ...nightEveryDay, months: 3 })])[0];
+  assert.equal(periodDateSeed(malformedMonths), null);
+
+  const brokenDates = ratePeriods([
+    rateRowFields({ ...summerDates, from: '02-30', to: '09-15' }),
+  ])[0];
+  assert.equal(periodHasDates(brokenDates), true);
+  assert.deepEqual(periodDateBounds(brokenDates), { from: '02-30', to: '09-15' });
+  assert.deepEqual(periodDateSeed(brokenDates), { from: '02-30', to: '09-15' });
+
+  assert.equal(dateRangeHint('06-20', '06-10'), 'This range wraps the year.');
+  assert.equal(dateRangeHint('11-01', '02-29'), 'This range wraps the year.');
+  assert.equal(dateRangeHint('06-15', '09-15'), '');
+  assert.equal(dateRangeHint('02-30', '09-15'), '');
+
+  assert.equal(periodRateMode(ratePeriods([rateRowFields(summerDates)])[0]), 'season');
+  assert.equal(periodRateMode(ratePeriods([rateRowFields(winterDates)])[0]), 'tou');
+  const mixed = ratePeriods([
+    rateRowFields(summerDates),
+    rateRowFields({ ...summerDates, id: 'peak', start: '16:00', end: '19:00' }),
+  ])[0];
+  assert.equal(periodRateMode(mixed), 'mixed');
+
+  assert.deepEqual(largestDateScope([[0, 365]]), {
+    from: '01-01',
+    to: '12-31',
+    fullYear: true,
+  });
+  assert.deepEqual(
+    largestDateScope([
+      [100, 120],
+      [180, 200],
+      [0, 10],
+    ]),
+    {
+      from: '04-10',
+      to: '04-30',
+      fullYear: false,
+    },
+  );
+  assert.equal(largestDateScope([]), null);
 });
 
 test('a date problem focuses the season dates; the old month focus is unchanged', () => {
@@ -2057,6 +2187,41 @@ test('a date problem focuses the season dates; the old month focus is unchanged'
   assert.equal(attempt.blocked, true);
   assert.deepEqual(commits, []);
   assert.deepEqual(attempt.target, { kind: 'row', index: 0, focus: 'dates' });
+});
+
+test('scope overlap decides whether a complement is still free to duplicate into', () => {
+  assert.equal(
+    scopesOverlap(
+      { kind: 'dates', from: '09-16', to: '06-14' },
+      { kind: 'dates', from: '06-15', to: '09-15' },
+    ),
+    false,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'dates', from: '09-16', to: '06-14' },
+      { kind: 'dates', from: '05-01', to: '05-31' },
+    ),
+    true,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'months', months: [3, 4, 5, 6, 7, 8, 9, 10] },
+      { kind: 'months', months: [11, 12, 1, 2] },
+    ),
+    false,
+  );
+  assert.equal(
+    scopesOverlap(
+      { kind: 'months', months: [3, 4, 5, 6, 7, 8, 9, 10] },
+      { kind: 'months', months: [4] },
+    ),
+    true,
+  );
+  assert.equal(
+    scopesOverlap({ kind: 'all', months: null }, { kind: 'dates', from: '06-15', to: '06-15' }),
+    true,
+  );
 });
 
 test('a season rate mixed with TOU windows is rejected; different seasons may coexist', () => {
@@ -2105,9 +2270,124 @@ test('date rows obey the editor cap and the helper text names both seasons', () 
 
   // Date rows are named by their dates in an overlap sentence.
   const label = windowLabel(summerDates, [0.2, 0.32], 0.31);
-  assert.equal(label, 'Off-peak 0.2 · Every day · All day · Jun 15–Sep 15');
+  assert.equal(label, 'Season rate 0.2 · Every day · All day · Jun 15–Sep 15');
   assert.equal(dateRangeText('06-15', '09-15'), 'Jun 15–Sep 15');
-  assert.equal(dateRangeText('02-29', '02-29'), 'Feb 29');
-  assert.equal(dateRangeText('10-15', '04-15'), 'Oct 15–Apr 15');
+  // A single annual date is not a weekday scope; a wrap must not read inverted.
+  assert.equal(dateRangeText('02-29', '02-29'), 'Feb 29 (one day)');
+  assert.equal(dateRangeText('10-15', '04-15'), 'Oct 15–Apr 15 (wraps)');
+  assert.equal(dateRangeText('06-20', '06-10'), 'Jun 20–Jun 10 (wraps)');
   assert.equal(dateRangeText('02-30', '03-01'), '');
+});
+
+test('a dates target expands the season and focuses the date control', () => {
+  const card = cardStub();
+  const view = viewStub([card]);
+  applySubmitFocus({ kind: 'row', index: 0, focus: 'dates' }, view);
+  assert.deepEqual(card.calls, ['reveal-period', 'dates']);
+});
+
+test('a window added inside a season inherits its whole scope', () => {
+  const dateSeason = ratePeriods([
+    rateRowFields({ ...summerDates, id: 'a' }),
+    rateRowFields({ ...summerDates, id: 'b', days: [0, 1, 2, 3, 4], start: '16:00', end: '19:00' }),
+  ])[0];
+  // Months alone would form a second, month-wide season: the raw day bounds are
+  // what keep the new row inside the date season.
+  assert.deepEqual(periodRowScope(dateSeason), {
+    months: [6, 7, 8, 9],
+    dates: { from: '06-15', to: '09-15' },
+  });
+  const monthSeason = ratePeriods([rateRowFields(winterPeak)])[0];
+  assert.deepEqual(periodRowScope(monthSeason), { months: [1, 2, 11, 12], dates: null });
+  assert.deepEqual(periodRowScope(null), { months: null, dates: null });
+
+  const scope = periodRowScope(dateSeason);
+  const row = defaultRateRow('added', scope.months, scope.dates);
+  assert.equal(row.from, '06-15');
+  assert.equal(row.to, '09-15');
+  // The new row groups back into the season it was added to, not a new one.
+  assert.equal(ratePeriods([row])[0].key, 'dates:06-15-09-15');
+});
+
+test('Add window picks a preset the season does not already contain', () => {
+  const peakRow = {
+    ...summerDates,
+    id: 'peak',
+    days: [0, 1, 2, 3, 4],
+    start: '16:00',
+    end: '19:00',
+  };
+  const nightRow = { ...summerDates, id: 'night', start: '00:00', end: '07:00' };
+  const peakOnly = ratePeriods([rateRowFields(peakRow)])[0];
+  const nightOnly = ratePeriods([rateRowFields(nightRow)])[0];
+  // A first window and a season already holding the weekday-evening shape both
+  // get the overnight preset, so the action cannot build an overlap by itself.
+  assert.equal(nextWindowPreset(null), 'overnight');
+  assert.equal(nextWindowPreset(ratePeriods([])[0]), 'overnight');
+  assert.equal(nextWindowPreset(peakOnly), 'overnight');
+  assert.equal(nextWindowPreset(nightOnly), 'peak');
+  // A custom-days row is not the peak preset, so peak stays the default.
+  assert.equal(
+    nextWindowPreset(ratePeriods([rateRowFields({ ...summerDates, id: 'c', days: [0, 6] })])[0]),
+    'peak',
+  );
+});
+
+test('a date season covers its months even when the stored hint is missing or stale', () => {
+  // Defect guard: uncoveredMonths is the seed for a month-mode season, so it
+  // must read the derived scope. A null or stale hint used to report the whole
+  // year (or eleven months) as free and seed over the date season.
+  assert.deepEqual(
+    uncoveredMonths([{ ...summerDates, months: null }]),
+    [1, 2, 3, 4, 5, 10, 11, 12],
+  );
+  assert.deepEqual(uncoveredMonths([{ ...summerDates, months: [1] }]), [1, 2, 3, 4, 5, 10, 11, 12]);
+  assert.deepEqual(
+    uncoveredMonths([{ ...summerDates, months: [6, 7, 8, 9] }]),
+    [1, 2, 3, 4, 5, 10, 11, 12],
+  );
+});
+
+test('the coverage caption names the scope, and a one-date season is not a weekday', () => {
+  const allYearRows = [rateRowFields(nightEveryDay)];
+  const allYearPeriods = ratePeriods(allYearRows);
+  const allYear = periodCoverage(allYearRows, 0.31, allYearPeriods[0], allYearPeriods, 2026);
+  // The week is sampled in January, but an all-year season is not January.
+  assert.equal(allYear.monthName, 'January');
+  assert.equal(allYear.captionText, 'All year');
+
+  const wrapRow = rateRowFields({ ...summerDates, id: 'wrap', from: '06-20', to: '06-10' });
+  const wrapPeriods = ratePeriods([wrapRow]);
+  const wrap = periodCoverage([wrapRow], 0.31, wrapPeriods[0], wrapPeriods, 2026);
+  assert.equal(wrap.captionText, 'Jun 20–Jun 10 (wraps)');
+
+  const oneRow = rateRowFields({ ...summerDates, id: 'one', from: '06-15', to: '06-15' });
+  const onePeriods = ratePeriods([oneRow]);
+  const one = periodCoverage([oneRow], 0.31, onePeriods[0], onePeriods, 2026);
+  // The row group already says "One day", so the caption tail is the bare date.
+  assert.equal(one.captionText, 'Jun 15');
+  // One sampled date is "One day", never the weekday it happens to fall on.
+  assert.deepEqual(
+    one.types.map((type) => type.label),
+    ['One day'],
+  );
+
+  // A month season that spans several months is sampled in one of them, so the
+  // caption marks that month as the example rather than reading as the scope.
+  const customRows = [rateRowFields({ ...nightEveryDay, id: 'custom', months: [6, 7, 8, 9] })];
+  const customPeriods = ratePeriods(customRows);
+  const custom = periodCoverage(customRows, 0.31, customPeriods[0], customPeriods, 2026);
+  assert.equal(custom.captionText, 'June · example');
+  // A single-month season needs no marker: the month is the whole scope.
+  const juneRows = [rateRowFields({ ...nightEveryDay, id: 'june', months: [6] })];
+  const junePeriods = ratePeriods(juneRows);
+  assert.equal(
+    periodCoverage(juneRows, 0.31, junePeriods[0], junePeriods, 2026).captionText,
+    'June',
+  );
+});
+
+test('a season rate is banded by name, not by a relative price tier', () => {
+  assert.equal(rateSegmentLabel({ window: summerDates, rate: 0.2 }, [0.2], 0.31), 'Season rate');
+  assert.equal(MIX_COVERAGE_MESSAGE, 'Fix the mix to see coverage.');
 });

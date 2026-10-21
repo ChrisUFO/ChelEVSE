@@ -16,90 +16,144 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 ## Screens
 
-| Tab          | What it shows                                                                                                                                      |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                  |
-| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                                   |
-| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                   |
-| **Config**   | Charger configuration with secrets redacted, App settings (all-other-times rate, seasons and windows, currency), and the notification opt-in card. |
-| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                            |
+| Tab          | What it shows                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                             |
+| **History**  | 30-day daily-energy chart (hand-rolled SVG) and recent sessions, each flagged when served from cache or offline.                                              |
+| **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                              |
+| **Config**   | Charger configuration with secrets redacted, App settings (all-other-times rate, month/date seasons and windows, currency), and the notification opt-in card. |
+| **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                                       |
 
 ## Electricity rates
 
-App settings hold one **all-other-times** rate plus an optional plan of **seasons** (month periods)
-and daily **windows**:
+App settings hold one **all other times** rate plus an optional plan of **seasons** and daily
+**windows**:
 
-- **All other times** is the base rate. It prices every moment no window covers, so a flat rate
-  keeps working with no plan at all. The currency is shared by every price.
-- A **season** owns a month scope: all year, a contiguous range such as November → February, or any
-  custom set such as January + June. There is one month editor per season; the windows inside it
-  inherit those months and show no month control of their own. Month chips apply immediately to
-  every window in the season, and each chip is a toggle: on an **All year** season every month is
-  pressed, so clicking one removes that month and leaves the other eleven (the last remaining month
-  is kept). Clicking a missing month adds it back.
+- **All other times** is the base rate. It prices every moment no window covers, so a flat rate keeps
+  working with no plan at all. The currency is shared by every price.
+- **Starting a plan** uses **Add season or time-of-use**, which offers **Season rate** or
+  **Time-of-use windows**. A season rate creates an All-year season with one all-day, every-day
+  window awaiting a price. Time-of-use creates the everyday overnight window (00:00–07:00) as a
+  starting point. Both start with an empty price so the plan cannot be saved by accident.
+- **Season rate** is one price for every hour in its season. The season hides the day/time controls
+  and **Add window**, says “One price for every hour in this season”, and shows a single
+  **Every day · 00:00–24:00** row in its table, and the row is titled **Season rate** — never a
+  price band — in the card, the table, the plan summary and the checker. **Use time-of-use windows**
+  turns it into the everyday 00:00–07:00 window; **Convert to one season rate** turns a single
+  time-of-use window back into one price. Converting in either direction needs exactly one window in
+  the season, so the action is not offered otherwise.
+- A **season** owns a month or date scope. **Months** mode has the 12 month chips and **All year**;
+  chips apply immediately to every window in the season, and each chip is a toggle: on an All-year
+  season every month is pressed, so clicking one removes that month and leaves the other eleven (the
+  last remaining month is kept).
+- **Specific dates** mode uses **From** and **To** month + day controls. The day is a number input,
+  so an invalid stored day stays visible and the error names the field. The mode is derived from the
+  rows, never stored:
+  - Months → dates, one continuous run: first day 1 to the last day of the last month (29 February in
+    the leap-year shape). A wrapping run such as November–February keeps its order.
+  - All year → dates: seeds the current month.
+  - A non-contiguous month set (January + June) cannot become one date range: Specific dates is
+    disabled with “Specific dates need one continuous range”.
+  - Dates → Months derives the months the range covers, clears the dates, and rounds to whole months;
+    the date panel says so. **Use all year** clears both dates and stores no month limit.
+  - Date bounds are inclusive and repeat every year. A range may wrap the year; a same-month reversed
+    range wraps too, the hint says “This range wraps the year.” and every place the range is printed
+    marks it (`Jun 20–Jun 10 (wraps)`). `from === to` is one day, printed `Jun 15 (one day)` and
+    tabulated as **One day · Jun 15** rather than a weekday that moves each year. Missing or unreal
+    values block saving and point at From or To.
+  - Editing a date commits to every row in the season at once. The season is repainted in place, so
+    the Tab or click that ended the edit is still delivered — typing a day and then pressing
+    Months, Use all year or Duplicate works on the first press. A commit that merges the season into
+    another or splits it apart rebuilds the plan on the next task and returns focus to that season's
+    own date control, never to the first matching field in an earlier season.
 - A **window** sets a price for a set of weekdays and a local `HH:MM` start and end. Up to 24
   windows. Day presets (Every day / Weekdays / Weekends) are shortcuts over the same weekday set;
   Custom reveals the individual day chips for an exact choice. A window whose start equals its end
   is **All day**; the editor shows that instead of `00:00 → 00:00`, and the table shows 00:00–24:00.
   **Set times** reveals the stored start and end without inventing hours, and the fields stay open
   while focus moves between them.
-- **Layering, not a partition.** A month can carry windows from more than one season (for example an
+- **Layering, not a partition.** A day can carry windows from more than one season (for example an
   every-month overnight window plus a November–February peak). The plan is their union. Each season
-  header shows its **own** window count and the **effective** price range, labelled with the
-  representative month it describes (for example `Jan example USD 0.10–0.32 effective`; January for
-  an all-year season, otherwise the first month of its scope) — the range includes the fallback and
-  any season that also applies in that month. The header keeps a coverage strip and any error even
-  when collapsed. Expanding shows the month chips, one complete 24-hour table per day pattern for
-  that same month, and the windows themselves. The table highlights that season's own rows and
-  labels a row from another season by band and season (for example “Peak Winter”), keeping its
-  band dot on the first line so the legend still matches, instead of calling it the fallback; a long
-  month list wraps under the band without splitting a range and without a dangling separator. A
-  sibling note names the other seasons that also apply there (for example “Winter also applies in
-  Nov–Feb”), and the checker shows the combined price.
-- **No window — other times** is a line under the seasons for months no window covers. It is where the
+  header shows its **own** window count and the price range for its sample: a month season labels the
+  representative month (`Jan example USD 0.10–0.32`; January for an all-year season, otherwise the
+  first month of its scope), while a date season shows its dates and no example month. The range
+  includes the fallback and any season that also applies on those days. The header keeps a
+  coverage strip and any error even when collapsed. Expanding shows the scope editor, one complete
+  24-hour table per day pattern for the same sample, and the windows themselves. The table caption
+  marks a sample month as one when the season covers more of the year (`Every day · June · example`),
+  so a four-month season is never tabulated as if June were its whole scope. The table highlights
+  that season's own rows and labels a row from another season by band and season, keeping its band
+  dot on the first line and, for a date season, its dates, so two overlapping date seasons are never
+  both just “Season”; a sibling note names the other seasons that also apply (for example “Season
+  Jun 1–Jun 30 also applies here”), and the checker shows the combined price.
+- **No season — other times** is a line under the seasons for days no season covers. It is where the
   all-other-times rate applies, not a season: no expand, no remove, and it is not counted in the plan
-  summary.
+  summary. A month-only gap collapses to whole months; a date season leaves the exact day range
+  (marked `(wraps)` when it crosses the year). At 320 px the title breaks after the dash, never
+  mid-phrase and never with a dangling `·`. The checker keeps `Other times` for hours and says
+  `No season —` when the day itself has no season.
 - **Price bands** (Peak / Off-peak / Shoulder / Same price) are derived from the plan's relative
-  prices for display only; no band or season name is stored.
+  prices for display only; no band or season name is stored. A season rate is the exception: it is
+  always banded **Season rate**, because a relative tier would describe a band the owner never chose.
+  The strip legend is read from the same resolved rows, so the dot beside a card's title, its strip
+  and its table band carry one name. A row that cannot price (no rate yet, an invalid time or an
+  invalid price) contributes nothing to the range: the plan summary and the season header say
+  `— needs attention` instead of quietly leaving the price out, and the checker asks for the rate.
 - **What applies at** checks a local date and time against the current draft — saved or not — and
-  names the winning window or the fallback. It never writes. **Now** fills in the current moment. A
-  definitive answer is withheld while a window is incomplete or two windows collide: the checker
-  says so and points back to the blocking fields.
-- **Duplicate** copies a season's windows into the months it does not cover, a quick start for the
-  other half of the year. It is not offered when the copy would take the plan past the 24-window
-  limit; a stored plan already over that limit shows the cap alone, with the cap's own remedy
-  (“Remove a window to get back to 24.”), in the plan error and the checker instead of accusing its
-  windows of overlapping.
+  names the winning window or the fallback. The scope reads as a season rate (`Season rate · Jun
+15–Sep 15`), a time-of-use summary (`Weekdays · 16:00–19:00 · Jun 15–Sep 15`), or
+  `Other times — no rate window covers this moment.` for an hour no window covers, or
+  `No season — no rate window covers this moment.` for a day no season covers at all. **Now** fills
+  in the current moment. A definitive answer is withheld while a window is incomplete or two windows
+  collide: the checker says so and points back to the blocking fields, naming the rate when that is
+  the only thing a row is missing (`Add a rate to check this moment.`).
+- **Duplicate** copies a season's windows into the rest of the year in one action: the months it does
+  not cover, or the single date range a date season leaves (Summer Jun 15–Sep 15 becomes Winter
+  Sep 16–Jun 14). It is only offered when that complement is free, the season is not a hand-edited
+  mix, and the copy stays within the 24-window limit.
+- A **season rate and daily windows cannot share one season**. The editor never offers that mix. A
+  stored or hand-edited mix shows one structural message in the season, the per-row overlap notes,
+  and `Fix the mix to see coverage.` in place of the tables and the checker; the overlap validation
+  blocks the save. The mix is never drawn as a working base-plus-override schedule, and the
+  screen-reader announcement repeats the same structural message rather than the overlap remedy.
 
-The stored document is unchanged: one flat `rates` list. Seasons are a presentation over each
-window's stored `months` value, so the editor never adds fields, reorders rows, or rewrites a month
-list it did not edit.
+The stored document is unchanged: one flat `rates` list. A month window keeps
+`{ id, rate, days, start, end, months }`. A date window adds `from` and `to` (`MM-DD`, inclusive)
+after `months`; `months` remains the coarse compatibility hint derived on write, so an older client
+still knows roughly when the season applies. All year stores `months: null` and no dates. There is no
+migration, no new field, and payload order is preserved. A flat configuration still writes exactly
+`{ rate, currency }` with no `rates` key.
 
 The plan summary names the number of seasons and windows, the window-price range (`3 windows · USD
-0.10–0.32`) and the other-times rate. The card header's range is labelled with its example month, so
-the summary's windows-only range and the card's effective range cannot read as two answers to one
-question. An unset fallback rate shows `—` (the fallback line omits it) rather than a made-up
-`USD 0.00`. The save row carries `N to fix` whenever validation has blockers (`N to fix · cap` when
-the plan is over the 24-window limit); Save is styled and labelled `Fix N to save` while they
-remain, but stays submit-capable so Enter in any field still validates, explains, and jumps to the
-first problem.
+0.10–0.32`) and the other-times rate. An unset fallback rate shows `—` (the fallback line omits it)
+rather than a made-up `USD 0.00`. The save row carries `N to fix` whenever validation has blockers
+(`N to fix · cap` when the plan is over the 24-window limit); Save is styled and labelled
+`Fix N to save` while they remain, but stays submit-capable so Enter in any field still validates,
+explains, and jumps to the first problem.
 
 Technical rules:
 
 - Weekdays use `0` = Monday … `6` = Sunday, the same convention as the charging schedule. The editor
   shows the day names, so the numbers only matter in the stored document.
 - Times are local wall clock. An end at or before the start wraps past midnight (22:00 → 06:00 is a
-  night window), and a window's after-midnight hours belong to the day it started.
+  night window), and a window's after-midnight hours belong to the day it started. A date season is
+  evaluated on that starting day, so a 22:00 window on 14 June still belongs to 14 June when it runs
+  into 15 June.
 - A month scope is an inclusive list that may wrap the year: November → February means November,
   December, January and February. A non-contiguous list such as January + June is valid and is shown
   as month chips, not repaired. "All year" stores no month limit (`null`).
-- Windows must not overlap. Two windows that share a day, a month and a time would make the rate
+- Date matching compares `MM-DD` keys on the local calendar. Bounds are inclusive; `from === to` is a
+  single day; a reversed range wraps. Leap day is a real annual day (the stored ring always includes
+  29 February); a non-leap year simply has no instant there.
+- Windows must not overlap. Two windows that share a day, a season day and a time would make the rate
   ambiguous, so the editor rejects the plan instead of silently choosing one and names both windows
-  in the error. A document written outside the editor (hand-edited, or by an older client) can still
+  in the error. Adjacent date seasons that share a month but no day (ending 15 June, starting 16 June)
+  do not overlap. A document written outside the editor (hand-edited, or by an older client) can still
   hold overlaps: there the **last matching window wins**, and the editor asks you to resolve the
   overlap before it will save again.
 - A malformed stored row stays visible with its error and blocks saving until it is fixed or
-  removed; loading never deletes or repairs it.
+  removed; loading never deletes or repairs it. A non-contiguous legacy month scope stays editable in
+  Months mode.
 - Saving writes the all-other-times rate, currency, and the window list in its original order. With
   no windows, the document keeps exactly its two flat fields.
 

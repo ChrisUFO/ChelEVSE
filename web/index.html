@@ -555,7 +555,7 @@
               <div class="rate-editor" role="group" aria-labelledby="rates-heading">
                 <div class="rate-head">
                   <div class="rate-head-copy">
-                    <h3 id="rates-heading">Electricity price</h3>
+                    <h3 id="rates-heading">Time-of-use &amp; seasonal rates</h3>
                     <p class="block-sub">Times are local, and every price is per kWh.</p>
                   </div>
                 </div>
@@ -606,11 +606,26 @@
 
                 <div class="flat-state" id="rates-flat">
                   <p class="flat-hint">
-                    Have a cheaper overnight or weekend rate? Add the hours it applies.
+                    Set one price for a season, or add daily windows when the price changes by time
+                    of day.
                   </p>
-                  <button class="btn add-rule" id="add-cheap-hours" type="button">
-                    <span class="add-plus" aria-hidden="true">+</span><span>Add cheap hours</span>
+                  <button class="btn add-rule" id="add-rate-plan" type="button">
+                    <span class="add-plus" aria-hidden="true">+</span
+                    ><span>Add season or time-of-use</span>
                   </button>
+                  <div class="plan-choices" id="rate-plan-choices" hidden>
+                    <button class="plan-choice" id="add-season-rate" type="button">
+                      <span class="plan-choice-title">Season rate</span>
+                      <span class="plan-choice-note">One price for every hour in the season.</span>
+                    </button>
+                    <button class="plan-choice" id="add-tou" type="button">
+                      <span class="plan-choice-title">Time-of-use windows</span>
+                      <span class="plan-choice-note">Different prices by day and time.</span>
+                    </button>
+                    <button class="link-btn plan-cancel" id="cancel-rate-plan" type="button">
+                      Cancel
+                    </button>
+                  </div>
                 </div>
 
                 <div class="rate-plan" id="rates-plan" hidden>
@@ -624,9 +639,9 @@
                     </div>
                   </div>
                   <p class="plan-help" id="plan-help">
-                    Months can carry windows from more than one season. Each table shows this
-                    season's own windows and names any other season that applies; the checker shows
-                    the combined price.
+                    Seasons can cover months or specific dates, and they can overlap. Each table
+                    shows this season's own windows and names any other season that applies; the
+                    checker shows the combined price.
                   </p>
                   <p class="rule-error doc-error" id="rates-error" role="alert" hidden></p>
                   <div class="rate-periods" id="rate-periods"></div>
