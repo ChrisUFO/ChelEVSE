@@ -28,7 +28,8 @@ from fakes import (  # noqa: E402
 )
 from mqtt_source import MqttPublishError, MqttSource  # noqa: E402
 
-BASE = "http://charger"
+HOST = bridge.ChargerHost("charger")
+BASE = HOST.base
 TOPIC = "chelevse"
 CONFIRM = 0.05
 
@@ -235,7 +236,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         ack_override(client, {"state": "disabled", "auto_release": True})
         session = FakeSession()
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
+            session, HOST, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual(
@@ -249,7 +250,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         ack_override(client, {"state": "null"})
         session = FakeSession()
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "resume"}, source=source, confirm_sec=CONFIRM
+            session, HOST, None, {"type": "resume"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual(client.published, [(f"{TOPIC}/override/set", "clear", 1)])
@@ -264,7 +265,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         session = FakeSession()
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "set_current", "amps": 99},
             source=source,
@@ -293,7 +294,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 session,
-                BASE,
+                HOST,
                 None,
                 {"type": "set_current", "amps": 20},
                 source=source,
@@ -310,7 +311,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         source.seed({"state": 254, "manual_override": 1})
         session = FakeSession()
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
+            session, HOST, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual(session.calls, [])
@@ -351,7 +352,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         session = FakeSession()
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "set_current", "amps": 32},
             source=source,
@@ -386,7 +387,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         )
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "set_current", "amps": 32},
             source=source,
@@ -421,7 +422,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         )
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "set_current", "amps": 10},
             source=source,
@@ -456,7 +457,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 session,
-                BASE,
+                HOST,
                 None,
                 {"type": "set_current", "amps": 10},
                 source=source,
@@ -476,7 +477,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 session,
-                BASE,
+                HOST,
                 None,
                 {"type": "pause"},
                 source=source,
@@ -495,7 +496,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 session,
-                BASE,
+                HOST,
                 None,
                 {"type": "pause"},
                 source=source,
@@ -513,7 +514,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         source, _client = make_source()
         session = FakeSession([FakeResponse(200, {"state": 254, "manual_override": 1})])
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
+            session, HOST, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {"transport": "mqtt"})
         self.assertEqual([call[0] for call in session.calls], ["get"])
@@ -523,7 +524,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
         client.publish_rc = 4
         session = FakeSession([FakeResponse(200)])
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
+            session, HOST, None, {"type": "pause"}, source=source, confirm_sec=CONFIRM
         )
         self.assertEqual(extra, {})  # the HTTP path's shape is unchanged
         self.assertEqual(session.calls[0][0], "post")
@@ -538,7 +539,7 @@ class MqttOverrideCommandTests(unittest.TestCase):
             with self.assertRaises(bridge.CommandError) as raised:
                 bridge.apply_command(
                     session,
-                    BASE,
+                    HOST,
                     None,
                     {"type": "pause"},
                     source=source,
@@ -556,7 +557,7 @@ class MqttRapiCommandTests(unittest.TestCase):
         session = FakeSession()
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "rapi", "command": "$FS 20"},
             source=source,
@@ -573,7 +574,7 @@ class MqttRapiCommandTests(unittest.TestCase):
         ack_rapi(client, "$OK 01 0 01 0200^12")
         bridge.apply_command(
             FakeSession(),
-            BASE,
+            HOST,
             None,
             {"type": "rapi", "command": "$GS"},
             source=source,
@@ -587,7 +588,7 @@ class MqttRapiCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 FakeSession(),
-                BASE,
+                HOST,
                 None,
                 {"type": "rapi", "command": "$XX 20"},
                 source=source,
@@ -602,7 +603,7 @@ class MqttRapiCommandTests(unittest.TestCase):
         with self.assertRaises(bridge.CommandError) as raised:
             bridge.apply_command(
                 session,
-                BASE,
+                HOST,
                 None,
                 {"type": "rapi", "command": "$GS"},
                 source=source,
@@ -618,7 +619,7 @@ class MqttRapiCommandTests(unittest.TestCase):
         session = FakeSession([FakeResponse(200, {"ret": "OK"})])
         extra = bridge.apply_command(
             session,
-            BASE,
+            HOST,
             None,
             {"type": "rapi", "command": "$GS"},
             source=source,
@@ -633,7 +634,7 @@ class FallbackTests(unittest.TestCase):
         source, client = make_source(ready=False)
         session = FakeSession([FakeResponse(200)])
         extra = bridge.apply_command(
-            session, BASE, None, {"type": "pause"}, source=source
+            session, HOST, None, {"type": "pause"}, source=source
         )
         self.assertEqual(extra, {})
         self.assertEqual(client.published, [])
@@ -643,14 +644,14 @@ class FallbackTests(unittest.TestCase):
         source, client = make_source(ready=False)
         client.drop()
         session = FakeSession([FakeResponse(200)])
-        bridge.apply_command(session, BASE, None, {"type": "pause"}, source=source)
+        bridge.apply_command(session, HOST, None, {"type": "pause"}, source=source)
         self.assertEqual(client.published, [])
         self.assertEqual(session.calls[0][0], "post")
 
     def test_no_source_keeps_the_existing_http_path(self):
         session = FakeSession([FakeResponse(200)])
         self.assertEqual(
-            bridge.apply_command(session, BASE, None, {"type": "pause"}), {}
+            bridge.apply_command(session, HOST, None, {"type": "pause"}), {}
         )
         self.assertEqual(session.calls[0][0], "post")
 
@@ -668,7 +669,7 @@ class CommandLoopTransportTests(unittest.TestCase):
         session = session or FakeSession()
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
-            bridge.command_loop(db, BASE, None, transport, 0, source)
+            bridge.command_loop(db, HOST, None, transport, 0, source)
         return session
 
     def test_an_mqtt_ack_is_recorded_with_its_transport(self):

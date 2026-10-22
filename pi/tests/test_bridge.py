@@ -19,6 +19,11 @@ from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
 UTC = timezone.utc
 
 
+def _host(value="charger"):
+    """A fresh charger-address holder: loops must not share mutable state."""
+    return bridge.ChargerHost(value)
+
+
 class FirestoreSafeTests(unittest.TestCase):
     def test_uint64_sentinel_becomes_float(self):
         safe = bridge.firestore_safe(
@@ -111,7 +116,7 @@ class ApplyCommandTests(unittest.TestCase):
     def test_pause_posts_disabled_override(self):
         session = FakeSession([FakeResponse(200)])
         self.assertEqual(
-            bridge.apply_command(session, "http://charger", None, {"type": "pause"}),
+            bridge.apply_command(session, _host(), None, {"type": "pause"}),
             {},
         )
         method, url, kwargs = session.calls[0]
@@ -120,7 +125,7 @@ class ApplyCommandTests(unittest.TestCase):
 
     def test_resume_deletes_override(self):
         session = FakeSession([FakeResponse(200)])
-        bridge.apply_command(session, "http://charger", None, {"type": "resume"})
+        bridge.apply_command(session, _host(), None, {"type": "resume"})
         self.assertEqual(session.calls[0][0], "delete")
         self.assertEqual(session.calls[0][1], "http://charger/override")
 
@@ -129,7 +134,7 @@ class ApplyCommandTests(unittest.TestCase):
             [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 0})]
         )
         self.assertEqual(
-            bridge.apply_command(session, "http://charger", None, {"type": "resume"}),
+            bridge.apply_command(session, _host(), None, {"type": "resume"}),
             {},
         )
         self.assertEqual([call[0] for call in session.calls], ["delete", "get"])
@@ -139,22 +144,22 @@ class ApplyCommandTests(unittest.TestCase):
             [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 1})]
         )
         with self.assertRaises(bridge.CommandError):
-            bridge.apply_command(session, "http://charger", None, {"type": "resume"})
+            bridge.apply_command(session, _host(), None, {"type": "resume"})
 
     def test_resume_500_with_non_object_status_fails_cleanly(self):
         session = FakeSession(
             [FakeResponse(500, text="Failed to release"), FakeResponse(200, [1, 2])]
         )
         with self.assertRaises(bridge.CommandError):
-            bridge.apply_command(session, "http://charger", None, {"type": "resume"})
+            bridge.apply_command(session, _host(), None, {"type": "resume"})
 
     def test_set_current_clamps_to_firmware_limits(self):
         session = FakeSession([FakeResponse(200), FakeResponse(200)])
         bridge.apply_command(
-            session, "http://charger", None, {"type": "set_current", "amps": 99}
+            session, _host(), None, {"type": "set_current", "amps": 99}
         )
         bridge.apply_command(
-            session, "http://charger", None, {"type": "set_current", "amps": 1}
+            session, _host(), None, {"type": "set_current", "amps": 1}
         )
         self.assertEqual(session.calls[0][2]["json"]["charge_current"], bridge.MAX_AMPS)
         self.assertEqual(session.calls[1][2]["json"]["max_current"], bridge.MIN_AMPS)
@@ -162,13 +167,13 @@ class ApplyCommandTests(unittest.TestCase):
     def test_set_current_rejects_missing_amps_without_calling_charger(self):
         session = FakeSession()
         with self.assertRaises(bridge.CommandError):
-            bridge.apply_command(session, "http://charger", None, {"type": "set_current"})
+            bridge.apply_command(session, _host(), None, {"type": "set_current"})
         self.assertEqual(session.calls, [])
 
     def test_rapi_returns_ret_value(self):
         session = FakeSession([FakeResponse(200, {"ret": "OK"})])
         extra = bridge.apply_command(
-            session, "http://charger", None, {"type": "rapi", "command": "$OK"}
+            session, _host(), None, {"type": "rapi", "command": "$OK"}
         )
         self.assertEqual(extra, {"result": "OK"})
         self.assertEqual(session.calls[0][2]["data"], {"rapi": "$OK", "json": 1})
@@ -176,7 +181,7 @@ class ApplyCommandTests(unittest.TestCase):
     def test_rapi_non_json_reply_is_returned_raw(self):
         session = FakeSession([FakeResponse(200, payload=None, text="  $OK  \n")])
         extra = bridge.apply_command(
-            session, "http://charger", None, {"type": "rapi", "command": "$OK"}
+            session, _host(), None, {"type": "rapi", "command": "$OK"}
         )
         self.assertEqual(extra, {"result": "$OK"})
 
@@ -186,7 +191,7 @@ class ApplyCommandTests(unittest.TestCase):
             with self.assertRaises(bridge.CommandError):
                 bridge.apply_command(
                     session,
-                    "http://charger",
+                    _host(),
                     None,
                     {"type": "rapi", "command": command},
                 )
@@ -195,13 +200,13 @@ class ApplyCommandTests(unittest.TestCase):
     def test_non_2xx_reply_is_a_command_error_with_http_status(self):
         session = FakeSession([FakeResponse(500, payload=None, text="boom")])
         with self.assertRaises(bridge.CommandError) as raised:
-            bridge.apply_command(session, "http://charger", None, {"type": "pause"})
+            bridge.apply_command(session, _host(), None, {"type": "pause"})
         self.assertIn("HTTP 500", str(raised.exception))
         self.assertIn("boom", str(raised.exception))
 
     def test_unknown_type_fails(self):
         with self.assertRaises(bridge.CommandError):
-            bridge.apply_command(FakeSession(), "http://charger", None, {"type": "x"})
+            bridge.apply_command(FakeSession(), _host(), None, {"type": "x"})
 
 
 def rule(rule_id, days, start, end, amps=16):
@@ -1285,7 +1290,7 @@ class CommandLoopTests(unittest.TestCase):
         session = FakeSession()
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
-            bridge.command_loop(db, "http://charger", None, transport, 0)
+            bridge.command_loop(db, _host(), None, transport, 0)
         return session
 
     def test_stale_command_is_failed_without_contacting_the_charger(self):
@@ -1348,7 +1353,7 @@ class SyncScheduleTests(unittest.TestCase):
             matching,
             {"id": 2, "state": "disabled", "time": "11:00:00", "days": ["monday"]},
         ]
-        bridge.sync_schedule(session, "http://charger", None, events)
+        bridge.sync_schedule(session, _host(), None, events)
         methods = [call[0] for call in session.calls]
         self.assertEqual(methods, ["get", "post", "delete"])
         self.assertEqual(session.calls[1][2]["json"]["id"], 2)
@@ -1358,17 +1363,17 @@ class SyncScheduleTests(unittest.TestCase):
 class SchedulePlanResponseTests(unittest.TestCase):
     def test_an_empty_firmware_plan_is_an_empty_object(self):
         session = FakeSession([FakeResponse(200, [])])
-        self.assertEqual(bridge._schedule_plan(session, "http://charger", None), {})
+        self.assertEqual(bridge._schedule_plan(session, _host(), None), {})
 
     def test_a_non_empty_list_is_still_malformed(self):
         session = FakeSession([FakeResponse(200, [1])])
         with self.assertRaises(ValueError):
-            bridge._schedule_plan(session, "http://charger", None)
+            bridge._schedule_plan(session, _host(), None)
 
     def test_an_object_is_returned_unchanged(self):
         plan = {"current_event": {"id": 1}}
         session = FakeSession([FakeResponse(200, plan)])
-        self.assertEqual(bridge._schedule_plan(session, "http://charger", None), plan)
+        self.assertEqual(bridge._schedule_plan(session, _host(), None), plan)
 
     def test_the_schedule_loop_publishes_the_empty_state_without_an_error(self):
         db = FakeDB()
@@ -1378,7 +1383,7 @@ class SchedulePlanResponseTests(unittest.TestCase):
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
             bridge, "log", logs.append
         ):
-            bridge.schedule_loop(db, "http://charger", None, transport, 60, 300)
+            bridge.schedule_loop(db, _host(), None, transport, 60, 300)
         schedule = db.data["status"]["current"].get("schedule")
         self.assertEqual(schedule, {"in_window": False, "active_rule_id": None})
         self.assertFalse([line for line in logs if "schedule plan failed" in line])
@@ -1391,7 +1396,7 @@ class SchedulePlanResponseTests(unittest.TestCase):
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
             bridge, "log", logs.append
         ):
-            bridge.schedule_loop(db, "http://charger", None, transport, 60, 300)
+            bridge.schedule_loop(db, _host(), None, transport, 60, 300)
         self.assertTrue(
             any(
                 "schedule plan failed (ValueError: schedule plan is not a JSON object)"
@@ -1510,7 +1515,7 @@ class LoopJitterTests(unittest.TestCase):
         stop = _RecordingStop(polls)
         transport = bridge.ChargerTransport(FakeSession())
         with mock.patch.object(bridge, "_stop", stop):
-            bridge.config_loop(FakeDB(), "http://charger", None, transport, interval, **kwargs)
+            bridge.config_loop(FakeDB(), _host(), None, transport, interval, **kwargs)
         return stop.waits
 
     def run_schedule(self, polls, interval, **kwargs):
@@ -1518,7 +1523,7 @@ class LoopJitterTests(unittest.TestCase):
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, {})]))
         with mock.patch.object(bridge, "_stop", stop):
             bridge.schedule_loop(
-                FakeDB(), "http://charger", None, transport, interval, 300, **kwargs
+                FakeDB(), _host(), None, transport, interval, 300, **kwargs
             )
         return stop.waits
 
@@ -1547,7 +1552,7 @@ class LoopJitterTests(unittest.TestCase):
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
             bridge, "log", logs.append
         ):
-            bridge.config_loop(db, "http://charger", None, transport, 60)
+            bridge.config_loop(db, _host(), None, transport, 60)
         self.assertEqual(stop.waits, [60, 60])
         self.assertEqual(len(logs), 2)
         self.assertTrue(all(line.startswith("config loop error") for line in logs))
@@ -1559,6 +1564,7 @@ class LoopJitterTests(unittest.TestCase):
 class LoopWiringTests(unittest.TestCase):
     def test_run_gives_every_loop_the_same_transport(self):
         transport = bridge.ChargerTransport(FakeSession())
+        host = _host()
         calls = {}
         threads = []
 
@@ -1578,10 +1584,13 @@ class LoopWiringTests(unittest.TestCase):
             def start(self):
                 self.target(*self.args)
 
+        settings_spy = spy("settings")
         with mock.patch.object(bridge, "status_loop", spy("status")), mock.patch.object(
             bridge, "config_loop", spy("config")
         ), mock.patch.object(bridge, "schedule_loop", spy("schedule")), mock.patch.object(
             bridge, "command_loop", spy("command")
+        ), mock.patch.object(
+            bridge, "settings_loop", settings_spy
         ), mock.patch.object(
             bridge.threading, "Thread", _ThreadSpy
         ), mock.patch.object(
@@ -1591,20 +1600,27 @@ class LoopWiringTests(unittest.TestCase):
         ):
             bridge.run(
                 FakeDB(),
-                "http://charger",
+                host,
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
             )
 
-        self.assertEqual(set(calls), {"status", "config", "schedule", "command"})
+        self.assertEqual(
+            set(calls), {"status", "config", "schedule", "command", "settings"}
+        )
         for name, args in calls.items():
-            self.assertIs(args[3], transport, f"{name} loop got another transport")
-        self.assertEqual(len(threads), 3)
+            self.assertIs(args[1], host, f"{name} loop got another charger host")
+            if name != "settings":
+                self.assertIs(args[3], transport, f"{name} loop got another transport")
+        self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
+        self.assertEqual(len(threads), 4)
         for thread in threads:
-            self.assertIs(thread.args[3], transport)
+            self.assertIs(thread.args[1], host)
             self.assertTrue(thread.daemon)
+            if thread.target is not settings_spy:
+                self.assertIs(thread.args[3], transport)
         tracker.return_value.seed.assert_called_once_with()
 
     def test_run_leaves_shutdown_logging_to_main(self):
@@ -1625,9 +1641,9 @@ class LoopWiringTests(unittest.TestCase):
         ) as fake_log:
             bridge.run(
                 FakeDB(),
-                "http://charger",
+                _host(),
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
             )
@@ -2121,7 +2137,7 @@ class WatchdogLoopTests(unittest.TestCase):
         tracker = bridge.StatusTracker(db)
         watchdog = bridge.Watchdog(
             db,
-            "http://charger",
+            _host(),
             None,
             transport,
             notifier,
@@ -2135,7 +2151,7 @@ class WatchdogLoopTests(unittest.TestCase):
         ):
             bridge.status_loop(
                 db,
-                "http://charger",
+                _host(),
                 None,
                 transport,
                 10,
@@ -2738,6 +2754,524 @@ class WatchdogLoopTests(unittest.TestCase):
         self.assertEqual(health["state"], "healthy")
         self.assertEqual(health["last_action"], "restart_gateway")
         self.assertEqual(health["last_transport"], "mqtt")
+
+
+class ChargerHostGrammarTests(unittest.TestCase):
+    """The shared host grammar: the bridge re-validates what the app lets through."""
+
+    ACCEPTED = (
+        "192.168.1.50",
+        "192.168.0.145",
+        "0.0.0.0",
+        "255.255.255.255",
+        "evse.local",
+        # This Pi's own CHARGER_HOST: mixed case and an mDNS .local name must
+        # survive the normalizer untouched.
+        "TerranceCharge.local",
+        "my-charger.local",
+        "host",
+        "a",
+        "1.2.3.4.5",  # five numeric labels is not an IPv4 literal
+        "001.002.003.004",  # leading zeroes still parse as 0..255
+    )
+
+    REJECTED = (
+        "",
+        "   ",
+        "http://192.168.1.50",
+        "https://evse.local",
+        "192.168.1.50:8080",
+        "192.168.1.50/status",
+        "192.168.1.50 status",
+        "192.168. 1.50",
+        "a@b",
+        "user@192.168.1.50",
+        ".192.168.1.50",
+        "192.168.1.50.",
+        "-charger",
+        "charger-",
+        "192.168.1.50-",
+        "999.1.1.1",
+        "192.168.1.256",
+        "evse_local",
+        "charger..local",
+    )
+
+    def test_accepted_values_are_returned_as_typed(self):
+        for value in self.ACCEPTED:
+            with self.subTest(value=value):
+                self.assertEqual(bridge._normalize_charger_host(value), value)
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        self.assertEqual(
+            bridge._normalize_charger_host("  192.168.1.50\t"), "192.168.1.50"
+        )
+        self.assertIsNone(bridge._normalize_charger_host("   "))
+
+    def test_rejected_values(self):
+        for value in self.REJECTED:
+            with self.subTest(value=value):
+                self.assertIsNone(bridge._normalize_charger_host(value))
+
+    def test_non_strings_are_rejected(self):
+        for value in (None, 42, 1.5, ["192.168.1.50"], b"192.168.1.50"):
+            with self.subTest(value=value):
+                self.assertIsNone(bridge._normalize_charger_host(value))
+
+    def test_the_host_length_cap(self):
+        labels = ["a" * 63, "b" * 63, "c" * 63, "d" * 61]
+        host = ".".join(labels)
+        self.assertEqual(len(host), 253)
+        self.assertEqual(bridge._normalize_charger_host(host), host)
+        self.assertIsNone(bridge._normalize_charger_host(host + "e"))
+
+    def test_the_label_length_cap(self):
+        self.assertEqual(bridge._normalize_charger_host("a" * 63 + ".local"), "a" * 63 + ".local")
+        self.assertIsNone(bridge._normalize_charger_host("a" * 64 + ".local"))
+
+
+class ChargerHostTests(unittest.TestCase):
+    """The holder: one swap point every consumer reads per request."""
+
+    def test_base_and_host_track_the_constructor_value(self):
+        host = bridge.ChargerHost("TerranceCharge.local")
+        self.assertEqual(host.host, "TerranceCharge.local")
+        self.assertEqual(host.base, "http://TerranceCharge.local")
+
+    def test_set_swaps_the_base_and_reports_the_change(self):
+        host = _host("192.168.0.145")
+        self.assertTrue(host.set("192.168.1.50"))
+        self.assertEqual(host.host, "192.168.1.50")
+        self.assertEqual(host.base, "http://192.168.1.50")
+
+    def test_the_same_value_reports_no_change(self):
+        host = _host("192.168.1.50")
+        self.assertFalse(host.set("192.168.1.50"))
+        self.assertFalse(host.set(" 192.168.1.50 "))
+        self.assertEqual(host.base, "http://192.168.1.50")
+
+    def test_a_malformed_or_missing_value_never_sets(self):
+        host = _host("192.168.1.50")
+        for value in ("http://192.168.1.50", "192.168.1.50:8080", "", None):
+            with self.subTest(value=value):
+                self.assertFalse(host.set(value))
+                self.assertEqual(host.base, "http://192.168.1.50")
+
+    def test_the_constructor_rejects_an_invalid_host(self):
+        with self.assertRaises(ValueError):
+            bridge.ChargerHost("http://192.168.1.50")
+
+
+class SeedHostTests(unittest.TestCase):
+    """Startup seeding: a saved app value beats CHARGER_HOST, safely."""
+
+    def seed(self, data=None, bootstrap="192.168.0.145", fail_reads=False):
+        db = FakeDB(data)
+        db.fail_reads = fail_reads
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            host = bridge.seed_host(db, bootstrap)
+        return host, logs
+
+    def test_a_stored_value_beats_the_environment(self):
+        host, logs = self.seed(
+            {"settings": {"current": {"charger_host": "192.168.1.50", "rate": 0.2}}}
+        )
+        self.assertEqual(host, "192.168.1.50")
+        self.assertEqual(logs, ["charger host: http://192.168.1.50 (app settings)"])
+
+    def test_a_stored_hostname_is_accepted(self):
+        host, logs = self.seed({"settings": {"current": {"charger_host": "evse.local"}}})
+        self.assertEqual(host, "evse.local")
+        self.assertEqual(logs, ["charger host: http://evse.local (app settings)"])
+
+    def test_a_malformed_stored_value_is_logged_and_ignored(self):
+        host, logs = self.seed(
+            {"settings": {"current": {"charger_host": "192.168.1.50:8080"}}}
+        )
+        self.assertEqual(host, "192.168.0.145")
+        self.assertEqual(
+            logs,
+            [
+                "charger host rejected: 192.168.1.50:8080 (using 192.168.0.145)",
+                "charger host: http://192.168.0.145 (environment)",
+            ],
+        )
+
+    def test_an_absent_key_uses_the_environment(self):
+        for data in ({}, {"settings": {"current": {"rate": 0.2}}}):
+            with self.subTest(data=data):
+                host, logs = self.seed(data or None)
+                self.assertEqual(host, "192.168.0.145")
+                self.assertEqual(
+                    logs, ["charger host: http://192.168.0.145 (environment)"]
+                )
+
+    def test_a_blank_stored_value_uses_the_environment(self):
+        host, logs = self.seed({"settings": {"current": {"charger_host": "  "}}})
+        self.assertEqual(host, "192.168.0.145")
+        self.assertEqual(logs, ["charger host: http://192.168.0.145 (environment)"])
+
+    def test_a_read_failure_falls_back_to_the_environment(self):
+        host, logs = self.seed(None, fail_reads=True)
+        self.assertEqual(host, "192.168.0.145")
+        self.assertEqual(len(logs), 2)
+        self.assertTrue(logs[0].startswith("charger host: settings read failed"))
+        self.assertEqual(logs[1], "charger host: http://192.168.0.145 (environment)")
+
+    def test_a_malformed_bootstrap_falls_back_to_the_built_in_default(self):
+        host, logs = self.seed(None, bootstrap="http://192.168.1.50")
+        self.assertEqual(host, bridge.DEFAULT_CHARGER_HOST)
+        self.assertEqual(
+            logs[0],
+            f"charger host rejected: http://192.168.1.50 "
+            f"(using {bridge.DEFAULT_CHARGER_HOST})",
+        )
+
+
+class SettingsLoopTests(unittest.TestCase):
+    """``settings/current.charger_host`` applied live, by its own thread."""
+
+    def run_loop(
+        self,
+        data=None,
+        host=None,
+        bootstrap="192.168.0.145",
+        fail_reads=False,
+        polls=1,
+    ):
+        db = FakeDB(data)
+        db.fail_reads = fail_reads
+        host = host or _host(bootstrap)
+        stop = _RecordingStop(polls)
+        logs = []
+        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
+            bridge, "log", logs.append
+        ):
+            bridge.settings_loop(db, host, bootstrap, 60)
+        return host, logs, stop
+
+    def test_a_valid_change_is_applied_and_logged(self):
+        host, logs, _ = self.run_loop(
+            {"settings": {"current": {"charger_host": "192.168.1.50"}}}
+        )
+        self.assertEqual(host.base, "http://192.168.1.50")
+        self.assertEqual(
+            logs, ["charger host: http://192.168.0.145 -> http://192.168.1.50 (app settings)"]
+        )
+
+    def test_a_cleared_key_reverts_to_the_bootstrap(self):
+        host, logs, _ = self.run_loop(
+            {"settings": {"current": {"rate": 0.2}}}, host=_host("192.168.1.50")
+        )
+        self.assertEqual(host.base, "http://192.168.0.145")
+        self.assertEqual(
+            logs,
+            ["charger host: http://192.168.1.50 -> http://192.168.0.145 (environment)"],
+        )
+
+    def test_a_blank_value_is_a_clear(self):
+        host, logs, _ = self.run_loop(
+            {"settings": {"current": {"charger_host": "   "}}}, host=_host("192.168.1.50")
+        )
+        self.assertEqual(host.base, "http://192.168.0.145")
+        self.assertIn("(environment)", logs[0])
+
+    def test_an_absent_settings_document_reverts_to_the_bootstrap(self):
+        host, logs, _ = self.run_loop(host=_host("192.168.1.50"))
+        self.assertEqual(host.base, "http://192.168.0.145")
+        self.assertEqual(
+            logs,
+            ["charger host: http://192.168.1.50 -> http://192.168.0.145 (environment)"],
+        )
+
+    def test_a_malformed_value_is_rejected_and_the_host_kept(self):
+        host, logs, _ = self.run_loop(
+            {"settings": {"current": {"charger_host": "192.168.1.50:8080"}}},
+            host=_host("192.168.0.145"),
+        )
+        self.assertEqual(host.base, "http://192.168.0.145")
+        self.assertEqual(
+            logs,
+            ["charger host rejected: 192.168.1.50:8080 (keeping http://192.168.0.145)"],
+        )
+
+    def test_a_read_error_keeps_the_current_host(self):
+        host, logs, _ = self.run_loop(
+            host=_host("192.168.1.50"), fail_reads=True
+        )
+        self.assertEqual(host.base, "http://192.168.1.50")
+        self.assertEqual(len(logs), 1)
+        self.assertTrue(logs[0].startswith("charger host: settings read failed"))
+        self.assertIn("keeping http://192.168.1.50", logs[0])
+
+    def test_an_unchanged_value_logs_nothing(self):
+        # The key is absent on every install that never set it: a per-tick log
+        # line would fill the journal for no transition at all.
+        host, logs, _ = self.run_loop(
+            {"settings": {"current": {"rate": 0.2}}}, host=_host("192.168.0.145")
+        )
+        self.assertEqual(logs, [])
+
+    def test_each_tick_waits_the_refresh_interval(self):
+        _, _, stop = self.run_loop(polls=2)
+        self.assertEqual(stop.waits, [60, 60])
+
+
+class _SilentMqtt:
+    """An MQTT source that publishes but never confirms: forces the reconcile."""
+
+    ready = True
+
+    def publish(self, topic, payload, qos=0):
+        pass
+
+    def wait_for_state(self, predicate, timeout):
+        return False
+
+
+class HostSwapTests(unittest.TestCase):
+    """Every consumer builds its URL from the holder, after a live swap."""
+
+    START = datetime(2026, 10, 20, 12, tzinfo=UTC)
+
+    def status_loop(self, host, session, polls, on_wait=None, watchdog=None):
+        db = FakeDB()
+        tracker = bridge.StatusTracker(db)
+        notifier = _RecordingNotifier()
+        transport = bridge.ChargerTransport(session)
+        watchdog = watchdog or bridge.Watchdog(
+            db, host, None, transport, notifier, bridge.WatchdogConfig()
+        )
+        with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
+            bridge.status_loop(
+                db, host, None, transport, 10, tracker, notifier, watchdog
+            )
+        return session
+
+    def test_the_status_loop_polls_the_swapped_host(self):
+        host = _host()
+        session = FakeSession([FakeResponse(200, _status_payload())] * 2)
+        self.status_loop(host, session, 2, on_wait=lambda: host.set("192.168.1.50"))
+        self.assertEqual(
+            [call[1] for call in session.calls],
+            ["http://charger/status", "http://192.168.1.50/status"],
+        )
+
+    def test_the_config_loop_fetches_from_the_swapped_host(self):
+        host = _host()
+        session = FakeSession([FakeResponse(200, {"firmware": "5.1.5"})] * 2)
+        transport = bridge.ChargerTransport(session)
+        with mock.patch.object(
+            bridge, "_stop", _StopAfter(2, lambda: host.set("192.168.1.50"))
+        ):
+            bridge.config_loop(FakeDB(), host, None, transport, 60)
+        self.assertEqual(
+            [call[1] for call in session.calls],
+            ["http://charger/config", "http://192.168.1.50/config"],
+        )
+
+    def test_the_schedule_loop_reads_the_plan_from_the_swapped_host(self):
+        host = _host()
+        session = FakeSession([FakeResponse(200, [])] * 2)
+        transport = bridge.ChargerTransport(session)
+        with mock.patch.object(
+            bridge, "_stop", _StopAfter(2, lambda: host.set("192.168.1.50"))
+        ):
+            bridge.schedule_loop(FakeDB(), host, None, transport, 60, 300)
+        self.assertEqual(
+            [call[1] for call in session.calls],
+            ["http://charger/schedule/plan", "http://192.168.1.50/schedule/plan"],
+        )
+
+    def test_the_schedule_sync_posts_to_the_swapped_host(self):
+        host = _host()
+        session = FakeSession([FakeResponse(200, []), FakeResponse(200)])
+        host.set("192.168.1.50")
+        bridge.sync_schedule(
+            session, host, None, [{"id": 1, "state": "active", "time": "10:00:00", "days": []}]
+        )
+        self.assertTrue(
+            all(call[1].startswith("http://192.168.1.50/") for call in session.calls)
+        )
+
+    def test_the_command_loop_dispatches_to_the_swapped_host(self):
+        host = _host()
+        db = FakeDB(
+            {
+                "commands": {
+                    "a": {
+                        "status": "pending",
+                        "type": "pause",
+                        "created_at": datetime.now(UTC),
+                    }
+                }
+            }
+        )
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        transport = bridge.ChargerTransport(session)
+
+        def swap_and_queue():
+            host.set("192.168.1.50")
+            db.data["commands"]["b"] = {
+                "status": "pending",
+                "type": "resume",
+                "created_at": datetime.now(UTC),
+            }
+
+        with mock.patch.object(bridge, "_stop", _StopAfter(2, swap_and_queue)):
+            bridge.command_loop(db, host, None, transport, 0)
+        self.assertEqual(
+            [call[1] for call in session.calls],
+            ["http://charger/override", "http://192.168.1.50/override"],
+        )
+
+    def test_a_direct_command_after_a_swap_targets_the_new_host(self):
+        host = _host()
+        session = FakeSession([FakeResponse(200)])
+        host.set("192.168.1.50")
+        bridge.apply_command(
+            session, host, None, {"type": "set_current", "amps": 16}
+        )
+        self.assertEqual(session.calls[0][1], "http://192.168.1.50/override")
+
+    def test_the_mqtt_override_reconcile_targets_the_new_host(self):
+        host = _host()
+        session = FakeSession(
+            [FakeResponse(200, {"state": 254, "manual_override": 1})]
+        )
+        host.set("192.168.1.50")
+        extra = bridge._apply_override_mqtt(
+            session, host, None, _SilentMqtt(), "pause", {"type": "pause"}, 0
+        )
+        self.assertEqual(extra, {"transport": "mqtt"})
+        self.assertEqual(session.calls[0][1], "http://192.168.1.50/status")
+
+    def test_the_watchdog_probes_and_restarts_the_swapped_host(self):
+        host = _host()
+        db = FakeDB()
+        clock = _Clock(self.START)
+        outage = requests.ConnectionError("charger unreachable")
+        session = _WatchdogSession([outage] * 3)
+        transport = bridge.ChargerTransport(session)
+        notifier = _RecordingNotifier()
+        tracker = bridge.StatusTracker(db)
+        watchdog = bridge.Watchdog(
+            db, host, None, transport, notifier, bridge.WatchdogConfig(), clock
+        )
+
+        def swap():
+            host.set("192.168.1.50")
+            clock.advance(10)
+
+        with mock.patch.object(bridge, "_stop", _StopAfter(3, swap)):
+            bridge.status_loop(
+                db, host, None, transport, 10, tracker, notifier, watchdog
+            )
+        urls = [call[1] for call in session.calls]
+        self.assertEqual(urls[0], "http://charger/status")
+        self.assertTrue(
+            all(url.startswith("http://192.168.1.50/") for url in urls[1:]), urls
+        )
+        self.assertIn("http://192.168.1.50/restart", urls)
+
+    def test_an_unreachable_swapped_host_keeps_the_loop_cycling(self):
+        host = _host()
+        outage = requests.ConnectionError("No route to host")
+        session = FakeSession(
+            [FakeResponse(200, _status_payload()), outage, outage]
+        )
+        db = FakeDB()
+        tracker = bridge.StatusTracker(db)
+        notifier = _RecordingNotifier()
+        transport = bridge.ChargerTransport(session)
+        watchdog = bridge.Watchdog(
+            db, host, None, transport, notifier, bridge.WatchdogConfig()
+        )
+        logs = []
+        with mock.patch.object(
+            bridge, "_stop", _StopAfter(3, lambda: host.set("192.168.1.50"))
+        ), mock.patch.object(bridge, "log", logs.append):
+            bridge.status_loop(
+                db, host, None, transport, 10, tracker, notifier, watchdog
+            )
+        # Three polls: the first on the old address, then two on an address the
+        # charger does not answer -- the loop got to its third tick and logged.
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(session.calls[1][1], "http://192.168.1.50/status")
+        self.assertTrue(any("charger offline" in line for line in logs), logs)
+        self.assertFalse(any("status loop error" in line for line in logs), logs)
+
+
+class MainSeedingTests(unittest.TestCase):
+    """main() wires the app value over the env bootstrap, and names it."""
+
+    def run_main(self, data=None, env=None, fail_reads=False):
+        db = FakeDB(data)
+        db.fail_reads = fail_reads
+        logs = []
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, env or {}, clear=True
+        ), mock.patch.object(
+            bridge, "init_firestore", return_value=db
+        ), mock.patch.object(
+            bridge, "run"
+        ) as run, mock.patch.object(
+            bridge, "log", logs.append
+        ), mock.patch.object(
+            bridge, "ChargerTransport"
+        ):
+            bridge.main()
+        return run, logs
+
+    def test_the_app_value_overrides_the_environment_at_startup(self):
+        run, logs = self.run_main(
+            {"settings": {"current": {"charger_host": "192.168.1.50"}}},
+            {"CHARGER_HOST": "192.168.0.145"},
+        )
+        self.assertIsInstance(run.call_args.args[1], bridge.ChargerHost)
+        self.assertEqual(run.call_args.args[1].base, "http://192.168.1.50")
+        self.assertIn("charger host: http://192.168.1.50 (app settings)", logs)
+        self.assertTrue(
+            any(line.startswith("bridge started: http://192.168.1.50") for line in logs)
+        )
+        self.assertEqual(run.call_args.args[7], "192.168.0.145")
+
+    def test_the_environment_seeds_a_fresh_pi(self):
+        run, logs = self.run_main({"settings": {"current": {"rate": 0.2}}})
+        self.assertEqual(run.call_args.args[1].base, "http://192.168.0.145")
+        self.assertIn("charger host: http://192.168.0.145 (environment)", logs)
+
+    def test_a_malformed_app_value_falls_back_to_the_environment(self):
+        run, logs = self.run_main(
+            {"settings": {"current": {"charger_host": "192.168.1.50/status"}}},
+            {"CHARGER_HOST": "192.168.0.145"},
+        )
+        self.assertEqual(run.call_args.args[1].base, "http://192.168.0.145")
+        self.assertIn(
+            "charger host rejected: 192.168.1.50/status (using 192.168.0.145)", logs
+        )
+
+    def test_a_settings_read_failure_still_starts_the_bridge(self):
+        run, logs = self.run_main(fail_reads=True)
+        self.assertEqual(run.call_args.args[1].base, "http://192.168.0.145")
+        self.assertTrue(
+            any("settings read failed" in line for line in logs), logs
+        )
+
+    def test_the_settings_interval_is_wired_and_env_overridable(self):
+        run, logs = self.run_main(env={"SETTINGS_INTERVAL": "15"})
+        self.assertEqual(run.call_args.args[3][5], 15)
+        self.assertIn("settings 15s", " ".join(logs))
+
+    def test_a_bad_settings_interval_fails_loudly(self):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, {"SETTINGS_INTERVAL": "soon"}, clear=True
+        ), mock.patch.object(bridge, "init_firestore") as init:
+            with self.assertRaises(SystemExit) as raised:
+                bridge.main()
+        self.assertIn("SETTINGS_INTERVAL", str(raised.exception))
+        init.assert_not_called()
 
 
 if __name__ == "__main__":

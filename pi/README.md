@@ -49,7 +49,7 @@ real environment variables take precedence.
 
 | Variable                          | Default               | Meaning                                                                                   |
 | --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                    | `192.168.0.145`       | Charger IP on the LAN                                                                     |
+| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's App settings value overrides it at runtime (below)   |
 | `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                           |
 | `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root) |
 | `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                      |
@@ -57,6 +57,7 @@ real environment variables take precedence.
 | `SCHEDULE_INTERVAL`               | `60`                  | Seconds between schedule/plan polls and sync checks                                       |
 | `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
 | `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                             |
+| `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)               |
 | `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                         |
 | `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
 | `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                  |
@@ -78,9 +79,47 @@ message naming the variable, like the interval settings. The same applies to bad
 `MQTT_RECONCILE_SEC` of zero or `nan`, a blank topic, or `MQTT_ENABLED=true`
 without `MQTT_HOST`.
 
+### Charger address
+
+The charger's address is owned by the app, not by the env file. At startup the
+bridge reads `settings/current.charger_host` and, when it is valid, uses it
+instead of `CHARGER_HOST`; it then re-reads that document every
+`SETTINGS_INTERVAL` (60 s) and swaps the address live — same process, same PID,
+no restart and no edit to `private/bridge.env`. Every consumer (status, config,
+schedule, commands, the watchdog probe and restart) builds its next URL from
+the one holder, so a swap takes effect on the very next request.
+
+The value is one host and nothing else: an IPv4 literal or a hostname, e.g.
+`192.168.1.50` or `evse.local`. At most 253 characters, only `A–Z a–z 0–9 . -`,
+an alphanumeric first and last character, labels of 1–63 characters with no
+leading or trailing hyphen, and every octet 0–255 in a four-part IPv4 literal.
+A scheme (`http://`), port (`:8080`), path, userinfo, inner space or a leading
+or trailing dot/hyphen is rejected. Case is preserved as typed. The base stays
+`http://<host>` — no port, no TLS, no userinfo override (credentials stay in
+`private/bridge.env`).
+
+Journal lines:
+
+- `charger host: http://192.168.1.50 (app settings)` — the address chosen at
+  startup, with its source (`environment` when the app has no value).
+- `charger host: http://192.168.0.145 -> http://192.168.1.50 (app settings)` —
+  a live change. Clearing is the same line with `(environment)` as the source.
+- `charger host rejected: 192.168.1.50:8080 (keeping http://192.168.0.145)` — a
+  stored value the grammar rejects: logged, current address kept. At startup
+  the same rejection names the bootstrap it falls back to, and the bridge starts
+  normally.
+- `charger host: settings read failed (...); keeping http://…` — a Firestore
+  read error changes nothing.
+
+Clearing the field in the app removes `charger_host` from the document (it is
+not stored as an empty string), and the bridge reverts to `CHARGER_HOST` on the
+next refresh. Nothing reverts because the charger stopped answering: a saved
+address is honoured until the owner changes it, and the charger-offline banner
+in the app is the feedback path.
+
 ### One charger HTTP session
 
-All four loops share one `requests.Session` (`ChargerTransport` in
+Every poll loop shares one `requests.Session` (`ChargerTransport` in
 `bridge.py`), capped at two pooled sockets (`pool_connections=1`,
 `pool_maxsize=2`). The ESP32 gateway is the constrained side of the link, so
 the bridge holds at most two keep-alive connections instead of one per loop.
