@@ -8,6 +8,7 @@ shutdown -- is tested at exact simulated times.
 
 import os
 import sys
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -196,6 +197,37 @@ class FailureRetentionTests(HistoryBase):
         self.assertTrue(self.tracker.history.flush("shutdown"))
         self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["kwh"], 2.0)
         self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 2.0)
+
+
+class FlushLoggingTests(HistoryBase):
+    """A flush that landed says so: the journal is the write-budget check."""
+
+    def test_a_successful_flush_logs_the_landed_energy(self):
+        logs = []
+        start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
+        self.record(100.0, start)
+        self.record(103.5, start + timedelta(minutes=1))
+        with mock.patch.object(bridge, "log", logs.append):
+            self.assertTrue(self.tracker.history.flush("charging interval"))
+        self.assertEqual(logs, ["history flush on charging interval: "
+                                "3.500 kWh across 1 bucket(s), 1 day doc(s)"])
+
+    def test_a_flush_with_nothing_pending_stays_silent(self):
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.assertTrue(self.tracker.history.flush("shutdown"))
+        self.assertEqual(logs, [])
+
+    def test_a_failed_flush_logs_only_the_failure(self):
+        logs = []
+        start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
+        self.record(100.0, start)
+        self.db.fail_writes = True
+        self.record(102.0, start + timedelta(minutes=1))
+        with mock.patch.object(bridge, "log", logs.append):
+            self.assertFalse(self.tracker.history.flush("charging interval"))
+        self.assertEqual(len(logs), 1)
+        self.assertIn("history flush failed", logs[0])
 
 
 class SessionCloseTests(HistoryBase):
@@ -404,6 +436,42 @@ class ShutdownDrainTests(unittest.TestCase):
         self.assertAlmostEqual(history[day]["kwh"], 8.0)
         (hour,) = history[day]["hours"]
         self.assertAlmostEqual(history[day]["hours"][hour], 8.0)
+
+    def test_the_drain_waits_for_an_apply_holding_the_sink_lock(self):
+        # The drain must serialize with the applies on the sink's lock, not
+        # touch the accumulator beside them: with the lock held (an apply
+        # mid-flight on a still-running daemon loop thread), the drain
+        # blocks; once released it flushes the pending energy.
+        db = FakeDB()
+        notifier = _RecordingNotifier()
+        tracker = bridge.StatusTracker(
+            db, history=bridge.HistoryAccumulator(db)
+        )
+        tracker.seeded = True
+        sink = bridge.StatusSink(db, tracker, notifier)
+        start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
+        with mock.patch.object(bridge, "_localnow", return_value=start):
+            tracker.record_history(100.0)
+            tracker.record_history(104.0)
+        started = threading.Event()
+        drained = threading.Event()
+
+        def drain():
+            started.set()
+            sink.drain_history()
+            drained.set()
+
+        with sink._lock:
+            thread = threading.Thread(target=drain, daemon=True)
+            thread.start()
+            self.assertTrue(started.wait(5))
+            # An unlockable drain would finish near-instantly here.
+            self.assertFalse(drained.wait(0.2))
+        self.assertTrue(drained.wait(5))
+        thread.join(5)
+        (write,) = [w for w in db.writes if w[1] == "history"]
+        self.assertEqual(write[2], "2026-10-21")
+        self.assertEqual(write[3]["kwh"]._value, 4.0)
 
 
 class HistoryEnvTests(unittest.TestCase):

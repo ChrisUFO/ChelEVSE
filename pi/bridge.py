@@ -541,6 +541,9 @@ class HistoryAccumulator:
         for (day, hour), delta in self.pending_hours.items():
             by_day.setdefault(day, {})[hour] = delta
         drained = True
+        landed_kwh = 0.0
+        landed_buckets = 0
+        landed_days = 0
         for day in sorted(by_day):
             hours = by_day[day]
             payload = {
@@ -571,6 +574,18 @@ class HistoryAccumulator:
                 for hour, delta in hours.items():
                     del self.pending_hours[(day, hour)]
                     self.pending_kwh -= delta
+                landed_kwh += sum(hours.values())
+                landed_buckets += len(hours)
+                landed_days += 1
+        if landed_days:
+            # The success counterpart of the failure log above: one line
+            # per flush that wrote, so the journal shows the write budget
+            # in operation (issue #94's <= 13 lines/h while charging; an
+            # empty flush writes nothing and stays silent).
+            log(
+                f"history flush on {reason}: {landed_kwh:.3f} kWh across "
+                f"{landed_buckets} bucket(s), {landed_days} day doc(s)"
+            )
         return drained
 
 
@@ -2101,6 +2116,19 @@ class StatusSink:
         """
         with self._lock:
             self.tracker.consider_history_flush()
+
+    def drain_history(self):
+        """Flush pending history on shutdown, under the lock like every apply.
+
+        The status and MQTT loops are daemon threads ``run()`` never joins,
+        so an apply can still be mid-flight when the drain fires; every
+        other accumulator touchpoint holds this lock, and the drain must
+        too, or it races the accumulator's dict state (a concurrent observe
+        can crash the iteration or drop a just-accumulated delta, and a
+        concurrent interval flush would double-write pending energy).
+        """
+        with self._lock:
+            self.tracker.history.flush("shutdown")
 
     def heartbeat_due(self):
         """(due, watermark) for a heartbeat write, under the lock.
@@ -4034,12 +4062,14 @@ def run(
     command_loop(db, host, auth, transport, command_interval, source, sink)
     if source is not None:
         source.stop()
-    # The SIGTERM/SIGINT handlers only set the stop event; with the loops
-    # down, the pending history energy is written before the process exits
-    # (issue #94) -- the drain runs here, off the signal handler. A failure
-    # is logged by the flush itself; the energy is lost with the process,
-    # bounded by the flush interval (the unclean-power-loss window).
-    tracker.history.flush("shutdown")
+    # The SIGTERM/SIGINT handlers only set the stop event; with the command
+    # loop down, the pending history energy is written before the process
+    # exits (issue #94) -- the drain runs here, off the signal handler and
+    # under the sink's lock, serialized against the still-running daemon
+    # loop threads. A failure is logged by the flush itself; the energy is
+    # lost with the process, bounded by the flush interval (the
+    # unclean-power-loss window).
+    sink.drain_history()
 
 
 def main():
