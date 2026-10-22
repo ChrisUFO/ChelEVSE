@@ -149,6 +149,24 @@ Python 3 service under systemd (`Restart=always`, `User=root`), installed by rsy
 | MQTT apply   | per event (optional)                                           | Debounce/merge MQTT status snapshots into the status path (a pure state updater — it never writes `status/current`; the write policy owns that); command acknowledgements are awaited by the command thread, not here                                              |
 | FCM notifier | on transition                                                  | Daemon worker draining a bounded queue; sends pushes and prunes invalid tokens                                                                                                                                                                                     |
 
+### Write budget (issue #96)
+
+Every successful Firestore write is counted by kind (`status`, `history`,
+`session`, `config`, `command`, `health`, `fcm` — deletes bill as writes) in a
+process-local rolling 24 h counter threaded from `run()` through every write
+site. It surfaces as an hourly journal summary, as `writes_24h` /
+`writes_by_kind` merged into `status/health` on that document's existing
+transition writes (so the counter itself costs no writes), as a tripwire
+warning at 50 % of the quota, and as a distinct line when a write fails with
+the SDK's `RetryError`-wrapped 429 — which otherwise reads like a timeout.
+The policy's budget: ~320 writes/day with no charging, ~1,180 at the real
+14 h/day charging workload, ~2,020 worst case (rate-limit saturated) — well
+inside the free tier's 20,000/day. Reads are not the binding constraint (the
+5 s command poll's 17,280 reads/day fits the 50,000 free, and slower polls
+would make button presses feel slower); batching would not help either, since
+Firestore bills per document written. Per-state table and rationale:
+`pi/README.md` → _Write budget and counter_.
+
 ### Status ingestion
 
 - HTTP and MQTT converge on `parse_status`: milliamps → amps, tenths °C → °C, absent sensors → `null`, `uint64` sentinels coerced, curated whitelist. Both feed the same state machine, history and session logic.
