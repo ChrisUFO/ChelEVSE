@@ -1,10 +1,11 @@
 // History screen: a Day / Week / Month / Year energy chart over hand-rolled SVG
-// bars, plus the 20 most recent sessions. One-shot reads on first tab
-// activation, on Refresh and on a period switch — deliberately no realtime
+// bars, plus the sessions list — the 20 most recent by default, pageable deeper
+// into the archive and browsable one month at a time. One-shot reads on first
+// tab activation, on Refresh and on a period switch — deliberately no realtime
 // listener here.
 
 import { $, setText } from '../ui.js';
-import { fetchHistory, fetchHistoryDay, fetchSessions } from '../store.js';
+import { SESSION_LIMIT, fetchHistory, fetchHistoryDay, fetchSessions } from '../store.js';
 import {
   CHART_VIEW_W,
   DEFAULT_PERIOD,
@@ -65,20 +66,28 @@ let historySeq = 0;
 let series = [];
 let selectedId = null;
 let todayId = null;
-let sessions = [];
+// The sessions list's whole view state — page one of the recent list or of a
+// browsed month, plus every page appended since. Kept as one object because
+// the paging rules (accumulate, adopt a view, conclude exhaustion) belong to
+// `nextSessionsView`, which maps one settled read onto the next view.
+let sessionsView = emptySessionsView();
+// Every sessions read takes a sequence number, like the chart's: a month
+// switch, a refresh and a "show more" can supersede each other, and only the
+// newest read may paint. `sessionsBusy` marks a read in flight so the
+// "show more" control cannot stack a second page onto one already loading.
+let sessionsSeq = 0;
+let sessionsBusy = false;
 // Latest settled read per section: idle | loading | fresh | empty | cached |
 // offline | error | no-intraday. Tracked separately so one section's outcome
 // never speaks for the other, and so freshness is never inferred from how much
 // data is on screen.
 let historyState = 'idle';
-let sessionsState = 'idle';
 // Today's daily total, kept separately because a day with no hourly buckets has
 // a real total the series cannot carry (the chart refuses to draw it as zeros).
 let dayTotal = null;
 // Whether the payload currently on screen came from an answer the server gave
 // (fresh/empty). Cached, offline, and failed reads never set it.
 let historyServer = false;
-let sessionsServer = false;
 let barEls = [];
 let generation = 0;
 let scrubbing = false;
@@ -493,19 +502,129 @@ function renderSession(item) {
   return li;
 }
 
-function sessionsMessage() {
-  if (sessionsState === 'loading') return 'Loading recent sessions…';
-  if (sessionsState === 'offline') return "You're offline — sessions aren't available.";
-  if (sessionsState === 'error') {
-    return "Couldn't load recent sessions. Check your connection and refresh.";
+// ---------- sessions view (pure) ----------
+
+// A view with nothing shown: the state every first read starts from.
+export function emptySessionsView() {
+  return {
+    sessions: [],
+    month: null,
+    cursor: null,
+    exhausted: false,
+    state: 'idle',
+  };
+}
+
+// Pages are disjoint by construction — `startAfter` continues past the last
+// shown document — but a re-read or a cache overlap must never render a row
+// twice, so pages merge by id (the bridge's id is the start epoch, unique per
+// session). The query's newest-first order is the kept order; nothing re-sorts.
+export function mergeSessions(shown = [], page = []) {
+  const merged = Array.isArray(shown) ? [...shown] : [];
+  const seen = new Set(merged.map((item) => item && item.id));
+  for (const item of Array.isArray(page) ? page : []) {
+    if (!item || seen.has(item.id)) continue;
+    seen.add(item.id);
+    merged.push(item);
   }
-  return 'No completed sessions yet. They appear after a car unplugs.';
+  return merged;
+}
+
+// The sessions view after one settled read; `read` null means the read failed.
+//   kind 'first'  page one of the view named by `month` ('YYYY-MM') or null
+//                 (recent): a read the server or the cache answered adopts
+//                 that view and replaces the list — refresh, a month pick and
+//                 the Recent reset all land here — while a failed read or an
+//                 offline cache miss keeps the previous view on screen.
+//   kind 'more'   the next page of the rendered view: appended without
+//                 duplicates, the cursor advanced past it.
+// Exhaustion is concluded only by a server-answered short page: a cached short
+// page is the cache answering, not the archive ending.
+export function nextSessionsView(view, read, { kind = 'first', month = null } = {}) {
+  const current = view || emptySessionsView();
+  if (!read) {
+    // A failed read changes nothing but the state: the rendered list stays
+    // exactly as it was, ready for a retry.
+    return { ...current, state: 'error' };
+  }
+  const state = historyReadState(read);
+  if (state === 'offline') {
+    // An offline cache miss is not an answer: keep the previous view the way
+    // the pre-paging screen kept its last loaded list.
+    return { ...current, state };
+  }
+  const short = !read.fromCache && read.docs.length < SESSION_LIMIT;
+  if (kind === 'more') {
+    const sessions = mergeSessions(current.sessions, read.docs);
+    return {
+      ...current,
+      // An empty page ends the archive without erasing it: the kept list is
+      // complete, which is a current presentation, not "no sessions".
+      state: state === 'empty' && sessions.length ? 'fresh' : state,
+      sessions,
+      cursor: read.lastDoc || current.cursor,
+      exhausted: current.exhausted || short,
+    };
+  }
+  return {
+    state,
+    month,
+    sessions: read.docs,
+    cursor: read.lastDoc || null,
+    exhausted: short,
+  };
+}
+
+// The "show more" control's painting: offered only beside a rendered list that
+// no server-answered short page has concluded, whatever the read state — a
+// failed or cached page leaves it usable for a retry. Previous data is "rows
+// exist", not payload provenance: a cached view survives an offline or failed
+// read the same way a server-sourced one does.
+export function sessionsControls(view) {
+  const section = sectionView(view.state, view.sessions.length > 0);
+  return { more: Boolean(section.showData) && !view.exhausted && view.sessions.length > 0 };
+}
+
+// A month id's half-open [start, end) range: Date values convert to the
+// Timestamps `started_at` stores, and the filter rides the orderBy's automatic
+// single-field index. Null (the recent view) reads the unfiltered newest page.
+export function monthRange(month) {
+  if (!month) return null;
+  const [year, index] = month.split('-').map(Number);
+  return { start: new Date(year, index - 1, 1), end: new Date(year, index, 1) };
+}
+
+// 'YYYY-MM' from the month picker, or null when it is empty or holds something
+// the native control would not have produced (a browser without it falls back
+// to a text input). An unparsable value reads the recent view rather than
+// firing a query with garbage bounds.
+function pickedMonth() {
+  const input = $('sessions-month');
+  const value = input && typeof input.value === 'string' ? input.value : '';
+  return /^\d{4}-\d{2}$/.test(value) ? value : null;
+}
+
+function sessionsMessage() {
+  if (sessionsView.state === 'loading') {
+    // The picker names the read being started; the view still holds the
+    // previous month until the first page lands, so the copy must not read it.
+    return pickedMonth() ? 'Loading sessions…' : 'Loading recent sessions…';
+  }
+  if (sessionsView.state === 'offline') return "You're offline — sessions aren't available.";
+  if (sessionsView.state === 'error') {
+    // View-agnostic: a failed month switch keeps the previous view's list, so
+    // the message must not promise which read failed.
+    return "Couldn't load sessions. Check your connection and refresh.";
+  }
+  return sessionsView.month
+    ? 'No sessions recorded in this month.'
+    : 'No completed sessions yet. They appear after a car unplugs.';
 }
 
 function sessionsNote() {
-  if (sessionsState === 'cached') return 'Showing cached sessions — reconnect to refresh.';
-  if (sessionsState === 'offline') return "You're offline — showing the last sessions loaded.";
-  return "Couldn't refresh recent sessions — showing the last list loaded.";
+  if (sessionsView.state === 'cached') return 'Showing cached sessions — reconnect to refresh.';
+  if (sessionsView.state === 'offline') return "You're offline — showing the last sessions loaded.";
+  return "Couldn't refresh sessions — showing the last list loaded.";
 }
 
 function renderSessions() {
@@ -514,14 +633,25 @@ function renderSessions() {
   list.replaceChildren();
   setText(
     $('sessions-count'),
-    sessions.length ? `${sessions.length} session${sessions.length === 1 ? '' : 's'}` : '',
+    sessionsView.sessions.length
+      ? `${sessionsView.sessions.length} session${sessionsView.sessions.length === 1 ? '' : 's'}`
+      : '',
   );
-  const hasData = sessionsServer && sessions.length > 0;
-  const view = sectionView(sessionsState, hasData);
-  if (sessionsState === 'empty' || !view.showData) {
+  const controls = sessionsControls(sessionsView);
+  const more = $('sessions-more');
+  if (more) {
+    more.hidden = !controls.more;
+    more.disabled = sessionsBusy;
+  }
+  // Rows exist, whatever their provenance: an offline or failed read keeps a
+  // cached view's list on screen (with its stale note) instead of hiding it
+  // beside a still-painted count.
+  const hasData = sessionsView.sessions.length > 0;
+  const view = sectionView(sessionsView.state, hasData);
+  if (sessionsView.state === 'empty' || !view.showData) {
     list.hidden = true;
     state.hidden = false;
-    state.className = sessionsState === 'error' ? 'section-state err' : 'section-state';
+    state.className = sessionsView.state === 'error' ? 'section-state err' : 'section-state';
     setText(state, sessionsMessage());
     return;
   }
@@ -530,7 +660,7 @@ function renderSessions() {
   state.className = 'section-state';
   setText(state, note);
   list.hidden = false;
-  for (const item of sessions) list.append(renderSession(item));
+  for (const item of sessionsView.sessions) list.append(renderSession(item));
 }
 
 // ---------- loading ----------
@@ -553,7 +683,7 @@ function setFeedback(text, kind) {
 // beside the section they belong to, so a mixed refresh never speaks for both.
 function renderLoadFeedback() {
   const answered = (state) => state === 'fresh' || state === 'empty';
-  if (!answered(historyState) || !answered(sessionsState)) {
+  if (!answered(historyState) || !answered(sessionsView.state)) {
     setFeedback('', '');
     return;
   }
@@ -663,25 +793,85 @@ async function switchPeriod(id) {
   await readHistory();
 }
 
+// Page one of the view the picker names (a month, or the recent list when it
+// is cleared): the previous view keeps the screen until this read lands, and a
+// failed read leaves it there for a retry. Refresh, a month pick and the
+// Recent reset all funnel through here.
+async function readSessionsFirstPage() {
+  const seq = ++sessionsSeq;
+  const gen = generation;
+  const month = pickedMonth();
+  sessionsBusy = true;
+  // The list on screen still belongs to the previous view; the loading state
+  // only says a new one is being fetched, and a failure brings the old list
+  // back with the error note beside it.
+  sessionsView = { ...sessionsView, state: 'loading' };
+  renderSessions();
+  let read = null;
+  try {
+    read = await fetchSessions({ range: monthRange(month) });
+  } catch {
+    read = null;
+  }
+  if (gen !== generation || seq !== sessionsSeq) return;
+  sessionsBusy = false;
+  sessionsView = nextSessionsView(sessionsView, read, { kind: 'first', month });
+  renderSessions();
+}
+
+// The next page of the rendered view, continued after its cursor: appended
+// without duplicates, and a failed page keeps the list and the control for a
+// retry.
+async function loadMoreSessions() {
+  if (sessionsBusy || loading) return;
+  const seq = ++sessionsSeq;
+  const gen = generation;
+  sessionsBusy = true;
+  renderSessions();
+  let read = null;
+  try {
+    read = await fetchSessions({
+      after: sessionsView.cursor,
+      range: monthRange(sessionsView.month),
+    });
+  } catch {
+    read = null;
+  }
+  if (gen !== generation || seq !== sessionsSeq) return;
+  sessionsBusy = false;
+  sessionsView = nextSessionsView(sessionsView, read, { kind: 'more' });
+  renderSessions();
+}
+
 async function loadAll() {
   if (loading) return;
   loading = true;
   loaded = true;
   const gen = generation;
-  const first = historyState === 'idle' && sessionsState === 'idle';
+  const first = historyState === 'idle' && sessionsView.state === 'idle';
   if (first) {
     historyState = 'loading';
-    sessionsState = 'loading';
+    sessionsView = { ...sessionsView, state: 'loading' };
     renderHistory();
     renderSessions();
   }
   setRefreshBusy(true);
   setFeedback('Refreshing…');
   const seq = ++historySeq;
+  // The sessions read takes its own sequence: a month pick or a "show more"
+  // during the refresh supersedes this page, and this page supersedes theirs.
+  const sessSeq = ++sessionsSeq;
+  sessionsBusy = true;
   const descriptor = currentPeriod();
   const today = new Date();
   const bounds = periodRange(descriptor, today);
-  const [hist, sess] = await Promise.allSettled([fetchPeriod(descriptor, bounds), fetchSessions()]);
+  // Refresh re-reads the current view's first page — the month the picker
+  // names, or the recent list when none is picked.
+  const month = pickedMonth();
+  const [hist, sess] = await Promise.allSettled([
+    fetchPeriod(descriptor, bounds),
+    fetchSessions({ range: monthRange(month) }),
+  ]);
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
 
@@ -697,14 +887,15 @@ async function loadAll() {
       today,
     );
   }
-  sessionsState = sess.status === 'fulfilled' ? historyReadState(sess.value) : 'error';
-  // Only a read that returned rows (fresh or cached) replaces the payload; an
-  // offline cache miss or a failed read leaves the previous list alone and
-  // sectionView decides whether it is still safe to show it as stale. The
-  // provenance flag follows the payload, not the latest read.
-  if (sess.status === 'fulfilled' && sessionsState !== 'offline') {
-    sessions = sess.value.docs;
-    sessionsServer = sessionsState === 'fresh' || sessionsState === 'empty';
+  // Same contract for the sessions view: only the newest sessions read paints,
+  // and a failed read or an offline cache miss keeps the previous payload with
+  // `nextSessionsView` deciding whether it is still safe to show as stale.
+  if (sessSeq === sessionsSeq) {
+    sessionsBusy = false;
+    sessionsView = nextSessionsView(sessionsView, sess.status === 'fulfilled' ? sess.value : null, {
+      kind: 'first',
+      month,
+    });
   }
   renderHistory();
   renderSessions();
@@ -717,6 +908,29 @@ async function loadAll() {
 
 export function initHistory() {
   $('history-refresh').addEventListener('click', loadAll);
+  // The sessions browse controls: a month pick swaps the read to that month's
+  // first page, Recent clears it back, and "show more" pages the rendered view
+  // deeper. All three keep the read path shared — only the request differs.
+  const monthInput = $('sessions-month');
+  if (monthInput) {
+    monthInput.addEventListener('change', () => {
+      // The Recent reset is offered exactly while a month is in the picker —
+      // including one whose read failed, so the way back is always visible.
+      const recent = $('sessions-recent');
+      if (recent) recent.hidden = !pickedMonth();
+      return readSessionsFirstPage();
+    });
+  }
+  const recentButton = $('sessions-recent');
+  if (recentButton) {
+    recentButton.addEventListener('click', () => {
+      if (monthInput) monthInput.value = '';
+      recentButton.hidden = true;
+      return readSessionsFirstPage();
+    });
+  }
+  const moreButton = $('sessions-more');
+  if (moreButton) moreButton.addEventListener('click', loadMoreSessions);
   const periodSwitch = $('period-switch');
   if (periodSwitch) {
     periodSwitch.addEventListener('click', (e) => {
@@ -828,12 +1042,13 @@ export function showHistorySettings(data) {
       if (barEls[index]) barEls[index].focus({ preventScroll: true });
     }
   }
-  if (sessions.length) renderSessions();
+  if (sessionsView.sessions.length) renderSessions();
 }
 
 export function resetHistory() {
   generation += 1;
   historySeq += 1;
+  sessionsSeq += 1;
   active = false;
   loaded = false;
   loading = false;
@@ -845,11 +1060,10 @@ export function resetHistory() {
   selectedId = null;
   dayTotal = null;
   todayId = null;
-  sessions = [];
+  sessionsView = emptySessionsView();
+  sessionsBusy = false;
   historyState = 'idle';
-  sessionsState = 'idle';
   historyServer = false;
-  sessionsServer = false;
   barEls = [];
   scrubbing = false;
   scrubPointer = null;
@@ -875,5 +1089,16 @@ export function resetHistory() {
     const state = $('sessions-state');
     state.hidden = true;
     state.className = 'section-state';
+    // The browse controls reset with the view: no month picked, no Recent
+    // offered, no page to continue.
+    const monthInput = $('sessions-month');
+    if (monthInput) monthInput.value = '';
+    const recentButton = $('sessions-recent');
+    if (recentButton) recentButton.hidden = true;
+    const moreButton = $('sessions-more');
+    if (moreButton) {
+      moreButton.hidden = true;
+      moreButton.disabled = false;
+    }
   }
 }

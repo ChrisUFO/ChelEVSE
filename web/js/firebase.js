@@ -34,6 +34,7 @@ export let query;
 export let where;
 export let orderBy;
 export let limit;
+export let startAfter;
 export let onSnapshot;
 export let documentId;
 
@@ -98,6 +99,7 @@ export async function initFirebase() {
       where,
       orderBy,
       limit,
+      startAfter,
       onSnapshot,
       documentId,
     } = dbMod);
