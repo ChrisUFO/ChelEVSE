@@ -512,7 +512,6 @@ export function emptySessionsView() {
     cursor: null,
     exhausted: false,
     state: 'idle',
-    server: false,
   };
 }
 
@@ -540,8 +539,7 @@ export function mergeSessions(shown = [], page = []) {
 //   kind 'more'   the next page of the rendered view: appended without
 //                 duplicates, the cursor advanced past it.
 // Exhaustion is concluded only by a server-answered short page: a cached short
-// page is the cache answering, not the archive ending. The provenance flag
-// follows the payload, never the latest read, so a page does not launder it.
+// page is the cache answering, not the archive ending.
 export function nextSessionsView(view, read, { kind = 'first', month = null } = {}) {
   const current = view || emptySessionsView();
   if (!read) {
@@ -574,15 +572,14 @@ export function nextSessionsView(view, read, { kind = 'first', month = null } = 
     sessions: read.docs,
     cursor: read.lastDoc || null,
     exhausted: short,
-    server: state === 'fresh' || state === 'empty',
   };
 }
 
 // The "show more" control's painting: offered only beside a rendered list that
 // no server-answered short page has concluded, whatever the read state — a
 // failed or cached page leaves it usable for a retry. Previous data is "rows
-// exist", not payload provenance: a cached view (server === false) survives an
-// offline or failed read the same way a server-sourced one does.
+// exist", not payload provenance: a cached view survives an offline or failed
+// read the same way a server-sourced one does.
 export function sessionsControls(view) {
   const section = sectionView(view.state, view.sessions.length > 0);
   return { more: Boolean(section.showData) && !view.exhausted && view.sessions.length > 0 };

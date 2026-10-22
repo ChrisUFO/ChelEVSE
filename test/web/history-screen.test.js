@@ -121,7 +121,7 @@ const fire = (id, type) => {
 const settle = () => new Promise((done) => setTimeout(done, 0));
 
 // A settled page fixture: `n` docs (ids continue after `offset`), an opaque
-// cursor, and server provenance unless overridden.
+// cursor, and a server answer unless overridden.
 const page = (n, offset = 0, extra = {}) => ({
   docs: Array.from({ length: n }, (_, i) => ({
     id: `s${offset + i + 1}`,
@@ -139,7 +139,6 @@ const page = (n, offset = 0, extra = {}) => ({
 test('a full first page offers more and the next page appends without duplicates', () => {
   const first = nextSessionsView(null, page(20), { kind: 'first' });
   assert.equal(first.state, 'fresh');
-  assert.equal(first.server, true);
   assert.equal(first.exhausted, false);
   assert.equal(first.cursor.id, 'cursor-0');
   assert.deepEqual(sessionsControls(first), { more: true });
@@ -218,7 +217,6 @@ test('a month pick adopts the month and Recent resets to fresh-load control stat
   const recent = nextSessionsView(march, page(20), { kind: 'first', month: null });
   assert.equal(recent.month, null);
   assert.equal(recent.sessions.length, 20);
-  assert.equal(recent.server, true);
   assert.equal(recent.exhausted, false);
   // The reset control state is exactly a fresh load's.
   assert.deepEqual(
@@ -234,7 +232,6 @@ test('a cached page never concludes exhaustion', () => {
     kind: 'first',
   });
   assert.equal(cachedFirst.state, 'cached');
-  assert.equal(cachedFirst.server, false);
   assert.equal(cachedFirst.exhausted, false);
   assert.deepEqual(sessionsControls(cachedFirst), { more: true });
 
@@ -294,13 +291,12 @@ test('an offline page keeps the list and cursor for a retry', () => {
 
 test('an offline or failed read keeps a cached view on screen', () => {
   // The failure matrix's cached-provenance variant: a first page answered by
-  // the cache (server === false) must keep its rows and retry control through
-  // a later offline cache miss or rejection, like a server-sourced view does.
+  // the cache must keep its rows and retry control through a later offline
+  // cache miss or rejection, like a server-sourced view does.
   const cachedFirst = nextSessionsView(null, page(20, 0, { fromCache: true }), {
     kind: 'first',
   });
   assert.equal(cachedFirst.state, 'cached');
-  assert.equal(cachedFirst.server, false);
 
   const miss = nextSessionsView(
     cachedFirst,
