@@ -47,33 +47,34 @@ Environment variables, read from `private/bridge.env` (see
 [../private.example/bridge.env.example](../private.example/bridge.env.example));
 real environment variables take precedence.
 
-| Variable                          | Default               | Meaning                                                                                   |
-| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's App settings value overrides it at runtime (below)   |
-| `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                           |
-| `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root) |
-| `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                      |
-| `CONFIG_INTERVAL`                 | `60`                  | Seconds between charger config polls                                                      |
-| `SCHEDULE_INTERVAL`               | `60`                  | Seconds between schedule/plan polls and sync checks                                       |
-| `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
-| `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                             |
-| `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)               |
-| `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)     |
-| `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                |
-| `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                              |
-| `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                         |
-| `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
-| `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                  |
-| `WATCHDOG_MAX_PER_HOUR`           | `3`                   | Hard cap on restart attempts in a trailing hour                                           |
-| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`               | Allow a restart while the last known state is charging                                    |
-| `MQTT_ENABLED`                    | `false`               | Ingest status from the charger's MQTT topics (see below); HTTP stays the fallback         |
-| `MQTT_HOST`                       | —                     | Broker host (required when `MQTT_ENABLED=true`)                                           |
-| `MQTT_PORT`                       | `1883`                | Broker port                                                                               |
-| `MQTT_USER` / `MQTT_PASS`         | unset                 | Broker credentials; keep the password in `private/bridge.env` only                        |
-| `MQTT_TOPIC`                      | `chelevse`            | Base topic the charger publishes to (`mqtt_topic` in the charger config)                  |
-| `MQTT_RECONCILE_SEC`              | `60`                  | Seconds between HTTP `/status` reconciles while MQTT is connected                         |
-| `MQTT_CLIENT_ID`                  | `chelevse-bridge`     | MQTT client id                                                                            |
-| `MQTT_ANNOUNCE_TOPIC`             | `openevse/announce/#` | Broker filter carrying the gateway's announce/Last Will (see the watchdog)                |
+| Variable                          | Default               | Meaning                                                                                                       |
+| --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's App settings value overrides it at runtime (below)                       |
+| `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                                               |
+| `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root)                     |
+| `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                                          |
+| `CONFIG_INTERVAL`                 | `60`                  | Seconds between charger config polls                                                                          |
+| `SCHEDULE_INTERVAL`               | `60`                  | Seconds between schedule/plan polls and sync checks                                                           |
+| `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged                         |
+| `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                                                 |
+| `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)                                   |
+| `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)                         |
+| `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                                    |
+| `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                                                  |
+| `HISTORY_FLUSH_SEC`               | `300`                 | Seconds between `history/<date>` flush writes while charging (rollover, session close and shutdown flush too) |
+| `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                                             |
+| `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy                                 |
+| `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                                      |
+| `WATCHDOG_MAX_PER_HOUR`           | `3`                   | Hard cap on restart attempts in a trailing hour                                                               |
+| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`               | Allow a restart while the last known state is charging                                                        |
+| `MQTT_ENABLED`                    | `false`               | Ingest status from the charger's MQTT topics (see below); HTTP stays the fallback                             |
+| `MQTT_HOST`                       | —                     | Broker host (required when `MQTT_ENABLED=true`)                                                               |
+| `MQTT_PORT`                       | `1883`                | Broker port                                                                                                   |
+| `MQTT_USER` / `MQTT_PASS`         | unset                 | Broker credentials; keep the password in `private/bridge.env` only                                            |
+| `MQTT_TOPIC`                      | `chelevse`            | Base topic the charger publishes to (`mqtt_topic` in the charger config)                                      |
+| `MQTT_RECONCILE_SEC`              | `60`                  | Seconds between HTTP `/status` reconciles while MQTT is connected                                             |
+| `MQTT_CLIENT_ID`                  | `chelevse-bridge`     | MQTT client id                                                                                                |
+| `MQTT_ANNOUNCE_TOPIC`             | `openevse/announce/#` | Broker filter carrying the gateway's announce/Last Will (see the watchdog)                                    |
 
 Bad `WATCHDOG_*` values (a non-number, `WATCHDOG_FAILURES=0`, a cooldown below
 zero, a cap below 1, a non-boolean flag) stop the bridge at startup with a
@@ -432,18 +433,18 @@ unaffected.
 Each loop is failure-isolated: a charger or Firestore error is logged as one
 timestamped line and the loop carries on at its next interval.
 
-| Loop     | Firestore document | Content                                                                                            |
-| -------- | ------------------ | -------------------------------------------------------------------------------------------------- |
-| Status   | `status/current`   | Curated `/status` fields on the write policy's cadence (see below)                                 |
-| Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas      |
-| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                    |
-| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                            |
-| Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                        |
-| Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged) |
-| Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`                                |
-| Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)                         |
-| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                                            |
-| Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)                               |
+| Loop     | Firestore document | Content                                                                                                                                                        |
+| -------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status   | `status/current`   | Curated `/status` fields on the write policy's cadence (see below)                                                                                             |
+| Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence |
+| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                |
+| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                                                                                        |
+| Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                                                                                    |
+| Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                             |
+| Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`                                                                                            |
+| Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                     |
+| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                                                                                                        |
+| Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                           |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -494,6 +495,31 @@ writes immediately on every failed poll — it is the one write that must not
 wait — while its journal line and push fire once per outage, on the edge.
 `status/health`, `status/config` and the schedule-window republish keep their
 own loops' cadences.
+
+### History flush (issue #94)
+
+`history/<date>` no longer writes per observation. Each positive
+`total_energy` delta is attributed to the local `(day, hour)` it was observed
+in and accumulated in memory; one flush writes **one masked-merge document per
+pending day**, carrying `kwh` plus every touched `hours.<HH>` bucket in the
+field-path merge list — a flush spanning an hour boundary is still one write,
+and midnight is one write per day document. Flush points:
+
+- **Hour rollover** — the first delta observed in a new local hour flushes the
+  closed hour's energy; one extra write per boundary crossed.
+- **Session close** — the charging (state 3) → not-charging edge flushes
+  exactly once.
+- **Every `HISTORY_FLUSH_SEC` (300 s) while charging** — 12 writes/hour while
+  charging, 0 while idle. Energy that creeps in while idle (standby draw) is
+  kept but waits for a rollover, session close or shutdown.
+- **Shutdown** — after the SIGTERM/SIGINT stop event ends the loops, the
+  bridge drains the accumulator before exiting, so stops and restarts lose
+  nothing.
+
+A failed write keeps the accumulator and retries on the next flush point, so
+energy is never dropped and every delta lands in its observed hour — including
+the retry's. An unclean power loss can lose at most one flush interval of
+history.
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
 disappear from the document. Credential fields are **redacted before the
