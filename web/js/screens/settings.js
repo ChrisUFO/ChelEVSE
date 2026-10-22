@@ -129,6 +129,7 @@ function readFields() {
   return {
     rate: $('setting-rate').value,
     currency: $('setting-currency').value,
+    chargerHost: $('setting-charger-host').value,
     rates: draftRates,
   };
 }
@@ -260,16 +261,28 @@ function currency() {
   return $('setting-currency').value.trim();
 }
 
+// The API field keys and their DOM ids differ for the charger address: the
+// validator reports `chargerHost`, the card's input is `setting-charger-host` and
+// its error slot `charger-host-error`. One mapping, used by every paint/focus
+// path, so no caller has to know the spelling.
+const FIELD_IDS = { chargerHost: 'charger-host' };
+
+function fieldId(field) {
+  return FIELD_IDS[field] || field;
+}
+
 function paintFieldError(field, message) {
-  const input = $(`setting-${field}`);
-  const node = $(`${field}-error`);
+  const input = $(`setting-${fieldId(field)}`);
+  const node = $(`${fieldId(field)}-error`);
   input.setAttribute('aria-invalid', String(Boolean(message)));
   node.hidden = !message;
   setText(node, message);
 }
 
 function renderErrors(errors = {}) {
-  for (const field of ['rate', 'currency']) paintFieldError(field, errors[field] || '');
+  for (const field of ['rate', 'currency', 'chargerHost']) {
+    paintFieldError(field, errors[field] || '');
+  }
 }
 
 // ---------- small DOM helpers ----------
@@ -2490,6 +2503,7 @@ function paintFeedback() {
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;
+  $('setting-charger-host').disabled = settingsSaving;
   $('confirm-one-rate').disabled = settingsSaving;
   $('cancel-one-rate').disabled = settingsSaving;
   paintRateMode();
@@ -2518,6 +2532,7 @@ function renderPlan() {
 function writeFields(fields) {
   $('setting-rate').value = fields.rate;
   $('setting-currency').value = fields.currency;
+  $('setting-charger-host').value = fields.chargerHost || '';
   draftRates = (Array.isArray(fields.rates) ? fields.rates : []).map(rateRowFields);
   removeConfirmKey = null;
   planPeriods = ratePeriodsForDraft();
@@ -2546,7 +2561,7 @@ function handleInput(field) {
   recomputeDirty();
   // Keep a shown error live: correcting the field clears it immediately, and a
   // still-invalid value keeps its explanation.
-  if ($(`${field}-error`).hidden === false) {
+  if ($(`${fieldId(field)}-error`).hidden === false) {
     const result = validateSettings(readFields());
     paintFieldError(field, result.errors[field] || '');
   }
@@ -2754,7 +2769,7 @@ const focusView = {
   firstCard: () => windowCards.find(Boolean),
   expand: (periodCard) => setExpanded(periodCard, true),
   reveal: (node) => revealNode(node),
-  focusField: (field) => $(`setting-${field}`).focus(),
+  focusField: (field) => $(`setting-${fieldId(field)}`).focus(),
   revealDocumentError: () => {
     const docError = $('rates-error');
     if (!docError.hidden) docError.scrollIntoView({ block: 'center', behavior: 'auto' });
@@ -2780,6 +2795,7 @@ export function initSettings() {
   $('settings-form').addEventListener('submit', submit);
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
+  $('setting-charger-host').addEventListener('input', () => handleInput('chargerHost'));
   $('rate-mode-flat').addEventListener('click', requestOneRate);
   $('rate-mode-seasons').addEventListener('click', switchToSeasons);
   $('rate-mode-flat').addEventListener('keydown', paintModeKeyboard);
