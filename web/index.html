@@ -317,7 +317,7 @@
               <span class="fig-value"><span id="fig-cost" class="fig-cost">—</span></span>
               <span class="fig-sub" id="cost-sub"></span>
             </div>
-            <div class="fig fig-wide">
+            <div class="fig fig-wide" id="fig-temp-stat">
               <span class="fig-label">Temperature</span>
               <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
               <span class="temp-sensors">
@@ -793,6 +793,19 @@
                   </section>
                 </div>
               </div>
+              <label class="switch-row" for="setting-show-temperature">
+                <span class="switch-copy">
+                  <span class="switch-title">Show temperature</span>
+                  <span class="switch-sub"
+                    >The Temperature stat on the Status page. Hide it when the charger reports no
+                    sensors.</span
+                  >
+                </span>
+                <span class="switch">
+                  <input id="setting-show-temperature" type="checkbox" role="switch" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
                 <span class="save-blockers" id="save-blockers" hidden></span>
