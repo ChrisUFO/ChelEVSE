@@ -7,6 +7,8 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   schedule every SCHEDULE_INTERVAL: schedule/current -> firmware scheduler,
     GET /schedule/plan -> status/current.schedule
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
+  settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
+    charger address, applied without a restart (CHARGER_HOST is the bootstrap)
 With MQTT_ENABLED=true the status topics arrive on the MQTT source and /status
 becomes reconciliation only (MQTT_RECONCILE_SEC); /config runs on a
 config_version change. Everything still flows through one apply_status path.
@@ -1040,6 +1042,95 @@ class ChargerHost:
                 return False
             self._host = normalized
             return True
+
+
+def _bootstrap_host(bootstrap):
+    """The env bootstrap as a valid host, else the built-in default (logged)."""
+    host = _normalize_charger_host(bootstrap)
+    if host is None:
+        log(f"charger host rejected: {bootstrap} (using {DEFAULT_CHARGER_HOST})")
+        return DEFAULT_CHARGER_HOST
+    return host
+
+
+def _read_charger_host(db):
+    """The stored ``settings/current.charger_host``, or None when unset.
+
+    Raises on a Firestore read failure; the caller decides how to keep going.
+    """
+    snapshot = db.collection("settings").document("current").get()
+    data = snapshot.to_dict() if snapshot.exists else None
+    return data.get("charger_host") if isinstance(data, dict) else None
+
+
+def seed_host(db, bootstrap):
+    """The charger host the bridge starts with; logs the choice and its source.
+
+    A valid ``settings/current.charger_host`` wins over the env bootstrap, so an
+    address saved in the app survives a service restart. A malformed stored
+    value is logged and ignored, and a read failure falls back to the bootstrap:
+    a fresh Pi with no settings document must still start.
+    """
+    host = _bootstrap_host(bootstrap)
+    try:
+        raw = _read_charger_host(db)
+    except Exception as exc:
+        log(
+            f"charger host: settings read failed "
+            f"({exc.__class__.__name__}: {exc}); using {host}"
+        )
+        log(f"charger host: http://{host} (environment)")
+        return host
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        log(f"charger host: http://{host} (environment)")
+        return host
+    stored = _normalize_charger_host(raw)
+    if stored is None:
+        log(f"charger host rejected: {raw} (using {host})")
+        log(f"charger host: http://{host} (environment)")
+        return host
+    log(f"charger host: http://{stored} (app settings)")
+    return stored
+
+
+def settings_loop(db, host, bootstrap, interval, initial_delay=0):
+    """Apply ``settings/current.charger_host`` to the running bridge.
+
+    Its own thread, so an address saved in the app reaches every consumer
+    within one interval with no restart and the same PID. Each tick:
+
+    - a valid, changed value is adopted and logged as an old -> new transition;
+    - an absent or cleared key reverts to the env bootstrap (same log, named
+      ``environment``), so clearing the field in the app is the way back;
+    - a malformed value is rejected with a log line and the current host is
+      kept: a console-written scheme or port must not build a broken URL;
+    - a read failure is logged and the current host is kept.
+
+    Nothing reverts because the charger stopped answering: a saved value is
+    honoured until the owner changes it.
+    """
+    fallback = _bootstrap_host(bootstrap)
+    if initial_delay:
+        _stop.wait(initial_delay)
+    while not _stop.is_set():
+        try:
+            raw = _read_charger_host(db)
+        except Exception as exc:
+            log(
+                f"charger host: settings read failed "
+                f"({exc.__class__.__name__}: {exc}); keeping {host.base}"
+            )
+        else:
+            cleared = raw is None or (isinstance(raw, str) and not raw.strip())
+            target = fallback if cleared else _normalize_charger_host(raw)
+            if target is None:
+                log(f"charger host rejected: {raw} (keeping {host.base})")
+            elif target != host.host:
+                previous = host.base
+                host.set(target)
+                source = "environment" if cleared else "app settings"
+                log(f"charger host: {previous} -> {host.base} ({source})")
+        _stop.wait(interval)
 
 
 def make_charger_session():
@@ -3262,13 +3353,26 @@ def schedule_loop(db, host, auth, transport, interval, reconcile_interval, initi
         _stop.wait(interval)
 
 
-def run(db, host, auth, intervals, transport, watchdog_config, mqtt=None):
+def run(
+    db,
+    host,
+    auth,
+    intervals,
+    transport,
+    watchdog_config,
+    mqtt=None,
+    bootstrap=DEFAULT_CHARGER_HOST,
+):
     """Start the pollers; blocks on the command loop until the stop event.
 
     Every loop gets the same ``transport``: one Session and one bounded
     keep-alive pool per process. With ``mqtt`` (an enabled MqttConfig) the
     source is started and its snapshots are applied on their own worker; the
     status and config loops then reconcile instead of polling.
+
+    ``host`` is the one charger-address holder every loop reads per request, so
+    ``settings_loop`` can swap it live. ``bootstrap`` is the env address that
+    refresh reverts to when the app clears the setting.
     """
     (
         status_interval,
@@ -3276,6 +3380,7 @@ def run(db, host, auth, intervals, transport, watchdog_config, mqtt=None):
         schedule_interval,
         reconcile_interval,
         command_interval,
+        settings_interval,
     ) = intervals
     tracker = StatusTracker(db)
     tracker.seed()
@@ -3341,6 +3446,8 @@ def run(db, host, auth, intervals, transport, watchdog_config, mqtt=None):
         config_event,
     )
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
+    settings_args = (db, host, bootstrap, settings_interval)
+    threading.Thread(target=settings_loop, args=settings_args, daemon=True).start()
     schedule_args = (
         db,
         host,
@@ -3362,7 +3469,6 @@ def run(db, host, auth, intervals, transport, watchdog_config, mqtt=None):
 
 
 def main():
-    host = ChargerHost(cfg("CHARGER_HOST", DEFAULT_CHARGER_HOST))
     user = cfg("CHARGER_USER")
     auth = (user, cfg("CHARGER_PASS", "")) if user is not None else None  # blank OK
     try:
@@ -3371,16 +3477,24 @@ def main():
         schedule_interval = float(cfg("SCHEDULE_INTERVAL") or 60)
         reconcile_interval = float(cfg("SCHEDULE_RECONCILE_INTERVAL") or 300)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
+        settings_interval = float(cfg("SETTINGS_INTERVAL") or 60)
     except ValueError:
         sys.exit(
             "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
-            "SCHEDULE_RECONCILE_INTERVAL and COMMAND_INTERVAL must be numbers."
+            "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
+            "must be numbers."
         )
 
     try:
         db = init_firestore()
     except RuntimeError as exc:
         sys.exit(str(exc))
+
+    # Seeded only once Firestore is available: an address saved in the app
+    # (settings/current.charger_host) overrides CHARGER_HOST at startup, while
+    # CHARGER_HOST stays the bootstrap a fresh Pi with no settings doc uses.
+    bootstrap = cfg("CHARGER_HOST", DEFAULT_CHARGER_HOST)
+    host = ChargerHost(seed_host(db, bootstrap))
 
     watchdog = watchdog_config_or_exit()
     mqtt = mqtt_config_or_exit()
@@ -3395,7 +3509,8 @@ def main():
     log(
         f"bridge started: {host.base}, polls {status_interval:g}s/"
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
-        f"schedule reconcile {reconcile_interval:g}s"
+        f"schedule reconcile {reconcile_interval:g}s, "
+        f"settings {settings_interval:g}s"
     )
     log(
         f"watchdog: enabled={watchdog.enabled} failures={watchdog.threshold} "
@@ -3418,6 +3533,7 @@ def main():
         schedule_interval,
         reconcile_interval,
         command_interval,
+        settings_interval,
     )
     run(
         db,
@@ -3427,6 +3543,7 @@ def main():
         ChargerTransport(make_charger_session()),
         watchdog,
         mqtt,
+        bootstrap,
     )
     log("bridge stopped")
 

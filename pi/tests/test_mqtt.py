@@ -1939,6 +1939,8 @@ class RunWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "schedule_loop", spy("schedule_loop")
         ), mock.patch.object(
+            bridge, "settings_loop", spy("settings_loop")
+        ), mock.patch.object(
             bridge, "command_loop", spy("command_loop")
         ), mock.patch.object(
             bridge, "mqtt_status_loop", spy("mqtt_status_loop")
@@ -1955,7 +1957,7 @@ class RunWiringTests(unittest.TestCase):
                 FakeDB(),
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
                 config,
@@ -1976,7 +1978,13 @@ class RunWiringTests(unittest.TestCase):
         self.assertIsInstance(worker[0][1], bridge.queue.Queue)
         self.assertEqual(
             [name for name, _args in threads],
-            ["status_loop", "config_loop", "schedule_loop", "mqtt_status_loop"],
+            [
+                "status_loop",
+                "config_loop",
+                "settings_loop",
+                "schedule_loop",
+                "mqtt_status_loop",
+            ],
         )
 
     def test_disabled_mqtt_keeps_the_http_only_wiring(self):
@@ -2002,13 +2010,19 @@ class RunWiringTests(unittest.TestCase):
                 FakeDB(),
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
                 bridge.MqttConfig(enabled=False),
             )
         self.assertEqual(
-            threads, [bridge.status_loop, bridge.config_loop, bridge.schedule_loop]
+            threads,
+            [
+                bridge.status_loop,
+                bridge.config_loop,
+                bridge.settings_loop,
+                bridge.schedule_loop,
+            ],
         )
 
 

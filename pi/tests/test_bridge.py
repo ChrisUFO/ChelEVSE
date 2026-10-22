@@ -1564,6 +1564,7 @@ class LoopJitterTests(unittest.TestCase):
 class LoopWiringTests(unittest.TestCase):
     def test_run_gives_every_loop_the_same_transport(self):
         transport = bridge.ChargerTransport(FakeSession())
+        host = _host()
         calls = {}
         threads = []
 
@@ -1583,10 +1584,13 @@ class LoopWiringTests(unittest.TestCase):
             def start(self):
                 self.target(*self.args)
 
+        settings_spy = spy("settings")
         with mock.patch.object(bridge, "status_loop", spy("status")), mock.patch.object(
             bridge, "config_loop", spy("config")
         ), mock.patch.object(bridge, "schedule_loop", spy("schedule")), mock.patch.object(
             bridge, "command_loop", spy("command")
+        ), mock.patch.object(
+            bridge, "settings_loop", settings_spy
         ), mock.patch.object(
             bridge.threading, "Thread", _ThreadSpy
         ), mock.patch.object(
@@ -1596,20 +1600,27 @@ class LoopWiringTests(unittest.TestCase):
         ):
             bridge.run(
                 FakeDB(),
-                _host(),
+                host,
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
             )
 
-        self.assertEqual(set(calls), {"status", "config", "schedule", "command"})
+        self.assertEqual(
+            set(calls), {"status", "config", "schedule", "command", "settings"}
+        )
         for name, args in calls.items():
-            self.assertIs(args[3], transport, f"{name} loop got another transport")
-        self.assertEqual(len(threads), 3)
+            self.assertIs(args[1], host, f"{name} loop got another charger host")
+            if name != "settings":
+                self.assertIs(args[3], transport, f"{name} loop got another transport")
+        self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
+        self.assertEqual(len(threads), 4)
         for thread in threads:
-            self.assertIs(thread.args[3], transport)
+            self.assertIs(thread.args[1], host)
             self.assertTrue(thread.daemon)
+            if thread.target is not settings_spy:
+                self.assertIs(thread.args[3], transport)
         tracker.return_value.seed.assert_called_once_with()
 
     def test_run_leaves_shutdown_logging_to_main(self):
@@ -1632,7 +1643,7 @@ class LoopWiringTests(unittest.TestCase):
                 FakeDB(),
                 _host(),
                 None,
-                (10, 60, 60, 300, 5),
+                (10, 60, 60, 300, 5, 60),
                 transport,
                 bridge.WatchdogConfig(),
             )
