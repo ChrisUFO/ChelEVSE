@@ -699,6 +699,7 @@ class IntervalTests(unittest.TestCase):
         step=timedelta(minutes=20),
         tracker=None,
         mono_step=None,
+        boot_step=None,
     ):
         """One status tick ``step`` later; returns that instant.
 
@@ -706,12 +707,15 @@ class IntervalTests(unittest.TestCase):
         and the interval clock (``CLOCK_BOOTTIME`` here) measures the gap the
         step allowance is derived from. ``mono_step`` advances the plain
         monotonic clock by something else, to reproduce a suspend — where
-        monotonic stops but boottime keeps counting. A 20 min default keeps a
-        2–3 kWh step at ~7 kW, i.e. a plausible charger.
+        monotonic stops but boottime keeps counting. ``boot_step`` does the same
+        for the interval clock, so a test can invert the wall clock while
+        boottime still advances (a clock step) or hold boottime still (no
+        measured span at all). A 20 min default keeps a 2–3 kWh step at ~7 kW,
+        i.e. a plausible charger.
         """
         self.now += step
         self.mono += (mono_step if mono_step is not None else step).total_seconds()
-        self.boot += step.total_seconds()
+        self.boot += (boot_step if boot_step is not None else step).total_seconds()
         with mock.patch.object(bridge, "_utcnow", return_value=self.now), mock.patch.object(
             bridge.time, "monotonic", return_value=self.mono
         ), mock.patch.object(bridge.time, "clock_gettime", return_value=self.boot):
@@ -862,6 +866,17 @@ class IntervalTests(unittest.TestCase):
         self.assertEqual(
             [line for line in messages if "counter reset" in line], [], messages
         )
+        # A healthy close derives and drops nothing: one stray line here would
+        # land in the journal on every interval of every session.
+        self.assertEqual(
+            [
+                line
+                for line in messages
+                if "interval span derived" in line or "interval dropped" in line
+            ],
+            [],
+            messages,
+        )
         # The presumption behind the test: the awake-time gap could not have
         # carried the step, so the boottime gap is what kept it.
         self.assertLess(bridge._interval_step_allowance(60), 6000)
@@ -869,6 +884,121 @@ class IntervalTests(unittest.TestCase):
         (interval,) = record["intervals"]
         self.assertAlmostEqual(interval["wh"], 6000.0)
         self.assertEqual((interval["started_at"], interval["ended_at"]), (started, ended))
+
+    def test_a_wall_clock_step_back_keeps_the_interval_with_its_measured_span(self):
+        # The Pi's wall clock is corrected backwards mid-session (NTP, a manual
+        # set), so the close instant reads *before* the open instant. The
+        # duration is not invented: CLOCK_BOOTTIME measured it, and only the
+        # wall-clock anchor is re-derived from that measurement. The constant is
+        # patched in (as in the suspend test) so the boottime branch measures the
+        # span on hosts that lack it; the monotonic fallback does not see
+        # ``boot_step`` and would read a negative span here.
+        with mock.patch.object(
+            bridge.time, "CLOCK_BOOTTIME", 1, create=True
+        ), mock.patch.object(bridge, "log") as log:
+            started = self.tick(3, 0, 0)
+            self.tick(
+                3,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+                mono_step=timedelta(minutes=20),
+            )
+            self.tick(
+                1,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+            )
+        messages = [call.args[0] for call in log.call_args_list]
+        derived = [line for line in messages if "interval span derived" in line]
+        self.assertEqual(len(derived), 1, messages)
+        self.assertIn("wall clock moved back 4800s", derived[0])
+        self.assertIn("2400s measured on CLOCK_BOOTTIME", derived[0])
+        self.assertIn("3000 Wh", derived[0])
+        self.assertEqual(
+            [line for line in messages if "interval dropped" in line], [], messages
+        )
+        self.assertEqual(
+            [line for line in messages if "unusable interval" in line], [], messages
+        )
+        (record,) = self.sessions().values()
+        (interval,) = record["intervals"]
+        # The measured span is the two 20-minute polls, not the clock's answer.
+        self.assertEqual(interval["started_at"], started)
+        self.assertEqual(interval["ended_at"], started + timedelta(seconds=2400))
+        self.assertAlmostEqual(interval["wh"], 3000.0)
+        # The stored shape is unchanged: no boottime key leaks into Firestore.
+        self.assertEqual(set(interval), {"started_at", "ended_at", "wh"})
+
+    def test_a_derived_interval_still_reconciles_with_the_session_wh(self):
+        # The money guard in the web layer trusts a list whose energy adds up to
+        # `wh`; a re-anchored interval must not break that.
+        with mock.patch.object(bridge.time, "CLOCK_BOOTTIME", 1, create=True):
+            self.tick(3, 0, 0)
+            self.tick(
+                3,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+                mono_step=timedelta(minutes=20),
+            )
+            self.tick(
+                1,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+            )
+        (record,) = self.sessions().values()
+        self.assertAlmostEqual(record["wh"], 3000.0)
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in record["intervals"]), record["wh"]
+        )
+
+    def test_a_wall_clock_step_back_without_a_measured_span_drops_and_logs_it(self):
+        # The interval clock read the same instant at open and close (a frozen
+        # or too-coarse clock), so there is no duration to re-anchor the
+        # inverted pair to. Nothing is written for it: the measured energy stays
+        # in the aggregate, and the line names the wall clock rather than
+        # blaming a corrupt entry.
+        with mock.patch.object(bridge, "log") as log:
+            self.tick(3, 0, 0)
+            self.tick(
+                3,
+                40,
+                60,
+                step=timedelta(minutes=1),
+                boot_step=timedelta(0),
+                mono_step=timedelta(0),
+            )
+            self.tick(
+                1,
+                40,
+                60,
+                step=timedelta(minutes=-90),
+                boot_step=timedelta(0),
+                mono_step=timedelta(0),
+            )
+        messages = [call.args[0] for call in log.call_args_list]
+        dropped = [line for line in messages if "interval dropped" in line]
+        self.assertEqual(len(dropped), 1, messages)
+        self.assertIn("wall clock stepped backwards and no measured span", dropped[0])
+        self.assertIn("40 Wh", dropped[0])
+        self.assertEqual(
+            [line for line in messages if "interval span derived" in line], [], messages
+        )
+        self.assertEqual(
+            [line for line in messages if "unusable interval" in line], [], messages
+        )
+        (record,) = self.sessions().values()
+        # No interval was written; its energy is still priced through the
+        # aggregate, exactly like a record with no measured intervals.
+        self.assertNotIn("intervals", record)
+        self.assertAlmostEqual(record["wh"], 40.0)
 
     def test_a_new_plug_in_counter_is_not_logged_as_a_reset(self):
         # The firmware clears session_energy at unplug, so the next plug-in's
