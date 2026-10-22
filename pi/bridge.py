@@ -121,6 +121,7 @@ HISTORY_FLUSH_SEC = 300
 # and fcm (token-prune deletes, which Firestore bills as writes), so the
 # total matches what the console reports.
 WRITE_KINDS = ("status", "history", "session", "config", "command", "health", "fcm")
+_WRITE_KINDS = frozenset(WRITE_KINDS)
 # The rolling window the budget is judged over, matching the quota's day.
 WRITE_WINDOW_SEC = 24 * 3600
 # One journal summary per hour; the same interval dedupes the quota-failure
@@ -549,7 +550,13 @@ class WriteCounter:
         self._lock = threading.Lock()
 
     def record(self, kind):
-        """Count one successful write of ``kind``; run the tripwire check."""
+        """Count one successful write of ``kind``; run the tripwire check.
+
+        An unknown kind is a programming error and raises here, at the
+        recording site, rather than an hour later in the next summary.
+        """
+        if kind not in _WRITE_KINDS:
+            raise KeyError(kind)
         crossed = False
         total = 0
         with self._lock:
