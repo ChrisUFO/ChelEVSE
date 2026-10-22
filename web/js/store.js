@@ -265,6 +265,11 @@ export async function readScheduleBaseline() {
 // documentId() range is a date range. The SDK resolves an offline read with
 // cached docs (often empty) instead of rejecting, so `fromCache` travels with
 // the result: the screen must not read a cached empty range as "no history".
+// Each document also keeps its pricing inputs: `hours` rides along only when
+// the stored value is a non-array object (fetchHistoryDay's normalization) — a
+// day recorded before hourly capture has `kwh` and no map, and must stay
+// unpriceable rather than gain an empty fabricated one, so a mixed range keeps
+// its partial-pricing disclosure (#120).
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
     query(
@@ -274,7 +279,15 @@ export async function fetchHistory(startId, endId) {
     ),
   );
   return {
-    docs: snap.docs.map((d) => ({ id: d.id, kwh: d.data().kwh })),
+    docs: snap.docs.map((d) => {
+      const data = d.data() || {};
+      const hours = data.hours;
+      return {
+        id: d.id,
+        kwh: data.kwh,
+        hours: hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : null,
+      };
+    }),
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
   };
 }
