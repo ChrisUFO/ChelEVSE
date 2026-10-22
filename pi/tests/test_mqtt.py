@@ -513,6 +513,10 @@ class StatusSinkTests(unittest.TestCase):
         self.apply(status_payload(total_energy=100), "http")
         self.apply(status_payload(total_energy=110), "mqtt")
         self.apply(status_payload(total_energy=110), "http")
+        # No flush point fired yet, so the delta is still pending -- but it
+        # is pending exactly once however often the unchanged reading lands.
+        self.assertEqual(self.tracker.history.pending_kwh, 10.0)
+        self.tracker.history.flush("shutdown")
         (day,) = self.db.data["history"]
         self.assertAlmostEqual(self.db.data["history"][day]["kwh"], 10.0)
 
