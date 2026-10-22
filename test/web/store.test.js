@@ -18,6 +18,33 @@ test('sessionsQueryOptions selects the 20 newest sessions', () => {
   assert.equal(SESSION_LIMIT, 20);
 });
 
+test('sessionsQueryOptions carries the paging cursor and month range only when asked', () => {
+  // The snapshot object is opaque to the options layer — it is passed through
+  // untouched for startAfter to consume.
+  const cursor = { id: '1760310600', data: () => ({}) };
+  const start = new Date(2026, 9, 1);
+  const end = new Date(2026, 10, 1);
+  assert.deepEqual(sessionsQueryOptions({ after: cursor, start, end }), {
+    field: 'started_at',
+    direction: 'desc',
+    limit: 20,
+    after: cursor,
+    start,
+    end,
+  });
+
+  // A bare cursor keeps the range absent, and a bare range keeps the cursor
+  // absent: the shape says exactly what the caller asked for.
+  const paged = sessionsQueryOptions({ after: cursor });
+  assert.equal(paged.after, cursor);
+  assert.equal('start' in paged, false);
+  assert.equal('end' in paged, false);
+  const ranged = sessionsQueryOptions({ start, end });
+  assert.equal(ranged.start, start);
+  assert.equal(ranged.end, end);
+  assert.equal('after' in ranged, false);
+});
+
 test('a pending control survives more than twenty newer RAPI docs', () => {
   // The newest mixed window is full of newer RAPI commands, so it does not
   // contain the pending pause at all.

@@ -15,6 +15,7 @@ import {
   where,
   orderBy,
   limit,
+  startAfter,
   onSnapshot,
   serverTimestamp,
   documentId,
@@ -306,20 +307,51 @@ export async function fetchHistoryDay(dayId) {
   };
 }
 
-// The sessions list is the 20 most recent, newest first.
+// The sessions list pages through the whole archive, newest first: page size
+// stays 20, a page continues after the previous page's last document snapshot
+// (`startAfter`), and an optional started_at range narrows it to one month.
+// The range filters the same field the query orders by, so Firestore's
+// automatic single-field index serves it — no composite index is involved.
 export const SESSION_LIMIT = 20;
 
-export function sessionsQueryOptions() {
-  return { field: 'started_at', direction: 'desc', limit: SESSION_LIMIT };
+// Pure options passthrough: `after` is the previous page's last document
+// snapshot, `start`/`end` a half-open started_at range (Date values convert
+// to the Timestamps the bridge stores). Options the caller did not ask for
+// stay absent, so the default shape is exactly the pre-paging query.
+export function sessionsQueryOptions({ after, start, end } = {}) {
+  const options = { field: 'started_at', direction: 'desc', limit: SESSION_LIMIT };
+  if (after) options.after = after;
+  if (start) options.start = start;
+  if (end) options.end = end;
+  return options;
 }
 
-export async function fetchSessions() {
-  const { field, direction, limit: max } = sessionsQueryOptions();
-  const snap = await getDocs(
-    query(collection(db, 'sessions'), orderBy(field, direction), limit(max)),
-  );
+export async function fetchSessions({ after, range } = {}) {
+  const {
+    field,
+    direction,
+    limit: max,
+    after: cursor,
+    start,
+    end,
+  } = sessionsQueryOptions({
+    after,
+    start: range ? range.start : undefined,
+    end: range ? range.end : undefined,
+  });
+  const constraints = [];
+  if (start) constraints.push(where(field, '>=', start));
+  if (end) constraints.push(where(field, '<', end));
+  constraints.push(orderBy(field, direction));
+  if (cursor) constraints.push(startAfter(cursor));
+  constraints.push(limit(max));
+  const snap = await getDocs(query(collection(db, 'sessions'), ...constraints));
   return {
     docs: snap.docs.map((d) => ({ id: d.id, ...d.data() })),
+    // The snapshot behind the last row: the cursor the next page continues
+    // after. Null when the page is empty, which the caller reads as
+    // exhaustion (a short page) anyway.
+    lastDoc: snap.docs.length ? snap.docs[snap.docs.length - 1] : null,
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
   };
 }
