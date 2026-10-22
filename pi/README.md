@@ -549,7 +549,20 @@ equality is _not_ universal:
 - a **restart mid-charge** leaves the energy drawn before it in the aggregate
   and in no interval (the seeded baseline starts the new interval at zero);
 - an **in-block counter reset** makes the intervals exceed the reset aggregate;
-- a **dropped implausible step** leaves the aggregate whole and the list short.
+- a **dropped implausible step** leaves the aggregate whole and the list short;
+- a **wall-clock step** with no measured span (below) leaves that interval's
+  energy in `wh` and in no interval.
+
+**No interval is fabricated.** An interval's duration is always measured: the
+bridge stamps `CLOCK_BOOTTIME` when it opens one, beside the wall-clock
+`started_at`. When the wall clock steps backwards between open and close (an NTP
+correction, a manual set), the pair's endpoints would invert, so the duration is
+taken from that measurement and only the absolute wall-clock anchor is inferred
+(`ended_at = started_at + measured`) — the interval is kept and the derivation
+is logged. When the interval clock measured nothing across the interval (a
+frozen or too-coarse reading), there is no duration to anchor it to: nothing is
+written, and the energy stays in `wh` like any other unmeasured part of the
+session. The stored shape stays `{started_at, ended_at, wh}` either way.
 
 A step is attributed only when the charger could have delivered it: at most
 `MAX_INTERVAL_POWER_W` (25 kW, more than twice the 48 A ceiling) × the measured
@@ -574,6 +587,19 @@ and each case has its own journal line:
 - `interval step dropped: <Δ> Wh in <gap> exceeds the <n> Wh the charger could
 deliver` — the step is physically impossible. The energy stays in the
   aggregate and the interval stays short.
+- `interval span derived: wall clock moved back <step>s; <duration>s measured on
+CLOCK_BOOTTIME (<wh> Wh)` — the wall clock was corrected backwards while the
+  interval was open. The interval is kept with the measured boottime span as its
+  duration; only its wall-clock anchor is re-derived. This is a clock incident,
+  not bad data: no entry is dropped.
+- `interval dropped: wall clock stepped backwards and no measured span (<wh> Wh)`
+  — the same step, but the interval clock measured nothing to re-anchor the pair
+  with. Nothing is written for that interval; its energy stays in the aggregate.
+
+A stored interval carries no boottime sample (the document shape has no room for
+one), so a reversed pair read back from Firestore cannot be re-anchored: the
+merge path still drops it and says so on the unusable-entry line below. The
+derivation only happens when the bridge closes an interval itself.
 
 A cap fold is logged too, naming the session, how many intervals it folded and
 how many it kept: `session <label>: <n> oldest intervals folded into
