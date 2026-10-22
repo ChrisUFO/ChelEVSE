@@ -913,6 +913,20 @@ test('flat settings keep the schedule summary hidden', () => {
   });
 });
 
+test('an all-unpriceable bar hides its figure instead of pricing it free', () => {
+  // The summary-level twin of this rule is covered above; `seriesCost` is the
+  // per-bar label and stays unexported, so its hide clause is pinned from
+  // source (the sw-shell pattern). Without it an all-unpriceable Year month
+  // bar would render $0.00 as if the energy were free.
+  const source = readFileSync(new URL('../../web/js/screens/history.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function seriesCost(');
+  assert.ok(start >= 0, 'screens/history.js declares seriesCost');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'screens/history.js closes seriesCost');
+  const body = source.slice(start, end + 2);
+  assert.match(body, /unpricedEnergy && !summary\.pricedEnergy\)\) return null/);
+});
+
 // ---------- screen read paths ----------
 //
 // Decision (issue #85a): the read-path wiring stays a source-text pin; the
