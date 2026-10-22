@@ -914,7 +914,7 @@ export function initHistory() {
       // including one whose read failed, so the way back is always visible.
       const recent = $('sessions-recent');
       if (recent) recent.hidden = !pickedMonth();
-      readSessionsFirstPage();
+      return readSessionsFirstPage();
     });
   }
   const recentButton = $('sessions-recent');
@@ -922,7 +922,7 @@ export function initHistory() {
     recentButton.addEventListener('click', () => {
       if (monthInput) monthInput.value = '';
       recentButton.hidden = true;
-      readSessionsFirstPage();
+      return readSessionsFirstPage();
     });
   }
   const moreButton = $('sessions-more');
