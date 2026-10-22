@@ -952,6 +952,96 @@ def _merge_intervals(*groups, session_id=None):
     return [folded] + tail
 
 
+# --- Charger address (issue #54) -------------------------------------------
+# The charger's address is app-managed once the bridge runs:
+# ``settings/current.charger_host`` wins over ``CHARGER_HOST``, and
+# ``settings_loop`` applies a change without a restart. The grammar below is
+# shared with ``web/js/settings.js`` and ``firestore.rules``; the bridge
+# re-validates fully because it must survive a value written from the console.
+DEFAULT_CHARGER_HOST = "192.168.0.145"
+CHARGER_HOST_MAX_LEN = 253
+CHARGER_HOST_LABEL_MAX_LEN = 63
+_CHARGER_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+_CHARGER_HOST_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+
+
+def _normalize_charger_host(raw):
+    """The charger-host grammar: the host as typed, or None when invalid.
+
+    Trimmed first; empty after trim means unset (None). 1..253 characters of
+    ``[A-Za-z0-9.-]`` with an alphanumeric first and last character, so a
+    scheme, port, path, userinfo, inner whitespace and a leading or trailing
+    dot/hyphen are all rejected by construction. Every dot-separated label is
+    1..63 characters with no leading or trailing hyphen. A four-label
+    all-numeric value is an IPv4 literal, so each octet must be 0..255. Case is
+    preserved as typed. No logging here: the caller decides what a rejection
+    means for the journal.
+    """
+    if not isinstance(raw, str):
+        return None
+    host = raw.strip()
+    if not 1 <= len(host) <= CHARGER_HOST_MAX_LEN:
+        return None
+    if _CHARGER_HOST_RE.fullmatch(host) is None:
+        return None
+    labels = host.split(".")
+    if any(
+        not 1 <= len(label) <= CHARGER_HOST_LABEL_MAX_LEN
+        or _CHARGER_HOST_LABEL_RE.fullmatch(label) is None
+        for label in labels
+    ):
+        return None
+    if len(labels) == 4 and all(label.isdigit() for label in labels):
+        if any(int(label) > 255 for label in labels):
+            return None
+    return host
+
+
+class ChargerHost:
+    """The charger's current address, swapped at runtime (issue #54).
+
+    One lock and nothing else. Every consumer reads ``base`` per request
+    instead of capturing the string, so a saved app setting applies to the next
+    request with no restart and no stale copy anywhere in the process. The
+    shared ``ChargerTransport`` needs no changes: ``requests`` pools per host,
+    so a swap simply opens a new socket.
+    """
+
+    def __init__(self, host):
+        normalized = _normalize_charger_host(host)
+        if normalized is None:
+            raise ValueError(f"invalid charger host {host!r}")
+        self._lock = threading.Lock()
+        self._host = normalized
+
+    @property
+    def host(self):
+        """The bare host the bridge was told to use."""
+        with self._lock:
+            return self._host
+
+    @property
+    def base(self):
+        """``http://<host>``: the base every charger URL is built from."""
+        with self._lock:
+            return f"http://{self._host}"
+
+    def set(self, host):
+        """Adopt ``host``; True only when it really changed the address.
+
+        ``None`` (or anything the grammar rejects) sets nothing, so a malformed
+        value can never replace a working address.
+        """
+        normalized = _normalize_charger_host(host)
+        if normalized is None:
+            return False
+        with self._lock:
+            if normalized == self._host:
+                return False
+            self._host = normalized
+            return True
+
+
 def make_charger_session():
     """One keep-alive session for the charger, capped at two pooled sockets."""
     session = requests.Session()
@@ -1064,12 +1154,12 @@ def mqtt_command_ready(source):
     return bool(source is not None and getattr(source, "ready", False))
 
 
-def _apply_command_http(transport, base, auth, cmd):
+def _apply_command_http(transport, host, auth, cmd):
     """The existing HTTP path: fallback, and the only path with MQTT off."""
     ctype = cmd.get("type")
     if ctype == "pause":
         resp = transport.post(
-            f"{base}/override",
+            f"{host.base}/override",
             json={"state": "disabled"},
             auth=auth,
             timeout=HTTP_TIMEOUT,
@@ -1078,13 +1168,15 @@ def _apply_command_http(transport, base, auth, cmd):
         return {}
     if ctype == "resume":
         # Clear the manual override; the firmware scheduler takes over again.
-        resp = transport.delete(f"{base}/override", auth=auth, timeout=HTTP_TIMEOUT)
+        resp = transport.delete(f"{host.base}/override", auth=auth, timeout=HTTP_TIMEOUT)
         if not 200 <= resp.status_code < 300:
             # v5.1.5 answers 500 "Failed to release manual override" when there
             # is nothing to release. The intended end state already holds, so
             # confirm it rather than reporting a spurious failure.
             try:
-                status = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+                status = transport.get(
+                    f"{host.base}/status", auth=auth, timeout=HTTP_TIMEOUT
+                )
                 status.raise_for_status()
                 body = status.json()
                 if isinstance(body, dict) and body.get("manual_override") == 0:
@@ -1097,7 +1189,7 @@ def _apply_command_http(transport, base, auth, cmd):
     if ctype == "set_current":
         amps = _command_amps(cmd)
         resp = transport.post(
-            f"{base}/override",
+            f"{host.base}/override",
             json={"state": "active", "charge_current": amps, "max_current": amps},
             auth=auth,
             timeout=HTTP_TIMEOUT,
@@ -1107,7 +1199,7 @@ def _apply_command_http(transport, base, auth, cmd):
     if ctype == "rapi":
         command = _command_rapi(cmd)
         resp = transport.post(
-            f"{base}/rapi",
+            f"{host.base}/rapi",
             data={"rapi": command, "json": 1},
             auth=auth,
             timeout=HTTP_TIMEOUT,
@@ -1216,7 +1308,7 @@ def _status_confirms(ctype, amps, status):
     return _setpoint_matches(status, amps)
 
 
-def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec):
+def _apply_override_mqtt(transport, host, auth, source, ctype, cmd, confirm_sec):
     """Publish one override command and wait for the firmware to reflect it."""
     if ctype == "pause":
         amps = None
@@ -1235,7 +1327,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
         # The client refused the message, so nothing was delivered and the HTTP
         # fallback cannot double-apply. An *accepted* publish never falls back.
         log(f"command transport: http (mqtt publish failed: {exc})")
-        return _apply_command_http(transport, base, auth, cmd)
+        return _apply_command_http(transport, host, auth, cmd)
     try:
         confirmed = source.wait_for_state(
             lambda view: _override_confirms(ctype, amps, view), confirm_sec
@@ -1250,7 +1342,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
     # The command may have applied while its broadcast was lost. Reconcile
     # read-only over HTTP (the command itself is never re-applied).
     try:
-        resp = transport.get(f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+        resp = transport.get(f"{host.base}/status", auth=auth, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         status = resp.json()
     except (requests.RequestException, ValueError):
@@ -1265,7 +1357,7 @@ def _apply_override_mqtt(transport, base, auth, source, ctype, cmd, confirm_sec)
     )
 
 
-def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
+def _apply_rapi_mqtt(transport, host, auth, source, cmd, confirm_sec):
     """Publish one RAPI command and map the next rapi/out reply."""
     command = _command_rapi(cmd)
     parts = command.split(None, 1)
@@ -1275,7 +1367,7 @@ def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
         reply = source.rapi_transaction(f"rapi/in/{head}", params, confirm_sec)
     except MqttPublishError as exc:
         log(f"command transport: http (mqtt publish failed: {exc})")
-        return _apply_command_http(transport, base, auth, cmd)
+        return _apply_command_http(transport, host, auth, cmd)
     except Exception as exc:  # never re-publish because an ack wait crashed
         raise CommandError(
             f"mqtt rapi failed ({exc.__class__.__name__}: {exc})",
@@ -1294,7 +1386,7 @@ def _apply_rapi_mqtt(transport, base, auth, source, cmd, confirm_sec):
     )
 
 
-def apply_command(transport, base, auth, cmd, source=None, confirm_sec=None):
+def apply_command(transport, host, auth, cmd, source=None, confirm_sec=None):
     """Apply one command document; return extra fields for the command doc.
 
     MQTT carries the command only while ``source.ready`` (connected and
@@ -1313,12 +1405,12 @@ def apply_command(transport, base, auth, cmd, source=None, confirm_sec=None):
     if mqtt_command_ready(source):
         if ctype == "rapi":
             return _apply_rapi_mqtt(
-                transport, base, auth, source, cmd, confirm_sec
+                transport, host, auth, source, cmd, confirm_sec
             )
         return _apply_override_mqtt(
-            transport, base, auth, source, ctype, cmd, confirm_sec
+            transport, host, auth, source, ctype, cmd, confirm_sec
         )
-    return _apply_command_http(transport, base, auth, cmd)
+    return _apply_command_http(transport, host, auth, cmd)
 
 
 def notify(db, body):
@@ -1987,10 +2079,10 @@ class Watchdog:
     """
 
     def __init__(
-        self, db, base, auth, transport, notifier, config, clock=None, mqtt=None
+        self, db, host, auth, transport, notifier, config, clock=None, mqtt=None
     ):
         self.db = db
-        self.base = base
+        self.host = host
         self.auth = auth
         self.transport = transport
         self.notifier = notifier
@@ -2033,7 +2125,7 @@ class Watchdog:
         """
         try:
             resp = self.transport.get(
-                f"{self.base}/status", auth=self.auth, timeout=HTTP_TIMEOUT
+                f"{self.host.base}/status", auth=self.auth, timeout=HTTP_TIMEOUT
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -2078,7 +2170,7 @@ class Watchdog:
         """POST /restart for one device; return a short result string."""
         try:
             resp = self.transport.post(
-                f"{self.base}/restart",
+                f"{self.host.base}/restart",
                 json={"device": device},
                 auth=self.auth,
                 timeout=HTTP_TIMEOUT,
@@ -2268,7 +2360,7 @@ class Watchdog:
 
 def status_loop(
     db,
-    base,
+    host,
     auth,
     transport,
     interval,
@@ -2368,7 +2460,7 @@ def status_loop(
                 mqtt_arrivals = mqtt.arrival_generation() if mqtt is not None else None
                 try:
                     resp = transport.get(
-                        f"{base}/status", auth=auth, timeout=HTTP_TIMEOUT
+                        f"{host.base}/status", auth=auth, timeout=HTTP_TIMEOUT
                     )
                     resp.raise_for_status()
                     payload = resp.json()
@@ -2455,7 +2547,7 @@ def status_loop(
 
 def config_loop(
     db,
-    base,
+    host,
     auth,
     transport,
     interval,
@@ -2584,7 +2676,7 @@ def config_loop(
                 next_sync = time.monotonic() + CONFIG_SAFETY_RESYNC_SEC
                 version = getattr(mqtt, "config_version", None)
             try:
-                resp = transport.get(f"{base}/config", auth=auth, timeout=HTTP_TIMEOUT)
+                resp = transport.get(f"{host.base}/config", auth=auth, timeout=HTTP_TIMEOUT)
                 resp.raise_for_status()
                 data = resp.json()
                 if not isinstance(data, dict):
@@ -2701,7 +2793,7 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
-def command_loop(db, base, auth, transport, interval, source=None):
+def command_loop(db, host, auth, transport, interval, source=None):
     # Commands already applied — acked or failed — whose status write did not
     # land. Retry the write, never the command: an accepted MQTT publish must
     # not be repeated (over MQTT or HTTP). Bounded and process-local, so a gap
@@ -2734,7 +2826,7 @@ def command_loop(db, base, auth, transport, interval, source=None):
                     selected = "mqtt" if mqtt_command_ready(source) else "http"
                     try:
                         extra = apply_command(
-                            transport, base, auth, cmd, source=source
+                            transport, host, auth, cmd, source=source
                         )
                     except CommandError as exc:
                         # `transport` names the path that carried the request;
@@ -2997,10 +3089,10 @@ def _log_schedule(label, resp):
     log(f"schedule: {label} -> HTTP {resp.status_code}" + (f" {body}" if body else ""))
 
 
-def _schedule_plan(transport, base, auth):
+def _schedule_plan(transport, host, auth):
     """GET /schedule/plan as a dict; raises on any failure."""
     resp = transport.get(
-        f"{base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT
+        f"{host.base}/schedule/plan", auth=auth, timeout=HTTP_TIMEOUT
     )
     # Logged only on failure (via the caller): this runs every SCHEDULE_INTERVAL.
     _require_ok(resp)
@@ -3037,7 +3129,7 @@ def _event_matches(existing, desired):
     )
 
 
-def sync_schedule(transport, base, auth, events):
+def sync_schedule(transport, host, auth, events):
     """Upsert changed firmware events and delete stale ones.
 
     The firmware upserts by id and never deletes omitted events, so the current
@@ -3045,7 +3137,7 @@ def sync_schedule(transport, base, auth, events):
     reconcile pass is otherwise read-mostly); every surplus id is DELETEd
     explicitly. Any request failure raises; the caller retries on the next tick.
     """
-    resp = transport.get(f"{base}/schedule", auth=auth, timeout=HTTP_TIMEOUT)
+    resp = transport.get(f"{host.base}/schedule", auth=auth, timeout=HTTP_TIMEOUT)
     _log_schedule("GET /schedule", resp)
     _require_ok(resp)
     existing = resp.json()
@@ -3068,7 +3160,7 @@ def sync_schedule(transport, base, auth, events):
             continue
         # One event per request: the firmware parses POST bodies into 1 KB.
         resp = transport.post(
-            f"{base}/schedule", json=event, auth=auth, timeout=HTTP_TIMEOUT
+            f"{host.base}/schedule", json=event, auth=auth, timeout=HTTP_TIMEOUT
         )
         _log_schedule(f"POST /schedule id={event['id']}", resp)
         _require_ok(resp)
@@ -3079,7 +3171,7 @@ def sync_schedule(transport, base, auth, events):
         if event_id in desired:
             continue
         resp = transport.delete(
-            f"{base}/schedule/{event_id}", auth=auth, timeout=HTTP_TIMEOUT
+            f"{host.base}/schedule/{event_id}", auth=auth, timeout=HTTP_TIMEOUT
         )
         _log_schedule(f"DELETE /schedule/{event_id}", resp)
         _require_ok(resp)
@@ -3090,7 +3182,7 @@ def sync_schedule(transport, base, auth, events):
     )
 
 
-def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initial_delay=0):
+def schedule_loop(db, host, auth, transport, interval, reconcile_interval, initial_delay=0):
     """Mirror schedule/current into the firmware and publish the live window."""
     status_doc = db.collection("status").document("current")
     last_hash = None
@@ -3144,7 +3236,7 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initi
                             )
                             amps_logged_hash = digest
                         try:
-                            sync_schedule(transport, base, auth, events)
+                            sync_schedule(transport, host, auth, events)
                         except (
                             CommandError,
                             requests.RequestException,
@@ -3159,7 +3251,7 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initi
             # Always publish the firmware's own view of the active window,
             # mapped through the last event set that actually synced.
             try:
-                plan = _schedule_plan(transport, base, auth)
+                plan = _schedule_plan(transport, host, auth)
                 status_doc.set(
                     {"schedule": schedule_state(plan, synced_event_rules)}, merge=True
                 )
@@ -3170,7 +3262,7 @@ def schedule_loop(db, base, auth, transport, interval, reconcile_interval, initi
         _stop.wait(interval)
 
 
-def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
+def run(db, host, auth, intervals, transport, watchdog_config, mqtt=None):
     """Start the pollers; blocks on the command loop until the stop event.
 
     Every loop gets the same ``transport``: one Session and one bounded
@@ -3213,7 +3305,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     # Built after the source: the outage decision needs its arrival sequence,
     # and the watchdog needs the link/LWT state for its restart transport.
     watchdog = Watchdog(
-        db, base, auth, transport, notifier, watchdog_config, mqtt=source
+        db, host, auth, transport, notifier, watchdog_config, mqtt=source
     )
     sink = StatusSink(
         db,
@@ -3226,7 +3318,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
 
     status_args = (
         db,
-        base,
+        host,
         auth,
         transport,
         status_interval,
@@ -3240,7 +3332,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     threading.Thread(target=status_loop, args=status_args, daemon=True).start()
     config_args = (
         db,
-        base,
+        host,
         auth,
         transport,
         config_interval,
@@ -3251,7 +3343,7 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
     schedule_args = (
         db,
-        base,
+        host,
         auth,
         transport,
         schedule_interval,
@@ -3264,13 +3356,13 @@ def run(db, base, auth, intervals, transport, watchdog_config, mqtt=None):
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
         ).start()
         source.start()
-    command_loop(db, base, auth, transport, command_interval, source)
+    command_loop(db, host, auth, transport, command_interval, source)
     if source is not None:
         source.stop()
 
 
 def main():
-    base = "http://" + cfg("CHARGER_HOST", "192.168.0.145")
+    host = ChargerHost(cfg("CHARGER_HOST", DEFAULT_CHARGER_HOST))
     user = cfg("CHARGER_USER")
     auth = (user, cfg("CHARGER_PASS", "")) if user is not None else None  # blank OK
     try:
@@ -3301,7 +3393,7 @@ def main():
         signal.signal(sig, stop)
 
     log(
-        f"bridge started: {base}, polls {status_interval:g}s/"
+        f"bridge started: {host.base}, polls {status_interval:g}s/"
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s"
     )
@@ -3329,7 +3421,7 @@ def main():
     )
     run(
         db,
-        base,
+        host,
         auth,
         intervals,
         ChargerTransport(make_charger_session()),

@@ -1120,7 +1120,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
             bridge.status_loop(
                 self.db,
-                "http://charger",
+                bridge.ChargerHost("charger"),
                 None,
                 transport,
                 interval,
@@ -1647,7 +1647,7 @@ class ConfigLoopMqttTests(unittest.TestCase):
             ):
                 bridge.config_loop(
                     self.db,
-                    "http://charger",
+                    bridge.ChargerHost("charger"),
                     None,
                     bridge.ChargerTransport(session),
                     interval,
@@ -1815,7 +1815,7 @@ class HealthTests(unittest.TestCase):
         notifier = _RecordingNotifier()
         watchdog = bridge.Watchdog(
             db,
-            "http://charger",
+            bridge.ChargerHost("charger"),
             None,
             bridge.ChargerTransport(FakeSession()),
             notifier,
@@ -1860,7 +1860,7 @@ class HealthTests(unittest.TestCase):
         )
         watchdog = bridge.Watchdog(
             db,
-            "http://charger",
+            bridge.ChargerHost("charger"),
             None,
             bridge.ChargerTransport(FakeSession()),
             _RecordingNotifier(),
@@ -1883,7 +1883,7 @@ class HealthTests(unittest.TestCase):
         source.last_lwt_at = None
         watchdog = bridge.Watchdog(
             db,
-            "http://charger",
+            bridge.ChargerHost("charger"),
             None,
             bridge.ChargerTransport(FakeSession()),
             _RecordingNotifier(),
@@ -1953,7 +1953,7 @@ class RunWiringTests(unittest.TestCase):
         ):
             bridge.run(
                 FakeDB(),
-                "http://charger",
+                bridge.ChargerHost("charger"),
                 None,
                 (10, 60, 60, 300, 5),
                 transport,
@@ -2000,7 +2000,7 @@ class RunWiringTests(unittest.TestCase):
         ):
             bridge.run(
                 FakeDB(),
-                "http://charger",
+                bridge.ChargerHost("charger"),
                 None,
                 (10, 60, 60, 300, 5),
                 transport,
