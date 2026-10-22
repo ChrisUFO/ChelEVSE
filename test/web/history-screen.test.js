@@ -292,6 +292,31 @@ test('an offline page keeps the list and cursor for a retry', () => {
   assert.equal(kept.state, 'offline');
 });
 
+test('an offline or failed read keeps a cached view on screen', () => {
+  // The failure matrix's cached-provenance variant: a first page answered by
+  // the cache (server === false) must keep its rows and retry control through
+  // a later offline cache miss or rejection, like a server-sourced view does.
+  const cachedFirst = nextSessionsView(null, page(20, 0, { fromCache: true }), {
+    kind: 'first',
+  });
+  assert.equal(cachedFirst.state, 'cached');
+  assert.equal(cachedFirst.server, false);
+
+  const miss = nextSessionsView(
+    cachedFirst,
+    { docs: [], lastDoc: null, fromCache: true },
+    { kind: 'more' },
+  );
+  assert.equal(miss.state, 'offline');
+  assert.equal(miss.sessions.length, 20);
+  assert.deepEqual(sessionsControls(miss), { more: true });
+
+  const failed = nextSessionsView(cachedFirst, null, { kind: 'more' });
+  assert.equal(failed.state, 'error');
+  assert.equal(failed.sessions.length, 20);
+  assert.deepEqual(sessionsControls(failed), { more: true });
+});
+
 test('monthRange bounds one month half-open', () => {
   const march = monthRange('2026-03');
   assert.equal(march.start.getTime(), new Date(2026, 2, 1).getTime());
@@ -330,7 +355,9 @@ test('the month picker and Recent reset drive the read and the way back', async 
   // synchronously) and offers the Recent reset.
   element('sessions-month').value = '2026-03';
   const pick = fire('sessions-month', 'change');
-  assert.equal(element('sessions-state').textContent, 'Loading recent sessions…');
+  // The picker names the read, so the copy says "sessions", not "recent" —
+  // the view still holds the previous month until the page lands.
+  assert.equal(element('sessions-state').textContent, 'Loading sessions…');
   await pick;
   await settle();
   // The read failed: the feedback element reports it and the way back stays.

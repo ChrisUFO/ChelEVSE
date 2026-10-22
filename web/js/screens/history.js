@@ -580,9 +580,11 @@ export function nextSessionsView(view, read, { kind = 'first', month = null } = 
 
 // The "show more" control's painting: offered only beside a rendered list that
 // no server-answered short page has concluded, whatever the read state — a
-// failed or cached page leaves it usable for a retry.
+// failed or cached page leaves it usable for a retry. Previous data is "rows
+// exist", not payload provenance: a cached view (server === false) survives an
+// offline or failed read the same way a server-sourced one does.
 export function sessionsControls(view) {
-  const section = sectionView(view.state, view.server && view.sessions.length > 0);
+  const section = sectionView(view.state, view.sessions.length > 0);
   return { more: Boolean(section.showData) && !view.exhausted && view.sessions.length > 0 };
 }
 
@@ -607,7 +609,9 @@ function pickedMonth() {
 
 function sessionsMessage() {
   if (sessionsView.state === 'loading') {
-    return sessionsView.month ? 'Loading sessions…' : 'Loading recent sessions…';
+    // The picker names the read being started; the view still holds the
+    // previous month until the first page lands, so the copy must not read it.
+    return pickedMonth() ? 'Loading sessions…' : 'Loading recent sessions…';
   }
   if (sessionsView.state === 'offline') return "You're offline — sessions aren't available.";
   if (sessionsView.state === 'error') {
@@ -642,7 +646,10 @@ function renderSessions() {
     more.hidden = !controls.more;
     more.disabled = sessionsBusy;
   }
-  const hasData = sessionsView.server && sessionsView.sessions.length > 0;
+  // Rows exist, whatever their provenance: an offline or failed read keeps a
+  // cached view's list on screen (with its stale note) instead of hiding it
+  // beside a still-painted count.
+  const hasData = sessionsView.sessions.length > 0;
   const view = sectionView(sessionsView.state, hasData);
   if (sessionsView.state === 'empty' || !view.showData) {
     list.hidden = true;
