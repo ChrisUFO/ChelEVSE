@@ -315,7 +315,7 @@ export async function fetchHistoryDay(dayId) {
     id: dayId,
     exists,
     kwh: exists && Number.isFinite(kwh) ? kwh : 0,
-    hours: exists && hours && typeof hours === 'object' ? hours : null,
+    hours: exists && hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : null,
     fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
   };
 }
