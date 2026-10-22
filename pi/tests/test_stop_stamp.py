@@ -309,5 +309,108 @@ class RestartCarriesStampTests(unittest.TestCase):
         self.assertIsNone(self.db.data["status"]["current"].get("charging_stopped_at"))
 
 
+class FailedBootSeedTests(unittest.TestCase):
+    """A boot seed that fails and retries after live ticks (issue #122).
+
+    The boot seed can lose its Firestore read (a deploy restart racing
+    network/DNS); the status loop retries it on later ticks, by which time
+    live applies have already established the state machine. The retry must
+    still adopt the stored stamp -- the sink's merge gate opens only once
+    the tracker holds one -- or no later clear could ever reach the
+    document and the dead plug-in's stamp survives until the next stop.
+    """
+
+    def setUp(self):
+        self.db = FakeDB()
+        self.db.data["status"] = {
+            "current": {
+                "state": 1,
+                "session_energy": 1797,
+                "elapsed": 3509,
+                "total_energy": 100.0,
+                "charging_stopped_at": STAMP,
+            }
+        }
+        self.db.fail_reads = True
+        self.tracker = bridge.StatusTracker(self.db)
+        self.assertFalse(self.tracker.seed())  # the boot read fails
+        self.db.fail_reads = False
+        self.clock = _Clock()
+        self.sink = bridge.StatusSink(
+            self.db,
+            self.tracker,
+            _RecordingNotifier(),
+            policy=bridge.WritePolicy(
+                bridge.WritePolicyConfig(10.0, 20.0, 100.0), clock=self.clock
+            ),
+        )
+
+    def apply(self, **overrides):
+        payload = status_payload(**overrides)
+        self.sink.apply_status(bridge.parse_status(payload), "http")
+
+    def reseed(self):
+        # The status loop's retry, on a later tick.
+        self.sink.maybe_seed()
+        self.assertTrue(self.tracker.seeded)
+
+    def writes(self):
+        return [
+            write[3]
+            for write in self.db.writes
+            if write[1] == "status" and write[2] == "current"
+        ]
+
+    def test_the_retry_seed_after_live_ticks_adopts_the_stored_stamp(self):
+        self.apply(
+            state=1, vehicle=1, session_energy=1797, elapsed=3509, total_energy=100.0
+        )
+        # The pre-adoption write could not carry the field; the document
+        # keeps its stamp through it.
+        self.assertNotIn("charging_stopped_at", self.writes()[0])
+        self.reseed()
+        self.assertEqual(self.tracker.charging_stopped_at, STAMP)
+        self.assertTrue(self.tracker.stamp_adopted)
+
+    def test_the_reset_after_a_failed_boot_seed_clears_the_document(self):
+        # Live tick, retry seed, then the plug-in ends (the unplug tick:
+        # the counters zeroed). Without adoption the clear is mute -- the
+        # payload omits the field and the dead stamp survives in the
+        # document -- voiding the restart-safety guarantee of §5.
+        self.apply(
+            state=1, vehicle=1, session_energy=1797, elapsed=3509, total_energy=100.0
+        )
+        self.reseed()
+        self.clock.advance(10.0)  # the vehicle trigger needs the gap open
+        self.apply(
+            state=1, vehicle=0, session_energy=0, elapsed=0, total_energy=100.0
+        )
+        self.assertIsNone(self.db.data["status"]["current"].get("charging_stopped_at"))
+
+    def test_a_retry_seed_never_overwrites_the_tracker_s_own_stamp(self):
+        # The no-resurrect guard: this process stamped its own stop (16:30,
+        # newer than the stored 14:00) while still unseeded, and that
+        # write failed; the retry seed must not rewind the live view to
+        # the document's older stamp.
+        self.apply(
+            state=3, vehicle=1, session_energy=500, elapsed=600, total_energy=100.0
+        )
+        self.db.fail_writes = True
+        fresh = datetime(2026, 10, 22, 16, 30, tzinfo=UTC)
+        with mock.patch("bridge._utcnow", return_value=fresh):
+            with self.assertRaises(RuntimeError):
+                self.apply(
+                    state=1,
+                    vehicle=1,
+                    session_energy=500,
+                    elapsed=600,
+                    total_energy=100.0,
+                )
+        self.db.fail_writes = False
+        self.assertEqual(self.tracker.charging_stopped_at, fresh)
+        self.reseed()
+        self.assertEqual(self.tracker.charging_stopped_at, fresh)
+
+
 if __name__ == "__main__":
     unittest.main()

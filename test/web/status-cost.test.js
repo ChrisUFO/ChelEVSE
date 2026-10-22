@@ -448,8 +448,18 @@ test('a new charge after adoption goes live and its stop freezes fresh', () => {
   showStatus(stoppedSnapshot());
   assert.equal(cost(), 'GBP 0.20');
   // The next plug-in charges: the live window takes over from its own
-  // write, stamp or no stamp.
-  showStatus(snapshot({ updated_at: at(2026, 1, 6, 5, 30), elapsed: 600, session_energy: 1500 }));
+  // write, stamp or no stamp. This snapshot still carries the previous
+  // block's stamp — the bridge clears the field at interval open, up to
+  // one observation cycle after the state edge — and neither the live
+  // figure nor the later freeze may see it.
+  showStatus(
+    snapshot({
+      updated_at: at(2026, 1, 6, 5, 30),
+      elapsed: 600,
+      session_energy: 1500,
+      charging_stopped_at: at(2026, 1, 5, 6, 30),
+    }),
+  );
   assert.equal(cost(), 'GBP 0.15');
   // Its stop re-stamps: the frozen figure is this session's, not the old
   // adopted one (GBP 0.20) nor a stretched re-adoption (GBP 0.20).
@@ -489,4 +499,23 @@ test('a session reset hides the adopted figure', () => {
     }),
   );
   assert.equal(cost(), 'GBP 0.20');
+});
+
+test('a flat config ignores an adopted anchor entirely', () => {
+  leaveStatus();
+  showSettings(FLAT);
+  showStatus(stoppedSnapshot());
+  // The flat path prices energy x rate and opens no rate window, so the
+  // adopted anchor must never re-price it — a renderCost branch reorder
+  // that let the anchor in would show a windowed figure here, not the
+  // flat one.
+  assert.equal(cost(), 'GBP 0.25');
+  // Later polls with the same stamp and a pause-grown elapsed stay flat.
+  showStatus(
+    stoppedSnapshot({
+      updated_at: at(2026, 1, 5, 14, 30),
+      elapsed: 8 * 3600,
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.25');
 });

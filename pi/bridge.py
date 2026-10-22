@@ -879,6 +879,22 @@ class StatusTracker:
         if _is_number(total):
             self.total_energy = float(total)
         state = data.get("state")
+        # A stored stop stamp outlives a restart: adopting it keeps the
+        # tracker's view aligned with the document, so the first write of
+        # the new process carries it forward (writing None here would
+        # null the field a cold-opened page still needs) and a later
+        # clear -- a new charge or the session's reset -- really clears.
+        # This sits outside the ``has_state`` gate below on purpose: a
+        # boot seed that failed and retried after live ticks already has
+        # state, and skipping adoption there would strand the stored
+        # stamp -- the sink's merge gate never opens, so no later clear
+        # could reach the document. ``stamp_adopted`` keeps a retry from
+        # resurrecting: once this process has held a stamp -- stamped on
+        # a stop or adopted -- the stored value never overwrites the view.
+        stored_stamp = data.get("charging_stopped_at")
+        if isinstance(stored_stamp, datetime) and not self.stamp_adopted:
+            self.charging_stopped_at = stored_stamp
+            self.stamp_adopted = True
         if not self.has_state:
             # Only the first successful seed establishes the state machine. A
             # retry after live ticks must restore the stored baseline without
@@ -889,15 +905,6 @@ class StatusTracker:
             self.has_state = _is_number(state)
             self.session_energy = data.get("session_energy")
             self.elapsed = data.get("elapsed")
-            # A stored stop stamp outlives a restart: adopting it keeps the
-            # tracker's view aligned with the document, so the first write of
-            # the new process carries it forward (writing None here would
-            # null the field a cold-opened page still needs) and a later
-            # clear -- a new charge or the session's reset -- really clears.
-            stored_stamp = data.get("charging_stopped_at")
-            if isinstance(stored_stamp, datetime):
-                self.charging_stopped_at = stored_stamp
-                self.stamp_adopted = True
             if state == 3:
                 if _is_number(self.session_energy) and self.session_energy > 0:
                     self.last_charging_energy = self.session_energy
