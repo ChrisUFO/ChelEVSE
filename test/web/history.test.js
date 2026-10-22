@@ -496,6 +496,15 @@ test('hourSeries turns an absent or malformed map into zero points', () => {
   }
 });
 
+test('hour points carry the day their buckets price', () => {
+  // The Day period reads one document for one captured day; every hourly point
+  // carries that day so a schedule can price the bucket's wall-clock span.
+  const points = hourSeries({ '05': 1 }, new Date(2026, 9, 18, 21, 30));
+  assert.equal(points[5].dayId, '2026-10-18');
+  assert.equal(points[0].dayId, '2026-10-18');
+  assert.equal(points[23].dayId, '2026-10-18');
+});
+
 test('periodSeries renders the day period from its single document', () => {
   const today = new Date(2026, 9, 18, 12, 40);
   const points = periodSeries('day', { kwh: 3.75, hours: { 11: 2, 12: 1.75 } }, today);
@@ -572,6 +581,63 @@ test('historySeries aligns docs to days and treats gaps as zero', () => {
     { id: '2026-10-17', kwh: 0, label: 'Sat 17 Oct' },
     { id: '2026-10-18', kwh: 0, label: 'Sun 18 Oct' },
   ]);
+});
+
+test('day points carry their document pricing inputs', () => {
+  const series = historySeries(
+    ['2026-10-16', '2026-10-17', '2026-10-18'],
+    [
+      { id: '2026-10-16', kwh: 4.5, hours: { '03': 4.5 } },
+      // Recorded before hourly capture: a real total, no buckets behind it.
+      { id: '2026-10-18', kwh: 7.25 },
+    ],
+  );
+  assert.deepEqual(series[0].hours, { '03': 4.5 });
+  assert.equal(series[2].hours, null);
+  // A gap day gains no property at all: its point shape is unchanged, so a
+  // genuine zero is priceable at 0.00 rather than an unpriceable gap.
+  assert.equal('hours' in series[1], false);
+  assert.deepEqual(series[1], { id: '2026-10-17', kwh: 0, label: 'Sat 17 Oct' });
+});
+
+test('periodSeries carries the day documents through the week and month buckets', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const docs = [
+    { id: '2026-10-12', kwh: 3, hours: { 22: 3 } },
+    { id: '2026-10-15', kwh: 2.5 },
+  ];
+  const week = periodSeries('week', docs, today);
+  assert.deepEqual(week[0].hours, { 22: 3 });
+  assert.equal(week[3].hours, null);
+  assert.equal('hours' in week[1], false);
+  const month = periodSeries('month', docs, today);
+  assert.deepEqual(month.find((point) => point.id === '2026-10-12').hours, { 22: 3 });
+});
+
+test('year month points carry the day documents that summed into them', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'year',
+    [
+      { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
+      // Energy with no buckets still counts toward the month's kWh — and its
+      // pricing split.
+      { id: '2026-10-18', kwh: 6 },
+      // Outside the 12-month window (2025-11 .. 2026-10), and a no-energy day
+      // inside it.
+      { id: '2025-10-31', kwh: 99 },
+      { id: '2026-10-03', kwh: -4 },
+    ],
+    today,
+  );
+  const october = points.find((point) => point.id === '2026-10');
+  assert.equal(october.kwh, 11);
+  assert.deepEqual(october.days, [
+    { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
+    { id: '2026-10-18', kwh: 6, hours: null },
+  ]);
+  // A month with no recorded energy carries an empty list, not a missing one.
+  assert.deepEqual(points.find((point) => point.id === '2026-05').days, []);
 });
 
 test('sumSeries and maxSeries ignore malformed points', () => {

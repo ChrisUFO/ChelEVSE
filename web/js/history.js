@@ -67,11 +67,14 @@ function hourValues(hours) {
 // 24 hourly points in the same shape every period's series uses:
 // { id, kwh, label, isCurrent }. `isCurrent` marks the hour in progress (the
 // bar shows what is recorded so far — nothing is padded or extrapolated).
+// `dayId` carries the day the buckets belong to (the Day period's read targets
+// that day's document): the pricing inputs for a schedule-priced hour bar.
 export function hourSeries(hours, today = new Date()) {
   const currentHour = hourId(today.getHours());
+  const day = dayId(today);
   return hourValues(hours).map((kwh, hour) => {
     const id = hourId(hour);
-    return { id, kwh, label: `${id}:00`, isCurrent: id === currentHour };
+    return { id, kwh, label: `${id}:00`, isCurrent: id === currentHour, dayId: day };
   });
 }
 
@@ -196,9 +199,10 @@ export function periodBounds(period, today = new Date()) {
 // { id, kwh, label, isCurrent }. The Day period's data is the single day
 // document (`{ kwh, hours }`) rather than a list, so its series is the hours map
 // itself; every range period aligns an array of daily documents to its slots.
-// A month bucket sums its daily documents by the local YYYY-MM prefix; days
-// without a document are genuine zero points, not gaps, and the current month is
-// partial because only recorded days exist.
+// A month bucket sums its daily documents by the local YYYY-MM prefix and keeps
+// those documents (`days`) so the point can be priced day by day; days without a
+// document are genuine zero points, not gaps, and the current month is partial
+// because only recorded days exist.
 export function periodSeries(period, data, today = new Date()) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') return hourSeries(data && data.hours, today);
@@ -210,12 +214,16 @@ export function periodSeries(period, data, today = new Date()) {
       months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
     }
     const totals = new Map(months.map((id) => [id, 0]));
+    const dayDocs = new Map(months.map((id) => [id, []]));
     for (const doc of docs || []) {
       if (!doc || typeof doc.id !== 'string') continue;
       const bucket = doc.id.slice(0, 7);
       if (!totals.has(bucket)) continue;
       const kwh = Number(doc.kwh);
-      if (Number.isFinite(kwh) && kwh > 0) totals.set(bucket, totals.get(bucket) + kwh);
+      if (Number.isFinite(kwh) && kwh > 0) {
+        totals.set(bucket, totals.get(bucket) + kwh);
+        dayDocs.get(bucket).push({ id: doc.id, kwh, hours: doc.hours ?? null });
+      }
     }
     const current = monthId(today);
     return months.map((id) => ({
@@ -223,6 +231,7 @@ export function periodSeries(period, data, today = new Date()) {
       kwh: totals.get(id),
       label: monthLabel(id),
       isCurrent: id === current,
+      days: dayDocs.get(id),
     }));
   }
   const current = dayId(today);
@@ -256,14 +265,25 @@ export function dayLabel(id) {
 }
 
 // Align Firestore docs to the requested day ids; absent/malformed days are 0.
+// A day that has a document carries its `hours` map beside the total so the
+// screen can price the bucket under a schedule; a day with no document is a
+// genuine zero and carries no pricing input at all — its point stays the exact
+// shape it had before pricing inputs existed.
 export function historySeries(ids, docs) {
   const byId = new Map();
   for (const doc of docs || []) {
     if (!doc || typeof doc.id !== 'string') continue;
     const kwh = Number(doc.kwh);
-    byId.set(doc.id, Number.isFinite(kwh) && kwh > 0 ? kwh : 0);
+    byId.set(doc.id, {
+      kwh: Number.isFinite(kwh) && kwh > 0 ? kwh : 0,
+      hours: doc.hours ?? null,
+    });
   }
-  return ids.map((id) => ({ id, kwh: byId.get(id) ?? 0, label: dayLabel(id) }));
+  return ids.map((id) => {
+    const doc = byId.get(id);
+    if (!doc) return { id, kwh: 0, label: dayLabel(id) };
+    return { id, kwh: doc.kwh, label: dayLabel(id), hours: doc.hours };
+  });
 }
 
 export function sumSeries(series) {
