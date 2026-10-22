@@ -460,7 +460,9 @@ guards are unchanged). The cadence, by field kind:
 - **Discrete triggers** — a snapshot-driven change of `state`, `vehicle`,
   `pilot` or `charger_online`, a session close, the active schedule window
   (#95: the schedule loop feeds it every `SCHEDULE_INTERVAL` and a _change_
-  arms the trigger; an unchanged window arms nothing), or a **completed
+  arms the trigger; an unchanged window arms nothing; publication still
+  waits for the first status apply, so a window that moves before any
+  observation rides that first write), or a **completed
   command** — publish at the next
   scheduler opportunity (the 1 s status-loop tick under MQTT), never sooner
   than `WRITE_MIN_GAP_SEC` (30 s) after the previous write. That gap is the

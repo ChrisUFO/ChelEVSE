@@ -2213,6 +2213,12 @@ class StatusSink:
         an apply, so a crossing whose rate-limit gap is already open lands
         immediately; a deferred trigger resolves on the status loop's next
         tick.
+
+        One narrowing is deliberate: publication still requires a first
+        status apply (the ``_applies`` gate in :meth:`_consider_publish`),
+        so a window that moves before any observation rides the first
+        apply's write instead of publishing on its own -- unlike the old
+        unconditional 60 s merge.
         """
         with self._lock:
             if self._latest.get("schedule") == schedule:
