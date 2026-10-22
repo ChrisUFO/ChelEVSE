@@ -22,10 +22,12 @@
 // malformed interval list falls back, and a *valid* list with one unpriceable
 // interval hides the figure rather than pro-rating over a tariff it cannot read.
 //
-// A day's history document stores one kWh total, not the shape of the intervals
-// behind it, so a daily/period cost cannot be re-costed under a schedule.
-// `aggregateCostLabel` therefore returns null whenever a schedule exists and the
-// history screen shows kWh only; per-session costs are still shown.
+// A day's history document has carried hourly buckets alongside its kWh total
+// since #60/#77, so a daily/period cost can be re-costed under a schedule after
+// all — bucket by bucket (the exports below aggregateCostLabel).
+// `aggregateCostLabel` itself still returns null whenever a schedule exists,
+// because one aggregate kWh figure cannot be split across windows; the history
+// screen prices the buckets instead. Per-session costs keep their own path.
 //
 // The live interval ends at the snapshot's own `updated_at`, never at the render
 // instant, and only while the snapshot is a live charging one (`liveCharging`:
@@ -186,10 +188,132 @@ export function sessionCostLabel(session, settings) {
 // Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:
 // one kWh figure cannot be split across the windows it was drawn in, so the
 // screens keep the energy figure and drop the cost instead of mispricing it.
+// (The flat path; the schedule path is the bucket-priced helpers below.)
 export function aggregateCostLabel(kwh, settings) {
   const normalized = costSettings(settings);
   if (hasRateSchedule(normalized)) return null;
   const energy = toNumber(kwh);
   if (!Number.isFinite(energy)) return null;
   return fmtCost(energy, normalized.rate, normalized.currency);
+}
+
+// ---------- schedule-priced history aggregates ----------
+//
+// Since #60/#77 every history/<YYYY-MM-DD> document also carries an hourly
+// `hours` map ({"00"…"23": kWh}), so a day's energy can be split across the
+// windows it was drawn in after all: each bucket is priced over its own
+// wall-clock hour by costForInterval, the same engine the live and per-session
+// costs use. The flat path is and stays aggregateCostLabel's — these helpers
+// price only under a schedule (null / a zero split without one), so flat output
+// stays byte-identical and there is exactly one flat implementation.
+
+// Local midnight of a day id, dayId's convention (web/js/history.js): the id
+// names the owner's calendar day, so the hour grid starts at that date's local
+// midnight. A malformed id (or one that rolls over, 2026-02-31) prices nothing.
+function dayStartFromId(id) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(id));
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) return null;
+  return date;
+}
+
+// The day's positive hourly buckets [{hour, kwh}] in bucket order, or null when
+// the map has none — the same "no usable hours" reading as the Day period's
+// 'no-intraday' state: zero, negative and malformed values are not recorded
+// hours, and only the stored zero-padded keys count.
+function positiveHours(hours) {
+  const map = hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : null;
+  if (!map) return null;
+  const buckets = [];
+  for (let hour = 0; hour < 24; hour += 1) {
+    const kwh = Number(map[String(hour).padStart(2, '0')]);
+    if (Number.isFinite(kwh) && kwh > 0) buckets.push({ hour, kwh });
+  }
+  return buckets.length > 0 ? buckets : null;
+}
+
+// Approximation (accepted, same family as the interval one above): a bucket's
+// span is local midnight + hour·3600 s, i.e. the real hours after midnight, so
+// a DST-shifted day prices 24 buckets against the 23 or 25 real hours it has —
+// on the spring-forward day the "02" bucket is the first instant that exists
+// (wall 03:00), and on the fall-back day every bucket after the repeated hour
+// sits one wall hour late (bucket "03" covers the repeated wall 02:00).
+// costForInterval's own boundaries are wall-clock too, so the two readings
+// agree outside the transition itself. Hour buckets are the finest shape a day
+// document stores, so no path can beat the hour it attributes energy to.
+function hourStartMs(start, hour) {
+  return start.getTime() + hour * 3600000;
+}
+
+// One hour bucket priced over its own span (kWh in, like the buckets
+// themselves; costForInterval takes Wh). An hour no base/window covers prices
+// 0.00 — the existing plan-banner rule — so under a schedule the null cases are
+// only the unusable-input guards.
+export function hourCost(dayId, hour, kwh, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return null;
+  const start = dayStartFromId(dayId);
+  const index = toNumber(hour);
+  const energy = toNumber(kwh);
+  if (!start) return null;
+  if (!Number.isInteger(index) || index < 0 || index > 23) return null;
+  if (!Number.isFinite(energy) || energy < 0) return null;
+  const from = hourStartMs(start, index);
+  return costForInterval(energy * 1000, from, from + 3600000, normalized);
+}
+
+// One day priced from its hourly buckets: the sum of its buckets' hourCosts.
+// `kwh` is the day's own total and decides the degenerate cases: a day with
+// energy but no usable bucket (recorded before hourly capture began) is
+// *unpriceable* — null, distinct from a 0.00 day — while a day with no energy
+// at all is fully priced at 0, so a range of empty days is never "partial".
+// Buckets that sum to less than the day's total are priced as they are; the
+// history screen's partial note covers that gap.
+export function dayCost(id, hours, kwh, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return null;
+  const buckets = positiveHours(hours);
+  if (!buckets) {
+    const total = toNumber(kwh);
+    // No bucket to price: a real zero-energy day costs 0.00; energy without
+    // buckets, or an unusable total, cannot be priced at all.
+    return Number.isFinite(total) && total <= 0 ? 0 : null;
+  }
+  const start = dayStartFromId(id);
+  if (!start) return null;
+  let cost = 0;
+  for (const bucket of buckets) {
+    const from = hourStartMs(start, bucket.hour);
+    const part = costForInterval(bucket.kwh * 1000, from, from + 3600000, normalized);
+    // Unreachable under a schedule (an uncovered slice prices 0.00); kept so a
+    // null from the engine hides the day instead of half-pricing it.
+    if (part == null) return null;
+    cost += part;
+  }
+  return cost;
+}
+
+// A period's schedule-priced sum over day documents ({id, kwh, hours}): the
+// cost of every priceable day plus the priced/unpriced split the history screen
+// drives its partial note with. Zero-energy days count as priced (they cost
+// 0.00); only a day with energy and no usable buckets is unpriced. Without a
+// schedule the split stays zeroed: aggregateCostLabel is the flat path.
+export function periodCost(docs, settings) {
+  const normalized = costSettings(settings);
+  const totals = { cost: 0, pricedDays: 0, unpricedDays: 0 };
+  if (!hasRateSchedule(normalized)) return totals;
+  for (const doc of Array.isArray(docs) ? docs : []) {
+    // A malformed row is not a day document: skipped like the series builders
+    // skip it, rather than counted as an unpriceable day.
+    if (!doc || typeof doc !== 'object') continue;
+    const cost = dayCost(doc.id, doc.hours, doc.kwh, normalized);
+    if (cost == null) totals.unpricedDays += 1;
+    else {
+      totals.cost += cost;
+      totals.pricedDays += 1;
+    }
+  }
+  return totals;
 }
