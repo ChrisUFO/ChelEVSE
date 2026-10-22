@@ -58,6 +58,9 @@ real environment variables take precedence.
 | `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged     |
 | `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                             |
 | `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)               |
+| `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)     |
+| `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                |
+| `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                              |
 | `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                         |
 | `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy             |
 | `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                  |
@@ -138,9 +141,11 @@ Polling intervals, timeouts, auth, payloads and failure logging are unchanged.
 
 ### MQTT status source (issue #44)
 
-With `MQTT_ENABLED=true` the bridge subscribes to `<MQTT_TOPIC>/#` and writes
+With `MQTT_ENABLED=true` the bridge subscribes to `<MQTT_TOPIC>/#` and applies
 status as the charger publishes it, instead of inferring freshness from a 10 s
-poll. The flag is **off by default**; with it off nothing below changes.
+poll — the document itself is written on the [write policy](#write-policy-issue-93)'s
+cadence, not per snapshot. The flag is **off by default**; with it off nothing
+below changes.
 
 The firmware publishes one topic per value (`<base>/amp`, `<base>/state`, …)
 when its EVSE poll reports a change. Topic values are handed over in their raw
@@ -174,7 +179,9 @@ retained `override` document and `rapi/out` feed the command acknowledgements
 
 **Cadence.** While the broker is connected **and the subscription is granted**,
 `/status` is fetched once every `MQTT_RECONCILE_SEC` (60 s) and merged into the
-snapshot — reconciliation only. A broker that accepts the connection and then
+snapshot — reconciliation only — plus once per charging heartbeat, whose
+forced observation refreshes the published values on the
+[write policy](#write-policy-issue-93)'s cadence. A broker that accepts the connection and then
 denies `<MQTT_TOPIC>/#` delivers nothing, which looks exactly like an idle
 charger: the bridge keeps HTTP as the status source at its usual 10 s cadence,
 logs the degraded source once (`status source: http (mqtt connected,
@@ -427,7 +434,7 @@ timestamped line and the loop carries on at its next interval.
 
 | Loop     | Firestore document | Content                                                                                            |
 | -------- | ------------------ | -------------------------------------------------------------------------------------------------- |
-| Status   | `status/current`   | Curated `/status` fields, merged on every poll                                                     |
+| Status   | `status/current`   | Curated `/status` fields on the write policy's cadence (see below)                                 |
 | Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas      |
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                    |
 | Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                            |
@@ -442,6 +449,47 @@ timestamped line and the loop carries on at its next interval.
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
 `temp1`–`temp3`, `temp_c`, `pilot`, `charger_online`, `updated_at`), not the
 whole raw `/status` object.
+
+### Write policy (issue #93)
+
+One scheduler owns every `status/current` write; MQTT snapshots and HTTP polls
+only **apply** state (tracker, history, sessions, generations — the discard
+guards are unchanged). The cadence, by field kind:
+
+- **Discrete triggers** — a snapshot-driven change of `state`, `vehicle`,
+  `pilot` or `charger_online`, a session close, the active schedule-window
+  hash (#95 wires it), or a **completed command** — publish at the next
+  scheduler opportunity (the 1 s status-loop tick under MQTT), never sooner
+  than `WRITE_MIN_GAP_SEC` (30 s) after the previous write. That gap is the
+  worst-case bound: a flapping charger cannot exceed one write per 30 s.
+- **Continuous values** — `session_energy`, `total_energy`, `elapsed`, `power`,
+  `voltage`, temperatures — never trigger a write. They move constantly while
+  charging, so they are carried by the heartbeats: at least one write per
+  `CHARGING_HEARTBEAT_SEC` (60 s) while charging, one per `HEARTBEAT_INTERVAL`
+  (300 s) otherwise. No write ever originates from `elapsed` alone — the app
+  interpolates it locally from the write anchor.
+- **A heartbeat is a full curated payload, never a timestamp-only bump.** When
+  due, the scheduler first forces a fresh observation through the existing
+  HTTP reconcile path (`GET /status` → `parse_status` → `apply_status` with
+  the mqtt-mark/arrival/seed guards) and publishes what that observation
+  applied. If nothing fresh landed — the charger did not answer and MQTT
+  stayed silent — there is no write: a fresh `updated_at` on stale values
+  would corrupt the app's live-cost interval `[updated_at − elapsed,
+updated_at]`. Under HTTP-only mode the status poll is the observation and
+  the heartbeat just publishes.
+- **A completed command forces an immediate write** bypassing both cadences
+  and the rate limit: the app holds its session clock until a _status_ write
+  lands, so the command document's own write is not a substitute. A failed
+  command forces nothing — the app releases its hold on the explicit failure.
+- **No-op suppression:** a due trigger whose payload equals the last written
+  payload (ignoring `updated_at`) writes nothing. A due heartbeat always
+  writes.
+- The first snapshot after start publishes (no last-written baseline).
+
+Kept outside the policy: the offline edge (`charger_online: false`) still
+writes immediately, once per outage decision, together with its push — it is
+the one write that must not wait — and `status/health`, `status/config` and
+the schedule-window republish keep their own loops' cadences.
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
 disappear from the document. Credential fields are **redacted before the
