@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CHARGING_STALE_AFTER_MS,
+  IDLE_STALE_AFTER_MS,
+  STALE_AFTER_MS,
   displayElapsed,
   elapsedClock,
   fmtCost,
@@ -115,7 +118,7 @@ test('displayElapsed interpolates from the document write time', () => {
   assert.equal(displayElapsed(charging(0, writtenAt + 20_000), writtenAt + 20_000), 0);
 
   // Stale or non-charging documents show the stored value without ticking.
-  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 61_000), 100);
+  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 151_000), 100);
   assert.equal(displayElapsed(charging(100, writtenAt, { state_label: 'ready' }), writtenAt), 100);
   assert.equal(displayElapsed(charging(100, writtenAt, { charger_online: false }), writtenAt), 100);
 });
@@ -197,8 +200,9 @@ test('elapsedClock keeps the same offset when the device clock is ahead', () => 
   assert.equal(step.seconds, 105);
   step = elapsedClock(step.clock, serverBehind, receipt + 2000);
   assert.equal(step.seconds, 107);
-  // Far enough behind to look stale, it stops interpolating.
-  const stale = { ...serverBehind, updated_at: { toMillis: () => receipt - 120_000 } };
+  // Far enough behind to look stale (past the 150 s charging threshold), it
+  // stops interpolating.
+  const stale = { ...serverBehind, updated_at: { toMillis: () => receipt - 151_000 } };
   assert.equal(elapsedClock(null, stale, receipt).seconds, 100);
 });
 
@@ -252,15 +256,19 @@ test('elapsedClock ignores an older write and never rewinds the clock', () => {
   assert.equal(afterStale.seconds, 3775);
   assert.equal(afterStale.clock.anchorMs, writtenAt);
   assert.equal(afterStale.clock.writeMs, writtenAt);
+  // Across a charging heartbeat gap (inside the 150 s bound) the clock keeps
+  // ticking instead of freezing between writes.
+  const gapped = elapsedClock(afterStale.clock, data, writtenAt + 61_000);
+  assert.equal(gapped.seconds, 3786);
   // When the bridge stops writing past the freshness window the clock freezes
   // at the last rendered value instead of snapping back to the raw base.
-  const frozen = elapsedClock(afterStale.clock, data, writtenAt + 61_000);
-  assert.equal(frozen.seconds, 3775);
-  const later = elapsedClock(frozen.clock, data, writtenAt + 120_000);
-  assert.equal(later.seconds, 3775);
+  const frozen = elapsedClock(gapped.clock, data, writtenAt + 151_000);
+  assert.equal(frozen.seconds, 3786);
+  const later = elapsedClock(frozen.clock, data, writtenAt + 220_000);
+  assert.equal(later.seconds, 3786);
   // A genuinely new write still re-anchors and follows its own elapsed value.
-  const next = { ...data, elapsed: 3800, updated_at: { toMillis: () => writtenAt + 121_000 } };
-  assert.equal(elapsedClock(later.clock, next, writtenAt + 121_000).seconds, 3800);
+  const next = { ...data, elapsed: 3800, updated_at: { toMillis: () => writtenAt + 221_000 } };
+  assert.equal(elapsedClock(later.clock, next, writtenAt + 221_000).seconds, 3800);
 });
 
 test('displayElapsed rejects every non-numeric elapsed shape', () => {
@@ -281,6 +289,25 @@ test('displayElapsed rejects every non-numeric elapsed shape', () => {
     displayElapsed({ elapsed: 42, state_label: 'charging', charger_online: true }, 5000),
     42,
   );
+});
+
+test('the session clock interpolates across charging heartbeat gaps', () => {
+  const writtenAt = 1_000_000;
+  const stamp = (ms) => ({ toMillis: () => ms });
+  const charging = (elapsed, updated) => ({
+    elapsed,
+    updated_at: stamp(updated),
+    state_label: 'charging',
+    charger_online: true,
+  });
+  // FRESH_MS matches the 150 s charging staleness threshold (60 s heartbeat
+  // × 2.5): at that write cadence the clock must keep ticking between
+  // heartbeats instead of freezing for the tail of every gap.
+  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 61_000), 161);
+  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 149_000), 249);
+  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 150_000), 250);
+  // Past the same bound the write counts as stale and the clock stops there.
+  assert.equal(displayElapsed(charging(100, writtenAt), writtenAt + 151_000), 100);
 });
 
 test('formatDuration renders sessions in h:mm', () => {
@@ -351,10 +378,94 @@ test('fmtCost is null until both energy and rate exist', () => {
   assert.equal(fmtCost(12.34, Number.NaN, 'USD'), null);
 });
 
+test('staleness constants derive from the documented write cadences', () => {
+  // 60 s charging heartbeat × 2.5; 300 s idle heartbeat × 2 + 120 s margin.
+  // STALE_AFTER_MS keeps its name from the single-threshold era as the
+  // charging bound — the tighter of the two.
+  assert.equal(CHARGING_STALE_AFTER_MS, 150_000);
+  assert.equal(IDLE_STALE_AFTER_MS, 720_000);
+  assert.equal(STALE_AFTER_MS, CHARGING_STALE_AFTER_MS);
+});
+
 test('freshnessState separates a stale bridge from an offline charger', () => {
-  assert.equal(freshnessState({ chargerOnline: true, ageMs: 5000 }), null);
-  assert.equal(freshnessState({ chargerOnline: false, ageMs: 5000 }), 'charger');
-  assert.equal(freshnessState({ chargerOnline: true, ageMs: 61000 }), 'bridge');
-  assert.equal(freshnessState({ chargerOnline: false, ageMs: 61000 }), 'bridge');
-  assert.equal(freshnessState({ chargerOnline: true, ageMs: Infinity }), 'bridge');
+  // Charging (online): fresh through 150 s…
+  assert.equal(freshnessState({ chargerOnline: true, stateLabel: 'charging', ageMs: 0 }), null);
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'charging', ageMs: 149_000 }),
+    null,
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'charging', ageMs: 150_000 }),
+    null,
+  );
+  // …and bridge-stale one second past the bound.
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'charging', ageMs: 151_000 }),
+    'bridge',
+  );
+
+  // Idle and online: the 12 min idle bound applies, not the charging one.
+  assert.equal(freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 5000 }), null);
+  assert.equal(freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 719_000 }), null);
+  assert.equal(freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 720_000 }), null);
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 721_000 }),
+    'bridge',
+  );
+  // No state label at all is the "otherwise" row: the idle bound.
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: 151_000 }), null);
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: 721_000 }), 'bridge');
+
+  // An explicit override replaces the state-derived bound entirely — and 0 is a
+  // real bound (stale immediately), not a falsy "derive it instead" value.
+  assert.equal(
+    freshnessState({
+      chargerOnline: true,
+      stateLabel: 'charging',
+      ageMs: 2000,
+      staleAfterMs: 1000,
+    }),
+    'bridge',
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 1, staleAfterMs: 0 }),
+    'bridge',
+  );
+
+  // The offline marker runs no age test and outranks every staleness rule…
+  assert.equal(
+    freshnessState({ chargerOnline: false, stateLabel: 'ready', ageMs: 5000 }),
+    'charger',
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: false, stateLabel: 'ready', ageMs: 721_000 }),
+    'charger',
+  );
+  // …including the frozen charging label an offline marker leaves behind.
+  assert.equal(
+    freshnessState({ chargerOnline: false, stateLabel: 'charging', ageMs: 151_000 }),
+    'charger',
+  );
+
+  // A missing or malformed timestamp is bridge-stale immediately, whatever the
+  // state says.
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'charging', ageMs: Infinity }),
+    'bridge',
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: Number.NaN }),
+    'bridge',
+  );
+  assert.equal(freshnessState({ chargerOnline: true, ageMs: undefined }), 'bridge');
+
+  // An absent online marker (older documents) still counts as online.
+  assert.equal(
+    freshnessState({ chargerOnline: null, stateLabel: 'charging', ageMs: 149_000 }),
+    null,
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: null, stateLabel: 'ready', ageMs: 721_000 }),
+    'bridge',
+  );
 });

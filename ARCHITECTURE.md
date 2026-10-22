@@ -154,7 +154,7 @@ Python 3 service under systemd (`Restart=always`, `User=root`), installed by rsy
 - HTTP and MQTT converge on `parse_status`: milliamps → amps, tenths °C → °C, absent sensors → `null`, `uint64` sentinels coerced, curated whitelist. Both feed the same state machine, history and session logic.
 - MQTT snapshots are debounced (~500 ms), seeded from a `/status` reply, and only run the state machine once complete. Ordering guards (`mqtt_mark`, arrival generations, seed-if-current) prevent a late HTTP reconcile from rewinding a newer MQTT apply.
 - MQTT is opt-in (`MQTT_ENABLED=false` by default). When enabled, the broker is Mosquitto on the Pi, LAN-only and authenticated; the bridge subscribes to `<topic>/#` and the firmware announce topic (`openevse/announce/#`, retained state + Last Will). HTTP remains the reconciler and the fallback.
-- When HTTP is the status source (or MQTT is not ready), failed polls merge `{charger_online: false, updated_at: SERVER_TIMESTAMP}` and keep the last values. Under a ready MQTT source, offline requires two consecutive failed reconciles with no snapshot; a late snapshot cancels the outage. The app distinguishes bridge staleness from charger offline with `freshnessState`.
+- When HTTP is the status source (or MQTT is not ready), failed polls merge `{charger_online: false, updated_at: SERVER_TIMESTAMP}` and keep the last values. Under a ready MQTT source, offline requires two consecutive failed reconciles with no snapshot; a late snapshot cancels the outage. The app distinguishes bridge staleness from charger offline with `freshnessState`, whose bounds anticipate the bridge's planned write cadences (#93): an online snapshot that says charging is stale after 150 s (2.5× the future 60 s heartbeat) and renders a "Not updating" banner, any other online snapshot after 12 min (2× the future 300 s idle heartbeat plus margin) with the bridge banner, while an offline marker takes precedence with no age test.
 
 ### Commands and watchdog
 
@@ -289,15 +289,15 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 ### Failure modes
 
-| Failure              | Behaviour                                                                                                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pi offline           | PWA shows stale `updated_at` / bridge-offline treatment; no status writes for ~60 s                                                                                       |
-| Charger unreachable  | Bridge retries, writes `charger_online: false`, distinguishes charger-offline from bridge-offline; watchdog restarts over HTTP or MQTT and alerts when neither path works |
-| MQTT broker down     | Bridge logs one transition, resumes 10 s HTTP polling, records `source: "http"`; the charger publishes into the void without affecting charging                           |
-| Firebase blip        | SDKs reconnect; bridge retries failed writes next tick; history baselines advance only after a successful write                                                           |
-| PWA offline          | Loaded app works from the Firestore cache and SW shell; cold reload needs the network (SDK/config are network-only)                                                       |
-| Stale deployed shell | Shell is cache-first; a shell change must bump `CACHE`; an open tab keeps old modules until reload                                                                        |
-| Index building       | Advanced reports `failed-precondition` until Firestore reports the index ready                                                                                            |
+| Failure              | Behaviour                                                                                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pi offline           | PWA shows stale `updated_at` / bridge-offline treatment once writes have stopped for the state-aware bound (~150 s if the last snapshot says charging, ~12 min otherwise; see §5) |
+| Charger unreachable  | Bridge retries, writes `charger_online: false`, distinguishes charger-offline from bridge-offline; watchdog restarts over HTTP or MQTT and alerts when neither path works         |
+| MQTT broker down     | Bridge logs one transition, resumes 10 s HTTP polling, records `source: "http"`; the charger publishes into the void without affecting charging                                   |
+| Firebase blip        | SDKs reconnect; bridge retries failed writes next tick; history baselines advance only after a successful write                                                                   |
+| PWA offline          | Loaded app works from the Firestore cache and SW shell; cold reload needs the network (SDK/config are network-only)                                                               |
+| Stale deployed shell | Shell is cache-first; a shell change must bump `CACHE`; an open tab keeps old modules until reload                                                                                |
+| Index building       | Advanced reports `failed-precondition` until Firestore reports the index ready                                                                                                    |
 
 ## 9. Testing and quality gates
 
@@ -342,17 +342,17 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 ## 12. Glossary
 
-| Term                | Meaning                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **One rate**        | `settings/current.rate`; the flat price when `rates` is absent/empty                                               |
-| **Rate row**        | One entry in `settings/current.rates`: price + weekday set + local time range + month set or date bounds           |
-| **Base rate**       | An all-day, every-day row (`days: 0..6`, `start === end`); prices every hour of its season unless an override wins |
-| **Daily window**    | A rate row that is not a base; overrides the base for its days and local time range                                |
-| **Period / season** | A presentation grouping of rows sharing a month or date scope; not persisted                                       |
-| **Live cost**       | Scheduled cost for the current session, anchored to `status.updated_at − elapsed` and shown only while charging    |
-| **Aggregate cost**  | Daily/period cost from one kWh total; hidden when a schedule exists                                                |
-| **MQTT source**     | The bridge's optional event-driven status/command path; HTTP is the reconciler and fallback                        |
-| **Transport**       | `mqtt` or `http`, recorded on a command when the bridge actually sent it                                           |
-| **Bridge stale**    | No status write for a threshold; distinct from charger offline                                                     |
-| **Grant**           | `users/{uid}` doc with `allowed: true`; the allowlist primitive                                                    |
-| **SHELL**           | The service-worker precache list; any change requires a `CACHE` bump                                               |
+| Term                | Meaning                                                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **One rate**        | `settings/current.rate`; the flat price when `rates` is absent/empty                                                                                                     |
+| **Rate row**        | One entry in `settings/current.rates`: price + weekday set + local time range + month set or date bounds                                                                 |
+| **Base rate**       | An all-day, every-day row (`days: 0..6`, `start === end`); prices every hour of its season unless an override wins                                                       |
+| **Daily window**    | A rate row that is not a base; overrides the base for its days and local time range                                                                                      |
+| **Period / season** | A presentation grouping of rows sharing a month or date scope; not persisted                                                                                             |
+| **Live cost**       | Scheduled cost for the current session, anchored to `status.updated_at − elapsed` and shown only while charging                                                          |
+| **Aggregate cost**  | Daily/period cost from one kWh total; hidden when a schedule exists                                                                                                      |
+| **MQTT source**     | The bridge's optional event-driven status/command path; HTTP is the reconciler and fallback                                                                              |
+| **Transport**       | `mqtt` or `http`, recorded on a command when the bridge actually sent it                                                                                                 |
+| **Bridge stale**    | No status write past the state-aware threshold: 150 s while charging, 12 min idle (≈2× the heartbeats the write policy of #93 will adopt); distinct from charger offline |
+| **Grant**           | `users/{uid}` doc with `allowed: true`; the allowlist primitive                                                                                                          |
+| **SHELL**           | The service-worker precache list; any change requires a `CACHE` bump                                                                                                     |

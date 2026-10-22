@@ -94,3 +94,35 @@ test('the state badge pulses only for a live charging snapshot', () => {
   showStatus({ exists: () => false });
   assert.equal(pulsing(), false);
 });
+
+test('the banner routes state-aware staleness verdicts', () => {
+  const ago = (ms) => ({ toMillis: () => Date.now() - ms });
+  const banner = () => element('banner');
+  const bannerText = () => banner().textContent;
+
+  // Charging inside the 150 s bound stays banner-free.
+  showStatus(snapshot({ updated_at: ago(149_000) }));
+  assert.equal(banner().hidden, true);
+  // One second past it: the dedicated charging wording, not "Bridge offline".
+  showStatus(snapshot({ updated_at: ago(151_000) }));
+  assert.equal(banner().hidden, false);
+  assert.equal(bannerText(), 'Not updating — showing last known values');
+  // The idle bound is 12 min, so a 151 s old ready snapshot is not stale…
+  showStatus(snapshot({ state: 2, state_label: 'ready', updated_at: ago(151_000) }));
+  assert.equal(banner().hidden, true);
+  // …but 12 min and one second is, with the bridge wording.
+  showStatus(snapshot({ state: 2, state_label: 'ready', updated_at: ago(721_000) }));
+  assert.equal(banner().hidden, false);
+  assert.equal(bannerText(), 'Bridge offline — showing last known values');
+  // The offline marker wins regardless of age, even over the frozen charging
+  // label it leaves behind.
+  showStatus(snapshot({ charger_online: false, updated_at: ago(721_000) }));
+  assert.equal(banner().hidden, false);
+  assert.equal(bannerText(), 'Charger offline — showing last known values');
+  // A missing timestamp is bridge-stale immediately, and even a charging label
+  // gets the plain bridge banner: with no age there is nothing softer to say.
+  showStatus(snapshot({ updated_at: null }));
+  assert.equal(banner().hidden, false);
+  assert.equal(bannerText(), 'Bridge offline — showing last known values');
+  assert.equal(element('updated').textContent, 'updated unknown');
+});
