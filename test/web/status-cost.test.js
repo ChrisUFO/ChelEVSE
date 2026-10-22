@@ -165,6 +165,9 @@ test('the figure freezes at the charging-stop anchor, never sliding', () => {
 });
 
 test('an offline marker keeps the frozen figure without re-pricing it', () => {
+  // This test's own anchor: the charging write that freezes at GBP 0.20.
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 6, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.20');
   // The bridge's offline marker refreshes updated_at while keeping the frozen
   // state/elapsed: the held figure must survive it unchanged.
   showStatus(
@@ -179,6 +182,9 @@ test('an offline marker keeps the frozen figure without re-pricing it', () => {
 });
 
 test('a session reset clears the anchor and a new charge re-anchors', () => {
+  // This test's own anchor: without one, the reset below would assert nothing.
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 14, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.30');
   // Energy zeroed: fresh idle state, the tile hides.
   showStatus(
     snapshot({
@@ -219,15 +225,35 @@ test('a session reset clears the anchor and a new charge re-anchors', () => {
 });
 
 test('flat configs price the session energy with no anchor at all', () => {
-  // The same cold-opened paused session: the flat path is energy x rate,
-  // byte-identical, shown for the whole session without ever needing a write.
+  // This test's own session: a reset clears any anchor, and the cold-opened
+  // paused write below is the session the flat path has to price.
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 18, 30),
+      elapsed: 0,
+      session_energy: 0,
+    }),
+  );
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 19, 0),
+      elapsed: 3 * 3600,
+      session_energy: 1000,
+    }),
+  );
+  // The flat path is energy x rate, byte-identical, shown for the whole
+  // session without ever needing a write.
   showSettings(FLAT);
   assert.equal(cost(), 'GBP 0.25');
   showStatus(
     snapshot({
       state: 2,
       state_label: 'ready',
-      updated_at: at(2026, 1, 5, 19, 0),
+      updated_at: at(2026, 1, 5, 19, 30),
       elapsed: 3 * 3600,
       session_energy: 1000,
     }),
