@@ -559,6 +559,7 @@ class RunWiringTests(unittest.TestCase):
         ):
             loops["status"] = ()
             holder["sink"] = sink.counter
+            holder["notifier"] = notifier.counter
             holder["tracker"] = tracker.counter
             holder["watchdog"] = watchdog.counter
 
@@ -584,6 +585,7 @@ class RunWiringTests(unittest.TestCase):
         sink_counter = holder["sink"]
         self.assertIsInstance(sink_counter, bridge.WriteCounter)
         # One instance, shared by every write site run() builds or calls.
+        self.assertIs(holder["notifier"], sink_counter)
         self.assertIs(holder["tracker"], sink_counter)
         self.assertIs(holder["watchdog"], sink_counter)
         self.assertIs(loops["config"][-1], sink_counter)
