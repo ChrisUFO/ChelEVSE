@@ -54,10 +54,23 @@ service cloud.firestore {
     // App settings: client-writable by allowlisted users, shape-validated.
     // The flat rate/currency stay mandatory; `rates` (the optional
     // time-of-use/seasonal schedule, which owns pricing once it holds any row)
-    // may be absent. Rules cannot iterate a list, so the guard is container-only:
-    // list, at most 24 rows — the same limit and reasoning as the schedule.
-    // Per-window shape and overlaps are validated by web/js/rates.js before
-    // the write is attempted.
+    // and `charger_host` (the optional charger address the bridge applies live)
+    // may each be absent.
+    //
+    // Rules cannot iterate a list, so the `rates` guard is container-only: list,
+    // at most 24 rows — the same limit and reasoning as the schedule. Per-window
+    // shape and overlaps are validated by web/js/rates.js before the write is
+    // attempted.
+    //
+    // Rules also cannot split a host into labels or compare octets, so the
+    // `charger_host` guard is the coarse subset of the shared grammar: length
+    // 1–253, characters `[A-Za-z0-9.-]`, first and last alphanumeric. Per-label
+    // length (≤ 63), a hyphen at a label boundary and an IPv4 octet above 255 are
+    // rejected by the app (web/js/settings.js validateChargerHost) and again by
+    // the bridge, which re-validates in full whatever it reads.
+    //
+    // No hasOnly whitelist on purpose: tightening unrelated keys is out of scope
+    // and would reject a field a future client version adds.
     match /settings/{doc} {
       allow read: if allowed();
       allow write: if allowed()
@@ -72,6 +85,15 @@ service cloud.firestore {
              || (
                   request.resource.data.rates is list
                   && request.resource.data.rates.size() <= 24
+                )
+           )
+        && (
+             !request.resource.data.keys().hasAny(['charger_host'])
+             || (
+                  request.resource.data.charger_host is string
+                  && request.resource.data.charger_host.size() >= 1
+                  && request.resource.data.charger_host.size() <= 253
+                  && request.resource.data.charger_host.matches('^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$')
                 )
            );
     }
