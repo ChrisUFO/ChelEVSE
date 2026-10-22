@@ -514,11 +514,14 @@ and midnight is one write per day document. Flush points:
   kept but waits for a rollover, session close or shutdown.
 - **Shutdown** — after the SIGTERM/SIGINT stop event ends the loops, the
   bridge drains the accumulator before exiting, so stops and restarts lose
-  nothing.
+  nothing when the drain's write lands; a drain that fails (Firestore
+  unreachable) is logged and that energy is lost with the process, like an
+  unclean power loss.
 
 A failed write keeps the accumulator and retries on the next flush point, so
-energy is never dropped and every delta lands in its observed hour — including
-the retry's. An unclean power loss can lose at most one flush interval of
+energy is never dropped while the bridge is running, and every delta lands in
+its observed hour — including the retry's. An unclean power loss — or a
+shutdown drain whose write fails — can lose at most one flush interval of
 history.
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
