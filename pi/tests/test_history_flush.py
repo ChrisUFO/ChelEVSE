@@ -403,7 +403,9 @@ class ShutdownDrainTests(unittest.TestCase):
     def test_stop_drains_pending_history_before_exit(self):
         db = FakeDB()
 
-        def stopped_charging(_db, _host, _auth, _transport, _interval, _source, sink):
+        def stopped_charging(
+            _db, _host, _auth, _transport, _interval, _source, sink, _counter
+        ):
             # The sink the loops share: one baseline observation, then a
             # charging burst, then the stop event (SIGTERM/SIGINT) ends the
             # command loop with the energy still pending.

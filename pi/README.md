@@ -439,7 +439,7 @@ timestamped line and the loop carries on at its next interval.
 | Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence |
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                |
 | Schedule | `status/current`   | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                          |
-| Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                                                                                    |
+| Status   | `status/health`    | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                        |
 | Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                             |
 | Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`                                                                                            |
 | Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                     |
@@ -526,6 +526,73 @@ energy is never dropped while the bridge is running, and every delta lands in
 its observed hour — including the retry's. An unclean power loss — or a
 shutdown drain whose write fails — can lose at most one flush interval of
 history.
+
+### Write budget and counter (issue #96)
+
+The bridge counts every successful Firestore write, by kind, in a
+process-local counter over a rolling 24 h window: `status` (`status/current`),
+`history` (`history/<day>`), `session` (`sessions/<id>`), `config`
+(`status/config`), `command` (`commands/<id>`), `health` (`status/health`)
+and `fcm` (token-prune deletes — Firestore bills a delete as a write). The
+status loop logs the summary once an hour (the first line right after
+start, proving the counter is alive):
+
+```
+firestore writes: 318 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 fcm=0)
+```
+
+`status/health` carries the same counts as `writes_24h` and `writes_by_kind`
+on its existing watchdog/transport-transition writes — the counter rides
+documents that are written anyway, so it costs no writes itself. Two more
+journal lines make quota trouble visible before it bites:
+
+- `write budget warning: N writes in 24h — 50% of the free-tier quota` when
+  the rolling count crosses 10,000 — once per crossing, re-armed only when
+  the window rolls the count back below it.
+- `firestore write quota exceeded (RESOURCE_EXHAUSTED) — writes paused until
+the daily reset`, at most once per hour while writes fail with the SDK's
+  `RetryError`-wrapped 429 (the direct `ResourceExhausted` form counts too).
+  Without this line the failure surfaces as `RetryError: Timeout of 60.0s
+exceeded, last exception: 429 Quota exceeded.` — which reads like a
+  network problem, exactly how the original outage went unnoticed.
+
+**The budget.** The project is on the free Spark plan: **20,000 document
+writes/day** and **50,000 document reads/day** are hard stops. The write
+policy above (#93/#94/#95) was sized for the real workload — one charger,
+two vehicles, 12–14 h/day charging:
+
+| Day                                   | status | history | idle heartbeat | edges + sessions + config + commands | Total  | Share of 20k |
+| ------------------------------------- | ------ | ------- | -------------- | ------------------------------------ | ------ | ------------ |
+| No charging                           | 0      | 0       | 288            | ~30                                  | ~320   | 1.6 %        |
+| 12 h charging (60 s heartbeat)        | 720    | 144     | 144            | ~50                                  | ~1,060 | 5 %          |
+| 14 h charging (60 s heartbeat)        | 840    | 168     | 120            | ~50                                  | ~1,180 | 6 %          |
+| 14 h, worst case (trigger every 30 s) | 1,680  | 168     | 120            | ~50                                  | ~2,020 | 10 %         |
+| Pathological: 24 h charging           | 1,440  | 288     | 0              | ~50                                  | ~1,780 | 9 %          |
+
+(The pre-policy burn, for reference, was ~27,000/day — 135 % of the quota,
+exhausting it by early evening every day. Acceptance for #91: ≤400 on a
+no-charge day, ≤1,300 typical / ≤2,200 worst case at the 12–14 h workload —
+verify against the summary line and `writes_24h` after deploy.)
+
+Two notes on why nothing else was tuned:
+
+- **Reads are not the binding constraint.** The command poll at
+  `COMMAND_INTERVAL=5` costs 17,280 reads/day of the 50,000 free; everything
+  else is listeners and single reads. Raising the interval would save reads
+  nobody needs and make every button press in the app feel up to 5 s slower,
+  so it stays at 5 s.
+- **Batching is not a saving.** Firestore bills per document written — a
+  batched write of N documents costs exactly what N writes cost — so the
+  only lever is writing less often, which is what the policy does. A
+  separate heartbeat document would be the same: one more write plus a
+  listener, for nothing.
+
+One deployment caveat the counter makes visible: with `MQTT_ENABLED=false`
+the config loop resyncs `status/config` unconditionally every
+`CONFIG_INTERVAL` (60 s) — ~1,440 writes/day on its own, dwarfing the table
+above. MQTT mode (this deployment) syncs only on a `config_version` change
+(~1/day); if the journal ever shows `config=` climbing on an HTTP-only
+install, that loop is why.
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
 disappear from the document. Credential fields are **redacted before the
@@ -1032,6 +1099,11 @@ pi/.venv/bin/python -m unittest discover -s pi/tests -v
 ```bash
 journalctl -u chelevse-bridge -f
 ```
+
+The write counter's hourly `firestore writes: N in 24h (…)` summary, the
+`write budget warning:` tripwire at 50 % of the quota, and the
+`firestore write quota exceeded` line all land here (see
+[Write budget and counter](#write-budget-and-counter-issue-96)).
 
 ## Uninstall
 

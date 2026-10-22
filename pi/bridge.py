@@ -25,7 +25,7 @@ import signal
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -112,6 +112,24 @@ TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
 # while charging, and shutdown. 300 s is 12 writes/hour while charging and
 # zero while idle; the shutdown drain means stops and restarts lose nothing.
 HISTORY_FLUSH_SEC = 300
+# --- Write counter (issue #96) ------------------------------------------------
+# The write budget is only verifiable if the bridge can see its own writes.
+# Observability constants, deliberately not env tunables: counting is not
+# policy. Kinds: the five the issue names -- status (status/current), history
+# (history/<day>), session (sessions/<id>), config (status/config), command
+# (commands/<id>) -- plus health (status/health, its own transition cadence)
+# and fcm (token-prune deletes, which Firestore bills as writes), so the
+# total matches what the console reports.
+WRITE_KINDS = ("status", "history", "session", "config", "command", "health", "fcm")
+_WRITE_KINDS = frozenset(WRITE_KINDS)
+# The rolling window the budget is judged over, matching the quota's day.
+WRITE_WINDOW_SEC = 24 * 3600
+# One journal summary per hour; the same interval dedupes the quota-failure
+# line (once per interval per process, not per failure).
+WRITE_SUMMARY_INTERVAL = 3600.0
+# The free tier allows 20,000 writes/day; the tripwire fires at its 50%, the
+# loudest early warning that costs nothing to check.
+WRITE_BUDGET_WARNING_AT = 10000
 # A granted subscription that never delivers a ``config_version`` still leaves
 # ``status/config`` stale: sync once over HTTP straight away, then keep this
 # slow safety resync until a version is observed.
@@ -453,6 +471,203 @@ def _gap_seconds(gap):
     return f"{float(gap):.0f} s"
 
 
+def quota_exceeded(exc, depth=8):
+    """True when ``exc`` is, or wraps, a Firestore quota failure (429).
+
+    In practice the SDK's retry hides the 429: the failure surfaces as
+    ``RetryError: Timeout of 60.0s exceeded, last exception: 429 Quota
+    exceeded.`` with the ``ResourceExhausted`` hanging off the wrapper's
+    ``cause``. Both forms are recognised -- a 429 status code or a
+    quota-shaped message anywhere in a bounded cause chain -- without
+    importing the SDK's exception classes, so test doubles with the same
+    shape count too. The bound keeps a pathological cause cycle from
+    spinning.
+    """
+    candidate = exc
+    seen = 0
+    while candidate is not None and seen < depth:
+        if getattr(candidate, "code", None) == 429:
+            return True
+        text = str(candidate)
+        if "RESOURCE_EXHAUSTED" in text or "Quota exceeded" in text:
+            return True
+        candidate = (
+            getattr(candidate, "cause", None)
+            or getattr(candidate, "exception", None)
+            or getattr(candidate, "__cause__", None)
+        )
+        seen += 1
+    return False
+
+
+class WriteCounter:
+    """Process-local count of successful Firestore writes, by kind (issue #96).
+
+    The milestone's premise: the write budget was discovered only when writes
+    started failing. Every write site records its kind here the moment a
+    write lands (:meth:`record` / the :meth:`counted` one-liner) and reports
+    its failures (:meth:`note_failure`); the counts feed the hourly journal
+    summary (:meth:`maybe_summary`), the ``writes_24h``/``writes_by_kind``
+    fields merged into ``status/health`` (:meth:`health_fields` -- a document
+    written only on watchdog/transport transitions, so the counter itself
+    costs no writes), and the 50% budget tripwire that would have caught the
+    outage before it bit.
+
+    The tripwire fires when a *crossing* takes the rolling count to
+    ``warning_at`` and re-arms only once the window rolls the count back
+    below it: hysteresis, so a count hovering at the line logs one warning
+    per re-crossing, never one per write.
+
+    Thread-safety: the write sites run under different locks -- the sink's
+    apply lock, the accumulator's flush points, none at all in the config
+    loop -- so the counter keeps its own small lock and never requires a
+    caller to hold any particular one. Injectable clock, the
+    ``WritePolicy(clock=...)`` precedent; monotonic, because the window is a
+    process-local span, not wall time.
+    """
+
+    def __init__(
+        self,
+        clock=time.monotonic,
+        window_sec=WRITE_WINDOW_SEC,
+        summary_interval=WRITE_SUMMARY_INTERVAL,
+        warning_at=WRITE_BUDGET_WARNING_AT,
+    ):
+        self.clock = clock
+        self.window_sec = window_sec
+        self.summary_interval = summary_interval
+        self.warning_at = warning_at
+        # (timestamp, kind) per successful write, oldest first.
+        self._events = deque()
+        # True while the warning has fired for the current stretch above the
+        # threshold.
+        self._warned = False
+        # When the next journal summary is due; None means one is due now
+        # (a startup line proves the counter is alive before any write).
+        self._next_summary_at = None
+        # Clock time of the last quota-failure line.
+        self._quota_logged_at = None
+        self._lock = threading.Lock()
+
+    def record(self, kind):
+        """Count one successful write of ``kind``; run the tripwire check.
+
+        An unknown kind is a programming error and raises here, at the
+        recording site, rather than an hour later in the next summary.
+        """
+        if kind not in _WRITE_KINDS:
+            raise KeyError(kind)
+        crossed = False
+        total = 0
+        with self._lock:
+            moment = self.clock()
+            self._events.append((moment, kind))
+            self._trim(moment)
+            if not self._warned and len(self._events) >= self.warning_at:
+                self._warned = True
+                crossed = True
+                total = len(self._events)
+        if crossed:
+            log(
+                f"write budget warning: {total} writes in 24h "
+                f"— 50% of the free-tier quota"
+            )
+
+    def note_failure(self, exc):
+        """Report one failed write; a quota 429 gets its distinct line.
+
+        The call sites keep their own detail logs (retry semantics, what was
+        kept pending); this adds the one line that says *quota*, not network
+        -- an exhaustion that reads like a timeout traceback is how the
+        original outage went unnoticed. Deduped to once per interval per
+        process, not per failure. Returns True for a quota failure whether
+        or not this call was the one that logged.
+        """
+        if not quota_exceeded(exc):
+            return False
+        with self._lock:
+            moment = self.clock()
+            if (
+                self._quota_logged_at is not None
+                and moment - self._quota_logged_at < self.summary_interval
+            ):
+                return True
+            self._quota_logged_at = moment
+        log(
+            "firestore write quota exceeded (RESOURCE_EXHAUSTED) "
+            "— writes paused until the daily reset"
+        )
+        return True
+
+    def counted(self, kind, write, *args, **kwargs):
+        """Run one write call; count it on success, inspect it on failure.
+
+        The one-liner for sites without failure handling of their own: the
+        exception re-raises untouched, so the caller's existing retry/log
+        semantics are unchanged.
+        """
+        try:
+            result = write(*args, **kwargs)
+        except Exception as exc:
+            self.note_failure(exc)
+            raise
+        self.record(kind)
+        return result
+
+    def snapshot(self):
+        """``(total, {kind: count})`` inside the rolling window.
+
+        Also the trim point for a window that aged out while nothing was
+        written, so ``writes_24h`` and the summary never report stale counts.
+        """
+        with self._lock:
+            self._trim(self.clock())
+            return self._counts()
+
+    def health_fields(self):
+        """The ``status/health`` merge fields for the current counts."""
+        total, by_kind = self.snapshot()
+        return {"writes_24h": total, "writes_by_kind": by_kind}
+
+    def summary(self):
+        """The journal line's message: the rolling total and its split."""
+        total, by_kind = self.snapshot()
+        detail = " ".join(f"{kind}={by_kind[kind]}" for kind in WRITE_KINDS)
+        return f"firestore writes: {total} in 24h ({detail})"
+
+    def maybe_summary(self):
+        """Log the summary when the interval elapsed; True when a line went out.
+
+        The first call logs at once: a startup ``firestore writes: 0 in 24h``
+        line proves the counter works before any write has landed.
+        """
+        with self._lock:
+            moment = self.clock()
+            if self._next_summary_at is not None and moment < self._next_summary_at:
+                return False
+            self._next_summary_at = moment + self.summary_interval
+            self._trim(moment)
+            total, by_kind = self._counts()
+        detail = " ".join(f"{kind}={by_kind[kind]}" for kind in WRITE_KINDS)
+        log(f"firestore writes: {total} in 24h ({detail})")
+        return True
+
+    def _trim(self, now):
+        """Drop writes older than the window; re-arm the tripwire below it."""
+        cutoff = now - self.window_sec
+        while self._events and self._events[0][0] <= cutoff:
+            self._events.popleft()
+        if len(self._events) < self.warning_at:
+            self._warned = False
+
+    def _counts(self):
+        """``(total, by_kind)`` from the events; the caller holds the lock."""
+        by_kind = dict.fromkeys(WRITE_KINDS, 0)
+        for _at, kind in self._events:
+            by_kind[kind] += 1
+        return len(self._events), by_kind
+
+
 class HistoryAccumulator:
     """In-memory ``history/<day>`` deltas; one flush is one write per day.
 
@@ -470,11 +685,15 @@ class HistoryAccumulator:
     hour, not the hour the retry lands in.
     """
 
-    def __init__(self, db, flush_sec=HISTORY_FLUSH_SEC, clock=time.monotonic):
+    def __init__(
+        self, db, flush_sec=HISTORY_FLUSH_SEC, clock=time.monotonic, counter=None
+    ):
         self.db = db
         self.flush_sec = flush_sec
         # Injectable monotonic clock, the WritePolicy(clock=...) precedent.
         self.clock = clock
+        # Successful flush writes are counted here (issue #96).
+        self.counter = counter or WriteCounter()
         # (day, "HH") -> pending kWh observed in that bucket.
         self.pending_hours = {}
         # Total pending kWh across days (the sum of pending_hours' values).
@@ -564,6 +783,7 @@ class HistoryAccumulator:
             try:
                 self.db.collection("history").document(day).set(payload, merge=merge)
             except Exception as exc:
+                self.counter.note_failure(exc)
                 log(
                     f"history flush failed on {reason} "
                     f"({exc.__class__.__name__}: {exc}); "
@@ -571,6 +791,7 @@ class HistoryAccumulator:
                 )
                 drained = False
             else:
+                self.counter.record("history")
                 for hour, delta in hours.items():
                     del self.pending_hours[(day, hour)]
                     self.pending_kwh -= delta
@@ -592,12 +813,16 @@ class HistoryAccumulator:
 class StatusTracker:
     """Status-derived state carried across ticks and bridge restarts."""
 
-    def __init__(self, db, history=None):
+    def __init__(self, db, history=None, counter=None):
         self.db = db
         # The history accumulator (issue #94): record_history attributes
         # deltas here; the flush points are rollover / session close / the
         # charging interval / shutdown. Injectable for the tests.
-        self.history = history or HistoryAccumulator(db)
+        self.history = history or HistoryAccumulator(db, counter=counter)
+        # Successful session writes are counted here (issue #96); the same
+        # counter as the accumulator's, so one injected instance counts all
+        # of a run's writes.
+        self.counter = counter or WriteCounter()
         self.total_energy = None
         self.state = None
         self.charger_online = None
@@ -920,9 +1145,11 @@ class StatusTracker:
         try:
             self.db.collection("sessions").document(session_id).set(payload)
         except Exception as exc:
+            self.counter.note_failure(exc)
             self.pending_session = {**payload, "_id": session_id}
             log(f"session write failed ({exc.__class__.__name__}: {exc}); will retry")
         else:
+            self.counter.record("session")
             self.pending_session = None
             log(f"session recorded: {session_id} ({payload['wh']:g} Wh)")
 
@@ -1660,13 +1887,14 @@ def apply_command(transport, host, auth, cmd, source=None, confirm_sec=None):
     return _apply_command_http(transport, host, auth, cmd)
 
 
-def notify(db, body):
+def notify(db, body, counter=None):
     """Push one notification to every registered FCM token; never raises.
 
     Tokens live in fcmTokens/{docId} with an optional `token` field (the doc id
     is the fallback). Each token is sent independently so one dead token cannot
     block the rest; unregistered/invalid tokens are pruned.
     """
+    counter = counter or WriteCounter()
     try:
         docs = list(db.collection("fcmTokens").stream())
     except Exception as exc:
@@ -1690,9 +1918,13 @@ def notify(db, body):
         except (messaging.UnregisteredError, exceptions.InvalidArgumentError):
             try:
                 doc.reference.delete()
-                log(f"pruned fcm token {doc.id}")
             except Exception as exc:
+                counter.note_failure(exc)
                 log(f"fcm token prune failed ({exc.__class__.__name__}: {exc})")
+            else:
+                # A delete is a billed write; it counts (issue #96).
+                counter.record("fcm")
+                log(f"pruned fcm token {doc.id}")
         except Exception as exc:
             log(f"fcm send failed ({exc.__class__.__name__}: {exc})")
 
@@ -1706,11 +1938,13 @@ class Notifier:
     full queue drops the newest push rather than blocking the caller.
     """
 
-    def __init__(self, db, max_queue=64):
+    def __init__(self, db, max_queue=64, counter=None):
         self.db = db
         self.queue = queue.Queue(maxsize=max_queue)
         self._thread = None
         self._lock = threading.Lock()
+        # The write counter the token prunes record into (issue #96).
+        self.counter = counter or WriteCounter()
 
     def enqueue(self, body):
         self._ensure_worker()
@@ -1732,7 +1966,7 @@ class Notifier:
         while True:
             body = self.queue.get()
             try:
-                notify(self.db, body)
+                notify(self.db, body, counter=self.counter)
             except Exception as exc:  # never let one push kill the worker
                 log(f"fcm notify error ({exc.__class__.__name__}: {exc})")
             finally:
@@ -1905,10 +2139,15 @@ class StatusSink:
     outage edge, outside the policy's cadences.
     """
 
-    def __init__(self, db, tracker, notifier, arrivals=None, policy=None):
+    def __init__(
+        self, db, tracker, notifier, arrivals=None, policy=None, counter=None
+    ):
         self.status_doc = db.collection("status").document("current")
         self.tracker = tracker
         self.notifier = notifier
+        # Successful status/current writes are counted here (issue #96);
+        # ``run()`` threads one counter through every write site.
+        self.counter = counter or WriteCounter()
         # The MQTT source's arrival sequence (``MqttSource.arrival_generation``).
         # An outage decision re-reads it under this lock, so a flush cannot land
         # between the "no snapshot" check and the offline write. It stays
@@ -2036,7 +2275,7 @@ class StatusSink:
             self.tracker.charger_online = False
         # Write the state before notifying so a slow push cannot leave the
         # app showing a stale online status.
-        self.status_doc.set(OFFLINE, merge=True)
+        self.counter.counted("status", self.status_doc.set, OFFLINE, merge=True)
         # The outage edge writes immediately, outside the policy's rate limit
         # (issue #93 keeps it intact: rare, and the one write that must not
         # wait). The accumulated view and the suppression baseline still have
@@ -2096,7 +2335,7 @@ class StatusSink:
             self.policy.triggered = False
             return False
         payload = dict(self._latest)
-        self.status_doc.set(payload, merge=True)
+        self.counter.counted("status", self.status_doc.set, payload, merge=True)
         self.policy.record_write(payload, now)
         return True
 
@@ -2284,13 +2523,17 @@ def mqtt_health_fields(mqtt):
 
 
 def write_transport_health(
-    db, source, mqtt_connected, announced=None, last_lwt_at=None
+    db, source, mqtt_connected, announced=None, last_lwt_at=None, counter=None
 ):
     """Publish the active status source into status/health (merge semantics).
 
     Merged, never replaced: the watchdog owns the rest of the document and its
-    writes merge too, so neither can clobber the other's fields.
+    writes merge too, so neither can clobber the other's fields. The write
+    carries the rolling write counts (issue #96): this document's own
+    transition-driven cadence is what exposes them, so the counter never
+    costs a write.
     """
+    counter = counter or WriteCounter()
     try:
         db.collection("status").document("health").set(
             {
@@ -2299,11 +2542,15 @@ def write_transport_health(
                 "mqtt_announced": announced,
                 "mqtt_last_lwt_at": last_lwt_at,
                 "updated_at": firestore.SERVER_TIMESTAMP,
+                **counter.health_fields(),
             },
             merge=True,
         )
     except Exception as exc:
+        counter.note_failure(exc)
         log(f"health transport write failed ({exc.__class__.__name__}: {exc})")
+    else:
+        counter.record("health")
 
 
 # Serializes the drain-and-refill in ``enqueue_latest``: the worker only ever
@@ -2736,7 +2983,16 @@ class Watchdog:
     """
 
     def __init__(
-        self, db, host, auth, transport, notifier, config, clock=None, mqtt=None
+        self,
+        db,
+        host,
+        auth,
+        transport,
+        notifier,
+        config,
+        clock=None,
+        mqtt=None,
+        counter=None,
     ):
         self.db = db
         self.host = host
@@ -2746,6 +3002,9 @@ class Watchdog:
         self.config = config
         self.clock = clock or _utcnow
         self.mqtt = mqtt
+        # Successful health writes are counted here (issue #96); the same
+        # counter as every other write site's.
+        self.counter = counter or WriteCounter()
         self.health_doc = db.collection("status").document("health")
         self.failures = 0
         self.samples = []
@@ -2893,7 +3152,10 @@ class Watchdog:
         so a healthy bridge writes it once. Merged so neither writer erases the
         other's fields: the transport fields (``source``, ``mqtt_connected``,
         the Last Will pair) are refreshed from the live source here, so a
-        watchdog write cannot leave a stale announcement behind.
+        watchdog write cannot leave a stale announcement behind. The write
+        also carries the rolling write counts (issue #96) -- riding this
+        document's transition cadence is how the counter is exposed without
+        costing a write.
         """
         now = self.clock()
         document = {
@@ -2912,10 +3174,14 @@ class Watchdog:
         }
         if self.mqtt is not None:
             document.update(mqtt_health_fields(self.mqtt))
+        document.update(self.counter.health_fields())
         try:
             self.health_doc.set(document, merge=True)
         except Exception as exc:
+            self.counter.note_failure(exc)
             log(f"watchdog: health write failed ({exc.__class__.__name__}: {exc})")
+        else:
+            self.counter.record("health")
 
     def record_success(self, payload):
         """A successful ``/status`` poll: clear the streak and note recovery."""
@@ -3101,7 +3367,12 @@ def status_loop(
                 detail = "mqtt not connected"
             log(f"status source: {source} ({detail})")
             write_transport_health(
-                db, source, mqtt_connected, announced, mqtt.last_lwt_at
+                db,
+                source,
+                mqtt_connected,
+                announced,
+                mqtt.last_lwt_at,
+                counter=sink.counter,
             )
             reconcile_failures = 0
             next_poll = now
@@ -3230,6 +3501,10 @@ def status_loop(
             # (issue #94): applies carry it between ticks, and a tick covers
             # an apply gap.
             sink.consider_history_flush()
+            # The write counter's hourly journal summary (issue #96) rides
+            # the same tick: the counter keeps its own lock and its own
+            # clock, so this is just the scheduler opportunity.
+            sink.counter.maybe_summary()
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval if mqtt is None else MQTT_TICK_SEC)
@@ -3245,6 +3520,7 @@ def config_loop(
     mqtt=None,
     config_event=None,
     tick=MQTT_TICK_SEC,
+    counter=None,
 ):
     """Sync /config; with MQTT, only when ``config_version`` changed.
 
@@ -3269,6 +3545,8 @@ def config_loop(
     republished on a reconnect is one) retries immediately.
     """
     config_doc = db.collection("status").document("config")
+    # Successful config writes are counted here (issue #96).
+    counter = counter or WriteCounter()
     last_synced = None
     # A sync is owed after a failure; retry_at is the current backoff deadline.
     pending = False
@@ -3384,6 +3662,7 @@ def config_loop(
                         {**safe_data, "updated_at": firestore.SERVER_TIMESTAMP}
                     )
                 except Exception as exc:
+                    counter.note_failure(exc)
                     if not mqtt_mode:
                         # Unchanged flag-off path: the loop's error handler logs
                         # a non-fetch failure.
@@ -3393,6 +3672,7 @@ def config_loop(
                     # escaping with the trigger still set (a hot loop).
                     retry(exc)
                 else:
+                    counter.record("config")
                     if config_event is not None:
                         config_event.clear()
                         if (
@@ -3483,12 +3763,16 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
-def command_loop(db, host, auth, transport, interval, source=None, sink=None):
+def command_loop(
+    db, host, auth, transport, interval, source=None, sink=None, counter=None
+):
     # Commands already applied — acked or failed — whose status write did not
     # land. Retry the write, never the command: an accepted MQTT publish must
     # not be repeated (over MQTT or HTTP). Bounded and process-local, so a gap
     # spanning a restart can still re-apply (at-least-once across restarts).
     settled = OrderedDict()
+    # Successful command status writes are counted here (issue #96).
+    counter = counter or WriteCounter()
     last_transport = None
     # Readiness from the last command picked up, used only to word the
     # transport edge log (a retried settled doc may reuse it).
@@ -3506,11 +3790,13 @@ def command_loop(db, host, auth, transport, interval, source=None, sink=None):
                         try:
                             doc.reference.update({"status": "failed", "error": reason})
                         except Exception as exc:
+                            counter.note_failure(exc)
                             log(
                                 f"command {doc.id} stale update failed "
                                 f"({exc.__class__.__name__}: {exc})"
                             )
                             continue
+                        counter.record("command")
                         log(f"command {doc.id} failed: {reason}")
                         continue
                     selected = "mqtt" if mqtt_command_ready(source) else "http"
@@ -3551,11 +3837,13 @@ def command_loop(db, host, auth, transport, interval, source=None, sink=None):
                 try:
                     doc.reference.update(fields)
                 except Exception as exc:
+                    counter.note_failure(exc)
                     log(
                         f"command {doc.id} status update failed "
                         f"({exc.__class__.__name__}: {exc}); will retry without re-applying"
                     )
                     continue
+                counter.record("command")
                 settled.pop(doc.id, None)
                 if fields["status"] == "acked":
                     log(f"command {doc.id} acked: {cmd.get('type')}")
@@ -4003,7 +4291,10 @@ def run(
     validated WritePolicyConfig from env; the sink owns the WritePolicy itself
     and with it every ``status/current`` write (issue #93). ``history`` is the
     validated HistoryConfig (issue #94): the tracker's accumulator flushes
-    history/<day> on its cadence and on the shutdown drain below.
+    history/<day> on its cadence and on the shutdown drain below. One
+    :class:`WriteCounter` (issue #96) is built here and threaded through
+    every write site, ``status/health`` and the status loop's summary tick,
+    so the journal's counts cover the whole process.
     """
     (
         status_interval,
@@ -4013,11 +4304,20 @@ def run(
         command_interval,
         settings_interval,
     ) = intervals
+    # The process's one write counter (issue #96): every write site records
+    # here, ``status/health``'s transition writes expose the rolling count,
+    # and the status loop logs the hourly summary. Built once, threaded
+    # everywhere, so the totals are the process's.
+    counter = WriteCounter()
     tracker = StatusTracker(
-        db, history=HistoryAccumulator(db, flush_sec=(history or HistoryConfig()).flush_sec)
+        db,
+        history=HistoryAccumulator(
+            db, flush_sec=(history or HistoryConfig()).flush_sec, counter=counter
+        ),
+        counter=counter,
     )
     tracker.seed()
-    notifier = Notifier(db)
+    notifier = Notifier(db, counter=counter)
 
     source = None
     snapshots = None
@@ -4043,7 +4343,14 @@ def run(
     # Built after the source: the outage decision needs its arrival sequence,
     # and the watchdog needs the link/LWT state for its restart transport.
     watchdog = Watchdog(
-        db, host, auth, transport, notifier, watchdog_config, mqtt=source
+        db,
+        host,
+        auth,
+        transport,
+        notifier,
+        watchdog_config,
+        mqtt=source,
+        counter=counter,
     )
     sink = StatusSink(
         db,
@@ -4051,6 +4358,7 @@ def run(
         notifier,
         arrivals=source.arrival_generation if source is not None else None,
         policy=WritePolicy(write_policy),
+        counter=counter,
     )
     if source is not None:
         mqtt_status_args = (sink, snapshots)
@@ -4078,6 +4386,7 @@ def run(
         CONFIG_INITIAL_DELAY,
         source,
         config_event,
+        counter,
     )
     threading.Thread(target=config_loop, args=config_args, daemon=True).start()
     settings_args = (db, host, bootstrap, settings_interval)
@@ -4098,7 +4407,7 @@ def run(
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
         ).start()
         source.start()
-    command_loop(db, host, auth, transport, command_interval, source, sink)
+    command_loop(db, host, auth, transport, command_interval, source, sink, counter)
     if source is not None:
         source.stop()
     # The SIGTERM/SIGINT handlers only set the stop event; with the command

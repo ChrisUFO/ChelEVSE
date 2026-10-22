@@ -148,6 +148,8 @@ class FakeDocument:
         like a stored document; ``db.writes`` keeps the raw payload and the
         merge argument the caller passed, for payload/mask assertions.
         """
+        if self._db.write_error is not None:
+            raise self._db.write_error
         if self._db.fail_writes:
             raise RuntimeError("write failed")
         self._db.writes.append(("set", self.collection, self.id, data, merge))
@@ -163,6 +165,8 @@ class FakeDocument:
             store[self.id] = _merge_top_level({}, data)
 
     def update(self, data):
+        if self._db.write_error is not None:
+            raise self._db.write_error
         if self._db.fail_writes:
             raise RuntimeError("write failed")
         self._db.writes.append(("update", self.collection, self.id, data, None))
@@ -172,6 +176,8 @@ class FakeDocument:
         store[self.id].update(data)
 
     def delete(self):
+        if self._db.write_error is not None:
+            raise self._db.write_error
         if self._db.fail_deletes:
             raise RuntimeError("delete failed")
         self._db.writes.append(("delete", self.collection, self.id, None, None))
@@ -268,6 +274,9 @@ class FakeDB:
         self.fail_reads = False
         self.fail_writes = False
         self.fail_deletes = False
+        # An exception to raise from every write instead of the generic
+        # RuntimeError (tests simulating a specific Firestore failure).
+        self.write_error = None
 
     def collection(self, name):
         return FakeCollection(self, name)
