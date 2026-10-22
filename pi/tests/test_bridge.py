@@ -422,10 +422,12 @@ class ScheduleStateTests(unittest.TestCase):
 
 
 class HistoryTests(unittest.TestCase):
-    """history/<local date>: one masked merge write per positive delta.
+    """history/<local date>: deltas accumulate in memory, flush as one write.
 
     The local clock is patched so the document id and the hour bucket are
-    deterministic; every case goes through ``record`` for that reason.
+    deterministic; every case goes through ``record`` for that reason. A
+    flush is one masked-merge write per pending day document (issue #94);
+    ``drain`` is the shutdown flush, the one trigger available on demand.
     """
 
     def setUp(self):
@@ -438,11 +440,19 @@ class HistoryTests(unittest.TestCase):
         with mock.patch.object(bridge, "_localnow", return_value=when):
             self.tracker.record_history(total)
 
+    def drain(self):
+        """The shutdown drain: flush whatever is pending, right now."""
+        return self.tracker.history.flush("shutdown")
+
     def history(self):
         return self.db.data.get("history", {})
 
+    def history_writes(self):
+        return [write for write in self.db.writes if write[1] == "history"]
+
     def test_first_observation_is_only_a_baseline(self):
         self.record(100.0)
+        self.drain()
         self.assertEqual(self.history(), {})
         self.assertEqual(self.db.writes, [])
         self.assertEqual(self.tracker.total_energy, 100.0)
@@ -450,6 +460,7 @@ class HistoryTests(unittest.TestCase):
     def test_delta_accumulates_the_daily_total_and_its_hour_bucket(self):
         self.record(100.0)
         self.record(112.5)
+        self.drain()
         (day,) = self.history()
         self.assertEqual(day, "2026-10-21")
         self.assertAlmostEqual(self.history()[day]["kwh"], 12.5)
@@ -475,6 +486,14 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(sorted(self.history()[day]["hours"]), ["21", "22"])
         self.assertAlmostEqual(self.history()[day]["hours"]["21"], 12.5)
         self.assertAlmostEqual(self.history()[day]["hours"]["22"], 5.5)
+        # The hour rollover flushed both buckets in ONE write.
+        (write,) = self.history_writes()
+        self.assertEqual(
+            write[4], ["kwh", "hours.`21`", "hours.`22`", "updated_at"]
+        )
+        # Nothing left pending, so a drain writes nothing more.
+        self.assertTrue(self.drain())
+        self.assertEqual(len(self.history_writes()), 1)
 
     def test_local_midnight_rolls_to_the_new_day_and_leaves_the_old_one_alone(self):
         self.record(100.0)
@@ -489,31 +508,52 @@ class HistoryTests(unittest.TestCase):
         self.assertAlmostEqual(second["kwh"], 2.0)
         self.assertEqual(list(second["hours"]), ["00"])
         self.assertAlmostEqual(second["hours"]["00"], 2.0)
+        # One write per day document, each carrying only its own day's hours.
+        self.assertEqual(
+            [(write[2], write[4]) for write in self.history_writes()],
+            [
+                ("2026-10-21", ["kwh", "hours.`23`", "updated_at"]),
+                ("2026-10-22", ["kwh", "hours.`00`", "updated_at"]),
+            ],
+        )
 
     def test_failed_write_keeps_the_delta_for_a_later_retry_hour(self):
         self.record(100.0)
         self.db.fail_writes = True
         self.record(110.0, datetime(2026, 10, 21, 21, 55, tzinfo=UTC))
-        # The baseline did not advance, so the whole delta is still owed.
-        self.assertEqual(self.tracker.total_energy, 100.0)
+        self.record(115.0, datetime(2026, 10, 21, 22, 2, tzinfo=UTC))
+        # Both flush attempts failed (the drain and the 22:02 rollover), so
+        # the accumulator kept everything; the baseline advanced on
+        # observation and the energy lives in the pending buckets.
+        self.assertFalse(self.drain())
+        self.assertEqual(self.tracker.total_energy, 115.0)
         self.assertEqual(self.history(), {})
         self.db.fail_writes = False
-        self.record(110.0, datetime(2026, 10, 21, 22, 5, tzinfo=UTC))
+        self.record(116.0, datetime(2026, 10, 21, 22, 5, tzinfo=UTC))
+        # The retry lands every observed delta in its observed hour, in one
+        # write, exactly as a shutdown drain would.
+        self.assertTrue(self.drain())
         (day,) = self.history()
-        self.assertAlmostEqual(self.history()[day]["kwh"], 10.0)
-        # The retry lands in the hour the bridge observed the energy in.
-        self.assertEqual(list(self.history()[day]["hours"]), ["22"])
-        self.assertAlmostEqual(self.history()[day]["hours"]["22"], 10.0)
-        self.assertEqual(self.tracker.total_energy, 110.0)
-        self.assertEqual(self.db.writes[-1][4], ["kwh", "hours.`22`", "updated_at"])
+        self.assertEqual(day, "2026-10-21")
+        self.assertAlmostEqual(self.history()[day]["kwh"], 16.0)
+        self.assertEqual(sorted(self.history()[day]["hours"]), ["21", "22"])
+        self.assertAlmostEqual(self.history()[day]["hours"]["21"], 10.0)
+        self.assertAlmostEqual(self.history()[day]["hours"]["22"], 6.0)
+        self.assertEqual(self.tracker.total_energy, 116.0)
+        self.assertEqual(
+            self.db.writes[-1][4],
+            ["kwh", "hours.`21`", "hours.`22`", "updated_at"],
+        )
 
     def test_meter_reset_writes_neither_counter_and_rebaselines(self):
         self.record(100.0)
         self.record(90.0)
+        self.drain()
         self.assertEqual(self.history(), {})
         self.assertEqual(self.db.writes, [])
         self.assertEqual(self.tracker.total_energy, 90.0)
         self.record(95.0)
+        self.drain()
         (day,) = self.history()
         self.assertAlmostEqual(self.history()[day]["kwh"], 5.0)
         self.assertEqual(list(self.history()[day]["hours"]), ["21"])
@@ -529,6 +569,7 @@ class HistoryTests(unittest.TestCase):
         }
         self.record(100.0)
         self.record(110.0)
+        self.drain()
         doc = self.history()["2026-10-21"]
         self.assertAlmostEqual(doc["kwh"], 50.0)
         self.assertAlmostEqual(doc["hours"]["21"], 10.0)
@@ -540,6 +581,7 @@ class HistoryTests(unittest.TestCase):
         self.record(100.0)
         self.record(100.0)
         self.record(100.0)
+        self.drain()
         self.assertEqual(self.history(), {})
         self.assertEqual(self.db.writes, [])
 
@@ -547,10 +589,12 @@ class HistoryTests(unittest.TestCase):
         self.tracker.seeded = False
         self.record(100.0)
         self.record(110.0)
+        self.drain()
         self.assertEqual(self.history(), {})
         self.db.data["status"] = {"current": {"total_energy": 90.0, "state": 1}}
         self.assertTrue(self.tracker.seed())
         self.record(120.0)
+        self.drain()
         (day,) = self.history()
         # 120 - 90, i.e. everything since the last stored reading.
         self.assertAlmostEqual(self.history()[day]["kwh"], 30.0)

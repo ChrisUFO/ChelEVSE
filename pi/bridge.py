@@ -106,6 +106,12 @@ HEARTBEAT_INTERVAL = 300
 # never triggers a write. ``updated_at`` is transport bookkeeping, never a
 # trigger; ``state_label`` follows ``state``.
 TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
+# --- History write accumulator (issue #94) ------------------------------------
+# history/<day> deltas accumulate in memory and flush as one masked-merge
+# write per day document on: hour rollover, session close, this interval
+# while charging, and shutdown. 300 s is 12 writes/hour while charging and
+# zero while idle; the shutdown drain means stops and restarts lose nothing.
+HISTORY_FLUSH_SEC = 300
 # A granted subscription that never delivers a ``config_version`` still leaves
 # ``status/config`` stale: sync once over HTTP straight away, then keep this
 # slow safety resync until a version is observed.
@@ -447,11 +453,151 @@ def _gap_seconds(gap):
     return f"{float(gap):.0f} s"
 
 
+class HistoryAccumulator:
+    """In-memory ``history/<day>`` deltas; one flush is one write per day.
+
+    ``StatusTracker.record_history`` attributes each positive total_energy
+    delta to the local ``(day, hour)`` it was observed in and hands it to
+    this accumulator; the write itself is deferred (issue #94). One flush
+    writes one document per pending day, carrying ``kwh`` plus every touched
+    ``hours.<HH>`` bucket in the same field-path merge list the per-delta
+    write used -- a flush spanning an hour boundary or midnight stays one
+    write per day document. Flush points: the hour rolls over, a session
+    closes, ``flush_sec`` elapses while charging, and shutdown.
+
+    A failed write keeps the accumulator, so the same energy is retried on
+    the next flush and never dropped; attribution stays with the observed
+    hour, not the hour the retry lands in.
+    """
+
+    def __init__(self, db, flush_sec=HISTORY_FLUSH_SEC, clock=time.monotonic):
+        self.db = db
+        self.flush_sec = flush_sec
+        # Injectable monotonic clock, the WritePolicy(clock=...) precedent.
+        self.clock = clock
+        # (day, "HH") -> pending kWh observed in that bucket.
+        self.pending_hours = {}
+        # Total pending kWh across days (the sum of pending_hours' values).
+        self.pending_kwh = 0.0
+        # The (day, "HH") of the most recent attribution. A delta observed in
+        # a different bucket means the hour rolled over: the pending energy
+        # belongs to a closed hour, so it is due now.
+        self.hour_key = None
+        # The clock time the charging interval is measured from: the first
+        # pending delta (the batch's birth) or the last flush attempt. A
+        # failed flush advances it too -- the retry rides the next flush
+        # point instead of spinning on every tick.
+        self.timed_from = None
+
+    def observe(self, delta, moment):
+        """Attribute one positive delta to the (day, hour) it was observed in.
+
+        The hour-rollover flush runs *after* accumulating, so one write spans
+        both buckets: the energy already belongs to its observed hours, and
+        splitting it into two writes would spend the boundary-crossing write
+        twice.
+        """
+        key = (moment.date().isoformat(), moment.strftime("%H"))
+        rolled = self.hour_key is not None and key != self.hour_key
+        self.hour_key = key
+        if not self.pending_hours:
+            self.timed_from = self.clock()
+        self.pending_hours[key] = self.pending_hours.get(key, 0.0) + delta
+        self.pending_kwh += delta
+        if rolled:
+            self.flush("hour rollover")
+
+    def due(self, now, charging):
+        """True when the charging interval elapsed with energy pending.
+
+        Charging-gated on purpose (issue #94: zero idle writes): energy a
+        charging session left unflushed waits for a rollover, session close
+        or shutdown rather than an idle timer.
+        """
+        return (
+            charging
+            and bool(self.pending_hours)
+            and self.timed_from is not None
+            and now - self.timed_from >= self.flush_sec
+        )
+
+    def consider(self, charging):
+        """Flush when the charging interval is due."""
+        if self.due(self.clock(), charging):
+            self.flush("charging interval")
+
+    def flush(self, reason):
+        """Write one masked-merge document per pending day; keep failures.
+
+        Returns True when nothing is left pending (nothing was, or every
+        write landed). A failed day keeps exactly its own deltas -- days that
+        landed are cleared, so a partial midnight flush never re-writes the
+        day that succeeded.
+        """
+        if not self.pending_hours:
+            return True
+        self.timed_from = self.clock()
+        by_day = {}
+        for (day, hour), delta in self.pending_hours.items():
+            by_day.setdefault(day, {})[hour] = delta
+        drained = True
+        landed_kwh = 0.0
+        landed_buckets = 0
+        landed_days = 0
+        for day in sorted(by_day):
+            hours = by_day[day]
+            payload = {
+                "kwh": firestore.Increment(sum(hours.values())),
+                "hours": {
+                    hour: firestore.Increment(delta)
+                    for hour, delta in sorted(hours.items())
+                },
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            }
+            # The same field-path merge list the per-delta write used (see
+            # record_history): one write increments kwh and exactly the
+            # touched hours.<HH> leaves, so sibling hours and every other
+            # field survive, and a missing document is created.
+            merge = ["kwh"] + [f"hours.`{hour}`" for hour in sorted(hours)] + [
+                "updated_at"
+            ]
+            try:
+                self.db.collection("history").document(day).set(payload, merge=merge)
+            except Exception as exc:
+                log(
+                    f"history flush failed on {reason} "
+                    f"({exc.__class__.__name__}: {exc}); "
+                    f"keeping {self.pending_kwh:.3f} kWh pending"
+                )
+                drained = False
+            else:
+                for hour, delta in hours.items():
+                    del self.pending_hours[(day, hour)]
+                    self.pending_kwh -= delta
+                landed_kwh += sum(hours.values())
+                landed_buckets += len(hours)
+                landed_days += 1
+        if landed_days:
+            # The success counterpart of the failure log above: one line
+            # per flush that wrote, so the journal shows the write budget
+            # in operation (issue #94's <= 13 lines/h while charging; an
+            # empty flush writes nothing and stays silent).
+            log(
+                f"history flush on {reason}: {landed_kwh:.3f} kWh across "
+                f"{landed_buckets} bucket(s), {landed_days} day doc(s)"
+            )
+        return drained
+
+
 class StatusTracker:
     """Status-derived state carried across ticks and bridge restarts."""
 
-    def __init__(self, db):
+    def __init__(self, db, history=None):
         self.db = db
+        # The history accumulator (issue #94): record_history attributes
+        # deltas here; the flush points are rollover / session close / the
+        # charging interval / shutdown. Injectable for the tests.
+        self.history = history or HistoryAccumulator(db)
         self.total_energy = None
         self.state = None
         self.charger_online = None
@@ -553,6 +699,11 @@ class StatusTracker:
             # session that ended while the bridge was down; with no seed the
             # first tick only establishes state.
             self._finalize_session(data)
+            # The session edge is a history flush point (issue #94): the
+            # energy observed during the session lands before the tracker
+            # goes quiet. An empty accumulator is a no-op, so an interval
+            # flush that just fired cannot double it.
+            self.history.flush("session close")
         self.previous_state = state
         self.has_state = True
         self.state = state
@@ -783,10 +934,14 @@ class StatusTracker:
         self._write_session(record.get("_id"), record)
 
     def record_history(self, total):
-        """Accumulate the total_energy delta into history/<local date>.
+        """Accumulate the total_energy delta into the history accumulator.
 
-        One write moves both counters: the daily ``kwh`` total and the
-        ``hours.<HH>`` bucket for the hour the delta was observed in.
+        One flush later moves both counters -- the daily ``kwh`` total and
+        the ``hours.<HH>`` bucket for the hour each delta was observed in --
+        as a single masked-merge write per day document (issue #94). The
+        baseline advances on observation; the accumulator holds the energy
+        until a write lands, so a failed flush retries the same deltas
+        instead of losing them.
         """
         if not _is_number(total):
             return
@@ -811,31 +966,17 @@ class StatusTracker:
         if delta <= 0:
             self.total_energy = total
             return
-        moment = _localnow()
-        day = moment.date().isoformat()
-        hour = moment.strftime("%H")
-        try:
-            self.db.collection("history").document(day).set(
-                {
-                    "kwh": firestore.Increment(delta),
-                    "hours": {hour: firestore.Increment(delta)},
-                    "updated_at": firestore.SERVER_TIMESTAMP,
-                },
-                # A field-path merge list, not dotted keys with merge=True and
-                # not update(): merge=True merges top-level keys only and would
-                # store a literal "hours.21" field, while update() cannot create
-                # a missing document (it defaults to exists=True). This single
-                # write increments kwh and exactly one hours.<HH> leaf, leaving
-                # sibling hours and every other field untouched. The hour
-                # segment is backtick-quoted because a Firestore field path
-                # cannot carry a bare numeric segment.
-                merge=["kwh", f"hours.`{hour}`", "updated_at"],
-            )
-        except Exception as exc:
-            # Keep the old baseline so the same delta is retried next tick.
-            log(f"history write failed ({exc.__class__.__name__}: {exc})")
-            return
         self.total_energy = total
+        self.history.observe(delta, _localnow())
+
+    def consider_history_flush(self):
+        """Flush pending history when the charging interval elapsed (issue #94).
+
+        The other flush points call ``history.flush`` directly: the hour
+        rollover inside the accumulator, the session close in ``observe``,
+        and the shutdown drain in ``run``.
+        """
+        self.history.consider(self.state == 3)
 
 
 def _vehicle_connected(data):
@@ -1967,6 +2108,28 @@ class StatusSink:
         with self._lock:
             return self._consider_publish()
 
+    def consider_history_flush(self):
+        """Flush pending history when the charging interval elapsed (issue #94).
+
+        The applies run the same check inline; this covers the gaps between
+        them (a charger gone silent mid-charge keeps the flush schedule).
+        """
+        with self._lock:
+            self.tracker.consider_history_flush()
+
+    def drain_history(self):
+        """Flush pending history on shutdown, under the lock like every apply.
+
+        The status and MQTT loops are daemon threads ``run()`` never joins,
+        so an apply can still be mid-flight when the drain fires; every
+        other accumulator touchpoint holds this lock, and the drain must
+        too, or it races the accumulator's dict state (a concurrent observe
+        can crash the iteration or drop a just-accumulated delta, and a
+        concurrent interval flush would double-write pending energy).
+        """
+        with self._lock:
+            self.tracker.history.flush("shutdown")
+
     def heartbeat_due(self):
         """(due, watermark) for a heartbeat write, under the lock.
 
@@ -2062,6 +2225,10 @@ class StatusSink:
                 self.notifier.enqueue(body)
         self._applies += 1
         self._consider_publish()
+        # The history accumulator's charging interval resolves on every apply
+        # (issue #94); rollover and session-close flushes fired inside the
+        # record/observe calls above.
+        tracker.consider_history_flush()
 
 
 def mqtt_health_fields(mqtt):
@@ -2347,6 +2514,33 @@ def write_policy_config_or_exit():
     """Write-policy tunables for ``main()``: a bad value stops the bridge by name."""
     try:
         return write_policy_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+class HistoryConfig(NamedTuple):
+    """Validated history-accumulator tunables; ``main()`` fills them from env."""
+
+    flush_sec: float = HISTORY_FLUSH_SEC
+
+
+def history_config():
+    """History flush tunable from the environment; bad values raise ValueError.
+
+    The same rejection rationale as the write-policy tunables: ``nan`` makes
+    every interval comparison read "not due yet" (freezing history writes),
+    and a non-positive period is always due.
+    """
+    flush_sec = _env_finite("HISTORY_FLUSH_SEC", HISTORY_FLUSH_SEC, float)
+    if flush_sec <= 0:
+        raise ValueError(f"HISTORY_FLUSH_SEC must be above zero, got {flush_sec:g}.")
+    return HistoryConfig(flush_sec=flush_sec)
+
+
+def history_config_or_exit():
+    """History flush tunable for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return history_config()
     except ValueError as exc:
         sys.exit(str(exc))
 
@@ -3002,6 +3196,10 @@ def status_loop(
             # Deferred triggers, forced writes and owed retries resolve here,
             # one scheduler tick at a time.
             sink.publish_pending()
+            # The history accumulator's charging interval resolves here too
+            # (issue #94): applies carry it between ticks, and a tick covers
+            # an apply gap.
+            sink.consider_history_flush()
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval if mqtt is None else MQTT_TICK_SEC)
@@ -3752,6 +3950,7 @@ def run(
     mqtt=None,
     bootstrap=DEFAULT_CHARGER_HOST,
     write_policy=None,
+    history=None,
 ):
     """Start the pollers; blocks on the command loop until the stop event.
 
@@ -3764,7 +3963,9 @@ def run(
     ``settings_loop`` can swap it live. ``bootstrap`` is the env address that
     refresh reverts to when the app clears the setting. ``write_policy`` is the
     validated WritePolicyConfig from env; the sink owns the WritePolicy itself
-    and with it every ``status/current`` write (issue #93).
+    and with it every ``status/current`` write (issue #93). ``history`` is the
+    validated HistoryConfig (issue #94): the tracker's accumulator flushes
+    history/<day> on its cadence and on the shutdown drain below.
     """
     (
         status_interval,
@@ -3774,7 +3975,9 @@ def run(
         command_interval,
         settings_interval,
     ) = intervals
-    tracker = StatusTracker(db)
+    tracker = StatusTracker(
+        db, history=HistoryAccumulator(db, flush_sec=(history or HistoryConfig()).flush_sec)
+    )
     tracker.seed()
     notifier = Notifier(db)
 
@@ -3859,6 +4062,14 @@ def run(
     command_loop(db, host, auth, transport, command_interval, source, sink)
     if source is not None:
         source.stop()
+    # The SIGTERM/SIGINT handlers only set the stop event; with the command
+    # loop down, the pending history energy is written before the process
+    # exits (issue #94) -- the drain runs here, off the signal handler and
+    # under the sink's lock, serialized against the still-running daemon
+    # loop threads. A failure is logged by the flush itself; the energy is
+    # lost with the process, bounded by the flush interval (the
+    # unclean-power-loss window).
+    sink.drain_history()
 
 
 def main():
@@ -3878,6 +4089,7 @@ def main():
             "must be numbers."
         )
     write_policy = write_policy_config_or_exit()
+    history = history_config_or_exit()
 
     try:
         db = init_firestore()
@@ -3907,7 +4119,8 @@ def main():
         f"settings {settings_interval:g}s, "
         f"status writes gap >={write_policy.min_gap:g}s, "
         f"heartbeats {write_policy.charging_heartbeat:g}s charging/"
-        f"{write_policy.idle_heartbeat:g}s idle"
+        f"{write_policy.idle_heartbeat:g}s idle, "
+        f"history flush {history.flush_sec:g}s charging"
     )
     log(
         f"watchdog: enabled={watchdog.enabled} failures={watchdog.threshold} "
@@ -3942,6 +4155,7 @@ def main():
         mqtt,
         bootstrap,
         write_policy=write_policy,
+        history=history,
     )
     log("bridge stopped")
 
