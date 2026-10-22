@@ -43,7 +43,10 @@
 // anchor (see heldAnchorAfter) and prices `[anchor - elapsed, anchor]`
 // (heldCostLabel), so the $ survives the whole plug-in while every later write —
 // fresh idle polls, the bridge's offline markers, schedule-only merges — leaves
-// the rate window exactly where the last live render priced it.
+// the rate window exactly where the last live render priced it. A cold open
+// (no charging write witnessed) reconstructs the same kind of anchor from the
+// bridge's `charging_stopped_at` stamp (see adoptedAnchor, issue #122): a
+// captured anchor always wins, and without the stamp today's hide stands.
 
 import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
 import {
@@ -169,6 +172,39 @@ export function heldAnchorAfter(prev, status) {
   }
   const energy = toNumber(status.session_energy);
   return Number.isFinite(energy) && energy > 0 ? prev : null;
+}
+
+// The cold-open anchor (issue #122): a not-charging snapshot with session
+// energy still on the meter and the bridge's `charging_stopped_at` stamp
+// yields the anchor the page would have captured had it been open at the
+// stop -- `{ms: stamp, elapsed}` -- so a reload or late sign-in still shows
+// the session's $. The page cannot reconstruct this alone: `updated_at`
+// refreshes on every poll while `elapsed`/`session_energy` freeze, so
+// anchoring to any web-known clock would slide the window (forbidden).
+//
+// Precedence is the caller's explicit `captured ?? adopted` wiring: a
+// captured or held anchor always wins -- by construction it prices the same
+// stop, from the write that observed it -- and adoption only fills the null
+// the held machine leaves on a cold open. A captured anchor is never
+// replaced by a later poll's stamp either: once adopted, the anchor is held
+// exactly like a captured one, so re-delivery of the same (or a newer)
+// stamp cannot move the figure.
+//
+// The pair is an approximation the captured path shares: `elapsed` is the
+// adopting snapshot's cumulative value, so pause time between the stop and
+// the cold open is folded into the pro-rated span (the single-span rule of
+// §4; the energy itself never moves). A malformed or absent stamp -- an
+// older bridge, or a pre-deploy bridge -- returns null and today's hide
+// stands. `elapsed` is passed through ungated: the pricer's null rules are
+// the single gate for unusable durations.
+export function adoptedAnchor(status) {
+  if (!status || liveCharging(status)) return null;
+  const energy = toNumber(status.session_energy);
+  if (!Number.isFinite(energy) || energy <= 0) return null;
+  const stamp = status.charging_stopped_at;
+  const ms = stamp && typeof stamp.toMillis === 'function' ? stamp.toMillis() : null;
+  if (ms == null) return null;
+  return { ms, elapsed: status.elapsed };
 }
 
 // Held session cost: the schedule over the frozen interval

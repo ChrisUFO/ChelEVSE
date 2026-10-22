@@ -17,6 +17,7 @@ import {
   toNumber,
 } from '../format.js';
 import {
+  adoptedAnchor,
   costSettings,
   heldAnchorAfter,
   heldCostLabel,
@@ -65,7 +66,12 @@ let clockHold = null;
 // The session cost's frozen anchor (see heldAnchorAfter): the last live
 // charging write's `updated_at` and `elapsed`, captured on every charging
 // write, held from the moment charging stops with session energy still on the
-// meter, and cleared when the session resets or a new charge re-anchors.
+// meter, and cleared when the session resets or a new charge re-anchors. On a
+// cold open — no charging write witnessed — the bridge's `charging_stopped_at`
+// stamp reconstructs it (see adoptedAnchor, issue #122), so the completed
+// session's $ survives a reload; a captured anchor always wins, and the
+// adopted one is held exactly like a captured one, so later polls carrying the
+// same stamp cannot move the figure.
 let costAnchor = null;
 
 function ageMs() {
@@ -127,10 +133,12 @@ function renderCost() {
   // The session's cost owns its tile for the whole plug-in. While charging it
   // is the live interval, [updated_at - elapsed, updated_at]; once charging
   // stops with session energy still on the meter it freezes at the anchor
-  // captured from the last charging write, so fresh polls — and the bridge's
-  // offline markers — can never slide the rate window over hours that drew no
-  // energy. A session reset hides it again (no anchor). With no schedule this
-  // stays exactly the flat fmtCost path, which ignores the anchor entirely.
+  // captured from the last charging write — or, on a cold open, the one
+  // reconstructed from the bridge's charging_stopped_at stamp — so fresh
+  // polls, and the bridge's offline markers, can never slide the rate window
+  // over hours that drew no energy. A session reset hides it again (no
+  // anchor). With no schedule this stays exactly the flat fmtCost path, which
+  // ignores the anchor entirely.
   let cost = null;
   let uncovered = false;
   if (status) {
@@ -404,8 +412,12 @@ export function showStatus(snap) {
   // clock interpolate from the old write and jump before the stop lands.
   clockHold = holdAfterSnapshot(clockHold, data);
   // The cost anchor follows the same writes: re-anchored while charging, held
-  // across schedule-only merges and stopped writes, cleared on a session reset.
-  costAnchor = heldAnchorAfter(costAnchor, data);
+  // across schedule-only merges and stopped writes, cleared on a session
+  // reset. A null after that machine is the cold-open case, and the bridge's
+  // stop stamp fills it — never the other way round: the held machine's
+  // non-null result (a captured or already-adopted anchor) always wins, which
+  // is what keeps repeated polls from re-adopting and moving the figure.
+  costAnchor = heldAnchorAfter(costAnchor, data) ?? adoptedAnchor(data);
   status = data;
   renderStatus();
 }
