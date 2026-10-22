@@ -9,6 +9,7 @@
 //
 // Interval costs:
 //   - live session   [updated_at - elapsed, updated_at] of the status snapshot
+//   - held session   [anchor - elapsed, anchor], the last live window frozen
 //   - finished session its stored started_at/ended_at
 //
 // A finished session carries `intervals: [{started_at, ended_at, wh}]`, one per
@@ -35,6 +36,14 @@
 // whole plug-in, so pricing a paused, cached or charger-offline snapshot against a
 // later clock would slide the window over idle hours that drew no energy.
 // Anchoring to the write freezes the figure until a new write arrives.
+//
+// The held session keeps that figure visible once charging stops with energy
+// still on the meter (the common plugged-in-complete end state): the screen
+// freezes the last charging write's own `updated_at` and its `elapsed` as one
+// anchor (see heldAnchorAfter) and prices `[anchor - elapsed, anchor]`
+// (heldCostLabel), so the $ survives the whole plug-in while every later write —
+// fresh idle polls, the bridge's offline markers, schedule-only merges — leaves
+// the rate window exactly where the last live render priced it.
 
 import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
 import {
@@ -69,6 +78,13 @@ function endMillis(now) {
   if (typeof now === 'number') return Number.isFinite(now) ? now : null;
   if (now instanceof Date) return Number.isFinite(now.getTime()) ? now.getTime() : null;
   return null;
+}
+
+// A status document's own write time, or null when it is missing or malformed —
+// the same reading statusCostLabel/statusCostUncovered make inline.
+function snapshotMillis(status) {
+  const updated = status && status.updated_at;
+  return updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
 }
 
 // Live session cost: the schedule over the elapsed part of the session, or the
@@ -123,6 +139,61 @@ export function statusCostUncovered(status, settings) {
   if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
     return false;
   }
+  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+}
+
+// ---------- held session (plugged in, not charging) ----------
+
+// The frozen anchor is a pair, not a timestamp alone: `elapsed` is cumulative for
+// the whole plug-in and keeps growing while paused, so re-using a later write's
+// value would stretch the interval past the plug-in's start and dilute the
+// energy over hours that drew none. Held together, the pair prices exactly the
+// figure the last live render showed.
+//
+// Advance the anchor for a status document — the cost's counterpart of the
+// session clock's hold. A live charging write re-anchors on every write (so a
+// new charge starts from its own window, and a document refreshed in place
+// carries its newer elapsed); a write without a usable timestamp cannot anchor
+// anything, and the labels' null rules then hide it exactly like the live one.
+// A late, older charging write must not rewind the anchor (the clock's rule).
+// Once charging stops, the anchor holds while the session's energy is still on
+// the meter — including under the bridge's offline markers, which keep the
+// charging label but are not live — and clears when the session resets, so a
+// fresh idle state hides the figure again.
+export function heldAnchorAfter(prev, status) {
+  if (!status) return null;
+  if (liveCharging(status)) {
+    const ms = snapshotMillis(status);
+    if (ms == null) return null;
+    return prev && prev.ms > ms ? prev : { ms, elapsed: status.elapsed };
+  }
+  const energy = toNumber(status.session_energy);
+  return Number.isFinite(energy) && energy > 0 ? prev : null;
+}
+
+// Held session cost: the schedule over the frozen interval
+// [anchorMs - elapsed, anchorMs], the window the last live render priced.
+// Null rules mirror liveCostLabel's: no schedule takes the flat path
+// (byte-identical, the anchor ignored), and a missing or unusable elapsed or
+// anchor hides the figure rather than guessing a window.
+export function heldCostLabel(wh, elapsed, anchorMs, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
+  const seconds = toNumber(elapsed);
+  const endMs = endMillis(anchorMs);
+  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
+  const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
+  return cost == null ? null : fmtMoney(cost, normalized.currency);
+}
+
+// Whether the held interval includes a slice with no base/window price — the
+// same marker the live figure carries, evaluated over the frozen window.
+export function heldCostUncovered(elapsed, anchorMs, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return false;
+  const seconds = toNumber(elapsed);
+  const endMs = endMillis(anchorMs);
+  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
   return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
 }
 

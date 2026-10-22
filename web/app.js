@@ -27,7 +27,13 @@ import {
   showStatusError,
   showStatusSchedule,
 } from './js/screens/status.js';
-import { initConfig, resetConfig, showConfigData, showConfigError } from './js/screens/config.js';
+import {
+  initConfig,
+  resetConfig,
+  showConfigData,
+  showConfigError,
+  showLifetimeEnergy,
+} from './js/screens/config.js';
 import {
   initSettings,
   resetSettings,
@@ -245,12 +251,15 @@ function enterApp(user) {
       if (!snap) {
         showStatusError();
         showLiveStatus(null);
+        showLifetimeEnergy(null);
         return;
       }
       setCached(snap.metadata.fromCache);
       const data = snap.data();
       showStatus(snap);
       showLiveStatus(data);
+      // Lifetime kWh lives on the Config screen now (#116).
+      showLifetimeEnergy(data && data.total_energy);
     },
     onCommands: showCommands,
     onSettings: (settings, meta) => {

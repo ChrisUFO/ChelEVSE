@@ -309,15 +309,13 @@
             <div class="fig">
               <span class="fig-label">Session</span>
               <span class="fig-value"><span id="fig-session">—</span><em>kWh</em></span>
-              <span class="fig-sub"
-                ><span id="session-cost" class="fig-cost" hidden></span
-                ><span id="session-sub">this charge</span></span
-              >
+              <span class="fig-sub">this charge</span>
             </div>
             <div class="fig">
-              <span class="fig-label">Lifetime</span>
-              <span class="fig-value"><span id="fig-total">—</span><em>kWh</em></span>
-              <span class="fig-sub">total</span>
+              <span class="fig-label">Cost</span>
+              <!-- The money string carries its own currency; no unit suffix. -->
+              <span class="fig-value"><span id="fig-cost" class="fig-cost">—</span></span>
+              <span class="fig-sub" id="cost-sub"></span>
             </div>
             <div class="fig fig-wide">
               <span class="fig-label">Temperature</span>
@@ -839,6 +837,9 @@
               Advanced console</button
             >.
           </p>
+          <!-- Lifetime energy moved here from the Status figures row (#116);
+               filled from status/current.total_energy. -->
+          <p class="section-note lifetime-note" id="lifetime-note" hidden></p>
 
           <p class="section-state" id="config-loading">Loading configuration…</p>
           <p class="section-state err" id="config-error" role="alert" hidden>
