@@ -138,6 +138,11 @@ export function validateSettings(draft) {
   const host = validateChargerHost(draft && draft.chargerHost);
   if (host.error) errors.chargerHost = host.error;
 
+  // The temperature toggle is a checkbox, so the draft is already boolean;
+  // anything else (a form built without the field) reads as the default
+  // "visible" and can never block a save.
+  const showTemperature = !(draft && draft.showTemperature === false);
+
   // The rate editor owns the row and document-level rate messages; this
   // validator only reports the flat pair. A stored schedule must still be valid
   // for the document to be saveable (and must never be silently dropped), so its
@@ -147,7 +152,7 @@ export function validateSettings(draft) {
   return {
     valid: Object.keys(errors).length === 0 && windows.valid,
     errors,
-    values: { rate, currency, rates: windows.values, chargerHost: host.value },
+    values: { rate, currency, rates: windows.values, chargerHost: host.value, showTemperature },
   };
 }
 
@@ -164,6 +169,9 @@ export function validateSettings(draft) {
 // form stays saveable and the next write replaces it. A valid host is carried
 // through so an unrelated rate edit re-sends it instead of deleting it — the
 // settings write replaces the whole document.
+//
+// `show_temperature` is optional the same way, with absent/non-bool meaning
+// visible: a corrupt value must not hide the stat nor block a save.
 export function normalizeSettings(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const normalized = normalizeRateSchedule(data);
@@ -177,6 +185,7 @@ export function normalizeSettings(data) {
     // back into settingsFields (showSettingsData -> setFields), so the key must
     // survive that round trip.
     charger_host: validateChargerHost(data.charger_host).value,
+    show_temperature: data.show_temperature !== false,
   };
 }
 
@@ -184,6 +193,7 @@ export function normalizeSettings(data) {
 // deletes a stored schedule, and the rate table can round-trip rows it does not
 // change. `chargerHost` travels the same way: the form always holds the stored
 // address, so a rate-only save does not drop it from the whole-document write.
+// `showTemperature` rides along identically.
 export function settingsFields(settings) {
   const normalized = normalizeSettings(settings);
   return normalized
@@ -192,8 +202,9 @@ export function settingsFields(settings) {
         currency: normalized.currency,
         rates: normalized.rates,
         chargerHost: normalized.charger_host,
+        showTemperature: normalized.show_temperature,
       }
-    : { rate: '', currency: '', rates: [], chargerHost: '' };
+    : { rate: '', currency: '', rates: [], chargerHost: '', showTemperature: true };
 }
 
 // The form before the first settings snapshot is blank apart from whatever the
@@ -205,6 +216,9 @@ export function firstLoadFields(draft, stored) {
   const fields = settingsFields(stored);
   const kept = (value) => typeof value === 'string' && value.trim() !== '';
   const rows = Array.isArray(draft && draft.rates) ? draft.rates : [];
+  // The checkbox's untouched state is checked (visible), so only an explicit
+  // off-toggle counts as typing; anything else adopts the stored preference.
+  const toggledOff = draft && draft.showTemperature === false;
   // Stored values arrive in the stored shape; a draft row the owner typed is
   // already an editor row. writeFields normalizes both, and rateRowFields maps
   // an editor row to itself, so the mix is inert.
@@ -212,6 +226,7 @@ export function firstLoadFields(draft, stored) {
     rate: kept(draft && draft.rate) ? draft.rate : fields.rate,
     currency: kept(draft && draft.currency) ? draft.currency : fields.currency,
     chargerHost: kept(draft && draft.chargerHost) ? draft.chargerHost : fields.chargerHost,
+    showTemperature: toggledOff ? false : fields.showTemperature,
     rates: rows.length ? rows : fields.rates,
   };
 }
@@ -1814,9 +1829,12 @@ export function formatPreviewWhen(date, now = new Date()) {
 // The exact Firestore payload for a validated settings save. `rates` is omitted
 // when empty, so a flat configuration writes byte-for-byte the two fields it
 // always has. `charger_host` is omitted the same way: absent means "use the
-// bridge's bootstrap", so clearing the field removes the key. A month row keeps
-// its stored key order; a date row appends `from`/`to` after `months`, whose
-// value is the derived compatibility hint.
+// bridge's bootstrap", so clearing the field removes the key. `show_temperature`
+// is omitted when true — absent already means visible — so a visible toggle
+// never adds a key, and only a stored `false` (which the form always carries)
+// reaches the document. A month row keeps its stored key order; a date row
+// appends `from`/`to` after `months`, whose value is the derived compatibility
+// hint.
 export function settingsPayload(values) {
   const source = values || {};
   const payload = { rate: source.rate, currency: source.currency };
@@ -1851,6 +1869,7 @@ export function settingsPayload(values) {
   // able to carry something `firestore.rules` would refuse.
   const host = validateChargerHost(source.chargerHost).value;
   if (host) payload.charger_host = host;
+  if (source.showTemperature === false) payload.show_temperature = false;
   return payload;
 }
 
@@ -1867,7 +1886,8 @@ function parseCurrencyValue(value) {
 // through rateWindowsKey so day/month order and numeric text do not matter. The
 // charger address is compared trimmed (the only normalization it has), so
 // " 192.168.1.50 " matches "192.168.1.50" but an invalid value never compares
-// equal to a blank one.
+// equal to a blank one. The temperature toggle compares by its visible/hidden
+// meaning, so an absent field (the default) matches an explicit true.
 export function sameSettingsInput(a, b) {
   const left = a || {};
   const right = b || {};
@@ -1881,7 +1901,8 @@ export function sameSettingsInput(a, b) {
     ratesMatch &&
     parseCurrencyValue(left.currency) === parseCurrencyValue(right.currency) &&
     rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
-    String(left.chargerHost ?? '').trim() === String(right.chargerHost ?? '').trim()
+    String(left.chargerHost ?? '').trim() === String(right.chargerHost ?? '').trim() &&
+    (left.showTemperature !== false) === (right.showTemperature !== false)
   );
 }
 
@@ -1898,7 +1919,8 @@ function settingsEqual(a, b) {
     left.rate === right.rate &&
     left.currency === right.currency &&
     rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
-    left.charger_host === right.charger_host
+    left.charger_host === right.charger_host &&
+    left.show_temperature === right.show_temperature
   );
 }
 
@@ -2001,16 +2023,19 @@ export function reconcileSettingsSave({
 } = {}) {
   const rates = Array.isArray(values.rates) ? values.rates : [];
   // The confirmed/attempted document is in stored shape (`charger_host`, absent
-  // when the field was cleared), exactly like a snapshot: every comparison below
-  // runs it through settingsFields/normalizeSettings.
+  // when the field was cleared; `show_temperature`, absent when the stat is
+  // visible), exactly like a snapshot: every comparison below runs it through
+  // settingsFields/normalizeSettings.
   const attempted = { rate: values.rate, currency: values.currency, rates };
   if (values.chargerHost) attempted.charger_host = values.chargerHost;
+  if (values.showTemperature === false) attempted.show_temperature = false;
   const untouched = settingsDraftMatches(draft, attempted);
   const draftFields = {
     rate: String(draft.rate ?? ''),
     currency: String(draft.currency ?? ''),
     rates: Array.isArray(draft.rates) ? draft.rates : [],
     chargerHost: String(draft.chargerHost ?? ''),
+    showTemperature: draft.showTemperature !== false,
   };
 
   if (ok) {

@@ -118,7 +118,7 @@ test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
     valid: true,
     errors: {},
-    values: { rate: 0.31, currency: 'USD', rates: [], chargerHost: '' },
+    values: { rate: 0.31, currency: 'USD', rates: [], chargerHost: '', showTemperature: true },
   });
   assert.equal(validateSettings({ rate: 0, currency: '$' }).valid, true);
   assert.equal(validateSettings({ rate: 5, currency: 'abcdefgh' }).valid, true);
@@ -128,6 +128,7 @@ test('validateSettings mirrors the rules shape', () => {
     currency: '€',
     rates: [],
     chargerHost: '',
+    showTemperature: true,
   });
 
   for (const rate of [-0.01, 5.01, '', '  ', 'abc', null, undefined, Number.NaN, Infinity]) {
@@ -248,6 +249,7 @@ test('normalizeSettings and settingsFields only adopt the documented shape', () 
     currency: 'USD',
     rates: [],
     charger_host: '',
+    show_temperature: true,
   });
   assert.equal(normalizeSettings(null), null);
   assert.equal(normalizeSettings({ rate: '0.31', currency: 'USD' }), null);
@@ -258,8 +260,15 @@ test('normalizeSettings and settingsFields only adopt the documented shape', () 
     currency: 'USD',
     rates: [],
     chargerHost: '',
+    showTemperature: true,
   });
-  assert.deepEqual(settingsFields(null), { rate: '', currency: '', rates: [], chargerHost: '' });
+  assert.deepEqual(settingsFields(null), {
+    rate: '',
+    currency: '',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
 });
 
 // ---------- charger address (issue #54) ----------
@@ -382,6 +391,7 @@ test('normalizeSettings keeps a valid charger address and drops a malformed one'
       currency: 'USD',
       rates: [],
       charger_host: 'evse.local',
+      show_temperature: true,
     },
   );
   // A console-written value the bridge would reject must not block a save: the
@@ -389,7 +399,7 @@ test('normalizeSettings keeps a valid charger address and drops a malformed one'
   for (const bad of ['http://192.168.1.50', '192.168.1.50:8080', '999.1.1.1', '', 42, null, {}]) {
     assert.deepEqual(
       normalizeSettings({ rate: 0.31, currency: 'USD', charger_host: bad }),
-      { rate: 0.31, currency: 'USD', rates: [], charger_host: '' },
+      { rate: 0.31, currency: 'USD', rates: [], charger_host: '', show_temperature: true },
       String(bad),
     );
   }
@@ -462,6 +472,108 @@ test('a rate-only save keeps the stored charger address in the payload', () => {
   // Clearing the field is the only way the key leaves the document.
   const cleared = validateSettings({ ...fields, chargerHost: '' }).values;
   assert.equal('charger_host' in settingsPayload(cleared), false);
+});
+
+// ---------- temperature visibility (issue #117) ----------
+
+test('show_temperature defaults to visible and only an explicit false hides it', () => {
+  // Absent and non-bool values all mean visible: a corrupt key must neither
+  // hide the stat nor block a save.
+  for (const absent of [undefined, null, 'false', 0, 'yes', {}, []]) {
+    const doc = { rate: 0.31, currency: 'USD' };
+    if (absent !== undefined) doc.show_temperature = absent;
+    assert.deepEqual(
+      normalizeSettings(doc).show_temperature,
+      true,
+      `show_temperature: ${JSON.stringify(absent)}`,
+    );
+    assert.equal(settingsFields(doc).showTemperature, true);
+  }
+  assert.equal(
+    normalizeSettings({ rate: 0.31, currency: 'USD', show_temperature: false }).show_temperature,
+    false,
+  );
+  assert.equal(
+    settingsFields({ rate: 0.31, currency: 'USD', show_temperature: false }).showTemperature,
+    false,
+  );
+  assert.equal(
+    normalizeSettings({ rate: 0.31, currency: 'USD', show_temperature: true }).show_temperature,
+    true,
+  );
+
+  // The validator adopts the checkbox verbatim; anything else reads as visible.
+  assert.equal(validateSettings({ rate: '0.31', currency: 'USD' }).values.showTemperature, true);
+  assert.equal(
+    validateSettings({ rate: '0.31', currency: 'USD', showTemperature: false }).values
+      .showTemperature,
+    false,
+  );
+
+  // normalizeSettings output survives the settingsFields round trip, so a
+  // stored false is never lost between snapshot and form.
+  const normalized = normalizeSettings({ rate: 0.31, currency: 'USD', show_temperature: false });
+  assert.equal(settingsFields(normalized).showTemperature, false);
+});
+
+test('a rate-only save keeps a stored hidden temperature in the payload', () => {
+  // Same #102-class guarantee as charger_host: store.js writes the whole
+  // document with setDoc (no merge), so a page that dropped the stored false
+  // would DELETE settings/current.show_temperature on an unrelated edit and the
+  // Status stat would reappear. The form carries the loaded toggle through
+  // every step, so it cannot be dropped.
+  const stored = { rate: 0.31, currency: 'USD', show_temperature: false };
+  const fields = settingsFields(stored);
+  assert.equal(fields.showTemperature, false);
+
+  const changed = { ...fields, rate: '0.4' };
+  const values = validateSettings(changed).values;
+  assert.deepEqual(settingsPayload(values), {
+    rate: 0.4,
+    currency: 'USD',
+    show_temperature: false,
+  });
+
+  // A successful save keeps it in the form and in the confirmed baseline, so
+  // the next edit still carries it.
+  const settled = reconcileSettingsSave({ ok: true, values, previous: stored, draft: changed });
+  assert.equal(settled.fields.showTemperature, false);
+  assert.equal(settled.confirmed.show_temperature, false);
+  assert.equal(settled.dirty, false);
+
+  // Toggling back on is the only way the key leaves the document: the payload
+  // omits it, exactly like a document that never had it.
+  const shown = validateSettings({ ...fields, showTemperature: true }).values;
+  assert.equal('show_temperature' in settingsPayload(shown), false);
+
+  // A flat save with the stat visible stays byte-identical to the two-field
+  // document the app has always written.
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [] }), {
+    rate: 0.31,
+    currency: 'USD',
+  });
+});
+
+test('the temperature toggle participates in dirty state by its visible meaning', () => {
+  const stored = { rate: 0.31, currency: 'USD', show_temperature: false };
+  // An absent field and an explicit true are the same setting (visible), so
+  // neither compares dirty against the other; only a real toggle does.
+  assert.equal(settingsDraftMatches(settingsFields(stored), stored), true);
+  assert.equal(
+    settingsDraftMatches({ ...settingsFields(stored), showTemperature: true }, stored),
+    false,
+  );
+  assert.equal(
+    settingsDraftMatches(
+      { ...settingsFields({ rate: 0.31, currency: 'USD' }), showTemperature: true },
+      { rate: 0.31, currency: 'USD' },
+    ),
+    true,
+  );
+  // An unchanged hidden document is clean and cannot be saved again.
+  const view = settingsSaveState({ draft: settingsFields(stored), confirmed: stored });
+  assert.equal(view.canSave, false);
+  assert.equal(view.text, '');
 });
 
 test('a cached snapshot that reports no document does not open the save gate', () => {
@@ -613,6 +725,7 @@ test('a draft typed before the document loads is completed from the snapshot', (
       currency: 'GBP',
       rates: [],
       chargerHost: '',
+      showTemperature: true,
     },
   );
 });
@@ -628,7 +741,12 @@ test('the stored rate schedule survives normalization and reaches the form field
   };
   const stored = { rate: 0.31, currency: 'USD', rates: [night] };
   const normalized = { ...night, from: null, to: null };
-  assert.deepEqual(normalizeSettings(stored), { ...stored, rates: [normalized], charger_host: '' });
+  assert.deepEqual(normalizeSettings(stored), {
+    ...stored,
+    rates: [normalized],
+    charger_host: '',
+    show_temperature: true,
+  });
   assert.deepEqual(settingsFields(stored).rates, [normalized]);
 });
 
@@ -1054,7 +1172,13 @@ test('a successful save of non-canonical input settles clean and shows Saved.', 
   const settled = reconcileSettingsSave({ ok: true, values, previous, draft });
 
   // Fields are canonicalised, so the form no longer looks dirty.
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'USD', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.fields, {
+    rate: '0.25',
+    currency: 'USD',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.deepEqual(settled.confirmed, { rate: 0.25, currency: 'USD', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, true);
@@ -1103,8 +1227,20 @@ test('a save and its rollback carry the rate schedule', () => {
     previous: { rate: 0.2, currency: 'EUR', rates: [] },
     draft,
   });
-  assert.deepEqual(failed.confirmed, { rate: 0.2, currency: 'EUR', rates: [], charger_host: '' });
-  assert.deepEqual(failed.fields, { rate: '0.2', currency: 'EUR', rates: [], chargerHost: '' });
+  assert.deepEqual(failed.confirmed, {
+    rate: 0.2,
+    currency: 'EUR',
+    rates: [],
+    charger_host: '',
+    show_temperature: true,
+  });
+  assert.deepEqual(failed.fields, {
+    rate: '0.2',
+    currency: 'EUR',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(failed.dirty, false);
 });
 
@@ -1115,7 +1251,13 @@ test('a save typed over while in flight is not canonicalised or called saved', (
     previous: null,
     draft: { rate: '0.25', currency: 'EUR' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'EUR', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.fields, {
+    rate: '0.25',
+    currency: 'EUR',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(
@@ -1135,8 +1277,20 @@ test('a failed save rolls an untouched form back to the confirmed values', () =>
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.250', currency: ' USD ' },
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.31, currency: 'EUR', rates: [], charger_host: '' });
-  assert.deepEqual(settled.fields, { rate: '0.31', currency: 'EUR', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.confirmed, {
+    rate: 0.31,
+    currency: 'EUR',
+    rates: [],
+    charger_host: '',
+    show_temperature: true,
+  });
+  assert.deepEqual(settled.fields, {
+    rate: '0.31',
+    currency: 'EUR',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
@@ -1161,7 +1315,7 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
   // No settings/current exists yet, so there is no previous state to restore:
   // every field the user typed stays, the form stays dirty, and Save stays on.
   assert.equal(settled.confirmed, null);
-  assert.deepEqual(settled.fields, { ...draft, rates: [], chargerHost: '' });
+  assert.deepEqual(settled.fields, { ...draft, rates: [], chargerHost: '', showTemperature: true });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_FIRST_MESSAGE);
@@ -1183,7 +1337,13 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
     previous: null,
     draft: { rate: '0.4', currency: 'EUR' },
   });
-  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR', rates: [], chargerHost: '' });
+  assert.deepEqual(typed.fields, {
+    rate: '0.4',
+    currency: 'EUR',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(typed.dirty, true);
 });
 
@@ -1194,7 +1354,13 @@ test('a failed save keeps a draft typed during the save', () => {
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.4', currency: 'USD' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.fields, {
+    rate: '0.4',
+    currency: 'USD',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   const view = settingsSaveState({
@@ -1219,8 +1385,20 @@ test('a failed save adopts a concurrent remote snapshot instead of the stale bas
   });
   // Another device wrote while our write was failing: that snapshot is the
   // newest server state.
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [], charger_host: '' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.confirmed, {
+    rate: 0.4,
+    currency: 'GBP',
+    rates: [],
+    charger_host: '',
+    show_temperature: true,
+  });
+  assert.deepEqual(settled.fields, {
+    rate: '0.4',
+    currency: 'GBP',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
 });
@@ -1234,8 +1412,20 @@ test('a failed save never clobbers a draft typed during a reflected snapshot', (
     remote: { rate: 0.35, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.35, currency: 'GBP', rates: [], charger_host: '' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.confirmed, {
+    rate: 0.35,
+    currency: 'GBP',
+    rates: [],
+    charger_host: '',
+    show_temperature: true,
+  });
+  assert.deepEqual(settled.fields, {
+    rate: '0.4',
+    currency: 'USD',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, true);
 });
 
@@ -1248,8 +1438,20 @@ test('a successful save adopts a newer snapshot but keeps the typed draft', () =
     remote: { rate: 0.4, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [], charger_host: '' });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' });
+  assert.deepEqual(settled.confirmed, {
+    rate: 0.4,
+    currency: 'GBP',
+    rates: [],
+    charger_host: '',
+    show_temperature: true,
+  });
+  assert.deepEqual(settled.fields, {
+    rate: '0.4',
+    currency: 'GBP',
+    rates: [],
+    chargerHost: '',
+    showTemperature: true,
+  });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
 });
