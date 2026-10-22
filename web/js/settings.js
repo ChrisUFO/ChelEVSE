@@ -1909,11 +1909,25 @@ export const WAITING_MESSAGE = 'Waiting for the server — this change may not b
 // No settings document has been read yet, so the blank form is not a baseline:
 // the whole-document write would replace the stored plan with nothing.
 export const LOADING_MESSAGE = 'Loading your settings…';
+// The listener failed: the hold on Save has no natural end until the page is
+// reloaded (a failed subscription does not retry), so the copy says so.
+export const LOAD_FAILED_MESSAGE = 'Couldn’t read your settings. Reload the page to try again.';
 export const SAVE_FAILED_MESSAGE =
   'Couldn’t save — the previous settings are back. Check your connection and try again.';
 // A first-ever save has no previous document to restore, so the generic copy
 // would describe a rollback that never happened.
 export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
+
+// Whether one settings snapshot can establish the save baseline. A snapshot that
+// carries a document always can: it holds the stored values a whole-document
+// write has to re-send. A snapshot that reports no document only can when the
+// server answered — the local cache also answers "no document" before any read
+// has reached the backend, and a save against that fiction would replace the
+// stored rate plan and charger address with whatever this device typed.
+export function settingsSnapshotIsBaseline(data, meta = {}) {
+  if (data != null) return true;
+  return !(meta && meta.fromCache === true);
+}
 
 // The card's whole visible state, derived from the draft and the flags the
 // screen owns. `dirty` is computed and returned so the screen never has to keep
@@ -1926,6 +1940,7 @@ export function settingsSaveState({
   waiting = false,
   saved = false,
   error = '',
+  offline = false,
 } = {}) {
   const dirty = !settingsDraftMatches(draft, confirmed);
   let text = '';
@@ -1952,7 +1967,11 @@ export function settingsSaveState({
     // Hold the save path, don't just describe it: writing this form now would
     // replace the whole document with fields that only the owner's typing has
     // filled, deleting the stored rate plan and charger address.
-    text = LOADING_MESSAGE;
+    //
+    // Offline with nothing read yet is not "still loading": the read cannot
+    // finish until the connection returns, so name the cause instead of leaving
+    // a loading hold that will never end on its own.
+    text = offline ? OFFLINE_MESSAGE : LOADING_MESSAGE;
     kind = 'warn';
   } else if (dirty) {
     text = 'Unsaved changes.';

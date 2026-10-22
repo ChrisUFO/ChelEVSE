@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   DAY_PRESETS,
   BLOCKED_SAVE_MESSAGE,
+  LOAD_FAILED_MESSAGE,
   LOADING_MESSAGE,
   OFFLINE_MESSAGE,
   RATE_CAP_MESSAGE,
@@ -84,6 +85,7 @@ import {
   settingsFields,
   settingsPayload,
   settingsSaveState,
+  settingsSnapshotIsBaseline,
   siblingNote,
   submitFocusTarget,
   submitSettingsPlan,
@@ -460,6 +462,64 @@ test('a rate-only save keeps the stored charger address in the payload', () => {
   // Clearing the field is the only way the key leaves the document.
   const cleared = validateSettings({ ...fields, chargerHost: '' }).values;
   assert.equal('charger_host' in settingsPayload(cleared), false);
+});
+
+test('a cached snapshot that reports no document does not open the save gate', () => {
+  // The local cache answers before the server. A cached "no document" is not
+  // evidence that the owner has no stored plan, so it must not become the
+  // baseline: a save against it would replace `settings/current` with the draft
+  // and delete the stored rate schedule and charger address.
+  assert.equal(settingsSnapshotIsBaseline(null, { fromCache: true }), false);
+
+  // Once the server confirms the absence the document really is missing, and the
+  // empty baseline becomes savable — a first-ever save has to stay possible.
+  assert.equal(settingsSnapshotIsBaseline(null, { fromCache: false }), true);
+
+  // A cached snapshot that carries the document holds the stored values a
+  // whole-document write must re-send, so it opens the gate like a server read.
+  const stored = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+  assert.equal(settingsSnapshotIsBaseline(stored, { fromCache: true }), true);
+
+  // A caller that passes no provenance keeps the previous contract.
+  assert.equal(settingsSnapshotIsBaseline(null), true);
+
+  // Composed with the state machine: the cached-empty snapshot leaves the form
+  // unloaded, so the offline draft below cannot start a whole-document write.
+  const held = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' },
+    confirmed: null,
+    loaded: settingsSnapshotIsBaseline(null, { fromCache: true }),
+  });
+  assert.equal(held.canSave, false);
+  assert.equal(held.text, LOADING_MESSAGE);
+});
+
+test('offline with nothing read yet names the connection instead of loading', () => {
+  // The read cannot finish until the connection returns, so the hold says why
+  // instead of showing a loading message that will never end on its own.
+  const offline = settingsSaveState({ loaded: false, offline: true });
+  assert.equal(offline.text, OFFLINE_MESSAGE);
+  assert.equal(offline.kind, 'warn');
+  assert.equal(offline.canSave, false);
+
+  // Online, the same unloaded form keeps the loading copy.
+  assert.equal(settingsSaveState({ loaded: false, offline: false }).text, LOADING_MESSAGE);
+
+  // A loaded form is unaffected: offline only changes what a held save says,
+  // and the write itself is still refused before it is queued.
+  const loaded = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD' },
+    confirmed: { rate: 0.31, currency: 'USD' },
+    offline: true,
+  });
+  assert.equal(loaded.text, 'Unsaved changes.');
+  assert.equal(loaded.canSave, true);
+
+  // A failed settings read keeps the gate closed and says why Save is held.
+  const failed = settingsSaveState({ loaded: false, error: LOAD_FAILED_MESSAGE });
+  assert.equal(failed.text, LOAD_FAILED_MESSAGE);
+  assert.equal(failed.kind, 'err');
+  assert.equal(failed.canSave, false);
 });
 
 test('Save is held until the first settings snapshot has landed', () => {

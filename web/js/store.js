@@ -33,6 +33,7 @@ export function startStore({
   onStatus,
   onCommands,
   onSettings,
+  onSettingsError,
   onConfig,
   onConfigError,
   onSchedule,
@@ -49,10 +50,17 @@ export function startStore({
     }
     return false;
   };
-  const watch = (path, onData, onError) =>
+  // Every document subscription hands the snapshot's provenance to its callback
+  // alongside the data: a cached snapshot is what the local cache knew before
+  // the server answered, which is not the same as the server's answer.
+  const watch = (path, onData, onError, options = {}) =>
     onSnapshot(
       doc(db, path),
-      (snap) => onData(snap && snap.exists() ? snap.data() : null),
+      options,
+      (snap) =>
+        onData(snap && snap.exists() ? snap.data() : null, {
+          fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
+        }),
       (err) => {
         if (!denied(err) && onError) onError(err);
       },
@@ -91,7 +99,18 @@ export function startStore({
     },
     denied,
   );
-  unsubSettings = watch('settings/current', (data) => onSettings && onSettings(data));
+  // The settings gate needs the snapshot's provenance: a cached snapshot that
+  // reports no document is the local cache answering before the server, not
+  // evidence that the owner has no stored plan. `includeMetadataChanges` is what
+  // delivers the server's confirmation of an absent document — the data is
+  // unchanged (still no document), so a metadata-only change is otherwise
+  // filtered out and the gate would never open on a genuinely empty account.
+  unsubSettings = watch(
+    'settings/current',
+    (data, meta) => onSettings && onSettings(data, meta),
+    (err) => onSettingsError && onSettingsError(err),
+    { includeMetadataChanges: true },
+  );
   unsubConfig = watch(
     'status/config',
     (data) => onConfig && onConfig(data),

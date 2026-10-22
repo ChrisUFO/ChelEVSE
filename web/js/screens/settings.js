@@ -13,6 +13,7 @@ import { DAY_NAMES } from '../schedule.js';
 import { $, setText } from '../ui.js';
 import {
   DAY_PRESETS,
+  LOAD_FAILED_MESSAGE,
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   RATE_CAP_REMEDY,
@@ -70,6 +71,7 @@ import {
   settingsDraftMatches,
   settingsFields,
   settingsSaveState,
+  settingsSnapshotIsBaseline,
   siblingNote,
   submitSettingsPlan,
   timeFieldsVisible,
@@ -101,6 +103,10 @@ let confirmedSettings = null;
 // says the document is absent. Until it has there is no baseline, so the form is
 // blank for reasons the owner cannot see and Save is held.
 let settingsLoaded = false;
+// The settings listener failed outright. While no baseline has been read, the
+// hold on Save then has no natural end (a failed subscription does not retry),
+// so the card must say why instead of showing "Loading…" forever.
+let settingsLoadFailed = false;
 // A snapshot that arrived while a write was in flight. The wrapper keeps "no
 // snapshot arrived" distinct from "the document is missing".
 let pendingSettings = null;
@@ -137,6 +143,13 @@ function readFields() {
     chargerHost: $('setting-charger-host').value,
     rates: draftRates,
   };
+}
+
+// The browser's own connection claim. It is only a hint — a dead uplink still
+// reports online — so it never decides whether a save may run; it shapes the
+// copy and stops obviously-doomed writes before they queue.
+function isOffline() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
 function currentRateMode() {
@@ -2479,7 +2492,8 @@ function paintFeedback() {
     saving: settingsSaving,
     waiting: settingsWaiting,
     saved: settingsSaved,
-    error: settingsError,
+    error: settingsError || (!settingsLoaded && settingsLoadFailed ? LOAD_FAILED_MESSAGE : ''),
+    offline: isOffline(),
   });
   // The value comparison is the only dirty rule; keep the flag in step.
   settingsDirty = view.dirty;
@@ -2577,8 +2591,15 @@ function handleInput(field) {
 
 // settings/current — null means the owner has not saved a rate yet. A remote
 // snapshot never overwrites a draft; it only becomes the new confirmed baseline.
-export function showSettingsData(data) {
+export function showSettingsData(data, meta) {
+  // A cached "no document" snapshot is the local cache answering before the
+  // server: it is not evidence that the owner has no stored plan, so it neither
+  // becomes the baseline nor opens the save gate. A cached snapshot that does
+  // carry the document holds the stored values a whole-document write must
+  // re-send, so it opens the gate like a server snapshot.
+  if (!settingsSnapshotIsBaseline(data, meta)) return;
   const next = normalizeSettings(data);
+  settingsLoadFailed = false;
   // The first snapshot is the document's truth even when it reports no document
   // (`data === null`). Before it lands the screen has no baseline, so Save is
   // held (settingsSaveState) — see the `first` branch below for the draft that
@@ -2608,6 +2629,16 @@ export function showSettingsData(data) {
     settingsSaved = false;
     renderErrors({});
   }
+  paintFeedback();
+}
+
+// The settings listener failed. No baseline was read, so the save gate stays
+// closed; the card names the failure so the owner is not left watching a
+// loading hold that cannot end. Only painted while the gate is closed: once a
+// baseline exists a failed re-read leaves a usable (if stale) form, and its
+// message must not displace the dirty/save feedback.
+export function showSettingsError() {
+  settingsLoadFailed = true;
   paintFeedback();
 }
 
@@ -2683,7 +2714,7 @@ async function beginSave(values) {
   // already timed out is still running, and a retry that starts no replacement
   // write must not revoke that write's ownership of its late settlement. The
   // form keeps saying why the retry did not start until the real outcome lands.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isOffline()) {
     settingsSaved = false;
     settingsError = OFFLINE_MESSAGE;
     paintFeedback();
@@ -2853,8 +2884,14 @@ export function initSettings() {
     announcePreview();
   });
   addEventListener('online', () => {
-    if (settingsError !== OFFLINE_MESSAGE) return;
-    settingsError = '';
+    if (settingsError === OFFLINE_MESSAGE) settingsError = '';
+    // The offline copy is not only an error: the not-yet-loaded hold shows it
+    // too, so a reconnect has to repaint back to the loading message.
+    paintFeedback();
+  });
+  // The reverse: going offline while the first snapshot is still outstanding
+  // turns the hold into "reconnect", which is the reason it cannot finish.
+  addEventListener('offline', () => {
     paintFeedback();
   });
   setPreviewNow();
@@ -2867,6 +2904,7 @@ export function resetSettings() {
   settingsGeneration += 1;
   confirmedSettings = null;
   settingsLoaded = false;
+  settingsLoadFailed = false;
   pendingSettings = null;
   settingsDirty = false;
   settingsSaving = false;
