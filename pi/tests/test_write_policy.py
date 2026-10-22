@@ -298,9 +298,8 @@ class HeartbeatTests(WritePolicyBase):
 class SuppressionTests(WritePolicyBase):
     def test_an_unchanged_trigger_set_writes_nothing(self):
         self.apply(total_energy=100)
-        # The schedule-window seam (#95 wires the hash): an armed trigger
-        # whose candidate matches the document moves nothing, so it is
-        # consumed without a write.
+        # An armed trigger whose candidate matches the document moves
+        # nothing, so it is consumed without a write.
         self.sink.note_trigger("schedule")
         self.clock.advance(self.GAP)
         self.tick()
@@ -316,6 +315,128 @@ class SuppressionTests(WritePolicyBase):
         self.tick()
         self.assertEqual(len(self.writes()), 2)
         self.assertEqual(self.writes()[1]["pilot"], 32)
+
+
+class ScheduleWindowTests(WritePolicyBase):
+    """The active schedule window as a write-policy trigger (issue #95).
+
+    ``note_schedule`` is the schedule loop's seam: an unchanged window arms
+    nothing (zero writes), a changed one arms the trigger and lands inside
+    the status write that trigger causes -- never a follow-up.
+    """
+
+    OUT = {"in_window": False, "active_rule_id": None}
+    ON = {"in_window": True, "active_rule_id": "rule-a"}
+
+    def feed(self, window):
+        return self.sink.note_schedule(window)
+
+    def test_an_unchanged_window_costs_zero_writes_over_24h(self):
+        self.record_write_times()
+        self.apply(total_energy=100)  # baseline write at t=0
+        self.clock.advance(1)
+        self.feed(self.OUT)  # first value: arms, deferred by the gap
+        self.tick()
+        self.assertEqual(self.write_times, [0])
+        self.clock.advance(self.GAP)  # t=11: the gap opens
+        self.tick()
+        self.assertEqual(self.write_times, [0, self.GAP + 1])
+        # 24 h of minute ticks, window unchanged. The charger is idle-silent
+        # (no observation lands, so no heartbeat can write either): the only
+        # writes still possible are triggers, and none may be owed.
+        for _ in range(24 * 60):
+            self.clock.advance(60)
+            self.assertFalse(self.feed(self.OUT))
+            self.tick()
+        self.assertEqual(self.write_times, [0, self.GAP + 1])
+        self.assertFalse(self.sink.policy.triggered)
+
+    def test_a_window_change_publishes_exactly_once_with_the_new_value(self):
+        self.apply(state=3, total_energy=100)  # written at t=0, no schedule
+        self.clock.advance(self.GAP + 1)  # the rate-limit gap is open
+        self.assertTrue(self.feed(self.ON))  # publishes inline, immediately
+        writes = self.writes()
+        self.assertEqual(len(writes), 2)
+        self.assertNotIn("schedule", writes[0])
+        self.assertEqual(writes[1]["schedule"], self.ON)  # same write
+        self.assertFalse(self.sink.policy.triggered)  # nothing further owed
+        self.clock.advance(1)
+        self.tick()
+        self.assertEqual(len(self.writes()), 2)  # no follow-up write
+
+    def test_a_crossing_while_charging_publishes_before_the_heartbeat(self):
+        self.record_write_times()
+        self.apply(state=3, session_energy=0, elapsed=0)  # write at t=0
+        # The charging heartbeat would write at t=20; the crossing is past
+        # the rate-limit gap at t=11 and publishes right there.
+        self.clock.advance(self.GAP + 1)
+        self.assertTrue(self.feed(self.ON))
+        self.assertEqual(self.write_times, [0, self.GAP + 1])
+        self.assertLess(self.write_times[-1], self.CHARGING)
+
+    def test_a_crossing_coinciding_with_another_trigger_shares_the_rate_limit(self):
+        self.apply(total_energy=100)  # write at t=0
+        self.clock.advance(2)
+        self.apply("mqtt", pilot=32)  # a snapshot trigger, inside the gap
+        self.assertFalse(self.feed(self.OUT))  # deferred with it, not past it
+        self.tick()
+        self.assertEqual(len(self.writes()), 1)
+        self.clock.advance(self.GAP)  # t=12: the gap opens
+        self.tick()
+        writes = self.writes()
+        self.assertEqual(len(writes), 2)  # one write serves both triggers
+        self.assertEqual(writes[1]["pilot"], 32)
+        self.assertEqual(writes[1]["schedule"], self.OUT)
+        self.assertFalse(self.sink.policy.triggered)
+
+    def test_the_published_payload_carries_schedule_state_of_the_new_window(self):
+        # The exact shape the Status badge (screens/status.js) and the
+        # Schedule screen window info (screens/schedule.js) consume: the
+        # payload's schedule is precisely schedule_state(plan, rules).
+        plan = {
+            "current_event": {"id": 3, "state": "active", "duration": 18000},
+            "next_event_delay": 600,
+        }
+        window = bridge.schedule_state(plan, {3: "workdays"})
+        self.apply(total_energy=100)
+        self.clock.advance(self.GAP + 1)
+        self.feed(window)
+        (write,) = self.writes()[1:]
+        self.assertEqual(
+            write["schedule"], {"in_window": True, "active_rule_id": "workdays"}
+        )
+        self.assertEqual(
+            write["schedule"], bridge.schedule_state(plan, {3: "workdays"})
+        )
+
+    def test_a_window_fed_before_any_observation_rides_the_first_write(self):
+        # Bridge start, charger still silent: the feed arms the trigger but
+        # cannot publish (no observation yet); the first apply's write then
+        # carries the window -- still one write, no follow-up.
+        self.assertFalse(self.feed(self.OUT))
+        self.assertTrue(self.sink.policy.triggered)
+        self.apply(total_energy=100)
+        (write,) = self.writes()
+        self.assertEqual(write["schedule"], self.OUT)
+        self.assertFalse(self.sink.policy.triggered)
+
+    def test_a_window_overtaken_by_a_heartbeat_write_is_not_written_twice(self):
+        self.apply(state=3, total_energy=100)  # write at t=0
+        self.clock.advance(2)
+        self.feed(self.ON)  # arms, deferred inside the gap
+        self.tick()
+        self.assertEqual(len(self.writes()), 1)
+        # The heartbeat's forced observation lands first and its write (the
+        # trigger's gap is open by then) carries the window exactly once.
+        self.clock.advance(self.CHARGING - 2)  # t=20
+        self.tick(observe=lambda: self.apply("mqtt", state=3, total_energy=101))
+        writes = self.writes()
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[1]["schedule"], self.ON)
+        self.assertFalse(self.sink.policy.triggered)  # consumed, not re-owed
+        self.clock.advance(self.GAP)
+        self.tick()
+        self.assertEqual(len(self.writes()), 2)
 
 
 class ForcedWriteTests(WritePolicyBase):
