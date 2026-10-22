@@ -1405,6 +1405,29 @@ class SyncScheduleTests(unittest.TestCase):
 
 
 class SchedulePlanResponseTests(unittest.TestCase):
+    """_schedule_plan parsing and the loop's window feed (issue #95)."""
+
+    def _sink(self, db):
+        """A real sink whose policy writes every trigger (pinned clock)."""
+        tracker = bridge.StatusTracker(db)
+        tracker.seeded = True
+        tracker.has_state = True
+        tracker.state = 1
+        tracker.previous_state = 1
+        tracker.charger_online = True
+        sink = bridge.StatusSink(
+            db,
+            tracker,
+            _RecordingNotifier(),
+            policy=bridge.WritePolicy(
+                bridge.WritePolicyConfig(min_gap=0), clock=lambda: 0.0
+            ),
+        )
+        # One observation first, so the window ride-alongs a policy that has
+        # a baseline write (the bridge start order: status before schedule).
+        sink.apply_status(bridge.parse_status(_status_payload()), "http")
+        return sink
+
     def test_an_empty_firmware_plan_is_an_empty_object(self):
         session = FakeSession([FakeResponse(200, [])])
         self.assertEqual(bridge._schedule_plan(session, _host(), None), {})
@@ -1421,26 +1444,29 @@ class SchedulePlanResponseTests(unittest.TestCase):
 
     def test_the_schedule_loop_publishes_the_empty_state_without_an_error(self):
         db = FakeDB()
+        sink = self._sink(db)
         stop = _RecordingStop(1)
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [])]))
         logs = []
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
             bridge, "log", logs.append
         ):
-            bridge.schedule_loop(db, _host(), None, transport, 60, 300)
+            bridge.schedule_loop(db, _host(), None, transport, 60, 300, sink)
         schedule = db.data["status"]["current"].get("schedule")
         self.assertEqual(schedule, {"in_window": False, "active_rule_id": None})
         self.assertFalse([line for line in logs if "schedule plan failed" in line])
 
     def test_the_schedule_loop_logs_a_malformed_plan(self):
         db = FakeDB()
+        sink = mock.Mock()
         stop = _RecordingStop(1)
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [1])]))
         logs = []
         with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
             bridge, "log", logs.append
         ):
-            bridge.schedule_loop(db, _host(), None, transport, 60, 300)
+            bridge.schedule_loop(db, _host(), None, transport, 60, 300, sink)
+        sink.note_schedule.assert_not_called()
         self.assertTrue(
             any(
                 "schedule plan failed (ValueError: schedule plan is not a JSON object)"
@@ -1448,6 +1474,48 @@ class SchedulePlanResponseTests(unittest.TestCase):
                 for line in logs
             )
         )
+
+    def test_the_schedule_loop_feeds_the_window_through_the_sink(self):
+        # Issue #95: the loop never writes status/current itself. It hands
+        # the firmware's window, mapped through the event-id->rule-id mapping
+        # that actually synced, to the write policy -- every tick, changed or
+        # not; the sink decides what a change is worth.
+        db = FakeDB()
+        db.data["schedule"] = {
+            "current": {
+                "enabled": True,
+                "rules": [
+                    {"id": "a", "days": [0], "start": "23:00", "end": "23:30", "amps": 20}
+                ],
+            }
+        }
+        sink = mock.Mock()
+        plan = {
+            "current_event": {"id": 1, "state": "active", "duration": 1800},
+            "next_event_delay": 600,
+        }
+        stop = _RecordingStop(2)
+        transport = bridge.ChargerTransport(
+            FakeSession(
+                [
+                    FakeResponse(200, []),  # GET /schedule (first sync)
+                    FakeResponse(200),  # POST event 1
+                    FakeResponse(200),  # POST event 2
+                    FakeResponse(200, plan),  # GET /schedule/plan
+                    FakeResponse(200, plan),  # second tick: sync not due again
+                ]
+            )
+        )
+        with mock.patch.object(bridge, "_stop", stop):
+            bridge.schedule_loop(db, _host(), None, transport, 60, 300, sink)
+        window = {"in_window": True, "active_rule_id": "a"}
+        self.assertEqual(
+            sink.note_schedule.call_args_list,
+            [mock.call(window), mock.call(window)],
+        )
+        # The loop itself wrote nothing: every status/current write belongs
+        # to the write policy.
+        self.assertEqual(db.writes, [])
 
 
 class ChargerSessionTests(unittest.TestCase):
@@ -1567,7 +1635,7 @@ class LoopJitterTests(unittest.TestCase):
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, {})]))
         with mock.patch.object(bridge, "_stop", stop):
             bridge.schedule_loop(
-                FakeDB(), _host(), None, transport, interval, 300, **kwargs
+                FakeDB(), _host(), None, transport, interval, 300, mock.Mock(), **kwargs
             )
         return stop.waits
 
@@ -1658,6 +1726,9 @@ class LoopWiringTests(unittest.TestCase):
             self.assertIs(args[1], host, f"{name} loop got another charger host")
             if name != "settings":
                 self.assertIs(args[3], transport, f"{name} loop got another transport")
+        # #95: the schedule loop feeds the same sink the status loop
+        # schedules writes through -- one write policy, one document owner.
+        self.assertIs(calls["schedule"][6], calls["status"][10])
         self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
         self.assertEqual(len(threads), 4)
         for thread in threads:
@@ -3122,7 +3193,9 @@ class HostSwapTests(unittest.TestCase):
         with mock.patch.object(
             bridge, "_stop", _StopAfter(2, lambda: host.set("192.168.1.50"))
         ):
-            bridge.schedule_loop(FakeDB(), host, None, transport, 60, 300)
+            bridge.schedule_loop(
+                FakeDB(), host, None, transport, 60, 300, mock.Mock()
+            )
         self.assertEqual(
             [call[1] for call in session.calls],
             ["http://charger/schedule/plan", "http://192.168.1.50/schedule/plan"],

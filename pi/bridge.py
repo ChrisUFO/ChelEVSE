@@ -5,7 +5,7 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   status every STATUS_INTERVAL: GET /status -> merge into status/current
   config every CONFIG_INTERVAL: GET /config -> replace status/config
   schedule every SCHEDULE_INTERVAL: schedule/current -> firmware scheduler,
-    GET /schedule/plan -> status/current.schedule
+    GET /schedule/plan -> the active window published on change (issue #95)
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
@@ -1762,10 +1762,11 @@ class WritePolicy:
     decided here, by field kind:
 
     - Discrete triggers (``state``, ``vehicle``, ``pilot``, ``charger_online``,
-      a session close, the active schedule-window hash -- #95 wires that one)
-      publish at the next scheduler opportunity, never sooner than ``min_gap``
-      after the previous write. A session close is the state edge itself, so
-      the ``state`` trigger carries it.
+      a session close, the active schedule window -- #95: the schedule loop
+      arms it when the firmware's window changes) publish at the next
+      scheduler opportunity, never sooner than ``min_gap`` after the previous
+      write. A session close is the state edge itself, so the ``state``
+      trigger carries it.
     - Continuous values (energy, elapsed, power, voltage, temperatures) never
       trigger a write: they move constantly while charging, so treating them
       as changes would degenerate into a fixed timer. They ride the
@@ -1825,8 +1826,9 @@ class WritePolicy:
     def note_trigger(self, reason):
         """Arm a discrete trigger; ``reason`` names it for the journal/tests.
 
-        The schedule-window hash (#95) lands here: this is the seam its loop
-        will call when the active window changes.
+        The schedule loop's window change (#95) lands here through
+        :meth:`StatusSink.note_schedule`, which merges the new value into
+        the accumulated view and arms this in one lock hold.
         """
         self.triggered = True
 
@@ -1865,9 +1867,9 @@ class WritePolicy:
     def suppressed(self, candidate):
         """True when writing ``candidate`` would change nothing.
 
-        Compared on the candidate's own fields, ignoring ``updated_at``: the
-        document also carries fields this policy never writes (``schedule``),
-        and those must not keep suppression from firing.
+        Compared on the candidate's own fields, ignoring ``updated_at``: a
+        field the candidate does not carry (one written outside this view)
+        must not keep suppression from firing.
         """
         if self.last_written is None:
             return False
@@ -2190,12 +2192,34 @@ class StatusSink:
     def note_trigger(self, reason):
         """Arm a discrete trigger from outside the apply path.
 
-        The active schedule-window hash (#95) lands here: the seam its loop
-        will call when the window changes, feeding the trigger set like any
-        snapshot-driven change.
+        Arms only: the value that moved must already be in the accumulated
+        view, or the write this trigger causes would not carry it. The
+        schedule loop uses :meth:`note_schedule`, which merges and arms
+        atomically.
         """
         with self._lock:
             self.policy.note_trigger(reason)
+
+    def note_schedule(self, schedule):
+        """Feed the active schedule window in; publish it only when it changes.
+
+        The schedule loop (#95) calls this every ``SCHEDULE_INTERVAL`` with
+        ``schedule_state(plan, synced_event_rules)``. The value merges into
+        the accumulated view and -- only when it actually moved -- arms the
+        write policy, both under one lock hold: the status write this
+        trigger causes carries the new window in its own payload, never a
+        follow-up write (the same-write guarantee). An unchanged window arms
+        nothing and costs zero writes. The publish attempt is inline, like
+        an apply, so a crossing whose rate-limit gap is already open lands
+        immediately; a deferred trigger resolves on the status loop's next
+        tick.
+        """
+        with self._lock:
+            if self._latest.get("schedule") == schedule:
+                return False
+            self._latest["schedule"] = dict(schedule)
+            self.policy.note_trigger("schedule window")
+            return self._consider_publish()
 
     def _apply(self, fields, source, complete):
         tracker = self.tracker
@@ -3860,9 +3884,13 @@ def sync_schedule(transport, host, auth, events):
     )
 
 
-def schedule_loop(db, host, auth, transport, interval, reconcile_interval, initial_delay=0):
-    """Mirror schedule/current into the firmware and publish the live window."""
-    status_doc = db.collection("status").document("current")
+def schedule_loop(db, host, auth, transport, interval, reconcile_interval, sink, initial_delay=0):
+    """Mirror schedule/current into the firmware and publish the live window.
+
+    ``sink`` is the run's :class:`StatusSink`: the firmware's active window
+    reaches ``status/current.schedule`` only through its write policy (issue
+    #95), never a write of this loop's own.
+    """
     last_hash = None
     synced_event_rules = {}
     last_sync = None
@@ -3926,13 +3954,15 @@ def schedule_loop(db, host, auth, transport, interval, reconcile_interval, initi
                             last_sync = now
                             synced_event_rules = desired_event_rules
 
-            # Always publish the firmware's own view of the active window,
-            # mapped through the last event set that actually synced.
+            # Publish the firmware's own view of the active window, mapped
+            # through the last event set that actually synced -- on change
+            # only (issue #95): the value feeds the sink's accumulated view
+            # and a change arms its write-policy trigger, so the window
+            # lands inside the status write it causes. The per-tick
+            # republish is gone; an unchanged window costs zero writes.
             try:
                 plan = _schedule_plan(transport, host, auth)
-                status_doc.set(
-                    {"schedule": schedule_state(plan, synced_event_rules)}, merge=True
-                )
+                sink.note_schedule(schedule_state(plan, synced_event_rules))
             except (CommandError, requests.RequestException, ValueError) as exc:
                 log(f"schedule plan failed ({exc.__class__.__name__}: {exc})")
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
@@ -4051,6 +4081,7 @@ def run(
         transport,
         schedule_interval,
         reconcile_interval,
+        sink,
         SCHEDULE_INITIAL_DELAY,
     )
     threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
