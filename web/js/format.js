@@ -5,7 +5,7 @@
 export const STATES = {
   charging: { label: 'Charging', color: '#38d996' },
   ready: { label: 'Ready', color: '#58a6ff' },
-  connected: { label: 'Connected', color: '#e0b45c' },
+  connected: { label: 'Connected', color: '#46c6d8' },
   sleeping: { label: 'Sleeping', color: '#93a0b4' },
   disabled: { label: 'Disabled', color: '#f26d5f' },
   unknown: { label: 'Unknown', color: '#98a1b0' },
