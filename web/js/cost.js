@@ -135,8 +135,10 @@ export function statusCostUncovered(status, settings) {
 //
 // The one legitimate divergence is the session's first charging tick, which
 // supplies the baseline only. That costs at most one observation gap of energy:
-// the bridge's widest gap is a 60 s MQTT reconcile, and at the charger's 48 A
-// ceiling (~11.5 kW) it is 11.5 kW × 60 s ≈ 192 Wh. A 250 Wh floor covers that
+// the bridge's widest gap is the 60 s cadence of its slowest status observation
+// (the HTTP reconcile today, the 60 s charging heartbeat once the write policy
+// of #93 lands), and at the charger's 48 A ceiling (~11.5 kW) it is
+// 11.5 kW × 60 s ≈ 192 Wh. A 250 Wh floor covers that
 // with margin (2.5× the 10 s HTTP poll's 32 Wh) and keeps a small session's
 // single-poll loss inside the rule; 2% of `wh` then scales it with the session
 // (600 Wh at 30 kWh) so ordinary counter jitter never forces a fallback.

@@ -64,14 +64,26 @@ function renderFreshness() {
   }
   const age = ageMs();
   setText($('updated'), Number.isFinite(age) ? `updated ${relTime(age)}` : 'updated unknown');
-  const state = freshnessState({ chargerOnline: status.charger_online, ageMs: age });
+  const state = freshnessState({
+    chargerOnline: status.charger_online,
+    stateLabel: status.state_label,
+    ageMs: age,
+  });
   const banner = $('banner');
   banner.hidden = !state;
+  // A bridge verdict on a charging snapshot is a missed 60 s heartbeat away
+  // from fresh, so it says "not updating" rather than claiming the whole
+  // bridge is down. A missing timestamp (non-finite age) keeps the plain
+  // bridge banner: there is no age to soften the verdict with.
+  const chargingStale =
+    state === 'bridge' && status.state_label === 'charging' && Number.isFinite(age);
   setText(
     banner,
     state === 'charger'
       ? 'Charger offline — showing last known values'
-      : 'Bridge offline — showing last known values',
+      : chargingStale
+        ? 'Not updating — showing last known values'
+        : 'Bridge offline — showing last known values',
   );
 }
 

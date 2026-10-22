@@ -58,12 +58,33 @@ export function formatElapsed(seconds) {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
 }
 
+// Bridge write cadences. The write policy planned for #93 keeps status/current
+// alive with a 60 s heartbeat while charging and a 300 s heartbeat otherwise;
+// the web app widens its staleness tolerance to match BEFORE the bridge adopts
+// that cadence, so a deploy-order gap cannot show a false banner. Every age
+// threshold below derives from these two numbers — a future cadence change
+// edits this block alone.
+const CHARGING_HEARTBEAT_MS = 60000;
+const IDLE_HEARTBEAT_MS = 300000;
+// Charging is the latency-sensitive case: stale at 2.5× its heartbeat (150 s).
+export const CHARGING_STALE_AFTER_MS = CHARGING_HEARTBEAT_MS * 2.5;
+// Idle only needs a liveness signal: stale at 2× its heartbeat plus a 120 s
+// margin (12 min), because an idle charger legitimately writes nothing between
+// heartbeats.
+export const IDLE_STALE_AFTER_MS = IDLE_HEARTBEAT_MS * 2 + 120000;
+// Name kept from the single-threshold era: the charging bound is the tighter of
+// the two, so existing imports stay meaningful.
+export const STALE_AFTER_MS = CHARGING_STALE_AFTER_MS;
+
 // Session-clock helpers. Interpolation is anchored to the local receipt of a
 // status write, never to the device's wall clock matching Firestore: the bridge
 // stamps `updated_at` with a server timestamp, so a device clock that is behind
 // would produce a negative age and freeze the clock. Returns null when elapsed
 // is absent or malformed (null, undefined, '', false).
-const FRESH_MS = 60000;
+// The gate matches the charging staleness threshold (derived from the 60 s
+// charging heartbeat above): at that cadence the clock must keep interpolating
+// between writes instead of freezing for the last portion of every heartbeat.
+const FRESH_MS = CHARGING_STALE_AFTER_MS;
 
 function writeMillis(data) {
   const updated = data && data.updated_at;
@@ -227,11 +248,20 @@ export function fmtCost(kwh, rate, currency) {
 }
 
 // Distinguish "the bridge stopped writing" from "the bridge is fine but the
-// charger is unreachable" — both used to render the same banner.
-export const STALE_AFTER_MS = 60000;
-
-export function freshnessState({ chargerOnline, ageMs: age, staleAfterMs = STALE_AFTER_MS }) {
-  if (!Number.isFinite(age) || age > staleAfterMs) return 'bridge';
+// charger is unreachable" — both used to render the same banner. The age bounds
+// come from the cadence block near the top: a charging snapshot is held to the
+// 150 s charging threshold, every other online snapshot to the 12 min idle one.
+export function freshnessState({ chargerOnline, stateLabel, ageMs: age, staleAfterMs }) {
+  // The offline marker needs no age test and outranks every staleness rule:
+  // the marker itself refreshes updated_at, and it freezes the last-known
+  // state label, so a charging label on an old document must not re-route to
+  // an age verdict.
   if (chargerOnline === false) return 'charger';
-  return null;
+  // A missing or malformed timestamp says nothing about when the bridge last
+  // wrote, so it is bridge-stale immediately, whatever the state says.
+  if (!Number.isFinite(age)) return 'bridge';
+  // Tests may override the bound; production always derives it from the state.
+  const bound =
+    staleAfterMs ?? (stateLabel === 'charging' ? CHARGING_STALE_AFTER_MS : IDLE_STALE_AFTER_MS);
+  return age > bound ? 'bridge' : null;
 }
