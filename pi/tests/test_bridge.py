@@ -1269,7 +1269,7 @@ class FcmTests(unittest.TestCase):
         with mock.patch.object(bridge, "notify") as fake_notify:
             notifier.enqueue("Charging stopped")
             notifier.queue.join()
-        fake_notify.assert_called_once_with(db, "Charging stopped")
+        fake_notify.assert_called_once_with(db, "Charging stopped", counter=notifier.counter)
 
 
 class CommandTests(unittest.TestCase):

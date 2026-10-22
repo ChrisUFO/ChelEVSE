@@ -1264,9 +1264,11 @@ class StatusLoopMqttTests(unittest.TestCase):
         writes = []
         original = bridge.write_transport_health
 
-        def spy(db, source, connected, announced=None, last_lwt_at=None):
+        def spy(db, source, connected, announced=None, last_lwt_at=None, counter=None):
             writes.append((source, connected))
-            original(db, source, connected, announced, last_lwt_at)
+            original(
+                db, source, connected, announced, last_lwt_at, counter=counter
+            )
 
         def on_wait():
             if client.connected:
