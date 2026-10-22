@@ -1774,12 +1774,13 @@ class StatusSink:
         # The write policy. Injectable clock/config for the tests; the
         # production sink uses monotonic time and the env tunables.
         self.policy = policy or WritePolicy()
-        # The accumulated curated view of every applied observation, and the
-        # policy-clock time the newest one landed. The heartbeat publishes
-        # this view only while it is fresh: a fresh ``updated_at`` on stale
-        # values would corrupt the app's live-cost interval.
+        # The accumulated curated view of every applied observation, and how
+        # many observations have landed. A heartbeat publishes the view only
+        # when an apply landed *after* its decision (the count is the
+        # watermark): a fresh ``updated_at`` on stale values would corrupt
+        # the app's live-cost interval.
         self._latest = {}
-        self._latest_at = None
+        self._applies = 0
         # The HTTP poll and the MQTT worker can apply at the same time; the
         # tracker's state machine is not thread-safe on its own.
         self._lock = threading.Lock()
@@ -1936,7 +1937,7 @@ class StatusSink:
         every other path an observation that may be stale must not publish on
         heartbeat grounds alone.
         """
-        if not self._latest or self._latest_at is None:
+        if not self._latest or not self._applies:
             # Nothing observed yet. The accumulated view may hold only the
             # offline merge, which is bookkeeping for the suppression baseline,
             # not an observation: the first publish follows the first apply
@@ -1970,14 +1971,15 @@ class StatusSink:
         """(due, watermark) for a heartbeat write, under the lock.
 
         ``due`` says a heartbeat write is owed (first snapshot included);
-        ``watermark`` is the observation time the eventual publish must beat,
-        passed to :meth:`publish_heartbeat`. It is None until the first
-        observation, which is by definition newer than the decision.
+        ``watermark`` is the apply count the eventual publish must beat,
+        passed to :meth:`publish_heartbeat`. A count, not a clock reading:
+        the heartbeat's own forced observation may land without the clock
+        moving, and it still counts.
         """
         with self._lock:
             if not self.policy.heartbeat_due(self.policy.clock(), self.tracker.state):
-                return False, None
-            return True, self._latest_at
+                return False, 0
+            return True, self._applies
 
     def heartbeat_poll_due(self):
         """True when a heartbeat may force an HTTP reconcile on this tick."""
@@ -1994,8 +1996,8 @@ class StatusSink:
     def publish_heartbeat(self, watermark):
         """Write the full curated payload a heartbeat owes -- fresh values only.
 
-        ``watermark`` is the observation time the heartbeat decision was made
-        against; the publish needs an observation newer than that (the forced
+        ``watermark`` is the apply count the heartbeat decision was made
+        against; the publish needs an apply that landed after it (the forced
         reconcile's reply, or an MQTT apply that landed during the poll).
         None arrived -- the charger did not answer and MQTT stayed silent --
         so there is no write: a fresh ``updated_at`` on stale values is
@@ -2006,9 +2008,7 @@ class StatusSink:
             if not self.policy.heartbeat_due(now, self.tracker.state):
                 # The forced reconcile's own apply already published.
                 return False
-            if self._latest_at is None or (
-                watermark is not None and self._latest_at <= watermark
-            ):
+            if self._applies <= watermark:
                 return False
             return self._consider_publish(heartbeat=True)
 
@@ -2060,7 +2060,7 @@ class StatusSink:
             body = _transition_body(had_state, was_charging, is_charging)
             if body is not None:
                 self.notifier.enqueue(body)
-        self._latest_at = self.policy.clock()
+        self._applies += 1
         self._consider_publish()
 
 
