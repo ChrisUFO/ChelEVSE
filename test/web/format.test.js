@@ -416,6 +416,22 @@ test('freshnessState separates a stale bridge from an offline charger', () => {
   assert.equal(freshnessState({ chargerOnline: true, ageMs: 151_000 }), null);
   assert.equal(freshnessState({ chargerOnline: true, ageMs: 721_000 }), 'bridge');
 
+  // An explicit override replaces the state-derived bound entirely — and 0 is a
+  // real bound (stale immediately), not a falsy "derive it instead" value.
+  assert.equal(
+    freshnessState({
+      chargerOnline: true,
+      stateLabel: 'charging',
+      ageMs: 2000,
+      staleAfterMs: 1000,
+    }),
+    'bridge',
+  );
+  assert.equal(
+    freshnessState({ chargerOnline: true, stateLabel: 'ready', ageMs: 1, staleAfterMs: 0 }),
+    'bridge',
+  );
+
   // The offline marker runs no age test and outranks every staleness rule…
   assert.equal(
     freshnessState({ chargerOnline: false, stateLabel: 'ready', ageMs: 5000 }),
