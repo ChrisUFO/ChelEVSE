@@ -866,6 +866,17 @@ class IntervalTests(unittest.TestCase):
         self.assertEqual(
             [line for line in messages if "counter reset" in line], [], messages
         )
+        # A healthy close derives and drops nothing: one stray line here would
+        # land in the journal on every interval of every session.
+        self.assertEqual(
+            [
+                line
+                for line in messages
+                if "interval span derived" in line or "interval dropped" in line
+            ],
+            [],
+            messages,
+        )
         # The presumption behind the test: the awake-time gap could not have
         # carried the step, so the boottime gap is what kept it.
         self.assertLess(bridge._interval_step_allowance(60), 6000)
@@ -878,8 +889,13 @@ class IntervalTests(unittest.TestCase):
         # The Pi's wall clock is corrected backwards mid-session (NTP, a manual
         # set), so the close instant reads *before* the open instant. The
         # duration is not invented: CLOCK_BOOTTIME measured it, and only the
-        # wall-clock anchor is re-derived from that measurement.
-        with mock.patch.object(bridge, "log") as log:
+        # wall-clock anchor is re-derived from that measurement. The constant is
+        # patched in (as in the suspend test) so the boottime branch measures the
+        # span on hosts that lack it; the monotonic fallback does not see
+        # ``boot_step`` and would read a negative span here.
+        with mock.patch.object(
+            bridge.time, "CLOCK_BOOTTIME", 1, create=True
+        ), mock.patch.object(bridge, "log") as log:
             started = self.tick(3, 0, 0)
             self.tick(
                 3,
@@ -920,22 +936,23 @@ class IntervalTests(unittest.TestCase):
     def test_a_derived_interval_still_reconciles_with_the_session_wh(self):
         # The money guard in the web layer trusts a list whose energy adds up to
         # `wh`; a re-anchored interval must not break that.
-        self.tick(3, 0, 0)
-        self.tick(
-            3,
-            3000,
-            1200,
-            step=timedelta(minutes=-40),
-            boot_step=timedelta(minutes=20),
-            mono_step=timedelta(minutes=20),
-        )
-        self.tick(
-            1,
-            3000,
-            1200,
-            step=timedelta(minutes=-40),
-            boot_step=timedelta(minutes=20),
-        )
+        with mock.patch.object(bridge.time, "CLOCK_BOOTTIME", 1, create=True):
+            self.tick(3, 0, 0)
+            self.tick(
+                3,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+                mono_step=timedelta(minutes=20),
+            )
+            self.tick(
+                1,
+                3000,
+                1200,
+                step=timedelta(minutes=-40),
+                boot_step=timedelta(minutes=20),
+            )
         (record,) = self.sessions().values()
         self.assertAlmostEqual(record["wh"], 3000.0)
         self.assertAlmostEqual(
