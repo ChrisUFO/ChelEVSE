@@ -819,6 +819,39 @@ test('a mixed range shows the priced-only total and flags the note', () => {
   assert.equal(summary.partial, true);
 });
 
+test('a mixed range read prices its days and discloses the unpriceable ones', () => {
+  // #120's live week, exactly as the range read now returns it: hourly capture
+  // began 2026-10-21, so the days before it carry a real total and `hours:
+  // null` (the projection's explicit no-map shape) beside priced days. The
+  // summary must show the priced days' $ and flag partial — not hide the whole
+  // range as unpriceable, which is what dropping `hours` from the projection
+  // did to every Week/Month/Year period.
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-10-19', kwh: 5.1, hours: null },
+      { id: '2026-10-20', kwh: 3.9, hours: null },
+      { id: '2026-10-21', kwh: 2.4, hours: { '02': 2.4 } },
+      { id: '2026-10-22', kwh: 1.2, hours: { '03': 1.2 } },
+    ],
+    new Date(2026, 9, 22, 12),
+  );
+  const summary = seriesCostSummary(points, 'day', NIGHTLY);
+  // 2.4 kWh and 1.2 kWh in the night window (0.10/kWh): 0.24 + 0.12.
+  assert.ok(Math.abs(summary.cost - 0.36) < 1e-9);
+  assert.equal(summary.partial, true);
+  // The per-bar split: a priced day shows its figure, a pre-capture day hides
+  // its own rather than pricing itself free — the split the note names.
+  const pricedDay = pointCostSummary(points[5], 'day', NIGHTLY);
+  assert.ok(Math.abs(pricedDay.cost - 0.24) < 1e-9);
+  assert.equal(pricedDay.pricedEnergy, true);
+  assert.equal(pricedDay.unpricedEnergy, false);
+  const legacyDay = pointCostSummary(points[3], 'day', NIGHTLY);
+  assert.equal(legacyDay.cost, null);
+  assert.equal(legacyDay.pricedEnergy, false);
+  assert.equal(legacyDay.unpricedEnergy, true);
+});
+
 test('a range whose energy is all unpriceable hides the cost instead of pricing it free', () => {
   const points = periodSeries(
     'week',

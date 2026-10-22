@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   COMMAND_LIMIT,
@@ -77,4 +78,32 @@ test('a pending control survives more than twenty newer RAPI docs', () => {
   assert.deepEqual(mergeCommandWindows(null, null), []);
   assert.equal(COMMAND_LIMIT, 20);
   assert.equal(RAPI_LIMIT, 20);
+});
+
+test("the history range read keeps every day document's pricing inputs", () => {
+  // fetchHistory needs a live Firestore `db`, so its document projection — the
+  // seam #114's schedule-pricing tests bypassed by injecting day docs straight
+  // into the pure series helpers — is pinned from source (the sw-shell
+  // pattern). Dropping `hours` from the mapping is exactly #120: Week, Month
+  // and Year points arrive with no pricing inputs, so the schedule-priced $
+  // hides silently as an all-unpriceable range while Day (whose single-document
+  // read carries hours) still shows it. Whitespace is flattened first so a
+  // reformat cannot loosen the pin.
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export async function fetchHistory(');
+  assert.ok(start >= 0, 'store.js declares fetchHistory');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes fetchHistory');
+  const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  // The mapping's contract: the id, the kWh total, and the hourly buckets kept
+  // only as a non-array object (fetchHistoryDay's normalization), never an
+  // empty fabricated map — a pre-hourly-capture day stays unpriceable so a
+  // mixed range keeps its partial-pricing disclosure.
+  assert.match(body, /docs: snap\.docs\.map\(\(d\) => \{/);
+  assert.match(body, /id: d\.id,/);
+  assert.match(body, /kwh: data\.kwh,/);
+  assert.match(
+    body,
+    /hours: hours && typeof hours === 'object' && !Array\.isArray\(hours\) \? hours : null,/,
+  );
 });
