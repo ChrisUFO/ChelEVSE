@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 import {
   DAY_PRESETS,
   BLOCKED_SAVE_MESSAGE,
+  LOAD_FAILED_MESSAGE,
+  LOADING_MESSAGE,
   OFFLINE_MESSAGE,
   RATE_CAP_MESSAGE,
   RATE_CAP_REMEDY,
@@ -32,6 +34,7 @@ import {
   dayTypesForWeek,
   daysForPreset,
   defaultRateRow,
+  firstLoadFields,
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
@@ -82,6 +85,7 @@ import {
   settingsFields,
   settingsPayload,
   settingsSaveState,
+  settingsSnapshotIsBaseline,
   siblingNote,
   submitFocusTarget,
   submitSettingsPlan,
@@ -90,6 +94,7 @@ import {
   toggledMonthScope,
   uncoveredDateRanges,
   uncoveredGapScopes,
+  validateChargerHost,
   validateRateEditorRows,
   validateSettings,
   validationProblemCount,
@@ -113,7 +118,7 @@ test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
     valid: true,
     errors: {},
-    values: { rate: 0.31, currency: 'USD', rates: [] },
+    values: { rate: 0.31, currency: 'USD', rates: [], chargerHost: '' },
   });
   assert.equal(validateSettings({ rate: 0, currency: '$' }).valid, true);
   assert.equal(validateSettings({ rate: 5, currency: 'abcdefgh' }).valid, true);
@@ -122,6 +127,7 @@ test('validateSettings mirrors the rules shape', () => {
     rate: 0.2,
     currency: '€',
     rates: [],
+    chargerHost: '',
   });
 
   for (const rate of [-0.01, 5.01, '', '  ', 'abc', null, undefined, Number.NaN, Infinity]) {
@@ -241,6 +247,7 @@ test('normalizeSettings and settingsFields only adopt the documented shape', () 
     rate: 0.31,
     currency: 'USD',
     rates: [],
+    charger_host: '',
   });
   assert.equal(normalizeSettings(null), null);
   assert.equal(normalizeSettings({ rate: '0.31', currency: 'USD' }), null);
@@ -250,8 +257,364 @@ test('normalizeSettings and settingsFields only adopt the documented shape', () 
     rate: '0.31',
     currency: 'USD',
     rates: [],
+    chargerHost: '',
   });
-  assert.deepEqual(settingsFields(null), { rate: '', currency: '', rates: [] });
+  assert.deepEqual(settingsFields(null), { rate: '', currency: '', rates: [], chargerHost: '' });
+});
+
+// ---------- charger address (issue #54) ----------
+
+// A 253-character address built from legal labels (63 + 63 + 63 + 61 plus dots).
+function host253() {
+  return [63, 63, 63, 61].map((length) => 'a'.repeat(length)).join('.');
+}
+
+test('the charger address grammar mirrors the bridge validator', () => {
+  const accepts = [
+    ['192.168.1.50', '192.168.1.50'],
+    [' 192.168.1.50 ', '192.168.1.50'],
+    ['\t192.168.0.145\n', '192.168.0.145'],
+    ['0.0.0.0', '0.0.0.0'],
+    ['255.255.255.255', '255.255.255.255'],
+    // Numeric labels are octets only when there are exactly four; a leading zero
+    // still parses as a number (the bridge does the same).
+    ['010.1.1.1', '010.1.1.1'],
+    ['evse.local', 'evse.local'],
+    // Case is preserved as typed, never lowercased.
+    ['TerranceCharge.local', 'TerranceCharge.local'],
+    ['my-charger.local', 'my-charger.local'],
+    ['localhost', 'localhost'],
+    [`${'a'.repeat(63)}.local`, `${'a'.repeat(63)}.local`],
+    [host253(), host253()],
+    // Empty is unset: the bridge falls back to CHARGER_HOST.
+    ['', ''],
+    ['   ', ''],
+    [null, ''],
+    [undefined, ''],
+  ];
+  for (const [input, value] of accepts) {
+    assert.deepEqual(validateChargerHost(input), { value, error: null }, String(input));
+  }
+
+  const h254 = [63, 63, 63, 62].map((length) => 'a'.repeat(length)).join('.');
+  const rejects = [
+    ['http://192.168.1.50', /no http/],
+    ['https://evse.local', /no http/],
+    ['192.168.1.50:8080', /no port/],
+    ['192.168.1.50/status', /no path/],
+    ['user:pass@192.168.1.50', /no username/],
+    ['192.168. 1.50', /spaces/],
+    ['192.168.1.50.', /dot/],
+    ['.192.168.1.50', /dot/],
+    ['-evse.local', /hyphen/],
+    ['evse.local-', /hyphen/],
+    ['evse.-local', /hyphen/],
+    ['evse..local', /1–63/],
+    ['evse_local', /letters, numbers/],
+    ['999.1.1.1', /0–255/],
+    ['256.0.0.1', /0–255/],
+    [`${'a'.repeat(64)}.local`, /63/],
+    [h254, /253/],
+    [42, /IPv4 address or hostname/],
+  ];
+  for (const [input, message] of rejects) {
+    const result = validateChargerHost(input);
+    assert.equal(result.value, '', String(input));
+    assert.match(result.error, message, String(input));
+  }
+});
+
+test('the charger address blocks only itself and is omitted when blank', () => {
+  // An empty field never blocks: absent means "use the bridge bootstrap".
+  const empty = validateSettings({ rate: '0.31', currency: 'USD' });
+  assert.equal(empty.valid, true);
+  assert.deepEqual(empty.errors, {});
+  assert.equal(empty.values.chargerHost, '');
+
+  const valid = validateSettings({ rate: '0.31', currency: 'USD', chargerHost: ' 192.168.1.50 ' });
+  assert.equal(valid.valid, true);
+  assert.equal(valid.values.chargerHost, '192.168.1.50');
+  assert.deepEqual(settingsPayload(valid.values), {
+    rate: 0.31,
+    currency: 'USD',
+    charger_host: '192.168.1.50',
+  });
+
+  const blocked = validateSettings({ rate: '0.31', currency: 'USD', chargerHost: 'a b' });
+  assert.equal(blocked.valid, false);
+  assert.match(blocked.errors.chargerHost, /spaces/);
+
+  // The gate never calls back for a blocked draft, so no write is attempted, and
+  // the keyboard path focuses the address field.
+  let committed = null;
+  const attempt = submitSettingsPlan({
+    fields: { rate: '0.31', currency: 'USD', chargerHost: 'http://192.168.1.50' },
+    onCommit: (values) => {
+      committed = values;
+    },
+  });
+  assert.equal(attempt.blocked, true);
+  assert.equal(committed, null);
+  assert.deepEqual(attempt.target, { kind: 'field', field: 'chargerHost' });
+  assert.deepEqual(submitFocusTarget({ errors: { chargerHost: 'x' } }), {
+    kind: 'field',
+    field: 'chargerHost',
+  });
+
+  // Clearing removes the key rather than storing an empty string.
+  for (const chargerHost of ['', '   ', undefined, null, 'http://x']) {
+    const payload = settingsPayload({ rate: 0.31, currency: 'USD', chargerHost });
+    assert.deepEqual(payload, { rate: 0.31, currency: 'USD' }, String(chargerHost));
+  }
+  // A rate-only payload is byte-identical to the document the app has always
+  // written (no charger_host key at all).
+  assert.deepEqual(settingsPayload({ rate: 0.31, currency: 'USD', rates: [] }), {
+    rate: 0.31,
+    currency: 'USD',
+  });
+});
+
+test('normalizeSettings keeps a valid charger address and drops a malformed one', () => {
+  assert.deepEqual(
+    normalizeSettings({ rate: 0.31, currency: 'USD', charger_host: ' evse.local ' }),
+    {
+      rate: 0.31,
+      currency: 'USD',
+      rates: [],
+      charger_host: 'evse.local',
+    },
+  );
+  // A console-written value the bridge would reject must not block a save: the
+  // form shows an empty address and the next write replaces it.
+  for (const bad of ['http://192.168.1.50', '192.168.1.50:8080', '999.1.1.1', '', 42, null, {}]) {
+    assert.deepEqual(
+      normalizeSettings({ rate: 0.31, currency: 'USD', charger_host: bad }),
+      { rate: 0.31, currency: 'USD', rates: [], charger_host: '' },
+      String(bad),
+    );
+  }
+  assert.equal(
+    validateSettings(settingsFields({ rate: 0.31, currency: 'USD', charger_host: 'http://x' }))
+      .valid,
+    true,
+  );
+  // normalizeSettings output is fed back through settingsFields
+  // (showSettingsData -> setFields -> writeFields), so the key survives that
+  // round trip too.
+  const normalized = normalizeSettings({
+    rate: 0.31,
+    currency: 'USD',
+    charger_host: 'evse.local',
+  });
+  assert.equal(settingsFields(normalized).chargerHost, 'evse.local');
+});
+
+test('the charger address participates in dirty state by its trimmed value', () => {
+  const stored = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+  assert.equal(settingsDraftMatches(settingsFields(stored), stored), true);
+  assert.equal(
+    settingsDraftMatches({ ...settingsFields(stored), chargerHost: ' 192.168.1.50 ' }, stored),
+    true,
+  );
+  assert.equal(settingsDraftMatches({ ...settingsFields(stored), rate: '0.32' }, stored), false);
+  assert.equal(
+    settingsDraftMatches({ ...settingsFields(stored), chargerHost: '192.168.1.51' }, stored),
+    false,
+  );
+  // Clearing the field is a real change (it removes the key)…
+  assert.equal(settingsDraftMatches({ ...settingsFields(stored), chargerHost: '' }, stored), false);
+  // …and an invalid draft never compares equal to a blank one just because both
+  // hold no usable host.
+  assert.equal(
+    settingsDraftMatches({ ...settingsFields(stored), chargerHost: 'http://x' }, stored),
+    false,
+  );
+  // An unchanged document is clean and cannot be saved again.
+  const view = settingsSaveState({ draft: settingsFields(stored), confirmed: stored });
+  assert.equal(view.canSave, false);
+  assert.equal(view.text, '');
+});
+
+test('a rate-only save keeps the stored charger address in the payload', () => {
+  // web/js/store.js writes the whole document with setDoc (no merge), so a page
+  // that dropped the stored host would DELETE settings/current.charger_host on an
+  // unrelated edit and the bridge would silently revert to CHARGER_HOST. The form
+  // carries the loaded address through every step, so it cannot be dropped.
+  const stored = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+  const fields = settingsFields(stored);
+  assert.equal(fields.chargerHost, '192.168.1.50');
+
+  const changed = { ...fields, rate: '0.4' };
+  const values = validateSettings(changed).values;
+  assert.deepEqual(settingsPayload(values), {
+    rate: 0.4,
+    currency: 'USD',
+    charger_host: '192.168.1.50',
+  });
+
+  // A successful save keeps it in the form and in the confirmed baseline, so the
+  // next edit still carries it.
+  const settled = reconcileSettingsSave({ ok: true, values, previous: stored, draft: changed });
+  assert.equal(settled.fields.chargerHost, '192.168.1.50');
+  assert.equal(settled.confirmed.charger_host, '192.168.1.50');
+  assert.equal(settled.dirty, false);
+
+  // Clearing the field is the only way the key leaves the document.
+  const cleared = validateSettings({ ...fields, chargerHost: '' }).values;
+  assert.equal('charger_host' in settingsPayload(cleared), false);
+});
+
+test('a cached snapshot that reports no document does not open the save gate', () => {
+  // The local cache answers before the server. A cached "no document" is not
+  // evidence that the owner has no stored plan, so it must not become the
+  // baseline: a save against it would replace `settings/current` with the draft
+  // and delete the stored rate schedule and charger address.
+  assert.equal(settingsSnapshotIsBaseline(null, { fromCache: true }), false);
+
+  // Once the server confirms the absence the document really is missing, and the
+  // empty baseline becomes savable — a first-ever save has to stay possible.
+  assert.equal(settingsSnapshotIsBaseline(null, { fromCache: false }), true);
+
+  // A cached snapshot that carries the document holds the stored values a
+  // whole-document write must re-send, so it opens the gate like a server read.
+  const stored = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+  assert.equal(settingsSnapshotIsBaseline(stored, { fromCache: true }), true);
+
+  // A caller that passes no provenance keeps the previous contract.
+  assert.equal(settingsSnapshotIsBaseline(null), true);
+
+  // Composed with the state machine: the cached-empty snapshot leaves the form
+  // unloaded, so the offline draft below cannot start a whole-document write.
+  const held = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' },
+    confirmed: null,
+    loaded: settingsSnapshotIsBaseline(null, { fromCache: true }),
+  });
+  assert.equal(held.canSave, false);
+  assert.equal(held.text, LOADING_MESSAGE);
+});
+
+test('offline with nothing read yet names the connection instead of loading', () => {
+  // The read cannot finish until the connection returns, so the hold says why
+  // instead of showing a loading message that will never end on its own.
+  const offline = settingsSaveState({ loaded: false, offline: true });
+  assert.equal(offline.text, OFFLINE_MESSAGE);
+  assert.equal(offline.kind, 'warn');
+  assert.equal(offline.canSave, false);
+
+  // Online, the same unloaded form keeps the loading copy.
+  assert.equal(settingsSaveState({ loaded: false, offline: false }).text, LOADING_MESSAGE);
+
+  // A loaded form is unaffected: offline only changes what a held save says,
+  // and the write itself is still refused before it is queued.
+  const loaded = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD' },
+    confirmed: { rate: 0.31, currency: 'USD' },
+    offline: true,
+  });
+  assert.equal(loaded.text, 'Unsaved changes.');
+  assert.equal(loaded.canSave, true);
+
+  // A failed settings read keeps the gate closed and says why Save is held.
+  const failed = settingsSaveState({ loaded: false, error: LOAD_FAILED_MESSAGE });
+  assert.equal(failed.text, LOAD_FAILED_MESSAGE);
+  assert.equal(failed.kind, 'err');
+  assert.equal(failed.canSave, false);
+});
+
+test('Save is held until the first settings snapshot has landed', () => {
+  const confirmed = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+
+  // Nothing has been read yet, so the blank form is not a baseline: the
+  // whole-document write would replace `settings/current` with the owner's
+  // typing and delete the stored rate plan and charger address.
+  const typedBefore = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' },
+    confirmed: null,
+    loaded: false,
+  });
+  assert.equal(typedBefore.text, LOADING_MESSAGE);
+  assert.equal(typedBefore.kind, 'warn');
+  assert.equal(typedBefore.dirty, true);
+  assert.equal(typedBefore.canSave, false);
+
+  // An untouched blank form offers no write either — the button must never
+  // suggest the save that the submit gate would refuse.
+  const untouched = settingsSaveState({ loaded: false });
+  assert.equal(untouched.canSave, false);
+  assert.equal(untouched.text, LOADING_MESSAGE);
+
+  // Once the snapshot has landed the state machine behaves exactly as before,
+  // and `loaded` defaults to true so every other caller keeps that contract.
+  const landed = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '192.168.1.50' },
+    confirmed,
+    loaded: true,
+  });
+  assert.equal(landed.text, 'Unsaved changes.');
+  assert.equal(landed.canSave, true);
+  assert.equal(
+    settingsSaveState({ draft: { rate: '0.4', currency: 'USD' }, confirmed }).canSave,
+    true,
+  );
+  assert.equal(
+    settingsSaveState({ draft: settingsFields(confirmed), confirmed, loaded: true }).text,
+    '',
+  );
+});
+
+test('a draft typed before the document loads is completed from the snapshot', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const stored = { rate: 0.31, currency: 'USD', rates: [night], charger_host: '192.168.1.50' };
+
+  // An untouched form adopts the stored document, exactly like a normal load.
+  assert.deepEqual(firstLoadFields(settingsFields(null), stored), settingsFields(stored));
+
+  // The owner typed a rate and currency into the blank form: both are kept, and
+  // the rows and charger address they never saw are adopted from the snapshot.
+  const typed = firstLoadFields(
+    { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' },
+    stored,
+  );
+  assert.equal(typed.rate, '0.4');
+  assert.equal(typed.currency, 'GBP');
+  assert.equal(typed.chargerHost, '192.168.1.50');
+  assert.deepEqual(typed.rates, settingsFields(stored).rates);
+
+  // A plan built before the load is kept rather than replaced.
+  const ownRows = [night, { ...night, id: 'day', days: [6], rate: 0.2 }];
+  assert.deepEqual(
+    firstLoadFields({ rate: '0.4', currency: 'USD', rates: ownRows, chargerHost: '' }, stored)
+      .rates,
+    ownRows,
+  );
+
+  // The completed draft is a safe whole-document payload: the stored schedule
+  // and address survive a save that only changed the price.
+  const payload = settingsPayload(validateSettings(typed).values);
+  assert.equal(payload.rate, 0.4);
+  assert.equal(payload.currency, 'GBP');
+  assert.equal(payload.charger_host, '192.168.1.50');
+  assert.equal(payload.rates.length, 1);
+  assert.equal(payload.rates[0].rate, 0.12);
+
+  // A snapshot that reports no document has nothing to adopt; the typing stays.
+  assert.deepEqual(
+    firstLoadFields({ rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' }, null),
+    {
+      rate: '0.4',
+      currency: 'GBP',
+      rates: [],
+      chargerHost: '',
+    },
+  );
 });
 
 test('the stored rate schedule survives normalization and reaches the form fields', () => {
@@ -265,7 +628,7 @@ test('the stored rate schedule survives normalization and reaches the form field
   };
   const stored = { rate: 0.31, currency: 'USD', rates: [night] };
   const normalized = { ...night, from: null, to: null };
-  assert.deepEqual(normalizeSettings(stored), { ...stored, rates: [normalized] });
+  assert.deepEqual(normalizeSettings(stored), { ...stored, rates: [normalized], charger_host: '' });
   assert.deepEqual(settingsFields(stored).rates, [normalized]);
 });
 
@@ -691,7 +1054,7 @@ test('a successful save of non-canonical input settles clean and shows Saved.', 
   const settled = reconcileSettingsSave({ ok: true, values, previous, draft });
 
   // Fields are canonicalised, so the form no longer looks dirty.
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'USD', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'USD', rates: [], chargerHost: '' });
   assert.deepEqual(settled.confirmed, { rate: 0.25, currency: 'USD', rates: [] });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, true);
@@ -740,8 +1103,8 @@ test('a save and its rollback carry the rate schedule', () => {
     previous: { rate: 0.2, currency: 'EUR', rates: [] },
     draft,
   });
-  assert.deepEqual(failed.confirmed, { rate: 0.2, currency: 'EUR', rates: [] });
-  assert.deepEqual(failed.fields, { rate: '0.2', currency: 'EUR', rates: [] });
+  assert.deepEqual(failed.confirmed, { rate: 0.2, currency: 'EUR', rates: [], charger_host: '' });
+  assert.deepEqual(failed.fields, { rate: '0.2', currency: 'EUR', rates: [], chargerHost: '' });
   assert.equal(failed.dirty, false);
 });
 
@@ -752,7 +1115,7 @@ test('a save typed over while in flight is not canonicalised or called saved', (
     previous: null,
     draft: { rate: '0.25', currency: 'EUR' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'EUR', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.25', currency: 'EUR', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(
@@ -772,8 +1135,8 @@ test('a failed save rolls an untouched form back to the confirmed values', () =>
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.250', currency: ' USD ' },
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.31, currency: 'EUR', rates: [] });
-  assert.deepEqual(settled.fields, { rate: '0.31', currency: 'EUR', rates: [] });
+  assert.deepEqual(settled.confirmed, { rate: 0.31, currency: 'EUR', rates: [], charger_host: '' });
+  assert.deepEqual(settled.fields, { rate: '0.31', currency: 'EUR', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
@@ -798,7 +1161,7 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
   // No settings/current exists yet, so there is no previous state to restore:
   // every field the user typed stays, the form stays dirty, and Save stays on.
   assert.equal(settled.confirmed, null);
-  assert.deepEqual(settled.fields, { ...draft, rates: [] });
+  assert.deepEqual(settled.fields, { ...draft, rates: [], chargerHost: '' });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   assert.equal(settled.error, SAVE_FAILED_FIRST_MESSAGE);
@@ -820,7 +1183,7 @@ test('a first-ever failed save keeps the draft and the retry available', () => {
     previous: null,
     draft: { rate: '0.4', currency: 'EUR' },
   });
-  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR', rates: [] });
+  assert.deepEqual(typed.fields, { rate: '0.4', currency: 'EUR', rates: [], chargerHost: '' });
   assert.equal(typed.dirty, true);
 });
 
@@ -831,7 +1194,7 @@ test('a failed save keeps a draft typed during the save', () => {
     previous: { rate: 0.31, currency: 'EUR' },
     draft: { rate: '0.4', currency: 'USD' },
   });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [] });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, true);
   assert.equal(settled.saved, false);
   const view = settingsSaveState({
@@ -856,8 +1219,8 @@ test('a failed save adopts a concurrent remote snapshot instead of the stale bas
   });
   // Another device wrote while our write was failing: that snapshot is the
   // newest server state.
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [] });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [] });
+  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [], charger_host: '' });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, false);
   assert.equal(settled.error, SAVE_FAILED_MESSAGE);
 });
@@ -871,8 +1234,8 @@ test('a failed save never clobbers a draft typed during a reflected snapshot', (
     remote: { rate: 0.35, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.35, currency: 'GBP', rates: [] });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [] });
+  assert.deepEqual(settled.confirmed, { rate: 0.35, currency: 'GBP', rates: [], charger_host: '' });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, true);
 });
 
@@ -885,8 +1248,8 @@ test('a successful save adopts a newer snapshot but keeps the typed draft', () =
     remote: { rate: 0.4, currency: 'GBP' },
     remoteSeen: true,
   });
-  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [] });
-  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [] });
+  assert.deepEqual(settled.confirmed, { rate: 0.4, currency: 'GBP', rates: [], charger_host: '' });
+  assert.deepEqual(settled.fields, { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' });
   assert.equal(settled.dirty, false);
   assert.equal(settled.saved, false);
 });

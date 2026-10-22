@@ -13,6 +13,7 @@ import { DAY_NAMES } from '../schedule.js';
 import { $, setText } from '../ui.js';
 import {
   DAY_PRESETS,
+  LOAD_FAILED_MESSAGE,
   MONTH_NAMES,
   OFFLINE_MESSAGE,
   RATE_CAP_REMEDY,
@@ -30,6 +31,7 @@ import {
   defaultRateRow,
   flatToScheduleRow,
   formatPreviewWhen,
+  firstLoadFields,
   isAllDayWindow,
   isLeapYear,
   largestDateScope,
@@ -69,6 +71,7 @@ import {
   settingsDraftMatches,
   settingsFields,
   settingsSaveState,
+  settingsSnapshotIsBaseline,
   siblingNote,
   submitSettingsPlan,
   timeFieldsVisible,
@@ -96,6 +99,14 @@ import { settleWrite } from '../write.js';
 // rendered controls in `windowCards`. Saving disables editing so there is no
 // mid-write drift.
 let confirmedSettings = null;
+// Whether the first settings snapshot has arrived — including the snapshot that
+// says the document is absent. Until it has there is no baseline, so the form is
+// blank for reasons the owner cannot see and Save is held.
+let settingsLoaded = false;
+// The settings listener failed outright. While no baseline has been read, the
+// hold on Save then has no natural end (a failed subscription does not retry),
+// so the card must say why instead of showing "Loading…" forever.
+let settingsLoadFailed = false;
 // A snapshot that arrived while a write was in flight. The wrapper keeps "no
 // snapshot arrived" distinct from "the document is missing".
 let pendingSettings = null;
@@ -129,8 +140,16 @@ function readFields() {
   return {
     rate: $('setting-rate').value,
     currency: $('setting-currency').value,
+    chargerHost: $('setting-charger-host').value,
     rates: draftRates,
   };
+}
+
+// The browser's own connection claim. It is only a hint — a dead uplink still
+// reports online — so it never decides whether a save may run; it shapes the
+// copy and stops obviously-doomed writes before they queue.
+function isOffline() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
 function currentRateMode() {
@@ -260,16 +279,28 @@ function currency() {
   return $('setting-currency').value.trim();
 }
 
+// The API field keys and their DOM ids differ for the charger address: the
+// validator reports `chargerHost`, the card's input is `setting-charger-host` and
+// its error slot `charger-host-error`. One mapping, used by every paint/focus
+// path, so no caller has to know the spelling.
+const FIELD_IDS = { chargerHost: 'charger-host' };
+
+function fieldId(field) {
+  return FIELD_IDS[field] || field;
+}
+
 function paintFieldError(field, message) {
-  const input = $(`setting-${field}`);
-  const node = $(`${field}-error`);
+  const input = $(`setting-${fieldId(field)}`);
+  const node = $(`${fieldId(field)}-error`);
   input.setAttribute('aria-invalid', String(Boolean(message)));
   node.hidden = !message;
   setText(node, message);
 }
 
 function renderErrors(errors = {}) {
-  for (const field of ['rate', 'currency']) paintFieldError(field, errors[field] || '');
+  for (const field of ['rate', 'currency', 'chargerHost']) {
+    paintFieldError(field, errors[field] || '');
+  }
 }
 
 // ---------- small DOM helpers ----------
@@ -2457,10 +2488,12 @@ function paintFeedback() {
   const view = settingsSaveState({
     draft: readFields(),
     confirmed: confirmedSettings,
+    loaded: settingsLoaded,
     saving: settingsSaving,
     waiting: settingsWaiting,
     saved: settingsSaved,
-    error: settingsError,
+    error: settingsError || (!settingsLoaded && settingsLoadFailed ? LOAD_FAILED_MESSAGE : ''),
+    offline: isOffline(),
   });
   // The value comparison is the only dirty rule; keep the flag in step.
   settingsDirty = view.dirty;
@@ -2490,6 +2523,7 @@ function paintFeedback() {
   $('settings-form').setAttribute('aria-busy', String(settingsSaving));
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;
+  $('setting-charger-host').disabled = settingsSaving;
   $('confirm-one-rate').disabled = settingsSaving;
   $('cancel-one-rate').disabled = settingsSaving;
   paintRateMode();
@@ -2518,6 +2552,7 @@ function renderPlan() {
 function writeFields(fields) {
   $('setting-rate').value = fields.rate;
   $('setting-currency').value = fields.currency;
+  $('setting-charger-host').value = fields.chargerHost || '';
   draftRates = (Array.isArray(fields.rates) ? fields.rates : []).map(rateRowFields);
   removeConfirmKey = null;
   planPeriods = ratePeriodsForDraft();
@@ -2546,7 +2581,7 @@ function handleInput(field) {
   recomputeDirty();
   // Keep a shown error live: correcting the field clears it immediately, and a
   // still-invalid value keeps its explanation.
-  if ($(`${field}-error`).hidden === false) {
+  if ($(`${fieldId(field)}-error`).hidden === false) {
     const result = validateSettings(readFields());
     paintFieldError(field, result.errors[field] || '');
   }
@@ -2556,22 +2591,54 @@ function handleInput(field) {
 
 // settings/current — null means the owner has not saved a rate yet. A remote
 // snapshot never overwrites a draft; it only becomes the new confirmed baseline.
-export function showSettingsData(data) {
+export function showSettingsData(data, meta) {
+  // A cached "no document" snapshot is the local cache answering before the
+  // server: it is not evidence that the owner has no stored plan, so it neither
+  // becomes the baseline nor opens the save gate. A cached snapshot that does
+  // carry the document holds the stored values a whole-document write must
+  // re-send, so it opens the gate like a server snapshot.
+  if (!settingsSnapshotIsBaseline(data, meta)) return;
   const next = normalizeSettings(data);
+  settingsLoadFailed = false;
+  // The first snapshot is the document's truth even when it reports no document
+  // (`data === null`). Before it lands the screen has no baseline, so Save is
+  // held (settingsSaveState) — see the `first` branch below for the draft that
+  // was typed into the not-yet-loaded form.
+  const first = !settingsLoaded;
+  settingsLoaded = true;
   if (settingsSaving || settingsWaiting) {
+    // A save can only be in flight after the first snapshot (Save is held until
+    // then), so `first` is never true here.
     pendingSettings = { settings: next };
     return;
   }
   // "Typed" is the value comparison against the baseline we are replacing.
   const typed = !settingsDraftMatches(readFields(), confirmedSettings);
   confirmedSettings = next;
-  if (!typed && !settingsDraftMatches(readFields(), next)) {
+  if (first) {
+    // A draft typed before the document was known lacks the stored values a
+    // whole-document save has to re-send, so it is completed from the snapshot
+    // instead of being adopted or repainted wholesale.
+    settingsSaved = false;
+    renderErrors({});
+    writeFields(firstLoadFields(readFields(), next));
+  } else if (!typed && !settingsDraftMatches(readFields(), next)) {
     setFields(next);
     // A failed-save message stays until the user acts: a snapshot echoing the
     // server truth does not undo the attempt the message describes.
     settingsSaved = false;
     renderErrors({});
   }
+  paintFeedback();
+}
+
+// The settings listener failed. No baseline was read, so the save gate stays
+// closed; the card names the failure so the owner is not left watching a
+// loading hold that cannot end. Only painted while the gate is closed: once a
+// baseline exists a failed re-read leaves a usable (if stale) form, and its
+// message must not displace the dirty/save feedback.
+export function showSettingsError() {
+  settingsLoadFailed = true;
   paintFeedback();
 }
 
@@ -2604,6 +2671,14 @@ function finishSave(generation, ok, values, previous) {
 async function submit(event) {
   event.preventDefault();
   if (settingsSaving) return;
+  // Save is held, not merely reported blocked, until the first settings
+  // snapshot lands: this blank form has none of the stored values, and the
+  // write replaces the whole document (it would delete `rates` and
+  // `charger_host`). The gate is here so no validation work runs either.
+  if (!settingsLoaded) {
+    paintFeedback();
+    return;
+  }
   // A valid save is the shared document validation plus the table's own rule,
   // both inside `submitSettingsPlan`; it calls back only for a saveable plan, so
   // a blocked Enter can never reach the write.
@@ -2639,7 +2714,7 @@ async function beginSave(values) {
   // already timed out is still running, and a retry that starts no replacement
   // write must not revoke that write's ownership of its late settlement. The
   // form keeps saying why the retry did not start until the real outcome lands.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isOffline()) {
     settingsSaved = false;
     settingsError = OFFLINE_MESSAGE;
     paintFeedback();
@@ -2754,7 +2829,7 @@ const focusView = {
   firstCard: () => windowCards.find(Boolean),
   expand: (periodCard) => setExpanded(periodCard, true),
   reveal: (node) => revealNode(node),
-  focusField: (field) => $(`setting-${field}`).focus(),
+  focusField: (field) => $(`setting-${fieldId(field)}`).focus(),
   revealDocumentError: () => {
     const docError = $('rates-error');
     if (!docError.hidden) docError.scrollIntoView({ block: 'center', behavior: 'auto' });
@@ -2780,6 +2855,7 @@ export function initSettings() {
   $('settings-form').addEventListener('submit', submit);
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
+  $('setting-charger-host').addEventListener('input', () => handleInput('chargerHost'));
   $('rate-mode-flat').addEventListener('click', requestOneRate);
   $('rate-mode-seasons').addEventListener('click', switchToSeasons);
   $('rate-mode-flat').addEventListener('keydown', paintModeKeyboard);
@@ -2808,8 +2884,14 @@ export function initSettings() {
     announcePreview();
   });
   addEventListener('online', () => {
-    if (settingsError !== OFFLINE_MESSAGE) return;
-    settingsError = '';
+    if (settingsError === OFFLINE_MESSAGE) settingsError = '';
+    // The offline copy is not only an error: the not-yet-loaded hold shows it
+    // too, so a reconnect has to repaint back to the loading message.
+    paintFeedback();
+  });
+  // The reverse: going offline while the first snapshot is still outstanding
+  // turns the hold into "reconnect", which is the reason it cannot finish.
+  addEventListener('offline', () => {
     paintFeedback();
   });
   setPreviewNow();
@@ -2821,6 +2903,8 @@ export function initSettings() {
 export function resetSettings() {
   settingsGeneration += 1;
   confirmedSettings = null;
+  settingsLoaded = false;
+  settingsLoadFailed = false;
   pendingSettings = null;
   settingsDirty = false;
   settingsSaving = false;

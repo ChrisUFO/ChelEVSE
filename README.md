@@ -206,7 +206,7 @@ live session and the whole history immediately.
 
 ## Security model
 
-- The repo is **public**; every deployment value (service-account key, Firebase config, charger IP) lives in gitignored files. See `private.example/`.
+- The repo is **public**; every deployment value (service-account key, Firebase config, charger default) lives in gitignored files. See `private.example/`. The charger address is the one value that can also be set at runtime: the app's **App settings** writes `settings/current.charger_host` and the running bridge applies it without a restart. `CHARGER_HOST` in `private/bridge.env` is the bootstrap default — used by a fresh Pi, and again once the field is cleared.
 - Access control is Google Sign-In (Firebase Auth) plus an owner-managed allowlist: `private/acl.txt` (gitignored) is synced to Firestore grant docs by `pi/acl.py`, and rules only serve data to granted users. Commands are whitelisted and validated; only the bridge's service account writes status/history.
 - Deploys are guarded: `scripts/check-firebase-project.mjs` refuses a release whose target project and service-account key disagree.
 - No inbound connections to the home network — the Pi only makes outbound requests.

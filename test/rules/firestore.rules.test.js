@@ -238,6 +238,57 @@ test('unauthenticated users cannot write settings with rates', async () => {
   );
 });
 
+// The charger address guard is the coarse subset of the shared grammar (issue
+// #54): length 1–253, `[A-Za-z0-9.-]`, first and last alphanumeric. Rules cannot
+// check per-label length or IPv4 octets — the app and the bridge do.
+test('settings may carry a valid charger address', async () => {
+  for (const [id, host] of [
+    ['host-ipv4', '192.168.1.50'],
+    ['host-name', 'evse.local'],
+    ['host-mixed-case', 'TerranceCharge.local'],
+    ['host-hyphen', 'my-charger.local'],
+    ['host-single', 'a'],
+    ['host-long', [63, 63, 63, 61].map((n) => 'a'.repeat(n)).join('.')],
+  ]) {
+    await assertSucceeds(
+      writeSettings(allowlisted(), id, { rate: 0.31, currency: 'USD', charger_host: host }),
+    );
+  }
+});
+
+test('settings may omit the optional charger address', async () => {
+  await assertSucceeds(
+    writeSettings(allowlisted(), 'no-host', {
+      rate: 0.31,
+      currency: 'USD',
+      rates: [rateWindow()],
+    }),
+  );
+});
+
+test('settings reject a charger address that is not a bare host', async () => {
+  const tooLong = [63, 63, 63, 62].map((n) => 'a'.repeat(n)).join('.');
+  for (const [id, host] of [
+    ['scheme', 'http://192.168.1.50'],
+    ['port', '192.168.1.50:8080'],
+    ['path', '192.168.1.50/status'],
+    ['space', 'a b'],
+    ['blank', ''],
+    ['trailing-dot', '192.168.1.50.'],
+    ['leading-hyphen', '-evse'],
+    ['too-long', tooLong],
+    ['number', 192],
+  ]) {
+    await assertFails(
+      writeSettings(allowlisted(), `bad-host-${id}`, {
+        rate: 0.31,
+        currency: 'USD',
+        charger_host: host,
+      }),
+    );
+  }
+});
+
 test('allowlisted user can register their own fcm token', async () => {
   await assertSucceeds(
     setDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-own'), {

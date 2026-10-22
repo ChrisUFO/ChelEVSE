@@ -28,7 +28,12 @@ import {
   showStatusSchedule,
 } from './js/screens/status.js';
 import { initConfig, resetConfig, showConfigData, showConfigError } from './js/screens/config.js';
-import { initSettings, resetSettings, showSettingsData } from './js/screens/settings.js';
+import {
+  initSettings,
+  resetSettings,
+  showSettingsData,
+  showSettingsError,
+} from './js/screens/settings.js';
 import {
   activateNotifications,
   enterNotifications,
@@ -248,11 +253,14 @@ function enterApp(user) {
       showLiveStatus(data);
     },
     onCommands: showCommands,
-    onSettings: (settings) => {
+    onSettings: (settings, meta) => {
       showSettings(settings);
       showHistorySettings(settings);
-      showSettingsData(settings);
+      // The gate needs the snapshot's provenance: a cached "no document" is not
+      // an absent document.
+      showSettingsData(settings, meta);
     },
+    onSettingsError: showSettingsError,
     onConfig: (data) => {
       showStatusConfig(data);
       showConfigData(data);

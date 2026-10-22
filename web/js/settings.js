@@ -48,9 +48,73 @@ export function rateIsUsable(value) {
 // container).
 export const CURRENCY_MAX = 8;
 
+// The charger address grammar (issue #54), mirrored exactly by the bridge's
+// `_normalize_charger_host` (pi/bridge.py) so the app rejects and normalizes the
+// same values the running bridge does. `firestore.rules` enforces only the
+// coarse part (length, character set, first/last alphanumeric): rules cannot
+// split labels or compare octets.
+export const CHARGER_HOST_MAX = 253;
+export const CHARGER_HOST_LABEL_MAX = 63;
+const CHARGER_HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+const CHARGER_HOST_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+const OCTET_RE = /^[0-9]+$/;
+
+// An IPv4 literal or a hostname, or an error that names the failure. Empty
+// (after trim) is valid and means unset: the bridge then falls back to its
+// `CHARGER_HOST` bootstrap. A scheme, port, path, userinfo and inner whitespace
+// are rejected by construction, as are a leading/trailing dot or hyphen, a
+// 64-character label, a 254-character address and an octet above 255. Case is
+// kept exactly as typed.
+export function validateChargerHost(value) {
+  // A non-string (a console-written number, say) is not an address. Mirroring the
+  // bridge: it rejects a non-string outright rather than stringifying it.
+  if (value != null && typeof value !== 'string') {
+    return {
+      value: '',
+      error: 'Enter an IPv4 address or hostname, like 192.168.1.50 or evse.local.',
+    };
+  }
+  const host = (value || '').trim();
+  if (!host) return { value: '', error: null };
+  const reject = (error) => ({ value: '', error });
+  if (host.includes('://')) return reject('Enter just the address — no http:// or https://.');
+  if (host.includes('@')) return reject('Enter just the address — no username or password.');
+  if (host.includes('/')) return reject('Enter just the address — no path.');
+  if (host.includes(':')) return reject('Enter just the address — no port number.');
+  if (/\s/.test(host)) return reject('Remove the spaces from the address.');
+  if (host.length > CHARGER_HOST_MAX) {
+    return reject(`Use ${CHARGER_HOST_MAX} characters or fewer.`);
+  }
+  if (!CHARGER_HOST_RE.test(host)) {
+    if (/^\.|\.$/.test(host)) return reject('The address cannot start or end with a dot.');
+    if (/^-|-$/.test(host)) return reject('The address cannot start or end with a hyphen.');
+    return reject('Use only letters, numbers, dots and hyphens.');
+  }
+  const labels = host.split('.');
+  for (const label of labels) {
+    if (label.length === 0) return reject('Each part of the address must be 1–63 characters.');
+    if (label.length > CHARGER_HOST_LABEL_MAX) {
+      return reject(
+        `Each part of the address must be ${CHARGER_HOST_LABEL_MAX} characters or fewer.`,
+      );
+    }
+    if (!CHARGER_HOST_LABEL_RE.test(label)) {
+      return reject('A part of the address cannot start or end with a hyphen.');
+    }
+  }
+  // Four all-numeric labels are an IPv4 literal, so each must be a real octet.
+  if (labels.length === 4 && labels.every((label) => OCTET_RE.test(label))) {
+    if (labels.some((label) => Number(label) > 255)) {
+      return reject('Each part of an IPv4 address must be 0–255.');
+    }
+  }
+  return { value: host, error: null };
+}
+
 // The form trims the currency, so a stray space cannot produce a string that
 // rules would accept but people would read as empty. An absent `rates` list is
-// a complete configuration: the flat rate covers every moment.
+// a complete configuration: the flat rate covers every moment; likewise an
+// absent/blank charger address means "use the bridge's bootstrap".
 export function validateSettings(draft) {
   const errors = {};
   const rate = parseRateValue(draft && draft.rate);
@@ -69,6 +133,11 @@ export function validateSettings(draft) {
     errors.currency = `Use ${CURRENCY_MAX} characters or fewer.`;
   }
 
+  // An empty charger address is a valid (unset) choice, never a blocker: the
+  // save then omits the key and the bridge reverts to its bootstrap.
+  const host = validateChargerHost(draft && draft.chargerHost);
+  if (host.error) errors.chargerHost = host.error;
+
   // The rate editor owns the row and document-level rate messages; this
   // validator only reports the flat pair. A stored schedule must still be valid
   // for the document to be saveable (and must never be silently dropped), so its
@@ -78,7 +147,7 @@ export function validateSettings(draft) {
   return {
     valid: Object.keys(errors).length === 0 && windows.valid,
     errors,
-    values: { rate, currency, rates: windows.values },
+    values: { rate, currency, rates: windows.values, chargerHost: host.value },
   };
 }
 
@@ -89,22 +158,62 @@ export function validateSettings(draft) {
 // (normalizeRateSchedule) still drops unusable rows, so a partially corrupt
 // document prices what it can; the flat rate remains only when no usable row is
 // left.
+//
+// The charger address is optional and never blocks a save: a stored value the
+// grammar rejects (a console-written scheme or port, say) normalizes to '' so the
+// form stays saveable and the next write replaces it. A valid host is carried
+// through so an unrelated rate edit re-sends it instead of deleting it — the
+// settings write replaces the whole document.
 export function normalizeSettings(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const normalized = normalizeRateSchedule(data);
   if (normalized.rate == null || normalized.currency == null) return null;
   const rates = Array.isArray(data.rates) ? data.rates.map(normalizeWindow) : [];
-  return { rate: normalized.rate, currency: normalized.currency, rates };
+  return {
+    rate: normalized.rate,
+    currency: normalized.currency,
+    rates,
+    // Stored shape, like every other key here: normalizeSettings output is fed
+    // back into settingsFields (showSettingsData -> setFields), so the key must
+    // survive that round trip.
+    charger_host: validateChargerHost(data.charger_host).value,
+  };
 }
 
 // The form's fields. `rates` travels with them so a rate/currency edit never
 // deletes a stored schedule, and the rate table can round-trip rows it does not
-// change.
+// change. `chargerHost` travels the same way: the form always holds the stored
+// address, so a rate-only save does not drop it from the whole-document write.
 export function settingsFields(settings) {
   const normalized = normalizeSettings(settings);
   return normalized
-    ? { rate: String(normalized.rate), currency: normalized.currency, rates: normalized.rates }
-    : { rate: '', currency: '', rates: [] };
+    ? {
+        rate: String(normalized.rate),
+        currency: normalized.currency,
+        rates: normalized.rates,
+        chargerHost: normalized.charger_host,
+      }
+    : { rate: '', currency: '', rates: [], chargerHost: '' };
+}
+
+// The form before the first settings snapshot is blank apart from whatever the
+// owner typed into it, so it carries none of the stored values that a
+// whole-document write must re-send. Hydrating it as-is would discard that
+// typing; adopting it as-is would delete the stored rate plan and charger
+// address. Fill the blanks from the snapshot and keep what the owner typed.
+export function firstLoadFields(draft, stored) {
+  const fields = settingsFields(stored);
+  const kept = (value) => typeof value === 'string' && value.trim() !== '';
+  const rows = Array.isArray(draft && draft.rates) ? draft.rates : [];
+  // Stored values arrive in the stored shape; a draft row the owner typed is
+  // already an editor row. writeFields normalizes both, and rateRowFields maps
+  // an editor row to itself, so the mix is inert.
+  return {
+    rate: kept(draft && draft.rate) ? draft.rate : fields.rate,
+    currency: kept(draft && draft.currency) ? draft.currency : fields.currency,
+    chargerHost: kept(draft && draft.chargerHost) ? draft.chargerHost : fields.chargerHost,
+    rates: rows.length ? rows : fields.rates,
+  };
 }
 
 export const MONTH_NAMES = [
@@ -1304,6 +1413,7 @@ export const BLOCKED_SAVE_MESSAGE = 'Fix the highlighted fields.';
 export function submitFocusTarget({ errors = {}, rateValidation } = {}) {
   if (errors.rate) return { kind: 'field', field: 'rate' };
   if (errors.currency) return { kind: 'field', field: 'currency' };
+  if (errors.chargerHost) return { kind: 'field', field: 'chargerHost' };
   const rows = (rateValidation && rateValidation.rows) || [];
   const index = rows.findIndex((row) => row && Object.keys(row).length > 0);
   if (index >= 0) {
@@ -1703,8 +1813,10 @@ export function formatPreviewWhen(date, now = new Date()) {
 
 // The exact Firestore payload for a validated settings save. `rates` is omitted
 // when empty, so a flat configuration writes byte-for-byte the two fields it
-// always has. A month row keeps its stored key order; a date row appends
-// `from`/`to` after `months`, whose value is the derived compatibility hint.
+// always has. `charger_host` is omitted the same way: absent means "use the
+// bridge's bootstrap", so clearing the field removes the key. A month row keeps
+// its stored key order; a date row appends `from`/`to` after `months`, whose
+// value is the derived compatibility hint.
 export function settingsPayload(values) {
   const source = values || {};
   const payload = { rate: source.rate, currency: source.currency };
@@ -1735,6 +1847,10 @@ export function settingsPayload(values) {
       };
     });
   }
+  // Only a value the grammar accepts is ever written: the payload must not be
+  // able to carry something `firestore.rules` would refuse.
+  const host = validateChargerHost(source.chargerHost).value;
+  if (host) payload.charger_host = host;
   return payload;
 }
 
@@ -1748,7 +1864,10 @@ function parseCurrencyValue(value) {
 // and a currency typed as " USD " are the same settings as the canonical
 // rendering, so they must not read as unsaved forever. Two non-numeric drafts
 // only match each other when their text is identical. Window rows compare
-// through rateWindowsKey so day/month order and numeric text do not matter.
+// through rateWindowsKey so day/month order and numeric text do not matter. The
+// charger address is compared trimmed (the only normalization it has), so
+// " 192.168.1.50 " matches "192.168.1.50" but an invalid value never compares
+// equal to a blank one.
 export function sameSettingsInput(a, b) {
   const left = a || {};
   const right = b || {};
@@ -1761,7 +1880,8 @@ export function sameSettingsInput(a, b) {
   return (
     ratesMatch &&
     parseCurrencyValue(left.currency) === parseCurrencyValue(right.currency) &&
-    rateWindowsKey(left.rates) === rateWindowsKey(right.rates)
+    rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
+    String(left.chargerHost ?? '').trim() === String(right.chargerHost ?? '').trim()
   );
 }
 
@@ -1777,7 +1897,8 @@ function settingsEqual(a, b) {
   return (
     left.rate === right.rate &&
     left.currency === right.currency &&
-    rateWindowsKey(left.rates) === rateWindowsKey(right.rates)
+    rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
+    left.charger_host === right.charger_host
   );
 }
 
@@ -1785,11 +1906,28 @@ function settingsEqual(a, b) {
 
 export const OFFLINE_MESSAGE = 'You’re offline — reconnect to save.';
 export const WAITING_MESSAGE = 'Waiting for the server — this change may not be saved yet.';
+// No settings document has been read yet, so the blank form is not a baseline:
+// the whole-document write would replace the stored plan with nothing.
+export const LOADING_MESSAGE = 'Loading your settings…';
+// The listener failed: the hold on Save has no natural end until the page is
+// reloaded (a failed subscription does not retry), so the copy says so.
+export const LOAD_FAILED_MESSAGE = 'Couldn’t read your settings. Reload the page to try again.';
 export const SAVE_FAILED_MESSAGE =
   'Couldn’t save — the previous settings are back. Check your connection and try again.';
 // A first-ever save has no previous document to restore, so the generic copy
 // would describe a rollback that never happened.
 export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
+
+// Whether one settings snapshot can establish the save baseline. A snapshot that
+// carries a document always can: it holds the stored values a whole-document
+// write has to re-send. A snapshot that reports no document only can when the
+// server answered — the local cache also answers "no document" before any read
+// has reached the backend, and a save against that fiction would replace the
+// stored rate plan and charger address with whatever this device typed.
+export function settingsSnapshotIsBaseline(data, meta = {}) {
+  if (data != null) return true;
+  return !(meta && meta.fromCache === true);
+}
 
 // The card's whole visible state, derived from the draft and the flags the
 // screen owns. `dirty` is computed and returned so the screen never has to keep
@@ -1797,10 +1935,12 @@ export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
 export function settingsSaveState({
   draft = { rate: '', currency: '', rates: [] },
   confirmed = null,
+  loaded = true,
   saving = false,
   waiting = false,
   saved = false,
   error = '',
+  offline = false,
 } = {}) {
   const dirty = !settingsDraftMatches(draft, confirmed);
   let text = '';
@@ -1823,11 +1963,28 @@ export function settingsSaveState({
   } else if (saved && !dirty) {
     text = 'Saved.';
     kind = 'ok';
+  } else if (!loaded) {
+    // Hold the save path, don't just describe it: writing this form now would
+    // replace the whole document with fields that only the owner's typing has
+    // filled, deleting the stored rate plan and charger address.
+    //
+    // Offline with nothing read yet is not "still loading": the read cannot
+    // finish until the connection returns, so name the cause instead of leaving
+    // a loading hold that will never end on its own.
+    text = offline ? OFFLINE_MESSAGE : LOADING_MESSAGE;
+    kind = 'warn';
   } else if (dirty) {
     text = 'Unsaved changes.';
     kind = 'warn';
   }
-  return { dirty, saved: saved && !dirty && !error, text, kind, busy, canSave: dirty && !saving };
+  return {
+    dirty,
+    saved: saved && !dirty && !error,
+    text,
+    kind,
+    busy,
+    canSave: loaded && dirty && !saving,
+  };
 }
 
 // Decide the post-settlement form state for one save. `draft` is what is in the
@@ -1843,12 +2000,17 @@ export function reconcileSettingsSave({
   remoteSeen = false,
 } = {}) {
   const rates = Array.isArray(values.rates) ? values.rates : [];
+  // The confirmed/attempted document is in stored shape (`charger_host`, absent
+  // when the field was cleared), exactly like a snapshot: every comparison below
+  // runs it through settingsFields/normalizeSettings.
   const attempted = { rate: values.rate, currency: values.currency, rates };
+  if (values.chargerHost) attempted.charger_host = values.chargerHost;
   const untouched = settingsDraftMatches(draft, attempted);
   const draftFields = {
     rate: String(draft.rate ?? ''),
     currency: String(draft.currency ?? ''),
     rates: Array.isArray(draft.rates) ? draft.rates : [],
+    chargerHost: String(draft.chargerHost ?? ''),
   };
 
   if (ok) {
