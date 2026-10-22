@@ -1693,14 +1693,15 @@ class LoopWiringTests(unittest.TestCase):
             return record
 
         class _ThreadSpy:
-            def __init__(self, target, args, daemon=None):
+            def __init__(self, target, args, kwargs=None, daemon=None):
                 self.target = target
                 self.args = args
+                self.kwargs = kwargs or {}
                 self.daemon = daemon
                 threads.append(self)
 
             def start(self):
-                self.target(*self.args)
+                self.target(*self.args, **self.kwargs)
 
         settings_spy = spy("settings")
         with mock.patch.object(bridge, "status_loop", spy("status")), mock.patch.object(

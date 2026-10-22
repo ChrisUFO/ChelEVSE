@@ -1940,15 +1940,16 @@ class RunWiringTests(unittest.TestCase):
         threads = []
 
         class _ThreadSpy:
-            def __init__(self, target, args, daemon=None):
+            def __init__(self, target, args, kwargs=None, daemon=None):
                 self.target = target
                 self.args = args
+                self.kwargs = kwargs or {}
                 threads.append((target.__name__, args))
 
             def start(self):
                 if self.target.__name__ == "mqtt_status_loop":
                     return  # would block; wiring is what this test checks
-                self.target(*self.args)
+                self.target(*self.args, **self.kwargs)
 
         def spy(name):
             def record(*args, **kwargs):
@@ -2021,7 +2022,7 @@ class RunWiringTests(unittest.TestCase):
         threads = []
 
         class _ThreadSpy:
-            def __init__(self, target, args, daemon=None):
+            def __init__(self, target, args, kwargs=None, daemon=None):
                 threads.append(target)
                 self._args = args
 
