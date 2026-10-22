@@ -53,9 +53,10 @@ service cloud.firestore {
 
     // App settings: client-writable by allowlisted users, shape-validated.
     // The flat rate/currency stay mandatory; `rates` (the optional
-    // time-of-use/seasonal schedule, which owns pricing once it holds any row)
-    // and `charger_host` (the optional charger address the bridge applies live)
-    // may each be absent.
+    // time-of-use/seasonal schedule, which owns pricing once it holds any row),
+    // `charger_host` (the optional charger address the bridge applies live) and
+    // `show_temperature` (the optional Status visibility preference, absent =
+    // visible) may each be absent.
     //
     // Rules cannot iterate a list, so the `rates` guard is container-only: list,
     // at most 24 rows — the same limit and reasoning as the schedule. Per-window
@@ -95,6 +96,10 @@ service cloud.firestore {
                   && request.resource.data.charger_host.size() <= 253
                   && request.resource.data.charger_host.matches('^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$')
                 )
+           )
+        && (
+             !request.resource.data.keys().hasAny(['show_temperature'])
+             || request.resource.data.show_temperature is bool
            );
     }
 

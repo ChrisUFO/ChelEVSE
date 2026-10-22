@@ -266,6 +266,39 @@ test('settings may omit the optional charger address', async () => {
   );
 });
 
+// The temperature toggle guard (issue #117): optional, absent = visible, but a
+// present value must be a bool — defense-in-depth like charger_host, since the
+// app only ever writes an explicit false.
+test('settings may carry the optional show_temperature boolean', async () => {
+  for (const [id, value] of [
+    ['temp-hidden', false],
+    ['temp-visible', true],
+  ]) {
+    await assertSucceeds(
+      writeSettings(allowlisted(), id, { rate: 0.31, currency: 'USD', show_temperature: value }),
+    );
+  }
+  await assertSucceeds(
+    writeSettings(allowlisted(), 'temp-absent', { rate: 0.31, currency: 'USD' }),
+  );
+});
+
+test('settings reject a show_temperature that is not a boolean', async () => {
+  for (const [id, value] of [
+    ['string', 'false'],
+    ['number', 0],
+    ['null', null],
+  ]) {
+    await assertFails(
+      writeSettings(allowlisted(), `bad-temp-${id}`, {
+        rate: 0.31,
+        currency: 'USD',
+        show_temperature: value,
+      }),
+    );
+  }
+});
+
 test('settings reject a charger address that is not a bare host', async () => {
   const tooLong = [63, 63, 63, 62].map((n) => 'a'.repeat(n)).join('.');
   for (const [id, host] of [
