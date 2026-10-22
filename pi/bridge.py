@@ -597,7 +597,14 @@ class StatusTracker:
                         f"charger could deliver; energy stays in the aggregate"
                     )
         if self.open_interval is None:
-            self.open_interval = {"started_at": _utcnow(), "wh": 0.0}
+            # The wall clock anchors the stored bounds; the boottime stamp is the
+            # same instant on the clock a wall-clock step cannot move, so an
+            # interval whose endpoints a step inverts still has a measured span.
+            self.open_interval = {
+                "started_at": _utcnow(),
+                "started_boot": _interval_clock(),
+                "wh": 0.0,
+            }
             baseline = f"{float(current):.0f} Wh" if _is_number(current) else "unknown"
             log(f"interval opened: baseline {baseline}")
         self.open_interval["wh"] += delta
@@ -607,8 +614,19 @@ class StatusTracker:
 
         Returns the just-closed interval as a one-item list, or an empty list
         when there is nothing trustworthy to store: an interval with no energy
-        (a zero-wh plug-in, or a restart whose counters never grew) and one
-        whose endpoints do not span time are dropped rather than fabricated.
+        (a zero-wh plug-in, or a restart whose counters never grew) is dropped
+        rather than fabricated.
+
+        An interval whose wall-clock endpoints do not span time — the clock
+        stepped backwards between open and close — is *not* dropped while its
+        boottime stamps measure a duration: the duration is observed, so only
+        the wall-clock anchor is inferred and ``ended_at`` becomes
+        ``started_at + measured``. Storing it keeps measured energy in a priced
+        session, and the derivation is logged distinctly from a corrupt entry so
+        the journal shows the clock moved rather than the data being bad. With
+        no measured span (a missing/non-numeric stamp, or a non-advancing one)
+        there is nothing to anchor the interval to: it is dropped and logged.
+        In both cases the stored shape stays ``{started_at, ended_at, wh}``.
         """
         interval = self.open_interval
         self.open_interval = None
@@ -619,8 +637,26 @@ class StatusTracker:
         if not (_is_number(wh) and wh > 0):
             return []
         ended_at = _utcnow()
-        if not isinstance(started_at, datetime) or ended_at <= started_at:
+        if not isinstance(started_at, datetime):
             return []
+        closed_boot = _interval_clock()
+        if ended_at <= started_at:
+            started_boot = interval.get("started_boot")
+            span = None
+            if _is_number(started_boot) and _is_number(closed_boot):
+                span = float(closed_boot) - float(started_boot)
+            if span is None or span <= 0:
+                log(
+                    f"interval dropped: wall clock stepped backwards and no "
+                    f"measured span ({float(wh):.0f} Wh)"
+                )
+                return []
+            step = (started_at - ended_at).total_seconds()
+            ended_at = started_at + timedelta(seconds=span)
+            log(
+                f"interval span derived: wall clock moved back {step:g}s; "
+                f"{span:g}s measured on CLOCK_BOOTTIME ({float(wh):.0f} Wh)"
+            )
         return [{"started_at": started_at, "ended_at": ended_at, "wh": float(wh)}]
 
     def _latest_session(self):
@@ -846,7 +882,13 @@ def _merge_session(candidate, record, vehicle_connected):
 
 
 def _usable_interval(entry):
-    """One stored interval as {started_at, ended_at, wh}, or None if unusable."""
+    """One stored interval as {started_at, ended_at, wh}, or None if unusable.
+
+    A stored document carries no boottime sample (the shape has no room for
+    one), so a reversed pair read back from Firestore cannot be re-anchored and
+    is dropped — the bridge only derives a span from the live tracker, before
+    the entry is written. Callers log the drop.
+    """
     if not isinstance(entry, dict):
         return None
     started_at = entry.get("started_at")
