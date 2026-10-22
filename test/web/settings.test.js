@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   DAY_PRESETS,
   BLOCKED_SAVE_MESSAGE,
+  LOADING_MESSAGE,
   OFFLINE_MESSAGE,
   RATE_CAP_MESSAGE,
   RATE_CAP_REMEDY,
@@ -32,6 +33,7 @@ import {
   dayTypesForWeek,
   daysForPreset,
   defaultRateRow,
+  firstLoadFields,
   flatToScheduleRow,
   formatPreviewWhen,
   isAllDayWindow,
@@ -458,6 +460,101 @@ test('a rate-only save keeps the stored charger address in the payload', () => {
   // Clearing the field is the only way the key leaves the document.
   const cleared = validateSettings({ ...fields, chargerHost: '' }).values;
   assert.equal('charger_host' in settingsPayload(cleared), false);
+});
+
+test('Save is held until the first settings snapshot has landed', () => {
+  const confirmed = { rate: 0.31, currency: 'USD', charger_host: '192.168.1.50' };
+
+  // Nothing has been read yet, so the blank form is not a baseline: the
+  // whole-document write would replace `settings/current` with the owner's
+  // typing and delete the stored rate plan and charger address.
+  const typedBefore = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '' },
+    confirmed: null,
+    loaded: false,
+  });
+  assert.equal(typedBefore.text, LOADING_MESSAGE);
+  assert.equal(typedBefore.kind, 'warn');
+  assert.equal(typedBefore.dirty, true);
+  assert.equal(typedBefore.canSave, false);
+
+  // An untouched blank form offers no write either — the button must never
+  // suggest the save that the submit gate would refuse.
+  const untouched = settingsSaveState({ loaded: false });
+  assert.equal(untouched.canSave, false);
+  assert.equal(untouched.text, LOADING_MESSAGE);
+
+  // Once the snapshot has landed the state machine behaves exactly as before,
+  // and `loaded` defaults to true so every other caller keeps that contract.
+  const landed = settingsSaveState({
+    draft: { rate: '0.4', currency: 'USD', rates: [], chargerHost: '192.168.1.50' },
+    confirmed,
+    loaded: true,
+  });
+  assert.equal(landed.text, 'Unsaved changes.');
+  assert.equal(landed.canSave, true);
+  assert.equal(
+    settingsSaveState({ draft: { rate: '0.4', currency: 'USD' }, confirmed }).canSave,
+    true,
+  );
+  assert.equal(
+    settingsSaveState({ draft: settingsFields(confirmed), confirmed, loaded: true }).text,
+    '',
+  );
+});
+
+test('a draft typed before the document loads is completed from the snapshot', () => {
+  const night = {
+    id: 'night',
+    rate: 0.12,
+    days: [0, 1, 2, 3, 4],
+    start: '22:00',
+    end: '06:00',
+    months: null,
+  };
+  const stored = { rate: 0.31, currency: 'USD', rates: [night], charger_host: '192.168.1.50' };
+
+  // An untouched form adopts the stored document, exactly like a normal load.
+  assert.deepEqual(firstLoadFields(settingsFields(null), stored), settingsFields(stored));
+
+  // The owner typed a rate and currency into the blank form: both are kept, and
+  // the rows and charger address they never saw are adopted from the snapshot.
+  const typed = firstLoadFields(
+    { rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' },
+    stored,
+  );
+  assert.equal(typed.rate, '0.4');
+  assert.equal(typed.currency, 'GBP');
+  assert.equal(typed.chargerHost, '192.168.1.50');
+  assert.deepEqual(typed.rates, settingsFields(stored).rates);
+
+  // A plan built before the load is kept rather than replaced.
+  const ownRows = [night, { ...night, id: 'day', days: [6], rate: 0.2 }];
+  assert.deepEqual(
+    firstLoadFields({ rate: '0.4', currency: 'USD', rates: ownRows, chargerHost: '' }, stored)
+      .rates,
+    ownRows,
+  );
+
+  // The completed draft is a safe whole-document payload: the stored schedule
+  // and address survive a save that only changed the price.
+  const payload = settingsPayload(validateSettings(typed).values);
+  assert.equal(payload.rate, 0.4);
+  assert.equal(payload.currency, 'GBP');
+  assert.equal(payload.charger_host, '192.168.1.50');
+  assert.equal(payload.rates.length, 1);
+  assert.equal(payload.rates[0].rate, 0.12);
+
+  // A snapshot that reports no document has nothing to adopt; the typing stays.
+  assert.deepEqual(
+    firstLoadFields({ rate: '0.4', currency: 'GBP', rates: [], chargerHost: '' }, null),
+    {
+      rate: '0.4',
+      currency: 'GBP',
+      rates: [],
+      chargerHost: '',
+    },
+  );
 });
 
 test('the stored rate schedule survives normalization and reaches the form fields', () => {

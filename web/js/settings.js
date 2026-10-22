@@ -196,6 +196,26 @@ export function settingsFields(settings) {
     : { rate: '', currency: '', rates: [], chargerHost: '' };
 }
 
+// The form before the first settings snapshot is blank apart from whatever the
+// owner typed into it, so it carries none of the stored values that a
+// whole-document write must re-send. Hydrating it as-is would discard that
+// typing; adopting it as-is would delete the stored rate plan and charger
+// address. Fill the blanks from the snapshot and keep what the owner typed.
+export function firstLoadFields(draft, stored) {
+  const fields = settingsFields(stored);
+  const kept = (value) => typeof value === 'string' && value.trim() !== '';
+  const rows = Array.isArray(draft && draft.rates) ? draft.rates : [];
+  // Stored values arrive in the stored shape; a draft row the owner typed is
+  // already an editor row. writeFields normalizes both, and rateRowFields maps
+  // an editor row to itself, so the mix is inert.
+  return {
+    rate: kept(draft && draft.rate) ? draft.rate : fields.rate,
+    currency: kept(draft && draft.currency) ? draft.currency : fields.currency,
+    chargerHost: kept(draft && draft.chargerHost) ? draft.chargerHost : fields.chargerHost,
+    rates: rows.length ? rows : fields.rates,
+  };
+}
+
 export const MONTH_NAMES = [
   'January',
   'February',
@@ -1886,6 +1906,9 @@ function settingsEqual(a, b) {
 
 export const OFFLINE_MESSAGE = 'You’re offline — reconnect to save.';
 export const WAITING_MESSAGE = 'Waiting for the server — this change may not be saved yet.';
+// No settings document has been read yet, so the blank form is not a baseline:
+// the whole-document write would replace the stored plan with nothing.
+export const LOADING_MESSAGE = 'Loading your settings…';
 export const SAVE_FAILED_MESSAGE =
   'Couldn’t save — the previous settings are back. Check your connection and try again.';
 // A first-ever save has no previous document to restore, so the generic copy
@@ -1898,6 +1921,7 @@ export const SAVE_FAILED_FIRST_MESSAGE = 'Couldn’t save — try again.';
 export function settingsSaveState({
   draft = { rate: '', currency: '', rates: [] },
   confirmed = null,
+  loaded = true,
   saving = false,
   waiting = false,
   saved = false,
@@ -1924,11 +1948,24 @@ export function settingsSaveState({
   } else if (saved && !dirty) {
     text = 'Saved.';
     kind = 'ok';
+  } else if (!loaded) {
+    // Hold the save path, don't just describe it: writing this form now would
+    // replace the whole document with fields that only the owner's typing has
+    // filled, deleting the stored rate plan and charger address.
+    text = LOADING_MESSAGE;
+    kind = 'warn';
   } else if (dirty) {
     text = 'Unsaved changes.';
     kind = 'warn';
   }
-  return { dirty, saved: saved && !dirty && !error, text, kind, busy, canSave: dirty && !saving };
+  return {
+    dirty,
+    saved: saved && !dirty && !error,
+    text,
+    kind,
+    busy,
+    canSave: loaded && dirty && !saving,
+  };
 }
 
 // Decide the post-settlement form state for one save. `draft` is what is in the
