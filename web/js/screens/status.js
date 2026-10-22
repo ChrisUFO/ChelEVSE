@@ -371,6 +371,7 @@ export function leaveStatus() {
   status = null;
   schedule = null;
   settings = null;
+  showTemperature = true;
   ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;

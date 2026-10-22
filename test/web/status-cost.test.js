@@ -56,7 +56,7 @@ globalThis.document = {
 // fixtures mean the same thing here as in cost.test.js.
 process.env.TZ = 'America/Denver';
 
-const { showStatus, showSettings } = await import('../../web/js/screens/status.js');
+const { showStatus, showSettings, leaveStatus } = await import('../../web/js/screens/status.js');
 
 function at(year, month, day, hours, minutes) {
   const ms = new Date(year, month - 1, day, hours, minutes).getTime();
@@ -328,5 +328,18 @@ test('the temperature stat hides on show_temperature false and stays live', () =
   // A corrupt value never hides the stat (normalizeSettings's absent = visible
   // contract, applied by the screen's own read of the raw document).
   showSettings({ ...NIGHTLY, show_temperature: 'false' });
+  assert.equal(tempHidden(), false);
+});
+
+// leaveStatus resets the screen's own settings-derived state, so the next
+// account's session starts from the visible default rather than carrying the
+// previous one's hidden tile until its first settings snapshot lands.
+test('leaving the status screen restores the temperature stat to visible', () => {
+  const tempHidden = () => element('fig-temp-stat').hidden;
+
+  showSettings({ ...NIGHTLY, show_temperature: false });
+  assert.equal(tempHidden(), true);
+
+  leaveStatus();
   assert.equal(tempHidden(), false);
 });
