@@ -6,7 +6,10 @@ window boundary, dedupe interval and tripwire crossing is tested at exact
 simulated times.
 """
 
+import inspect
 import sys
+import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,9 +17,16 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import requests  # noqa: E402
+
 import bridge  # noqa: E402
 from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
-from test_mqtt import _RecordingNotifier, _StopAfter, status_payload  # noqa: E402
+from test_mqtt import (  # noqa: E402
+    _RecordingNotifier,
+    _StopAfter,
+    _StubMqtt,
+    status_payload,
+)
 from test_write_policy import _Clock  # noqa: E402
 
 try:
@@ -530,66 +540,182 @@ class SiteQuotaFailureTests(unittest.TestCase):
         self.assertEqual(self.counter.snapshot()[0], 0)
 
 
+class _TickSensitiveStop(_StopAfter):
+    """A stop stand-in that exercises its wait interval arithmetically.
+
+    ``threading.Event.wait(timeout)`` on an unset event computes
+    ``now + timeout`` — the operation that raised TypeError live when the
+    write counter was bound into ``tick``. The stock ``_StopAfter`` ignores
+    the interval entirely and would mask exactly that.
+    """
+
+    def wait(self, interval):
+        time.monotonic() + interval  # TypeError unless the interval is a number
+        return super().wait(interval)
+
+
+def capture_run_wiring():
+    """Run ``run()`` with every thread start captured, none executed.
+
+    Returns ``(threads, command)``: each thread carries ``target`` and
+    ``bound`` — the target's REAL signature bound with the exact args and
+    kwargs ``run()`` passed, defaults applied — and ``command`` is the same
+    binding for the directly called ``command_loop``. A mis-shaped call
+    raises TypeError here, and a mis-mapped one shows up in the bound
+    arguments, which is what the wiring tests assert.
+    """
+    threads = []
+    command = {}
+    real_command_loop = bridge.command_loop
+
+    class RecordingThread:
+        def __init__(self, target, args=(), kwargs=None, **_thread_options):
+            self.target = target
+            self.bound = inspect.signature(target).bind(*args, **(kwargs or {}))
+            self.bound.apply_defaults()
+            threads.append(self)
+
+        def start(self):
+            pass
+
+    def record_command(*args, **kwargs):
+        bound = inspect.signature(real_command_loop).bind(*args, **kwargs)
+        bound.apply_defaults()
+        command["bound"] = bound
+
+    with mock.patch.object(
+        bridge.threading, "Thread", RecordingThread
+    ), mock.patch.object(bridge, "command_loop", side_effect=record_command):
+        bridge.run(
+            FakeDB(),
+            bridge.ChargerHost("charger"),
+            None,
+            (10, 60, 60, 300, 5, 60),
+            object(),
+            bridge.WatchdogConfig(enabled=False),
+        )
+    return threads, command["bound"]
+
+
 class RunWiringTests(unittest.TestCase):
-    """run() threads one counter through every write site."""
+    """run() threads one counter through every write site — bound, not positional.
+
+    The shipped form of this suite asserted ``args[-1] is counter``: true
+    positionally while that positional actually landed in ``tick``, so the
+    mis-binding passed CI. Here every loop call is bound against its real
+    signature and the parameter each value lands in is asserted.
+    """
+
+    def setUp(self):
+        self.threads, self.command = capture_run_wiring()
+
+    def loops(self):
+        return {t.target.__name__: t.bound.arguments for t in self.threads}
+
+    def shared_counter(self):
+        return self.loops()["status_loop"]["sink"].counter
+
+    def test_run_starts_exactly_the_four_poller_threads(self):
+        self.assertEqual(
+            set(self.loops()),
+            {"status_loop", "config_loop", "settings_loop", "schedule_loop"},
+        )
+        self.assertEqual(self.command.arguments["interval"], 5)
+
+    def test_config_counter_binds_by_name_and_tick_stays_a_number(self):
+        config = self.loops()["config_loop"]
+        # The shipped bug: the 9th positional landed in tick (a WriteCounter
+        # where seconds belong) and counter fell to its None default.
+        self.assertIsInstance(config["tick"], (int, float))
+        self.assertIs(config["counter"], self.shared_counter())
 
     def test_one_counter_reaches_tracker_notifier_watchdog_and_loops(self):
-        db = FakeDB()
-        loops = {}
-        holder = {}
+        status = self.loops()["status_loop"]
+        shared = self.shared_counter()
+        self.assertIsInstance(shared, bridge.WriteCounter)
+        self.assertIs(status["tracker"].counter, shared)
+        self.assertIs(status["notifier"].counter, shared)
+        self.assertIs(status["watchdog"].counter, shared)
+        self.assertIs(self.loops()["config_loop"]["counter"], shared)
+        self.assertIs(self.command.arguments["counter"], shared)
+        self.assertIs(self.command.arguments["sink"], status["sink"])
 
-        def spy(name):
-            def record(*args, **kwargs):
-                loops[name] = args
+    def test_each_loop_binds_its_expected_parameters(self):
+        loops = self.loops()
+        self.assertEqual(
+            (
+                loops["status_loop"]["interval"],
+                loops["config_loop"]["interval"],
+                loops["schedule_loop"]["interval"],
+                loops["settings_loop"]["interval"],
+            ),
+            (10, 60, 60, 60),
+        )
+        self.assertEqual(
+            loops["config_loop"]["initial_delay"], bridge.CONFIG_INITIAL_DELAY
+        )
+        self.assertIsNone(loops["config_loop"]["mqtt"])
+        self.assertIsNone(loops["config_loop"]["config_event"])
+        self.assertEqual(loops["schedule_loop"]["reconcile_interval"], 300)
+        self.assertEqual(
+            loops["schedule_loop"]["initial_delay"], bridge.SCHEDULE_INITIAL_DELAY
+        )
+        self.assertIs(loops["schedule_loop"]["sink"], loops["status_loop"]["sink"])
+        self.assertEqual(
+            loops["settings_loop"]["bootstrap"], bridge.DEFAULT_CHARGER_HOST
+        )
+        self.assertIsNone(self.command.arguments["source"])
 
-            return record
 
-        def status_loop_spy(
-            db,
-            host,
-            auth,
-            transport,
-            interval,
-            tracker,
-            notifier,
-            watchdog,
-            mqtt=None,
-            reconcile_interval=None,
-            sink=None,
+class ConfigLoopOutageSurvivalTests(unittest.TestCase):
+    """The live PR #107 crash as a smoke: charger outage -> config
+    ReadTimeout -> bounded retry -> the MQTT-mode tail ``_stop.wait(tick)``.
+
+    run() bound the counter into ``tick``, so the first failed sync ended
+    the config thread in TypeError (journal, 02:12 MDT). The loop here runs
+    with exactly the ``tick`` and ``counter`` ``run()`` wires.
+    """
+
+    def test_a_failed_first_mqtt_sync_survives_the_tail_wait(self):
+        logs = []
+        calls = []
+
+        class UnreachableSession:
+            def get(self, _url, **_kwargs):
+                calls.append(1)
+                raise requests.ReadTimeout("charger unreachable")
+
+        threads, _command = capture_run_wiring()
+        (config,) = [t for t in threads if t.target is bridge.config_loop]
+        tick = config.bound.arguments["tick"]
+        counter = config.bound.arguments["counter"]
+        self.assertIsInstance(tick, (int, float))
+
+        event = threading.Event()
+        event.set()  # a config_version arrived: the sync is owed now
+        with mock.patch.object(bridge, "log", logs.append), mock.patch.object(
+            bridge, "_stop", _TickSensitiveStop(1)
         ):
-            loops["status"] = ()
-            holder["sink"] = sink.counter
-            holder["notifier"] = notifier.counter
-            holder["tracker"] = tracker.counter
-            holder["watchdog"] = watchdog.counter
-
-        with mock.patch.object(
-            bridge, "status_loop", side_effect=status_loop_spy
-        ), mock.patch.object(
-            bridge, "config_loop", side_effect=spy("config")
-        ), mock.patch.object(
-            bridge, "settings_loop", side_effect=spy("settings")
-        ), mock.patch.object(
-            bridge, "schedule_loop", side_effect=spy("schedule")
-        ), mock.patch.object(
-            bridge, "command_loop", side_effect=spy("command")
-        ):
-            bridge.run(
-                db,
+            # Returning normally is the assertion: the failure cycle,
+            # tail wait included, completes instead of raising TypeError.
+            bridge.config_loop(
+                FakeDB(),
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5, 60),
-                object(),
-                bridge.WatchdogConfig(enabled=False),
+                bridge.ChargerTransport(UnreachableSession()),
+                60,
+                0,
+                _StubMqtt(),
+                event,
+                tick=tick,
+                counter=counter,
             )
-        sink_counter = holder["sink"]
-        self.assertIsInstance(sink_counter, bridge.WriteCounter)
-        # One instance, shared by every write site run() builds or calls.
-        self.assertIs(holder["notifier"], sink_counter)
-        self.assertIs(holder["tracker"], sink_counter)
-        self.assertIs(holder["watchdog"], sink_counter)
-        self.assertIs(loops["config"][-1], sink_counter)
-        self.assertIs(loops["command"][-1], sink_counter)
+        self.assertEqual(len(calls), 1)  # one fetch, then the retry backoff
+        self.assertFalse(event.is_set())  # the trigger was consumed
+        self.assertTrue(
+            any("config sync failed (ReadTimeout)" in line for line in logs)
+        )
+        self.assertEqual(counter.snapshot()[0], 0)  # no write happened to count
 
 
 if __name__ == "__main__":

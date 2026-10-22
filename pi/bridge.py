@@ -4386,9 +4386,13 @@ def run(
         CONFIG_INITIAL_DELAY,
         source,
         config_event,
-        counter,
     )
-    threading.Thread(target=config_loop, args=config_args, daemon=True).start()
+    # ``counter`` binds by keyword: it follows defaulted parameters (``tick``
+    # among them), and the positional form once landed it in ``tick`` — a
+    # WriteCounter where seconds belong, fatal to the MQTT-mode tail wait.
+    threading.Thread(
+        target=config_loop, args=config_args, kwargs={"counter": counter}, daemon=True
+    ).start()
     settings_args = (db, host, bootstrap, settings_interval)
     threading.Thread(target=settings_loop, args=settings_args, daemon=True).start()
     schedule_args = (
