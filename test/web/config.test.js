@@ -135,14 +135,14 @@ test('rawConfigJson keeps every content field, redactions, and readable timestam
   assert.match(raw, /"wifi_serial": "B0A732FDCF04"/);
   assert.match(raw, /"nested": \{/);
   assert.match(raw, /"at": "2026-10-18T00:00:00.000Z"/);
-  // The heading already shows "Updated HH:MM"; repeating the poll timestamp in
-  // the snapshot would make the text change on a poll the screen skips.
+  // The heading already shows this timestamp; repeating it in the snapshot
+  // would make the text change on a replace the screen skips rebuilding.
   assert.doesNotMatch(raw, /updated_at/);
   assert.equal(rawConfigJson(null), '{}');
   assert.equal(rawConfigJson('nope'), '{}');
 });
 
-test('configSignature ignores the poll timestamp and key order', () => {
+test('configSignature ignores updated_at and key order', () => {
   const first = {
     hostname: 'chelevse-driveway',
     max_current_soft: 32,
@@ -155,7 +155,7 @@ test('configSignature ignores the poll timestamp and key order', () => {
     max_current_soft: 32,
     hostname: 'chelevse-driveway',
   };
-  // Same charger data, new poll timestamp and property order: one signature, so
+  // Same charger data, a new `updated_at` and property order: one signature, so
   // the screen can leave the panel and any text selection alone.
   assert.equal(configSignature(first), configSignature(polled));
   assert.notEqual(configSignature(first), '');
@@ -183,4 +183,79 @@ test('configSignature reports no signature for unusable documents', () => {
   // An empty document is a valid signature; the screen renders its empty state.
   assert.equal(configSignature({}), '{}');
   assert.equal(configSignature({ updated_at: 1 }), '{}');
+});
+
+// ---------- screen rendering ----------
+
+// The Config screen renders into the live DOM. Give it the smallest document it
+// needs — one stub element per id — and import the module afterwards; every
+// lookup is deferred to render time (same pattern as status-pulse.test.js).
+function stubElement() {
+  return {
+    hidden: false,
+    textContent: '',
+    dataset: {},
+    children: [],
+    replaceChildren(...nodes) {
+      this.children = nodes;
+      this.textContent = nodes.map((node) => node.textContent || '').join('');
+    },
+    append(...nodes) {
+      this.children.push(...nodes);
+      this.textContent += nodes.map((node) => node.textContent || '').join('');
+    },
+    setAttribute() {},
+    addEventListener() {},
+  };
+}
+
+const elements = new Map();
+const element = (id) => {
+  let node = elements.get(id);
+  if (!node) {
+    node = stubElement();
+    elements.set(id, node);
+  }
+  return node;
+};
+
+globalThis.document = {
+  getElementById: (id) => element(id),
+  createElement: () => stubElement(),
+};
+
+const { showConfigData } = await import('../../web/js/screens/config.js');
+
+const clock = (iso) => ({ toDate: () => new Date(iso) });
+const heading = () => element('config-updated').textContent;
+const panelNodes = () => element('config-sections').children;
+const asHeadingTime = (date) =>
+  `Synced ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+test("the heading says Synced HH:MM — the config's last change, not a poll", () => {
+  // Under MQTT the bridge replaces status/config only when config_version
+  // changes, so updated_at marks the last change (#99); the time itself
+  // follows the viewer's locale, like the status screen's timestamps.
+  const when = new Date('2026-10-22T17:01:00');
+  showConfigData({ hostname: 'garage', updated_at: { toDate: () => when } });
+  assert.equal(heading(), asHeadingTime(when));
+  // No usable timestamp: no heading, no throw.
+  showConfigData({ hostname: 'garage' });
+  assert.equal(heading(), '');
+});
+
+test('a replace that only moves updated_at refreshes the heading, not the panel', () => {
+  // The skip-rebuild contract: unchanged content with a new timestamp (an
+  // HTTP-mode poll, an MQTT reconnect republish) moves only the heading, so a
+  // text selection in the panel or Raw JSON survives; a real change rebuilds.
+  showConfigData({ hostname: 'garage', updated_at: clock('2026-10-22T17:01:00') });
+  const built = panelNodes();
+  assert.ok(built.length > 0);
+
+  showConfigData({ hostname: 'garage', updated_at: clock('2026-10-22T18:02:00') });
+  assert.equal(panelNodes(), built, 'an unchanged snapshot must not rebuild the panel');
+  assert.equal(heading(), asHeadingTime(new Date('2026-10-22T18:02:00')));
+
+  showConfigData({ hostname: 'driveway', updated_at: clock('2026-10-22T18:02:00') });
+  assert.notEqual(panelNodes(), built, 'a changed value must rebuild the panel');
 });

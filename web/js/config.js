@@ -169,9 +169,13 @@ export function buildConfigSections(config) {
 }
 
 // Raw JSON is the complete content view, including keys the curated map does not
-// know. The poll timestamp is deliberately absent: the heading already says
-// "Updated HH:MM", and leaving `updated_at` out keeps this snapshot stable across
-// a timestamp-only poll, so the screen's skip-unchanged check stays honest.
+// know. `updated_at` is deliberately absent: under MQTT the bridge replaces
+// `status/config` only when the charger's `config_version` changes, so that
+// timestamp marks the config's last change (the heading's "Synced HH:MM"), not a
+// fetch. Leaving it out keeps this snapshot stable when a replace lands with
+// only the timestamp moved, so the screen's skip-unchanged check stays honest.
+// A genuine "last polled" indicator would belong on the status write, which
+// already carries `updated_at` — not on this rarely-changing document.
 // Firestore timestamps become ISO strings so the panel stays readable; redacted
 // values are the bridge's own "***" sentinel and are printed unchanged.
 function plainValue(value) {
@@ -195,8 +199,9 @@ export function rawConfigJson(config) {
   if (!config || typeof config !== 'object') return '{}';
   const content = {};
   for (const [key, value] of Object.entries(config)) {
-    // The heading shows the poll time; repeating it here would make the JSON
-    // text change on a poll the screen deliberately skips rebuilding.
+    // The heading already shows this timestamp; repeating it here would make
+    // the JSON text change on a replace the screen deliberately skips
+    // rebuilding.
     if (key !== 'updated_at') content[key] = value;
   }
   try {
@@ -218,10 +223,11 @@ function sortKeys(value) {
   return value;
 }
 
-// Identity of what the Config screen renders. The bridge rewrites `updated_at`
-// on every poll without changing anything else, and that timestamp is the only
-// field that reaches the screen outside the snapshot itself — so excluding it
-// lets the screen skip a rebuild that would collapse an in-progress selection.
+// Identity of what the Config screen renders. A `status/config` replace can
+// move only `updated_at` (an HTTP-mode poll, an MQTT reconnect republish), and
+// that timestamp is the only field that reaches the screen outside the snapshot
+// content — so excluding it lets the screen skip a rebuild that would collapse
+// an in-progress selection.
 // Returns '' when no stable signature can be produced; callers must render.
 export function configSignature(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) return '';

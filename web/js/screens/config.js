@@ -8,8 +8,8 @@ import { buildConfigSections, configSignature, rawConfigJson } from '../config.j
 let config = null;
 let configLoaded = false;
 let configFailed = false;
-// Signature of the snapshot currently on screen, so a poll that only bumps
-// `updated_at` refreshes the timestamp instead of rebuilding the panel (which
+// Signature of the snapshot currently on screen, so a replace that only bumps
+// `updated_at` refreshes the heading instead of rebuilding the panel (which
 // would collapse a text selection the user is copying).
 let renderedSignature = null;
 
@@ -20,7 +20,10 @@ function el(tag, className, text) {
   return node;
 }
 
-function updatedLabel(data) {
+// "Synced", not "Updated": under MQTT the bridge replaces `status/config` only
+// when the charger's `config_version` changes, so `updated_at` marks the
+// config's last change, not a fetch (issue #99).
+function syncedLabel(data) {
   const updated = data && data.updated_at;
   if (!updated || typeof updated.toDate !== 'function') return '';
   try {
@@ -28,7 +31,7 @@ function updatedLabel(data) {
       hour: '2-digit',
       minute: '2-digit',
     });
-    return `Updated ${time}`;
+    return `Synced ${time}`;
   } catch {
     return '';
   }
@@ -43,7 +46,7 @@ function render() {
 
   loading.hidden = configLoaded || configFailed;
   error.hidden = !configFailed;
-  setText($('config-updated'), config ? updatedLabel(config) : '');
+  setText($('config-updated'), config ? syncedLabel(config) : '');
 
   if (configFailed || !configLoaded) {
     renderedSignature = null;
