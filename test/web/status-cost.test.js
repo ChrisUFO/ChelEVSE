@@ -343,3 +343,150 @@ test('leaving the status screen restores the temperature stat to visible', () =>
   leaveStatus();
   assert.equal(tempHidden(), false);
 });
+
+// ---------- cold-open adoption (the bridge's charging_stopped_at, #122) ----------
+
+// A plugged-in-complete stop write as the bridge issues it: charging ended,
+// the vehicle connected, `charging_stopped_at` frozen at the stop instant.
+function stoppedSnapshot(overrides = {}) {
+  return snapshot({
+    state: 2,
+    state_label: 'ready',
+    updated_at: at(2026, 1, 5, 6, 30),
+    elapsed: 3600,
+    session_energy: 1000,
+    charging_stopped_at: at(2026, 1, 5, 6, 30),
+    ...overrides,
+  });
+}
+
+// Each cold-open test starts from a left screen: no settings, no anchor —
+// exactly the reload/sign-in the stamp exists for.
+test('a cold open shows the frozen figure from the bridge stamp', () => {
+  leaveStatus();
+  showSettings(NIGHTLY);
+  showStatus(stoppedSnapshot());
+  // [05:30, 06:30] straddles the off-peak end: the figure a page open at
+  // the stop would have frozen.
+  assert.equal(cost(), 'GBP 0.20');
+  // Later polls with the same stamp — idle heartbeats whose elapsed grew
+  // with the pause — must not re-adopt: the stretched window would
+  // re-price the same energy to GBP 0.13.
+  showStatus(
+    stoppedSnapshot({
+      updated_at: at(2026, 1, 5, 14, 30),
+      elapsed: 8 * 3600,
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.20');
+  // The offline marker keeps the adopted figure, never re-pricing it.
+  showStatus(
+    stoppedSnapshot({
+      charger_online: false,
+      updated_at: at(2026, 1, 5, 15, 0),
+      elapsed: 8.5 * 3600,
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.20');
+});
+
+test('a cold open without the stamp keeps today’s hide', () => {
+  leaveStatus();
+  showSettings(NIGHTLY);
+  // An older or pre-deploy bridge: no field, no figure — exactly the
+  // pre-#122 behaviour for a paused session the page never saw charging.
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 8, 30),
+      elapsed: 3 * 3600,
+      session_energy: 1000,
+    }),
+  );
+  assert.equal(cost(), '—');
+  // A malformed stamp is as good as none.
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 8, 45),
+      elapsed: 3 * 3600,
+      session_energy: 1000,
+      charging_stopped_at: null,
+    }),
+  );
+  assert.equal(cost(), '—');
+});
+
+test('a captured anchor outranks the stamp across a witnessed stop', () => {
+  leaveStatus();
+  showSettings(NIGHTLY);
+  // The page is open for this one: the charging write captures its own
+  // anchor (05:30, elapsed 3600 → GBP 0.10 live).
+  showStatus(snapshot({ updated_at: at(2026, 1, 6, 5, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.10');
+  // The stop write carries the stamp AND a pause-grown elapsed; the
+  // captured anchor wins, so the figure stays 0.10 where adopting the
+  // stamped pair would re-price to GBP 0.13.
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 6, 8, 30),
+      elapsed: 3 * 3600,
+      session_energy: 1000,
+      charging_stopped_at: at(2026, 1, 6, 6, 30),
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.10');
+});
+
+test('a new charge after adoption goes live and its stop freezes fresh', () => {
+  leaveStatus();
+  showSettings(NIGHTLY);
+  showStatus(stoppedSnapshot());
+  assert.equal(cost(), 'GBP 0.20');
+  // The next plug-in charges: the live window takes over from its own
+  // write, stamp or no stamp.
+  showStatus(snapshot({ updated_at: at(2026, 1, 6, 5, 30), elapsed: 600, session_energy: 1500 }));
+  assert.equal(cost(), 'GBP 0.15');
+  // Its stop re-stamps: the frozen figure is this session's, not the old
+  // adopted one (GBP 0.20) nor a stretched re-adoption (GBP 0.20).
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 6, 8, 30),
+      elapsed: 3 * 3600,
+      session_energy: 1500,
+      charging_stopped_at: at(2026, 1, 6, 6, 30),
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.15');
+});
+
+test('a session reset hides the adopted figure', () => {
+  leaveStatus();
+  showSettings(NIGHTLY);
+  showStatus(stoppedSnapshot());
+  assert.equal(cost(), 'GBP 0.20');
+  // Counters zeroed (the vehicle left): the energy gate beats the stamp —
+  // even one that has not been cleared yet — and the tile hides.
+  showStatus(
+    stoppedSnapshot({
+      updated_at: at(2026, 1, 5, 9, 0),
+      elapsed: 0,
+      session_energy: 0,
+    }),
+  );
+  assert.equal(cost(), '—');
+  // A later stamped snapshot of a *fresh* session adopts its own stamp.
+  showStatus(
+    stoppedSnapshot({
+      updated_at: at(2026, 1, 6, 6, 35),
+      charging_stopped_at: at(2026, 1, 6, 6, 30),
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.20');
+});
