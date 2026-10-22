@@ -137,6 +137,14 @@ const submitForm = async () => {
   }
 };
 
+// The owner's toggle: the state lands on the checkbox and the screen's own
+// change listener recomputes the draft (readFields()).
+const toggle = (id, checked) => {
+  const input = element(id);
+  input.checked = checked;
+  for (const listener of input.listeners.get('change') || []) listener();
+};
+
 const feedbackText = () => element('settings-feedback').textContent;
 
 // A dirty edit clears a shown error only when the recomputed draft is still
@@ -219,4 +227,56 @@ test('a stored rate row survives the same rate-only path', async () => {
   // Clean again only if the draft still carries the row: dropping
   // `rates: draftRates` from `readFields()` leaves the form forever dirty.
   await editRateBackToStored();
+});
+
+// The temperature switch (issue #117) rides the same #102 carry-through as the
+// charger address: the snapshot seeds the checkbox, the draft re-sends it, and a
+// rate-only save can no longer delete a stored hidden preference.
+test('a rate-only save re-sends a stored hidden temperature through the real screen', async () => {
+  resetSettings();
+  showSettingsData({ ...storedDoc, show_temperature: false });
+
+  // The snapshot seeded the switch off (writeFields) and the loaded form is
+  // clean — the seeded checkbox already matches the stored document.
+  assert.equal(element('setting-show-temperature').checked, false);
+  assert.equal(feedbackText(), '');
+
+  // The owner edits only the rate, through the screen's own input listener.
+  type('setting-rate', '0.4');
+  assert.equal(feedbackText(), 'Unsaved changes.');
+
+  // The real submit gate over the real draft: offline refusal proves the draft
+  // passed validation with the checkbox carried into it.
+  navigator.onLine = false;
+  await submitForm();
+  assert.equal(feedbackText(), OFFLINE_MESSAGE);
+  navigator.onLine = true;
+
+  // Returning to the stored rate leaves the form clean: the draft comparison
+  // says the submit values equal the stored document — temperature toggle
+  // included — so the whole-document write re-sends the stored false. Dropping
+  // `showTemperature` from `readFields()` (or its seed from `writeFields()`)
+  // flips this to "Unsaved changes."
+  await editRateBackToStored();
+
+  // The toggle itself is a real edit, and toggling back is clean again.
+  toggle('setting-show-temperature', true);
+  assert.equal(feedbackText(), 'Unsaved changes.');
+  toggle('setting-show-temperature', false);
+  assert.equal(feedbackText(), '');
+});
+
+test('the temperature switch is seeded visible for a stored document without it', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+
+  // Absent means visible: the checkbox seeds checked and the form is clean.
+  assert.equal(element('setting-show-temperature').checked, true);
+  assert.equal(feedbackText(), '');
+
+  // Hiding through the switch is the same unsaved edit as typing a new rate.
+  toggle('setting-show-temperature', false);
+  assert.equal(feedbackText(), 'Unsaved changes.');
+  toggle('setting-show-temperature', true);
+  assert.equal(feedbackText(), '');
 });

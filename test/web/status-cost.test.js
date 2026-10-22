@@ -294,3 +294,39 @@ test('the understates-cost marker sits under the figure, live and held', () => {
   assert.equal(cost(), 'GBP 0.30');
   assert.equal(sub().textContent, '');
 });
+
+// The Temperature stat's visibility follows settings/current.show_temperature
+// (issue #117): absent = visible, only an explicit false hides the whole tile —
+// average and T1–T3 — and the preference re-applies on every settings snapshot
+// and every status render, so a toggle saved anywhere lands without a reload.
+test('the temperature stat hides on show_temperature false and stays live', () => {
+  const tempHidden = () => element('fig-temp-stat').hidden;
+
+  // Visible by default: a document without the field renders today's page.
+  showSettings(NIGHTLY);
+  showStatus(snapshot({ temp_c: 21, temp1: 20, temp2: 22 }));
+  assert.equal(tempHidden(), false);
+
+  // A snapshot that hides it applies immediately, with no new status write.
+  showSettings({ ...NIGHTLY, show_temperature: false });
+  assert.equal(tempHidden(), true);
+
+  // Every status render re-applies the preference: fresh telemetry must not
+  // bring the tile back while it reads false.
+  showStatus(snapshot({ temp_c: 23, temp1: 22, temp2: 24 }));
+  assert.equal(tempHidden(), true);
+
+  // An explicit true shows it; removing the key (the visible save omits it)
+  // shows it too — both mean visible.
+  showSettings({ ...NIGHTLY, show_temperature: true });
+  assert.equal(tempHidden(), false);
+  showSettings({ ...NIGHTLY, show_temperature: false });
+  assert.equal(tempHidden(), true);
+  showSettings(NIGHTLY);
+  assert.equal(tempHidden(), false);
+
+  // A corrupt value never hides the stat (normalizeSettings's absent = visible
+  // contract, applied by the screen's own read of the raw document).
+  showSettings({ ...NIGHTLY, show_temperature: 'false' });
+  assert.equal(tempHidden(), false);
+});
