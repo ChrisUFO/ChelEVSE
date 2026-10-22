@@ -255,7 +255,7 @@ Any future editor (including #58) must preserve these semantics.
 
 ### Offline, service worker and push
 
-- `web/sw.js` is a plain service worker with no Firebase SDK. `CACHE` is currently `chelevse-v58`; `SHELL` lists every runtime `web/js/**` module plus the root assets. `test/web/sw-shell.test.js` fails if a module is missing, duplicated, or if `CACHE` is malformed.
+- `web/sw.js` is a plain service worker with no Firebase SDK. `CACHE` names the versioned precache; `SHELL` lists every runtime `web/js/**` module plus the root assets. `test/web/sw-shell.test.js` fails if a module is missing, duplicated, or if `CACHE` is malformed.
 - Fetch is cache-first for same-origin GETs, except `firebase-config.js`, which is deliberately network-only. Navigation falls back to `index.html`; other failures return 503. Cross-origin/Firebase requests always go to the network.
 - Install precaches the shell and `skipWaiting`; activate deletes old caches and `clients.claim`; the page reloads once on `controllerchange` only if a controller already existed. **Any shell change must bump `CACHE`**, or existing clients keep the old modules.
 - Firestore uses its persistent cache with a multi-tab manager and an in-memory fallback. A cold reload still needs the network for the SDK and `firebase-config.js`.

@@ -501,14 +501,16 @@ test('a session reset hides the adopted figure', () => {
   assert.equal(cost(), 'GBP 0.20');
 });
 
-test('a flat config ignores an adopted anchor entirely', () => {
+test('flat pricing is unaffected by the stop stamp', () => {
   leaveStatus();
   showSettings(FLAT);
   showStatus(stoppedSnapshot());
-  // The flat path prices energy x rate and opens no rate window, so the
-  // adopted anchor must never re-price it — a renderCost branch reorder
-  // that let the anchor in would show a windowed figure here, not the
-  // flat one.
+  // A cold-open stopped snapshot under a flat config still shows the flat
+  // figure. This pins that the adoption machinery leaves the flat render
+  // intact — not a renderCost branch reorder, which a schedule-free
+  // config cannot detect (every pricing path returns the same energy x
+  // rate figure; the schedule cold-open tests above are the load-bearing
+  // reorder guards).
   assert.equal(cost(), 'GBP 0.25');
   // Later polls with the same stamp and a pause-grown elapsed stay flat.
   showStatus(
