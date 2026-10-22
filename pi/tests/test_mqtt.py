@@ -547,7 +547,9 @@ class StatusSinkTests(unittest.TestCase):
         # arrival. With no flush in between that equals the watermark the
         # previous reply recorded -- the ordinary idle charger, and the whole
         # HTTP fallback -- yet the reply is still the newest observation that
-        # exists, so every poll has to apply.
+        # exists, so every poll has to apply. The document write is the write
+        # policy's business (issue #93): total_energy is continuous, so only
+        # the first apply publishes; the tracker still sees every value.
         for energy in (100, 110, 120):
             applied = self.sink.apply_status(
                 bridge.parse_status(status_payload(total_energy=energy)),
@@ -556,7 +558,12 @@ class StatusSinkTests(unittest.TestCase):
                 arrival=0,
             )
             self.assertTrue(applied, energy)
-        self.assertEqual(self.db.data["status"]["current"]["total_energy"], 120)
+        self.assertEqual(self.tracker.total_energy, 120)
+        self.assertEqual(
+            [write[3]["total_energy"] for write in self.db.writes
+             if write[1] == "status" and write[2] == "current"],
+            [100],
+        )
 
     def test_the_watermark_gates_records_not_the_reconcile_reply(self):
         # A reconcile records its arrival, so a snapshot flushed at or before
@@ -586,7 +593,15 @@ class StatusSinkTests(unittest.TestCase):
                 arrival=3,
             )
         )
-        self.assertEqual(self.db.data["status"]["current"]["total_energy"], 120)
+        # The dropped records never reached the tracker either; the applied one
+        # did. The document carries only the first (published) write --
+        # total_energy is continuous and never triggers one (issue #93).
+        self.assertEqual(self.tracker.total_energy, 120)
+        self.assertEqual(
+            [write[3]["total_energy"] for write in self.db.writes
+             if write[1] == "status" and write[2] == "current"],
+            [100],
+        )
 
     def test_a_partial_snapshot_only_merges_its_fields(self):
         # No /status seed and the tracker charging: an amp-only snapshot must
@@ -1156,8 +1171,11 @@ class StatusLoopMqttTests(unittest.TestCase):
     def test_every_reconcile_applies_while_mqtt_is_quiet(self):
         # A granted subscription that publishes nothing (an idle charger)
         # advances neither counter, so each reply's arrival equals the previous
-        # watermark. Every poll must still write the document: otherwise
-        # updated_at freezes and the journal claims "mqtt advanced".
+        # watermark. Every poll must still apply: the journal claiming
+        # "mqtt advanced" would be a falsely discarded fresh reply. Which of
+        # those applies *writes* is the write policy's decision (issue #93):
+        # total_energy is continuous, so only the first publishes and the
+        # heartbeats carry the rest.
         self.connect()
         session = FakeSession(
             [
@@ -1171,8 +1189,9 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 3)
         self.assertEqual(
             [write[3]["total_energy"] for write in self.current_writes()],
-            [100, 110, 120],
+            [100],
         )
+        self.assertEqual(self.tracker.total_energy, 120)
         self.assertEqual(
             [line for line in logs if "reconcile discarded" in line],
             [],
@@ -1181,8 +1200,9 @@ class StatusLoopMqttTests(unittest.TestCase):
 
     def test_every_fallback_poll_after_a_broker_drop_applies(self):
         # The generation freezes when the broker drops, so every fallback poll
-        # reads the same arrival: the whole fallback must keep updating status,
-        # not just its first poll.
+        # reads the same arrival: the whole fallback must keep applying status,
+        # not just its first poll. The document itself follows the write policy
+        # (issue #93): continuous movement rides the heartbeats.
         client = self.connect()
         session = FakeSession(
             [
@@ -1204,13 +1224,15 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 4)
         self.assertEqual(
             [write[3]["total_energy"] for write in self.current_writes()],
-            [100, 110, 120, 130],
+            [100],
         )
+        self.assertEqual(self.tracker.total_energy, 130)
         self.assertEqual([line for line in logs if "reconcile discarded" in line], [])
 
     def test_every_poll_under_a_denied_subscription_applies(self):
         # Same freeze behind a connected-but-denied subscription: HTTP is the
-        # source and every poll is the newest observation.
+        # source and every poll is the newest observation. Writes stay on the
+        # write policy's cadence (issue #93); the applies all land.
         self.source.start()
         client = self.factory.client
         client.connect()
@@ -1227,8 +1249,9 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 3)
         self.assertEqual(
             [write[3]["total_energy"] for write in self.current_writes()],
-            [100, 110, 120],
+            [100],
         )
+        self.assertEqual(self.tracker.total_energy, 120)
         self.assertEqual([line for line in logs if "reconcile discarded" in line], [])
 
     def test_transport_source_is_recorded_on_each_edge(self):
