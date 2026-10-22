@@ -4,6 +4,7 @@
 
 import { $, setText } from '../ui.js';
 import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
+import { fmtK, toNumber } from '../format.js';
 
 let config = null;
 let configLoaded = false;
@@ -12,6 +13,9 @@ let configFailed = false;
 // `updated_at` refreshes the heading instead of rebuilding the panel (which
 // would collapse a text selection the user is copying).
 let renderedSignature = null;
+// status/current.total_energy (kWh) — the Lifetime figure's small home since
+// the Status figures row gave its tile to the session cost (#116).
+let lifetime = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -115,6 +119,20 @@ export function showConfigData(data) {
   render();
 }
 
+// status/current.total_energy, fanned out from the status listener: one plain
+// line beside the charger details, hidden until a usable value exists.
+export function showLifetimeEnergy(totalKwh) {
+  lifetime = totalKwh;
+  renderLifetime();
+}
+
+function renderLifetime() {
+  const el = $('lifetime-note');
+  const kwh = toNumber(lifetime);
+  el.hidden = !(Number.isFinite(kwh) && kwh > 0);
+  setText(el, `Lifetime energy: ${fmtK(kwh)} kWh`);
+}
+
 export function showConfigError() {
   config = null;
   configLoaded = true;
@@ -135,6 +153,8 @@ export function resetConfig() {
   config = null;
   configLoaded = false;
   configFailed = false;
+  lifetime = null;
+  renderLifetime();
   if (!$('config-sections')) return;
   render();
 }

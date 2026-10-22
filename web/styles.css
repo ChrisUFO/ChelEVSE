@@ -3108,6 +3108,12 @@ input[aria-invalid='true']:focus-visible {
   line-height: 1.55;
   color: var(--muted);
 }
+/* Lifetime energy's one-line home since the Status tile became the session
+   cost (#116): a footnote to the charger snapshot, not a figure. */
+.lifetime-note {
+  margin: -6px 2px 14px;
+  color: var(--muted);
+}
 .link-btn {
   display: inline;
   padding: 0;

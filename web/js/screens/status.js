@@ -16,7 +16,14 @@ import {
   stateFor,
   toNumber,
 } from '../format.js';
-import { costSettings, statusCostLabel, statusCostUncovered } from '../cost.js';
+import {
+  costSettings,
+  heldAnchorAfter,
+  heldCostLabel,
+  heldCostUncovered,
+  statusCostLabel,
+  statusCostUncovered,
+} from '../cost.js';
 import { sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
@@ -50,6 +57,11 @@ let clock = null;
 // Value frozen when a stop command is sent, with the status write it belongs
 // to; released only by a new status write or an explicit command failure.
 let clockHold = null;
+// The session cost's frozen anchor (see heldAnchorAfter): the last live
+// charging write's `updated_at` and `elapsed`, captured on every charging
+// write, held from the moment charging stops with session energy still on the
+// meter, and cleared when the session resets or a new charge re-anchors.
+let costAnchor = null;
 
 function ageMs() {
   const ts = status && status.updated_at;
@@ -107,32 +119,36 @@ function freezeElapsed() {
 }
 
 function renderCost() {
-  // Live cost over the snapshot's own interval, [updated_at - elapsed,
-  // updated_at], and only while the charger is charging: `elapsed` is cumulative
-  // for the whole plug-in, so pricing a paused or cached snapshot against a later
-  // clock would slide the window over hours that added no energy. The bridge
-  // stores only session energy, so the schedule pro-rates it across that span.
-  // With no schedule this is exactly the flat fmtCost path.
-  const cost = statusCostLabel(status, settings);
-  const el = $('session-cost');
-  el.hidden = !cost;
-  el.replaceChildren();
-  if (cost) {
-    el.append(document.createTextNode(cost));
-    if (statusCostUncovered(status, settings)) {
-      // Its own line under the figure, in the warning colour: "includes unpriced
-      // time" was a 10.5 px footnote that wrapped mid-phrase under a green zero.
-      // "Understates cost" says what the caveat does to the number.
-      const marker = document.createElement('span');
-      marker.className = 'cost-unpriced';
-      marker.textContent = 'understates cost';
-      marker.title =
-        'Some hours in this session have no price and count as 0.00, so this cost is lower than the real one.';
-      el.append(marker);
+  // The session's cost owns its tile for the whole plug-in. While charging it
+  // is the live interval, [updated_at - elapsed, updated_at]; once charging
+  // stops with session energy still on the meter it freezes at the anchor
+  // captured from the last charging write, so fresh polls — and the bridge's
+  // offline markers — can never slide the rate window over hours that drew no
+  // energy. A session reset hides it again (no anchor). With no schedule this
+  // stays exactly the flat fmtCost path, which ignores the anchor entirely.
+  let cost = null;
+  let uncovered = false;
+  if (status) {
+    cost = statusCostLabel(status, settings);
+    if (cost != null) uncovered = statusCostUncovered(status, settings);
+    else if (costAnchor) {
+      cost = heldCostLabel(status.session_energy, costAnchor.elapsed, costAnchor.ms, settings);
+      uncovered = cost != null && heldCostUncovered(costAnchor.elapsed, costAnchor.ms, settings);
     }
   }
-  // The tile is half-width: the cost replaces the caption rather than wrapping.
-  $('session-sub').hidden = Boolean(cost);
+  setText($('fig-cost'), cost ?? '—');
+  const sub = $('cost-sub');
+  sub.replaceChildren();
+  if (uncovered) {
+    // Under the figure, in the warning colour: "Understates cost" says what
+    // the caveat does to the number, and the tooltip explains the 0.00 slices.
+    const marker = document.createElement('span');
+    marker.className = 'cost-unpriced';
+    marker.textContent = 'understates cost';
+    marker.title =
+      'Some hours in this session have no price and count as 0.00, so this cost is lower than the real one.';
+    sub.append(marker);
+  }
 }
 
 function renderScheduleBadge() {
@@ -174,7 +190,6 @@ function renderStatus() {
     status && status.session_energy != null ? fmtK(toNumber(status.session_energy) / 1000) : '—',
   );
   setText($('fig-setpoint'), status ? numOrDash(status.pilot) : '—');
-  setText($('fig-total'), status && status.total_energy != null ? fmtK(status.total_energy) : '—');
   setText($('fig-temp'), status ? numOrDash(status.temp_c) : '—');
   for (const n of [1, 2, 3]) {
     const t = status ? numOrDash(status[`temp${n}`]) : '—';
@@ -349,6 +364,7 @@ export function leaveStatus() {
   shownResultId = null;
   clock = null;
   clockHold = null;
+  costAnchor = null;
   setBusy(false);
   const fb = $('feedback');
   fb.className = 'feedback';
@@ -357,9 +373,8 @@ export function leaveStatus() {
   $('hold-panel').hidden = true;
   $('hold').setAttribute('aria-expanded', 'false');
   setText($('elapsed'), '—');
-  setText($('session-cost'), '');
-  $('session-cost').hidden = true;
-  $('session-sub').hidden = false;
+  setText($('fig-cost'), '—');
+  $('cost-sub').replaceChildren();
   $('schedule-badge').hidden = true;
   setAmps(32);
   showConfig(null);
@@ -374,6 +389,9 @@ export function showStatus(snap) {
   // `schedule` into status/current, and releasing on that merge would let the
   // clock interpolate from the old write and jump before the stop lands.
   clockHold = holdAfterSnapshot(clockHold, data);
+  // The cost anchor follows the same writes: re-anchored while charging, held
+  // across schedule-only merges and stopped writes, cleared on a session reset.
+  costAnchor = heldAnchorAfter(costAnchor, data);
   status = data;
   renderStatus();
 }
@@ -381,6 +399,7 @@ export function showStatus(snap) {
 export function showStatusError() {
   clock = null;
   clockHold = null;
+  costAnchor = null;
   status = null;
   renderStatus();
 }
