@@ -405,7 +405,9 @@ class ScheduleWindowTests(WritePolicyBase):
         self.assertEqual(
             write["schedule"], {"in_window": True, "active_rule_id": "workdays"}
         )
-        self.assertEqual(write["schedule"], bridge.schedule_state(plan, {3: "workdays"}))
+        self.assertEqual(
+            write["schedule"], bridge.schedule_state(plan, {3: "workdays"})
+        )
 
     def test_a_window_fed_before_any_observation_rides_the_first_write(self):
         # Bridge start, charger still silent: the feed arms the trigger but

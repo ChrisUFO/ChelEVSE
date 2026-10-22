@@ -3884,7 +3884,9 @@ def sync_schedule(transport, host, auth, events):
     )
 
 
-def schedule_loop(db, host, auth, transport, interval, reconcile_interval, sink, initial_delay=0):
+def schedule_loop(
+    db, host, auth, transport, interval, reconcile_interval, sink, initial_delay=0
+):
     """Mirror schedule/current into the firmware and publish the live window.
 
     ``sink`` is the run's :class:`StatusSink`: the firmware's active window

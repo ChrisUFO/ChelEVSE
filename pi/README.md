@@ -438,7 +438,7 @@ timestamped line and the loop carries on at its next interval.
 | Status   | `status/current`   | Curated `/status` fields on the write policy's cadence (see below)                                                                                             |
 | Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence |
 | Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                |
-| Status   | `status/current`   | `schedule: {in_window, active_rule_id}` merged from the firmware's plan                                                                                        |
+| Schedule | `status/current`   | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                          |
 | Status   | `status/health`    | Watchdog state, decision reason, probe results and the last restart attempt                                                                                    |
 | Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                             |
 | Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`                                                                                            |
@@ -458,8 +458,10 @@ only **apply** state (tracker, history, sessions, generations — the discard
 guards are unchanged). The cadence, by field kind:
 
 - **Discrete triggers** — a snapshot-driven change of `state`, `vehicle`,
-  `pilot` or `charger_online`, a session close, the active schedule-window
-  hash (#95 wires it), or a **completed command** — publish at the next
+  `pilot` or `charger_online`, a session close, the active schedule window
+  (#95: the schedule loop feeds it every `SCHEDULE_INTERVAL` and a _change_
+  arms the trigger; an unchanged window arms nothing), or a **completed
+  command** — publish at the next
   scheduler opportunity (the 1 s status-loop tick under MQTT), never sooner
   than `WRITE_MIN_GAP_SEC` (30 s) after the previous write. That gap is the
   worst-case bound: a flapping charger cannot exceed one write per 30 s.
@@ -493,8 +495,7 @@ updated_at]`. Under HTTP-only mode the status poll is the observation and
 Kept outside the policy: the offline edge (`charger_online: false`) still
 writes immediately on every failed poll — it is the one write that must not
 wait — while its journal line and push fire once per outage, on the edge.
-`status/health`, `status/config` and the schedule-window republish keep their
-own loops' cadences.
+`status/health` and `status/config` keep their own loops' cadences.
 
 ### History flush (issue #94)
 
@@ -882,8 +883,12 @@ down.
   event-id→rule-id mapping, and the reconcile clock are recorded only after
   every request succeeded, so a failure is retried on the next tick and the
   published `active_rule_id` always uses the mapping that is actually live.
-- **Window status.** Every tick (changed or not) reads `GET /schedule/plan` and
-  merges exactly `schedule: {in_window, active_rule_id}` into `status/current`.
+- **Window status.** Every tick reads `GET /schedule/plan` and feeds exactly
+  `schedule: {in_window, active_rule_id}` into the write policy — it is
+  published only when it changes (issue #95): a change arms the
+  schedule-window trigger and the new value rides the status write that
+  trigger causes (same write, never a follow-up), subject to the 30 s rate
+  limit like any discrete trigger; an unchanged window costs zero writes.
   `in_window` is true when the firmware's `current_event` is an `active` event
   **and** the next event (its end) is due within that event's `duration`.
   `active_rule_id` is the rule that owns the event id when in a window, else

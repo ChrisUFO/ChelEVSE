@@ -1485,7 +1485,13 @@ class SchedulePlanResponseTests(unittest.TestCase):
             "current": {
                 "enabled": True,
                 "rules": [
-                    {"id": "a", "days": [0], "start": "23:00", "end": "23:30", "amps": 20}
+                    {
+                        "id": "a",
+                        "days": [0],
+                        "start": "23:00",
+                        "end": "23:30",
+                        "amps": 20,
+                    }
                 ],
             }
         }
