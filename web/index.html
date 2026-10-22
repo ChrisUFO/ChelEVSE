@@ -601,7 +601,9 @@
           >
             <div class="block-head">
               <h2 id="settings-heading">App settings</h2>
-              <p class="block-sub">Used for the cost estimates on Status and History.</p>
+              <p class="block-sub">
+                The charger address, and the prices behind the cost estimates on Status and History.
+              </p>
             </div>
             <form id="settings-form" class="settings-form" novalidate>
               <div class="rate-editor" role="group" aria-labelledby="rates-heading">
@@ -704,7 +706,9 @@
                         spellcheck="false"
                         aria-describedby="charger-host-hint charger-host-error"
                       />
-                      <span class="field-hint" id="charger-host-hint">IPv4 or hostname</span>
+                      <span class="field-hint" id="charger-host-hint"
+                        >IPv4 or hostname — blank uses the Pi’s default</span
+                      >
                       <span class="field-error" id="charger-host-error" hidden></span>
                     </div>
                   </div>
