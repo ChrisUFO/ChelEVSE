@@ -91,6 +91,21 @@ MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
 # minutes, so one failed HTTP poll next to that silence proves nothing; the
 # broker-side LWT is #45.
 MQTT_OUTAGE_FAILURES = 2
+# --- Status write policy (issue #93) -----------------------------------------
+# One scheduler owns every status/current write; MQTT applies state and never
+# writes. No write may land sooner than this after the previous one (the
+# worst-case bound: a flapping charger cannot exceed one write per gap).
+WRITE_MIN_GAP_SEC = 30
+# While charging (state 3) the continuous values -- energy, elapsed, power,
+# voltage, temperatures -- are refreshed at least this often; they never
+# trigger a write themselves. Idle (any other state) liveness cadence.
+CHARGING_HEARTBEAT_SEC = 60
+HEARTBEAT_INTERVAL = 300
+# Snapshot fields whose change is a discrete trigger: they publish at the next
+# scheduler opportunity. Everything else parse_status emits is continuous and
+# never triggers a write. ``updated_at`` is transport bookkeeping, never a
+# trigger; ``state_label`` follows ``state``.
+TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
 # A granted subscription that never delivers a ``config_version`` still leaves
 # ``status/config`` stale: sync once over HTTP straight away, then keep this
 # slow safety resync until a version is observed.
@@ -1590,16 +1605,164 @@ def _transition_body(had_state, was_charging, is_charging):
     return "Charging started" if is_charging else "Charging stopped"
 
 
+class WritePolicyConfig(NamedTuple):
+    """Validated write-policy tunables; ``main()`` fills them from env."""
+
+    min_gap: float = WRITE_MIN_GAP_SEC
+    charging_heartbeat: float = CHARGING_HEARTBEAT_SEC
+    idle_heartbeat: float = HEARTBEAT_INTERVAL
+
+
+class WritePolicy:
+    """The one cadence decision for ``status/current`` writes (issue #93).
+
+    Every observation -- MQTT snapshots and HTTP reconciles alike -- is applied
+    to the tracker and an accumulated field view; whether a *write* follows is
+    decided here, by field kind:
+
+    - Discrete triggers (``state``, ``vehicle``, ``pilot``, ``charger_online``,
+      a session close, the active schedule-window hash -- #95 wires that one)
+      publish at the next scheduler opportunity, never sooner than ``min_gap``
+      after the previous write. A session close is the state edge itself, so
+      the ``state`` trigger carries it.
+    - Continuous values (energy, elapsed, power, voltage, temperatures) never
+      trigger a write: they move constantly while charging, so treating them
+      as changes would degenerate into a fixed timer. They ride the
+      heartbeats -- ``charging_heartbeat`` while state 3, ``idle_heartbeat``
+      otherwise. ``elapsed`` in particular never triggers anything; the app
+      interpolates it locally from the write anchor.
+    - A forced write (a completed command) bypasses both cadences and the gap.
+
+    A heartbeat is always a full curated payload backed by a fresh
+    observation, never a timestamp-only merge: a fresh ``updated_at`` on stale
+    values would corrupt the app's live-cost interval. The sink enforces the
+    freshness; this class owns only the arithmetic. ``last_written`` mirrors
+    the document (out-of-policy merges included) for no-op suppression, which
+    applies to trigger writes only -- a due heartbeat and a forced write
+    always land.
+    """
+
+    def __init__(self, config=None, clock=time.monotonic):
+        self.config = config or WritePolicyConfig()
+        self.clock = clock
+        # The policy-clock time of the last write this policy performed. The
+        # offline edge writes outside the policy and deliberately does not
+        # advance it: the recovery apply must still publish promptly.
+        self.last_write_at = None
+        self.last_written = None
+        self.triggered = False
+        self.forced = False
+        self._next_heartbeat_poll = 0.0
+
+    def heartbeat_period(self, state):
+        """Seconds between heartbeat writes for the current charging state."""
+        return (
+            self.config.charging_heartbeat if state == 3 else self.config.idle_heartbeat
+        )
+
+    def heartbeat_due(self, now, state):
+        """True when a heartbeat write is owed, first snapshot included."""
+        return (
+            self.last_write_at is None
+            or now - self.last_write_at >= self.heartbeat_period(state)
+        )
+
+    def heartbeat_poll_due(self, now, state):
+        """True when a heartbeat may force an HTTP reconcile now.
+
+        Paced once per period: a failing forced reconcile (charger
+        unreachable) must keep the reconcile cadence instead of re-polling on
+        every 1 s tick -- two failures a second apart would flag an outage an
+        idle-but-silent charger does not deserve.
+        """
+        return now >= self._next_heartbeat_poll and self.heartbeat_due(now, state)
+
+    def note_heartbeat_poll(self, now, state):
+        """Mark one heartbeat-driven poll as attempted (paces the next)."""
+        self._next_heartbeat_poll = now + self.heartbeat_period(state)
+
+    def note_trigger(self, reason):
+        """Arm a discrete trigger; ``reason`` names it for the journal/tests.
+
+        The schedule-window hash (#95) lands here: this is the seam its loop
+        will call when the active window changes.
+        """
+        self.triggered = True
+
+    def note_external(self, payload):
+        """Record a write that happened outside this policy's decision.
+
+        The document moved, so the suppression baseline must move with it:
+        without this, an offline edge followed by a recovery whose other
+        values are unchanged would read as a no-op and never republish
+        ``charger_online: true``.
+        """
+        if self.last_written is None:
+            self.last_written = dict(payload)
+        else:
+            self.last_written.update(payload)
+
+    def decision(self, now, state, heartbeat=False):
+        """The write owed at ``now``, or None.
+
+        Priority: forced, first (no write yet -- the initial payload is due),
+        trigger (gap satisfied), heartbeat (only when the caller is serving a
+        due heartbeat; the apply path never publishes on heartbeat grounds --
+        the observation may be stale).
+        """
+        if self.forced:
+            return "forced"
+        if self.last_write_at is None:
+            return "first"
+        gap = now - self.last_write_at
+        if self.triggered and gap >= self.config.min_gap:
+            return "trigger"
+        if heartbeat and gap >= self.heartbeat_period(state):
+            return "heartbeat"
+        return None
+
+    def suppressed(self, candidate):
+        """True when writing ``candidate`` would change nothing.
+
+        Compared on the candidate's own fields, ignoring ``updated_at``: the
+        document also carries fields this policy never writes (``schedule``),
+        and those must not keep suppression from firing.
+        """
+        if self.last_written is None:
+            return False
+        return all(
+            value == self.last_written.get(key)
+            for key, value in candidate.items()
+            if key != "updated_at"
+        )
+
+    def record_write(self, payload, now):
+        """Consume the write: cadence baseline, suppression baseline, triggers."""
+        self.last_write_at = now
+        self.last_written = dict(payload)
+        self.triggered = False
+        self.forced = False
+
+
 class StatusSink:
-    """The one status write path, shared by the HTTP poll and MQTT snapshots.
+    """The one status apply path, shared by the HTTP poll and MQTT snapshots.
 
     Both transports describe the same charger state, so history, sessions and
     transition notifications run here exactly once per real change: the edge is
     computed against the tracker's pre-tick state, which the first source
     advances, so a second source reporting the same state has no edge left.
+
+    Applies never write ``status/current`` themselves (issue #93): each one
+    updates the tracker, merges into the accumulated field view and hands the
+    write decision to :class:`WritePolicy`. The scheduler opportunities are
+    the applies themselves (a first snapshot, a discrete trigger whose gap is
+    satisfied) and the status loop's tick (deferred triggers, forced writes,
+    heartbeats -- see :meth:`publish_pending` and :meth:`publish_heartbeat`).
+    The offline edge is the one exception: it still writes immediately, as an
+    outage edge, outside the policy's cadences.
     """
 
-    def __init__(self, db, tracker, notifier, arrivals=None):
+    def __init__(self, db, tracker, notifier, arrivals=None, policy=None):
         self.status_doc = db.collection("status").document("current")
         self.tracker = tracker
         self.notifier = notifier
@@ -1608,6 +1771,16 @@ class StatusSink:
         # between the "no snapshot" check and the offline write. It stays
         # ``None`` without an MQTT source: HTTP-only runs never use that path.
         self.arrivals = arrivals
+        # The write policy. Injectable clock/config for the tests; the
+        # production sink uses monotonic time and the env tunables.
+        self.policy = policy or WritePolicy()
+        # The accumulated curated view of every applied observation, and how
+        # many observations have landed. A heartbeat publishes the view only
+        # when an apply landed *after* its decision (the count is the
+        # watermark): a fresh ``updated_at`` on stale values would corrupt
+        # the app's live-cost interval.
+        self._latest = {}
+        self._applies = 0
         # The HTTP poll and the MQTT worker can apply at the same time; the
         # tracker's state machine is not thread-safe on its own.
         self._lock = threading.Lock()
@@ -1721,6 +1894,13 @@ class StatusSink:
         # Write the state before notifying so a slow push cannot leave the
         # app showing a stale online status.
         self.status_doc.set(OFFLINE, merge=True)
+        # The outage edge writes immediately, outside the policy's rate limit
+        # (issue #93 keeps it intact: rare, and the one write that must not
+        # wait). The accumulated view and the suppression baseline still have
+        # to see it, or the recovery apply's ``charger_online`` change would
+        # not read as the discrete trigger it is.
+        self._accumulate(OFFLINE)
+        self.policy.note_external(OFFLINE)
         if edge:
             # Journal and notify once per outage, on the edge.
             log(f"charger offline ({reason})")
@@ -1731,9 +1911,137 @@ class StatusSink:
         with self._lock:
             self.tracker.maybe_seed()
 
+    def _accumulate(self, fields):
+        """Merge one parsed observation into the accumulated view (lock held).
+
+        Returns nothing; a discrete field that moved arms the policy's
+        trigger. The baseline is the accumulated view itself, so a change the
+        document has not seen yet stays armed across a rate-limited deferral,
+        and a burst that returns to the written values is left to no-op
+        suppression at publish time.
+        """
+        changed = [
+            name
+            for name in TRIGGER_FIELDS
+            if name in fields and fields[name] != self._latest.get(name)
+        ]
+        self._latest.update(fields)
+        if changed:
+            self.policy.triggered = True
+
+    def _consider_publish(self, heartbeat=False):
+        """Publish now when the policy owes a write (the lock is held).
+
+        Heartbeat servicing is the caller's explicit business
+        (:meth:`publish_heartbeat`) because it carries a freshness gate; on
+        every other path an observation that may be stale must not publish on
+        heartbeat grounds alone.
+        """
+        if not self._latest or not self._applies:
+            # Nothing observed yet. The accumulated view may hold only the
+            # offline merge, which is bookkeeping for the suppression baseline,
+            # not an observation: the first publish follows the first apply
+            # (issue #93: the first snapshot after start publishes).
+            return False
+        now = self.policy.clock()
+        reason = self.policy.decision(now, self.tracker.state, heartbeat=heartbeat)
+        if reason is None:
+            return False
+        if reason == "trigger" and self.policy.suppressed(self._latest):
+            # The owed trigger's values all match the document: writing them
+            # again would move nothing (a due heartbeat is never skipped).
+            self.policy.triggered = False
+            return False
+        payload = dict(self._latest)
+        self.status_doc.set(payload, merge=True)
+        self.policy.record_write(payload, now)
+        return True
+
+    def publish_pending(self):
+        """One scheduler tick: resolve a deferred trigger or a forced write.
+
+        Also retries a write that failed (the policy only advances on a write
+        that landed). The status loop calls this every tick; the applies call
+        the same decision inline.
+        """
+        with self._lock:
+            return self._consider_publish()
+
+    def heartbeat_due(self):
+        """(due, watermark) for a heartbeat write, under the lock.
+
+        ``due`` says a heartbeat write is owed (first snapshot included);
+        ``watermark`` is the apply count the eventual publish must beat,
+        passed to :meth:`publish_heartbeat`. A count, not a clock reading:
+        the heartbeat's own forced observation may land without the clock
+        moving, and it still counts.
+        """
+        with self._lock:
+            if not self.policy.heartbeat_due(self.policy.clock(), self.tracker.state):
+                return False, 0
+            return True, self._applies
+
+    def heartbeat_poll_due(self):
+        """True when a heartbeat may force an HTTP reconcile on this tick."""
+        with self._lock:
+            return self.policy.heartbeat_poll_due(
+                self.policy.clock(), self.tracker.state
+            )
+
+    def note_heartbeat_poll(self):
+        """Mark one heartbeat-driven poll as attempted (paces the next)."""
+        with self._lock:
+            self.policy.note_heartbeat_poll(self.policy.clock(), self.tracker.state)
+
+    def publish_heartbeat(self, watermark):
+        """Write the full curated payload a heartbeat owes -- fresh values only.
+
+        ``watermark`` is the apply count the heartbeat decision was made
+        against; the publish needs an apply that landed after it (the forced
+        reconcile's reply, or an MQTT apply that landed during the poll).
+        None arrived -- the charger did not answer and MQTT stayed silent --
+        so there is no write: a fresh ``updated_at`` on stale values is
+        exactly what a heartbeat must never stamp.
+        """
+        with self._lock:
+            now = self.policy.clock()
+            if not self.policy.heartbeat_due(now, self.tracker.state):
+                # The forced reconcile's own apply already published.
+                return False
+            if self._applies <= watermark:
+                return False
+            return self._consider_publish(heartbeat=True)
+
+    def force_write(self):
+        """Publish immediately, bypassing both cadences and the rate limit.
+
+        A completed command owes the app a *status* write: ``holdAfterSnapshot``
+        holds its session clock until one lands, and the command document's
+        own write does not release it. With no observation yet the flag stays
+        armed and the first apply publishes.
+        """
+        with self._lock:
+            self.policy.forced = True
+            return self._consider_publish()
+
+    def note_trigger(self, reason):
+        """Arm a discrete trigger from outside the apply path.
+
+        The active schedule-window hash (#95) lands here: the seam its loop
+        will call when the window changes, feeding the trigger set like any
+        snapshot-driven change.
+        """
+        with self._lock:
+            self.policy.note_trigger(reason)
+
     def _apply(self, fields, source, complete):
         tracker = self.tracker
-        self.status_doc.set(fields, merge=True)
+        # The observation merges into the accumulated view first -- a discrete
+        # field it moves arms the write policy's trigger -- and the write
+        # itself is decided after the state machine, so the document and the
+        # tracker can never disagree (issue #93: MQTT applies, the scheduler
+        # writes).
+        self._accumulate(fields)
         if tracker.charger_online is False:
             tracker.charger_online = True
             log(f"charger online ({source})")
@@ -1743,15 +2051,17 @@ class StatusSink:
             # absent state would read as "not charging" and stop a session that
             # is still running.
             tracker.record_history(fields.get("total_energy"))
-            return
-        had_state = tracker.has_state
-        was_charging = tracker.has_state and tracker.previous_state == 3
-        is_charging = fields.get("state") == 3
-        tracker.record_history(fields.get("total_energy"))
-        tracker.observe(fields)
-        body = _transition_body(had_state, was_charging, is_charging)
-        if body is not None:
-            self.notifier.enqueue(body)
+        else:
+            had_state = tracker.has_state
+            was_charging = tracker.has_state and tracker.previous_state == 3
+            is_charging = fields.get("state") == 3
+            tracker.record_history(fields.get("total_energy"))
+            tracker.observe(fields)
+            body = _transition_body(had_state, was_charging, is_charging)
+            if body is not None:
+                self.notifier.enqueue(body)
+        self._applies += 1
+        self._consider_publish()
 
 
 def mqtt_health_fields(mqtt):
@@ -1857,7 +2167,7 @@ def _coalesce(pending):
 
 
 def mqtt_status_loop(sink, snapshots):
-    """Apply debounced MQTT snapshots as they arrive (event-driven writes).
+    """Apply debounced MQTT snapshots as they arrive (state updates only).
 
     Runs on its own thread so a Firestore write never blocks paho's network
     loop. Every snapshot is parsed here with the same ``parse_status`` the HTTP
@@ -1867,8 +2177,10 @@ def mqtt_status_loop(sink, snapshots):
     carries a numeric state; before that it is a field update only, and a seed
     that lands afterwards does not promote it. A snapshot no newer than the last
     applied reconcile is dropped: that reply already carries a later view of the
-    charger. A failed write is a log line; the next snapshot and the 60 s HTTP
-    reconciliation both carry the full state.
+    charger. Writes are the write policy's decision (issue #93): the apply
+    publishes only when a first snapshot, a discrete trigger past its rate
+    limit, or a forced write is due, and the status loop's scheduler tick
+    resolves the rest.
     """
     while not _stop.is_set():
         try:
@@ -2005,6 +2317,36 @@ def mqtt_config_or_exit():
     """MQTT settings for ``main()``: a bad value stops the bridge by name."""
     try:
         return mqtt_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def write_policy_config():
+    """Write-policy tunables from the environment; bad values raise ValueError.
+
+    Non-finite and non-positive values are equally rejected: against ``nan``
+    every cadence comparison reads "not due yet", which would silently
+    freeze all status writes, while a negative period is always due and
+    would write on every scheduler tick.
+    """
+    tunables = (
+        ("WRITE_MIN_GAP_SEC", WRITE_MIN_GAP_SEC),
+        ("CHARGING_HEARTBEAT_SEC", CHARGING_HEARTBEAT_SEC),
+        ("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL),
+    )
+    values = []
+    for name, default in tunables:
+        value = _env_finite(name, default, float)
+        if value <= 0:
+            raise ValueError(f"{name} must be above zero, got {value:g}.")
+        values.append(value)
+    return WritePolicyConfig(*values)
+
+
+def write_policy_config_or_exit():
+    """Write-policy tunables for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return write_policy_config()
     except ValueError as exc:
         sys.exit(str(exc))
 
@@ -2471,6 +2813,12 @@ def status_loop(
     before; an HTTP failure while MQTT is connected is logged and feeds the
     watchdog, but only marks the charger offline after repeated failures with no
     MQTT snapshot in between (an idle charger is silent by design).
+
+    The loop is also the write-policy scheduler's tick (issue #93): each pass
+    resolves a deferred trigger or a forced write, and a due heartbeat forces a
+    fresh HTTP observation (ahead of the reconcile cadence in MQTT mode) before
+    publishing the full curated payload. Without MQTT every tick already polls,
+    so the heartbeat just publishes what the poll applied.
     """
     sink = sink or StatusSink(
         db,
@@ -2534,10 +2882,25 @@ def status_loop(
             reconcile_failures = 0
             next_poll = now
         try:
-            # Without MQTT the wait interval is the cadence (unchanged); with it
-            # the loop ticks every second and polls only when reconciliation is
-            # due or the source just changed.
-            if mqtt is None or now >= next_poll:
+            # A due heartbeat forces a fresh HTTP observation before any
+            # publish: a heartbeat is a full curated payload, never a
+            # republish of stale values. The forced poll is paced once per
+            # heartbeat period so a failing one keeps the reconcile cadence.
+            heartbeat, watermark = sink.heartbeat_due()
+            force_poll = heartbeat and sink.heartbeat_poll_due()
+            # Without MQTT the wait interval is the cadence (unchanged): every
+            # tick polls, and the heartbeat then just publishes what the poll
+            # applied. With MQTT the loop ticks every second and polls when
+            # reconciliation is due, the source just changed, or a heartbeat
+            # needs its fresh observation.
+            if mqtt is None or now >= next_poll or force_poll:
+                if heartbeat:
+                    # This poll serves the heartbeat, forced or not: pace the
+                    # next heartbeat poll a full period out so a failing
+                    # reconcile keeps the reconcile cadence (two failures a
+                    # second apart would flag an outage an idle charger does
+                    # not deserve).
+                    sink.note_heartbeat_poll()
                 # The deadline advances before the poll body: a Firestore
                 # failure inside the apply must not leave it overdue, or the 1 s
                 # tick turns into a 1 Hz charger poll for the whole outage.
@@ -2631,6 +2994,14 @@ def status_loop(
                             mqtt_snapshots = mqtt.snapshots
                         reconcile_failures = 0
                     watchdog.record_success(payload)
+            if heartbeat:
+                # Publishes only when the poll (or an MQTT apply that landed
+                # during it) produced an observation newer than the watermark;
+                # a failed poll never stamps stale values fresh.
+                sink.publish_heartbeat(watermark)
+            # Deferred triggers, forced writes and owed retries resolve here,
+            # one scheduler tick at a time.
+            sink.publish_pending()
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"status loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval if mqtt is None else MQTT_TICK_SEC)
@@ -2884,7 +3255,7 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
-def command_loop(db, host, auth, transport, interval, source=None):
+def command_loop(db, host, auth, transport, interval, source=None, sink=None):
     # Commands already applied — acked or failed — whose status write did not
     # land. Retry the write, never the command: an accepted MQTT publish must
     # not be repeated (over MQTT or HTTP). Bounded and process-local, so a gap
@@ -2960,6 +3331,24 @@ def command_loop(db, host, auth, transport, interval, source=None):
                 settled.pop(doc.id, None)
                 if fields["status"] == "acked":
                     log(f"command {doc.id} acked: {cmd.get('type')}")
+                    # The app's holdAfterSnapshot holds its session clock until
+                    # a *status* write lands; this document's own write does
+                    # not release it, so a completed command forces one
+                    # immediately, bypassing the write policy's cadences
+                    # (issue #93). A failed command forces nothing: the app
+                    # clears its hold only when the send itself fails
+                    # client-side, so a bridge-reported failure leaves the
+                    # held clock frozen until the next heartbeat (<=60 s
+                    # while charging) -- self-clearing, and cheaper than a
+                    # write per failed command.
+                    if sink is not None:
+                        try:
+                            sink.force_write()
+                        except Exception as exc:
+                            log(
+                                f"forced status write failed "
+                                f"({exc.__class__.__name__}: {exc}); will retry"
+                            )
                 else:
                     log(f"command {doc.id} failed: {fields['error']}")
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
@@ -3362,6 +3751,7 @@ def run(
     watchdog_config,
     mqtt=None,
     bootstrap=DEFAULT_CHARGER_HOST,
+    write_policy=None,
 ):
     """Start the pollers; blocks on the command loop until the stop event.
 
@@ -3372,7 +3762,9 @@ def run(
 
     ``host`` is the one charger-address holder every loop reads per request, so
     ``settings_loop`` can swap it live. ``bootstrap`` is the env address that
-    refresh reverts to when the app clears the setting.
+    refresh reverts to when the app clears the setting. ``write_policy`` is the
+    validated WritePolicyConfig from env; the sink owns the WritePolicy itself
+    and with it every ``status/current`` write (issue #93).
     """
     (
         status_interval,
@@ -3417,6 +3809,7 @@ def run(
         tracker,
         notifier,
         arrivals=source.arrival_generation if source is not None else None,
+        policy=WritePolicy(write_policy),
     )
     if source is not None:
         mqtt_status_args = (sink, snapshots)
@@ -3463,7 +3856,7 @@ def run(
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
         ).start()
         source.start()
-    command_loop(db, host, auth, transport, command_interval, source)
+    command_loop(db, host, auth, transport, command_interval, source, sink)
     if source is not None:
         source.stop()
 
@@ -3484,6 +3877,7 @@ def main():
             "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
             "must be numbers."
         )
+    write_policy = write_policy_config_or_exit()
 
     try:
         db = init_firestore()
@@ -3510,7 +3904,10 @@ def main():
         f"bridge started: {host.base}, polls {status_interval:g}s/"
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s, "
-        f"settings {settings_interval:g}s"
+        f"settings {settings_interval:g}s, "
+        f"status writes gap >={write_policy.min_gap:g}s, "
+        f"heartbeats {write_policy.charging_heartbeat:g}s charging/"
+        f"{write_policy.idle_heartbeat:g}s idle"
     )
     log(
         f"watchdog: enabled={watchdog.enabled} failures={watchdog.threshold} "
@@ -3544,6 +3941,7 @@ def main():
         watchdog,
         mqtt,
         bootstrap,
+        write_policy=write_policy,
     )
     log("bridge stopped")
 
