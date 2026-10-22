@@ -536,9 +536,10 @@ bridge opens an interval when it first sees `state: 3`, adds each charging
 tick's `session_energy` growth to it, and closes it when the state leaves 3 (or
 at finalisation). The bounds are observation times — the charger's transition
 happened between two polls, so an interval starts at the first tick that saw it
-rather than at the aggregate's charger-timer start. The web app prices each
-interval over its own start and end, which is what makes a paused session
-accurate.
+rather than at the aggregate's charger-timer start (and a wall-clock step that
+inverts the pair makes the close the observed open plus the measured span, see
+below). The web app prices each interval over its own start and end, which is
+what makes a paused session accurate.
 
 **What the intervals are guaranteed to account for.** In a session the bridge
 observed end to end with no counter reset, the intervals add up to `wh` except
@@ -553,14 +554,20 @@ equality is _not_ universal:
 - a **wall-clock step** with no measured span (below) leaves that interval's
   energy in `wh` and in no interval.
 
-**No interval is fabricated.** An interval's duration is always measured: the
-bridge stamps `CLOCK_BOOTTIME` when it opens one, beside the wall-clock
-`started_at`. When the wall clock steps backwards between open and close (an NTP
-correction, a manual set), the pair's endpoints would invert, so the duration is
-taken from that measurement and only the absolute wall-clock anchor is inferred
-(`ended_at = started_at + measured`) — the interval is kept and the derivation
-is logged. When the interval clock measured nothing across the interval (a
-frozen or too-coarse reading), there is no duration to anchor it to: nothing is
+**No interval is fabricated.** Its bounds are wall-clock times the bridge
+observed, and when a step inverts them the duration comes from a measurement:
+the bridge stamps `CLOCK_BOOTTIME` when it opens an interval, beside the
+wall-clock `started_at`. When the wall clock steps backwards between open and
+close (an NTP correction, a manual set), the pair's endpoints would invert, so
+the duration is taken from that measurement and only the absolute wall-clock
+anchor is inferred (`ended_at = started_at + measured`) — the interval is kept
+and the derivation is logged. The anchor is the pre-step open, so a derived end
+can land after the session's own aggregate `ended_at`, which is recorded on the
+corrected clock. A step that does not invert the pair takes no derivation: both
+bounds stay the observed wall-clock times, so that interval's stored span is off
+by the step (a backwards step shortens it) with no line logged. When the
+interval clock measured nothing across an inverted interval (a frozen or
+too-coarse reading), there is no duration to anchor the pair to: nothing is
 written, and the energy stays in `wh` like any other unmeasured part of the
 session. The stored shape stays `{started_at, ended_at, wh}` either way.
 
@@ -607,7 +614,7 @@ how many it kept: `session <label>: <n> oldest intervals folded into
 sum of the folded intervals. Only unusable entries are dropped, and they have
 their own line: `session <label>: <n> unusable interval(s) dropped`.
 
-Because of those three cases the web app does not trust the list blindly: it
+Because of those cases the web app does not trust the list blindly: it
 prices per interval only when the intervals add up to the session's `wh` within
 `max(250 Wh, 2%)` and otherwise falls back to pro-rating the aggregate. So a
 session with intervals _and_ a divergent energy total still shows a correct
