@@ -474,8 +474,10 @@ class CommandForceWiringTests(unittest.TestCase):
         self.assertEqual(db.data["commands"]["a"]["status"], "acked")
 
     def test_a_failed_command_does_not_force_a_status_write(self):
-        # The app releases its clock hold on the explicit failure; no status
-        # write is owed.
+        # A failed command forces nothing: the app clears its clock hold
+        # only when the send itself fails client-side, so a bridge-reported
+        # failure holds the clock until the next heartbeat write (<=60 s
+        # while charging) -- self-clearing, no status write owed.
         db, sink = self.run_loop([FakeResponse(500)], _ForcingSink())
         self.assertEqual(sink.forced, 0)
         self.assertEqual(db.data["commands"]["a"]["status"], "failed")
@@ -631,11 +633,29 @@ class PolicyEnvTests(unittest.TestCase):
             bridge.WritePolicyConfig(5.0, 61.0, 600.0),
         )
 
-    def test_unparseable_values_exit_loudly(self):
+    def assert_bad_tunable_exits(self, name, raw):
+        """main() must stop on a bad tunable, and only on that.
+
+        init_firestore is patched (a missing service-account key exits
+        just as loudly), so the tunable validation at the top of main()
+        is the only exit source exercised, and the message must name
+        the offending tunable.
+        """
         with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, {"WRITE_MIN_GAP_SEC": "soon"}, clear=True
-        ), self.assertRaises(SystemExit):
-            bridge.main()
+            os.environ, {name: raw}, clear=True
+        ), mock.patch.object(
+            bridge, "init_firestore", return_value=FakeDB()
+        ), mock.patch.object(bridge, "run"), mock.patch.object(
+            bridge, "log"
+        ), mock.patch.object(
+            bridge, "ChargerTransport"
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                bridge.main()
+        self.assertIn(name, str(cm.exception))
+
+    def test_unparseable_values_exit_loudly(self):
+        self.assert_bad_tunable_exits("WRITE_MIN_GAP_SEC", "soon")
 
     def test_non_finite_values_exit_loudly(self):
         for name, raw in (
@@ -647,12 +667,7 @@ class PolicyEnvTests(unittest.TestCase):
             ("HEARTBEAT_INTERVAL", "inf"),
         ):
             with self.subTest(name=name, raw=raw):
-                with mock.patch.dict(
-                    bridge._FILE_ENV, {}, clear=True
-                ), mock.patch.dict(
-                    os.environ, {name: raw}, clear=True
-                ), self.assertRaises(SystemExit):
-                    bridge.main()
+                self.assert_bad_tunable_exits(name, raw)
 
     def test_non_positive_values_exit_loudly(self):
         for name, raw in (
@@ -662,12 +677,7 @@ class PolicyEnvTests(unittest.TestCase):
             ("HEARTBEAT_INTERVAL", "-60"),
         ):
             with self.subTest(name=name, raw=raw):
-                with mock.patch.dict(
-                    bridge._FILE_ENV, {}, clear=True
-                ), mock.patch.dict(
-                    os.environ, {name: raw}, clear=True
-                ), self.assertRaises(SystemExit):
-                    bridge.main()
+                self.assert_bad_tunable_exits(name, raw)
 
 
 if __name__ == "__main__":

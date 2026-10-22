@@ -490,9 +490,10 @@ updated_at]`. Under HTTP-only mode the status poll is the observation and
 - The first snapshot after start publishes (no last-written baseline).
 
 Kept outside the policy: the offline edge (`charger_online: false`) still
-writes immediately, once per outage decision, together with its push — it is
-the one write that must not wait — and `status/health`, `status/config` and
-the schedule-window republish keep their own loops' cadences.
+writes immediately on every failed poll — it is the one write that must not
+wait — while its journal line and push fire once per outage, on the edge.
+`status/health`, `status/config` and the schedule-window republish keep their
+own loops' cadences.
 
 `status/config` is replaced wholesale (not merged), so removed charger settings
 disappear from the document. Credential fields are **redacted before the
