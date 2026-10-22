@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 // The config screen renders into the live DOM. Give it the smallest document
 // it needs — one stub element per id — and import the module afterwards; every
@@ -79,4 +80,12 @@ test('resetConfig clears the note with the rest of the screen', () => {
   assert.equal(note().hidden, false);
   resetConfig();
   assert.equal(note().hidden, true);
+});
+
+test('index.html ships the note element the screen renders into', () => {
+  // The stub above answers any id, so the wiring is pinned from source: if
+  // this element is renamed or removed, renderLifetime has nothing to fill
+  // and the Lifetime figure silently vanishes from the Config screen.
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  assert.match(source, /id="lifetime-note"/);
 });

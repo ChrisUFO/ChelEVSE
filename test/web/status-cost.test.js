@@ -135,6 +135,7 @@ test('the cost tile shows the live window while charging', () => {
 });
 
 test('the figure freezes at the charging-stop anchor, never sliding', () => {
+  showSettings(NIGHTLY);
   // Charging ended 06:30 (elapsed 3600): the figure on screen is GBP 0.20.
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 6, 30), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.20');
@@ -165,6 +166,7 @@ test('the figure freezes at the charging-stop anchor, never sliding', () => {
 });
 
 test('an offline marker keeps the frozen figure without re-pricing it', () => {
+  showSettings(NIGHTLY);
   // This test's own anchor: the charging write that freezes at GBP 0.20.
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 6, 30), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.20');
@@ -182,6 +184,7 @@ test('an offline marker keeps the frozen figure without re-pricing it', () => {
 });
 
 test('a session reset clears the anchor and a new charge re-anchors', () => {
+  showSettings(NIGHTLY);
   // This test's own anchor: without one, the reset below would assert nothing.
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 14, 30), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.30');
