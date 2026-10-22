@@ -10,6 +10,9 @@ import {
   aggregateCostLabel,
   costSettings,
   dayCost,
+  heldAnchorAfter,
+  heldCostLabel,
+  heldCostUncovered,
   hourCost,
   liveCostLabel,
   periodCost,
@@ -275,6 +278,109 @@ test('a stale cached snapshot does not slide with the wall clock', () => {
   } finally {
     mock.timers.reset();
   }
+});
+
+// ---------- held session (plugged in, not charging) ----------
+
+test('a held session prices the frozen window, not the current clock', () => {
+  // 1 kWh charged 05:30–06:30 (elapsed 3600); the charging write was stamped
+  // 06:30. Hours later the frozen figure is still that straddled half-and-half
+  // window — the live figure at the moment charging stopped.
+  const anchor = date(2026, 1, 5, 6, 30).getTime();
+  assert.equal(heldCostLabel(1000, 3600, anchor, nightly()), 'GBP 0.20');
+  // The same energy priced at a *later* anchor would be the 0.30 fallback, so
+  // the assertion above really is the frozen window.
+  assert.equal(heldCostLabel(1000, 3600, anchor + 6 * HOUR_MS, nightly()), 'GBP 0.30');
+  // The whole window off-peak prices as the live figure did.
+  assert.equal(heldCostLabel(1000, 3600, date(2026, 1, 5, 3, 0).getTime(), nightly()), 'GBP 0.10');
+  // A frozen anchor with the *stopped* write's elapsed (pause time added)
+  // would stretch the window past the plug-in's start and dilute the figure —
+  // which is why the anchor carries the charging write's own elapsed.
+  assert.equal(heldCostLabel(1000, 3 * 3600, anchor, nightly()), 'GBP 0.13');
+});
+
+test('a held session hides when elapsed or anchor is unusable', () => {
+  const anchor = date(2026, 1, 5, 6, 30).getTime();
+  // The same degenerate inputs liveCostLabel hides on.
+  for (const elapsed of [null, undefined, 0, -60, '', 'x', Number.NaN]) {
+    assert.equal(heldCostLabel(1000, elapsed, anchor, nightly()), null, String(elapsed));
+  }
+  for (const ms of [null, undefined, Number.NaN, Infinity]) {
+    assert.equal(heldCostLabel(1000, 3600, ms, nightly()), null, String(ms));
+  }
+  // Unusable energy hides exactly like the live path.
+  assert.equal(heldCostLabel(null, 3600, anchor, nightly()), null);
+  assert.equal(heldCostLabel('', 3600, anchor, nightly()), null);
+});
+
+test('held flat output is byte-identical to the live and fmtCost paths', () => {
+  const now = date(2026, 1, 5, 12, 0);
+  // The anchor and elapsed are irrelevant without a schedule, including when
+  // missing: energy x rate is the whole figure.
+  assert.equal(heldCostLabel(12345, 3600, now.getTime(), FLAT), 'GBP 3.02');
+  assert.equal(heldCostLabel(12345, null, null, FLAT), 'GBP 3.02');
+  assert.equal(heldCostLabel(12345, null, null, FLAT), fmtCost(12.345, 0.245, 'GBP'));
+  assert.equal(heldCostLabel(12345, null, null, FLAT), liveCostLabel(12345, null, now, FLAT));
+  assert.equal(heldCostLabel(1000, 3600, null, { ...FLAT, rates: [] }), 'GBP 0.25');
+  assert.equal(heldCostLabel(null, 3600, now.getTime(), FLAT), null);
+});
+
+test('the held marker follows the frozen interval', () => {
+  const noon = date(2026, 1, 5, 12, 0).getTime();
+  const peak = date(2026, 1, 5, 17, 0).getTime();
+  const edge = date(2026, 1, 5, 16, 30).getTime();
+  // A base-less window prices only its own hours; the frozen window decides.
+  assert.equal(heldCostUncovered(3600, noon, windowOnly()), true);
+  assert.equal(heldCostUncovered(3600, peak, windowOnly()), false);
+  assert.equal(heldCostUncovered(3600, edge, windowOnly()), true);
+  assert.notEqual(heldCostLabel(1000, 3600, edge, windowOnly()), null);
+  // A schedule with a base covers every slice.
+  assert.equal(heldCostUncovered(3600, noon, nightly()), false);
+  // Flat configs and degenerate inputs never carry the marker.
+  assert.equal(heldCostUncovered(3600, noon, FLAT), false);
+  for (const elapsed of [null, 0, -60]) {
+    assert.equal(heldCostUncovered(elapsed, noon, windowOnly()), false, String(elapsed));
+  }
+  assert.equal(heldCostUncovered(3600, null, windowOnly()), false);
+});
+
+test('heldAnchorAfter captures, holds, clears and re-anchors', () => {
+  const t0 = date(2026, 1, 5, 6, 30).getTime();
+  const charging = liveStatus(3, t0, 3600);
+  const anchor = heldAnchorAfter(null, charging);
+  assert.deepEqual(anchor, { ms: t0, elapsed: 3600 });
+  // A live charging write re-anchors on every write, including a document
+  // refreshed in place (same stamp, newer elapsed).
+  const refreshed = liveStatus(3, t0, 4200);
+  assert.deepEqual(heldAnchorAfter(anchor, refreshed), { ms: t0, elapsed: 4200 });
+  const later = liveStatus(3, t0 + 60000, 4300);
+  const laterAnchor = heldAnchorAfter(anchor, later);
+  assert.deepEqual(laterAnchor, { ms: t0 + 60000, elapsed: 4300 });
+  // A late, older charging write must not rewind the anchor.
+  assert.deepEqual(heldAnchorAfter(laterAnchor, charging), laterAnchor);
+  // Charging stops with energy on the meter: the anchor holds, and a newer
+  // stopped write (pause time counted into elapsed) does not move it.
+  const stopped = liveStatus(2, t0 + 2 * HOUR_MS, 3 * 3600);
+  assert.equal(heldAnchorAfter(laterAnchor, stopped), laterAnchor);
+  const hoursLater = liveStatus(2, t0 + 6 * HOUR_MS, 7 * 3600);
+  assert.equal(heldAnchorAfter(laterAnchor, hoursLater), laterAnchor);
+  // The bridge's offline marker keeps the charging label but is not live.
+  const offline = liveStatus(3, t0 + 6 * HOUR_MS, 4300, 1000, { charger_online: false });
+  assert.equal(heldAnchorAfter(laterAnchor, offline), laterAnchor);
+  // A session reset clears it, and so does absent/unusable energy. (`undefined`
+  // energy is the same toNumber path as null; the fixture's default hides it.)
+  const reset = liveStatus(2, t0 + 6 * HOUR_MS, 0, 0);
+  assert.equal(heldAnchorAfter(laterAnchor, reset), null);
+  for (const wh of [null, 0, -1, 'x', ' ']) {
+    assert.equal(heldAnchorAfter(laterAnchor, liveStatus(2, t0, 3600, wh)), null, String(wh));
+  }
+  // A new charge re-anchors from its own write.
+  const again = liveStatus(3, t0 + 12 * HOUR_MS, 600);
+  assert.deepEqual(heldAnchorAfter(null, again), { ms: t0 + 12 * HOUR_MS, elapsed: 600 });
+  // A charging write without a usable timestamp anchors nothing, and there is
+  // no anchor without a document.
+  assert.equal(heldAnchorAfter(laterAnchor, liveStatus(3, null, 3600)), null);
+  assert.equal(heldAnchorAfter(laterAnchor, null), null);
 });
 
 // ---------- finished sessions ----------
