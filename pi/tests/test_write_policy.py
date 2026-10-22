@@ -637,6 +637,38 @@ class PolicyEnvTests(unittest.TestCase):
         ), self.assertRaises(SystemExit):
             bridge.main()
 
+    def test_non_finite_values_exit_loudly(self):
+        for name, raw in (
+            ("WRITE_MIN_GAP_SEC", "nan"),
+            ("WRITE_MIN_GAP_SEC", "inf"),
+            ("CHARGING_HEARTBEAT_SEC", "nan"),
+            ("CHARGING_HEARTBEAT_SEC", "inf"),
+            ("HEARTBEAT_INTERVAL", "nan"),
+            ("HEARTBEAT_INTERVAL", "inf"),
+        ):
+            with self.subTest(name=name, raw=raw):
+                with mock.patch.dict(
+                    bridge._FILE_ENV, {}, clear=True
+                ), mock.patch.dict(
+                    os.environ, {name: raw}, clear=True
+                ), self.assertRaises(SystemExit):
+                    bridge.main()
+
+    def test_non_positive_values_exit_loudly(self):
+        for name, raw in (
+            ("WRITE_MIN_GAP_SEC", "-1"),
+            ("WRITE_MIN_GAP_SEC", "0"),
+            ("CHARGING_HEARTBEAT_SEC", "-1"),
+            ("HEARTBEAT_INTERVAL", "-60"),
+        ):
+            with self.subTest(name=name, raw=raw):
+                with mock.patch.dict(
+                    bridge._FILE_ENV, {}, clear=True
+                ), mock.patch.dict(
+                    os.environ, {name: raw}, clear=True
+                ), self.assertRaises(SystemExit):
+                    bridge.main()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2321,6 +2321,36 @@ def mqtt_config_or_exit():
         sys.exit(str(exc))
 
 
+def write_policy_config():
+    """Write-policy tunables from the environment; bad values raise ValueError.
+
+    Non-finite and non-positive values are equally rejected: against ``nan``
+    every cadence comparison reads "not due yet", which would silently
+    freeze all status writes, while a negative period is always due and
+    would write on every scheduler tick.
+    """
+    tunables = (
+        ("WRITE_MIN_GAP_SEC", WRITE_MIN_GAP_SEC),
+        ("CHARGING_HEARTBEAT_SEC", CHARGING_HEARTBEAT_SEC),
+        ("HEARTBEAT_INTERVAL", HEARTBEAT_INTERVAL),
+    )
+    values = []
+    for name, default in tunables:
+        value = _env_finite(name, default, float)
+        if value <= 0:
+            raise ValueError(f"{name} must be above zero, got {value:g}.")
+        values.append(value)
+    return WritePolicyConfig(*values)
+
+
+def write_policy_config_or_exit():
+    """Write-policy tunables for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return write_policy_config()
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
 def attempts_within(now, attempts, window):
     """Attempt timestamps inside the trailing ``window`` seconds.
 
@@ -3305,8 +3335,12 @@ def command_loop(db, host, auth, transport, interval, source=None, sink=None):
                     # a *status* write lands; this document's own write does
                     # not release it, so a completed command forces one
                     # immediately, bypassing the write policy's cadences
-                    # (issue #93). A failed command needs no forced write:
-                    # the app releases its hold on the explicit failure.
+                    # (issue #93). A failed command forces nothing: the app
+                    # clears its hold only when the send itself fails
+                    # client-side, so a bridge-reported failure leaves the
+                    # held clock frozen until the next heartbeat (<=60 s
+                    # while charging) -- self-clearing, and cheaper than a
+                    # write per failed command.
                     if sink is not None:
                         try:
                             sink.force_write()
@@ -3837,18 +3871,13 @@ def main():
         reconcile_interval = float(cfg("SCHEDULE_RECONCILE_INTERVAL") or 300)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
         settings_interval = float(cfg("SETTINGS_INTERVAL") or 60)
-        write_min_gap = float(cfg("WRITE_MIN_GAP_SEC") or WRITE_MIN_GAP_SEC)
-        charging_heartbeat = float(
-            cfg("CHARGING_HEARTBEAT_SEC") or CHARGING_HEARTBEAT_SEC
-        )
-        idle_heartbeat = float(cfg("HEARTBEAT_INTERVAL") or HEARTBEAT_INTERVAL)
     except ValueError:
         sys.exit(
             "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
-            "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL, SETTINGS_INTERVAL, "
-            "WRITE_MIN_GAP_SEC, CHARGING_HEARTBEAT_SEC and HEARTBEAT_INTERVAL "
+            "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
             "must be numbers."
         )
+    write_policy = write_policy_config_or_exit()
 
     try:
         db = init_firestore()
@@ -3876,8 +3905,9 @@ def main():
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s, "
         f"settings {settings_interval:g}s, "
-        f"status writes gap >={write_min_gap:g}s, "
-        f"heartbeats {charging_heartbeat:g}s charging/{idle_heartbeat:g}s idle"
+        f"status writes gap >={write_policy.min_gap:g}s, "
+        f"heartbeats {write_policy.charging_heartbeat:g}s charging/"
+        f"{write_policy.idle_heartbeat:g}s idle"
     )
     log(
         f"watchdog: enabled={watchdog.enabled} failures={watchdog.threshold} "
@@ -3911,9 +3941,7 @@ def main():
         watchdog,
         mqtt,
         bootstrap,
-        write_policy=WritePolicyConfig(
-            write_min_gap, charging_heartbeat, idle_heartbeat
-        ),
+        write_policy=write_policy,
     )
     log("bridge stopped")
 

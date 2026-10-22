@@ -480,7 +480,10 @@ updated_at]`. Under HTTP-only mode the status poll is the observation and
 - **A completed command forces an immediate write** bypassing both cadences
   and the rate limit: the app holds its session clock until a _status_ write
   lands, so the command document's own write is not a substitute. A failed
-  command forces nothing — the app releases its hold on the explicit failure.
+  command forces nothing — the app clears its held clock only when the send
+  itself fails on the device, so a bridge-reported failure leaves the clock
+  frozen until the next heartbeat write (≤60 s while charging), where it
+  self-clears.
 - **No-op suppression:** a due trigger whose payload equals the last written
   payload (ignoring `updated_at`) writes nothing. A due heartbeat always
   writes.
