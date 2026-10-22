@@ -493,7 +493,15 @@
               <span class="section-note" id="sessions-count"></span>
             </div>
             <p class="section-state" id="sessions-state" hidden></p>
+            <div class="sessions-controls">
+              <label class="section-note" for="sessions-month">Browse a month</label>
+              <input type="month" id="sessions-month" autocomplete="off" />
+              <button id="sessions-recent" class="btn small" type="button" hidden>Recent</button>
+            </div>
             <ul class="sessions" id="sessions-list"></ul>
+            <button id="sessions-more" class="btn small sessions-more" type="button" hidden>
+              Show more
+            </button>
           </section>
         </section>
 
