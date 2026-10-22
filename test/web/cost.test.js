@@ -9,13 +9,16 @@ import assert from 'node:assert/strict';
 import {
   aggregateCostLabel,
   costSettings,
+  dayCost,
+  hourCost,
   liveCostLabel,
+  periodCost,
   sessionCostLabel,
   sessionIntervalsValid,
   statusCostLabel,
   statusCostUncovered,
 } from '../../web/js/cost.js';
-import { fmtCost } from '../../web/js/format.js';
+import { fmtCost, fmtMoney } from '../../web/js/format.js';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -618,4 +621,157 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
   // The season rate prices any hour, live included.
   assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
   assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.00');
+});
+
+// ---------- schedule-priced history aggregates ----------
+
+test('dayCost prices each bucket over its own wall-clock hour', () => {
+  // 2 kWh in the 00–06 window (hour 02), 1 kWh at the fallback (hour 12).
+  const cost = dayCost('2026-01-05', { '02': 2, 12: 1 }, 3, nightly());
+  assert.ok(Math.abs(cost - 0.5) < 1e-9);
+  // The label the history screen renders from such a figure.
+  assert.equal(fmtMoney(cost, 'GBP'), 'GBP 0.50');
+  // A window boundary inside one hour splits the bucket: 05:30–06:30 at 0.10
+  // leaves hour 05 half window, half fallback.
+  const straddle = nightly({ start: '05:30', end: '06:30' });
+  assert.ok(Math.abs(hourCost('2026-01-05', '05', 1, straddle) - 0.2) < 1e-9);
+});
+
+test('hourCost is the per-bucket piece dayCost sums', () => {
+  const hours = { '05': 1.5, '06': 2.5 };
+  const settings = nightly();
+  const total = dayCost('2026-01-05', hours, 4, settings);
+  const parts =
+    hourCost('2026-01-05', '05', hours['05'], settings) +
+    hourCost('2026-01-05', '06', hours['06'], settings);
+  assert.ok(Math.abs(total - parts) < 1e-9);
+  // The 06:00 boundary sits between the two buckets: 05 is window, 06 is not.
+  assert.ok(Math.abs(hourCost('2026-01-05', '05', 1, settings) - 0.1) < 1e-9);
+  assert.ok(Math.abs(hourCost('2026-01-05', '06', 1, settings) - 0.3) < 1e-9);
+  // Hour ids reach here as the series points' zero-padded strings; a bare
+  // number is accepted for direct use, anything else is unusable.
+  assert.ok(Math.abs(hourCost('2026-01-05', 5, 1, settings) - 0.1) < 1e-9);
+  assert.equal(hourCost('2026-01-05', '24', 1, settings), null);
+  assert.equal(hourCost('2026-01-05', 'nope', 1, settings), null);
+  assert.equal(hourCost('2026-01-05', '05', 'nope', settings), null);
+  assert.equal(hourCost('2026-01-05', '05', -1, settings), null);
+});
+
+test('dayCost prices season edges and the new-year tail from the day id', () => {
+  // A date-scoped season: all-day 0.20 from 15 June to 15 September only.
+  const summer = {
+    rate: 0.3,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [6, 7, 8, 9],
+        from: '06-15',
+        to: '09-15',
+      },
+    ],
+  };
+  assert.ok(Math.abs(dayCost('2026-06-15', { 12: 1 }, 1, summer) - 0.2) < 1e-9);
+  // The day before the season is outside every season: 0.00, not hidden.
+  assert.equal(dayCost('2026-06-14', { 12: 1 }, 1, summer), 0);
+  // A December-only 22:00–06:00 window covers the early hours of 1 January
+  // (the tail of the window that started on 31 December), as any interval.
+  const december = nightly({ start: '22:00', end: '06:00', months: [12] });
+  assert.ok(Math.abs(dayCost('2026-01-01', { '01': 1 }, 1, december) - 0.1) < 1e-9);
+  assert.ok(Math.abs(dayCost('2026-01-01', { 12: 1 }, 1, december) - 0.3) < 1e-9);
+});
+
+test('DST-shifted day ids price their buckets as the real hours after midnight', () => {
+  const offPeak = nightly({ end: '03:00' });
+  // 2026-03-08 in Denver springs forward at 02:00: the "02" bucket spans the
+  // first instants that exist (wall 03:00–04:00), outside a 00:00–03:00
+  // window, and every later bucket stays one wall hour late.
+  const spring = dayCost('2026-03-08', { '01': 1, '02': 1, '03': 1 }, 3, offPeak);
+  assert.ok(Math.abs(spring - (0.1 + 0.3 + 0.3)) < 1e-9);
+  // 2026-11-01 falls back: the 25-hour day's buckets "01"–"03" all land inside
+  // the three-wall-hour window, so the day prices cheaper than its wall clock
+  // suggests — the accepted midnight + h·3600 s approximation.
+  const autumn = dayCost('2026-11-01', { '01': 1, '02': 1, '03': 1, '04': 1 }, 4, offPeak);
+  assert.ok(Math.abs(autumn - (0.1 + 0.1 + 0.1 + 0.3)) < 1e-9);
+});
+
+test('a day with energy but no usable buckets is unpriceable, not free', () => {
+  // Recorded before hourly capture began: a real total, nothing to split
+  // across windows. Null is distinct from a 0.00 day.
+  assert.equal(dayCost('2026-01-05', null, 4.2, nightly()), null);
+  assert.equal(dayCost('2026-01-05', {}, 4.2, nightly()), null);
+  assert.equal(dayCost('2026-01-05', { '00': 0, '05': -1, '07': 'nope' }, 4.2, nightly()), null);
+  assert.equal(dayCost('2026-01-05', 'nope', 4.2, nightly()), null);
+  // A day with no energy at all is fully priced at 0.00 — never a gap the
+  // partial note has to cover.
+  assert.equal(dayCost('2026-01-05', null, 0, nightly()), 0);
+  assert.equal(dayCost('2026-01-05', {}, 0, nightly()), 0);
+  assert.equal(dayCost('2026-01-05', null, -4, nightly()), 0);
+  // An unusable total says nothing: unknown energy is not free either.
+  assert.equal(dayCost('2026-01-05', null, 'nope', nightly()), null);
+  assert.equal(dayCost('2026-01-05', null, null, nightly()), null);
+  // A malformed day id prices nothing, buckets or not.
+  assert.equal(dayCost('2026-02-31', { '05': 1 }, 1, nightly()), null);
+  assert.equal(dayCost('nope', { '05': 1 }, 1, nightly()), null);
+});
+
+test('hours no base or window covers price 0.00 (the plan-banner rule)', () => {
+  // windowOnly prices 16:00–19:00 and nothing else: noon is 0.00, 17:00 pays.
+  const cost = dayCost('2026-01-05', { 12: 1, 17: 1 }, 2, windowOnly());
+  assert.ok(Math.abs(cost - 0.32) < 1e-9);
+  // A zero-energy hour prices 0.00 rather than hiding.
+  assert.equal(hourCost('2026-01-05', '12', 0, windowOnly()), 0);
+});
+
+test('periodCost sums priceable days and reports the split for the note', () => {
+  const docs = [
+    { id: '2026-01-05', kwh: 3, hours: { '02': 2, 12: 1 } }, // 0.50
+    { id: '2026-01-06', kwh: 4.2 }, // energy, no buckets: unpriceable
+    { id: '2026-01-07', kwh: 0 }, // zero-energy day: priced at 0.00
+    { id: '2026-01-08', kwh: 1, hours: { '03': 1 } }, // 0.10
+    { id: 'nope', kwh: 1, hours: { '03': 1 } }, // bad id: unpriceable
+    null, // malformed rows are skipped, never thrown
+  ];
+  const totals = periodCost(docs, nightly());
+  assert.equal(totals.pricedDays, 3);
+  assert.equal(totals.unpricedDays, 2);
+  assert.ok(Math.abs(totals.cost - 0.6) < 1e-9);
+  // Empty and non-list inputs are a zeroed split, not a throw.
+  assert.deepEqual(periodCost([], nightly()), { cost: 0, pricedDays: 0, unpricedDays: 0 });
+  assert.deepEqual(periodCost(null, nightly()), { cost: 0, pricedDays: 0, unpricedDays: 0 });
+});
+
+test('flat settings never price through the schedule helpers', () => {
+  // One flat implementation: aggregateCostLabel. The bucket-priced aggregates
+  // return hidden/zeroed under a flat config, so a flat figure on screen can
+  // only ever come from the byte-identical aggregate path.
+  assert.equal(dayCost('2026-01-05', { '02': 2 }, 2, FLAT), null);
+  assert.equal(hourCost('2026-01-05', '02', 2, FLAT), null);
+  assert.deepEqual(periodCost([{ id: '2026-01-05', kwh: 3, hours: { '02': 2 } }], FLAT), {
+    cost: 0,
+    pricedDays: 0,
+    unpricedDays: 0,
+  });
+});
+
+test('flat aggregate output stays byte-identical across the input matrix', () => {
+  // The regression the whole PR leans on: for the same inputs the flat label
+  // is exactly the fmtCost string the pre-schedule screen rendered.
+  for (const kwh of [0, 0.001, 0.125, 1, 12.345, 250, 999.999, 12345.6789, -1]) {
+    assert.equal(
+      aggregateCostLabel(kwh, FLAT),
+      fmtCost(kwh, FLAT.rate, FLAT.currency),
+      String(kwh),
+    );
+  }
+  for (const bad of [null, undefined, '', 'nope', ' ', Number.NaN, Infinity, true]) {
+    assert.equal(aggregateCostLabel(bad, FLAT), null, String(bad));
+  }
+  // A missing rate or currency hides exactly as before.
+  assert.equal(aggregateCostLabel(1, { rate: null, currency: 'GBP' }), null);
+  assert.equal(aggregateCostLabel(1, null), null);
 });

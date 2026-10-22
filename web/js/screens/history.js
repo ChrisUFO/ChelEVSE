@@ -23,9 +23,17 @@ import {
   sectionView,
   sumSeries,
 } from '../history.js';
-import { aggregateCostLabel, costSettings, hasRateSchedule, sessionCostLabel } from '../cost.js';
+import {
+  aggregateCostLabel,
+  costSettings,
+  dayCost,
+  hasRateSchedule,
+  hourCost,
+  periodCost,
+  sessionCostLabel,
+} from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
-import { fmtK, formatDuration, toNumber } from '../format.js';
+import { fmtK, formatDuration, fmtMoney, toNumber } from '../format.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const VIEW_W = CHART_VIEW_W;
@@ -44,8 +52,10 @@ const PARTIAL_SUFFIX = { month: ' (current month)', hour: ' (this hour so far)' 
 let active = false;
 let loaded = false;
 let loading = false;
-// Full cost settings ({rate, currency, rates}); per-session costs use the
-// schedule, and its presence hides the aggregate daily/period cost below.
+// Full cost settings ({rate, currency, rates}), re-read on every render:
+// per-session costs, the flat aggregate and the schedule-priced aggregates
+// below all take it per call, so a saved schedule re-prices the whole screen
+// with nothing stored. Nothing here is ever written back to history/*.
 let settings = null;
 // Selected chart range (a PERIODS id), and the read that owns the chart. Every
 // history read takes a sequence number so a period switch cannot be repainted by
@@ -87,22 +97,76 @@ function svgEl(tag, attrs) {
   return node;
 }
 
-// ---------- summary + chart ----------
+// ---------- summary + chart costing ----------
 
-// Period cost from a kWh total. Null when a schedule exists: a day stores one
-// kWh figure, so its cost cannot be split across the windows it was drawn in.
-// The chart and summary then show kWh only.
-function seriesCost(kwh) {
-  return aggregateCostLabel(kwh, settings);
+// One rendered bucket's schedule-priced cost and what of its energy it covers.
+// Pure — `settings` arrives per call — and schedule-only by design: the flat
+// path is aggregateCostLabel's and stays byte-identical, so a flat misuse
+// returns a hidden figure, never a flat price.
+//   hour bucket   one wall-clock hour of the day the Day period's read targeted
+//   day bucket    the day document's own hourly buckets (Week/Month bars)
+//   month bucket  the day documents that summed into the month (Year bars); a
+//                 partially covered month shows its partial cost, disclosed by
+//                 the same note as the period total
+export function pointCostSummary(point, bucket, settings) {
+  if (bucket === 'hour') {
+    const cost = hourCost(point.dayId, point.id, point.kwh, settings);
+    return { cost, pricedEnergy: point.kwh > 0, unpricedEnergy: false };
+  }
+  if (bucket === 'month') {
+    const totals = periodCost(point.days, settings);
+    return {
+      cost: totals.cost,
+      pricedEnergy: totals.pricedDays > 0,
+      unpricedEnergy: totals.unpricedDays > 0,
+    };
+  }
+  const cost = dayCost(point.id, point.hours, point.kwh, settings);
+  return { cost, pricedEnergy: cost != null && point.kwh > 0, unpricedEnergy: cost == null };
 }
 
-// Say why the aggregate cost is absent: with a schedule the summary reflows to
-// one full-width kWh card and the chart drops its cost readout, and an absence
-// alone reads as lost data. Only ever shown beside a rendered summary.
+// The summary's schedule-priced total over one rendered series: the sum of
+// every priced bucket, hidden when the range's energy is unpriceable and
+// nothing priced sits beside it (a 0.00 there would read as free), with
+// `partial` flagging a mix of priced and unpriceable day energy for the note.
+// Days with no energy are fully priced at 0.00 — an empty range is a $0.00
+// range, not a partial one.
+export function seriesCostSummary(points, bucket, settings) {
+  if (!hasRateSchedule(settings)) return { cost: null, partial: false };
+  let cost = 0;
+  let pricedEnergy = false;
+  let unpricedEnergy = false;
+  for (const point of points || []) {
+    const one = pointCostSummary(point, bucket, settings);
+    if (one.cost != null) cost += one.cost;
+    if (one.pricedEnergy) pricedEnergy = true;
+    if (one.unpricedEnergy) unpricedEnergy = true;
+  }
+  return {
+    cost: unpricedEnergy && !pricedEnergy ? null : cost,
+    partial: pricedEnergy && unpricedEnergy,
+  };
+}
+
+// One bucket's cost label, or null to hide: flat keeps aggregateCostLabel's
+// byte-identical path; under a schedule a bucket whose energy is entirely
+// unpriceable hides rather than showing a figure that covers none of it.
+function seriesCost(point) {
+  if (!hasRateSchedule(settings)) return aggregateCostLabel(point.kwh, settings);
+  const summary = pointCostSummary(point, currentPeriod().bucket, settings);
+  if (summary.cost == null || (summary.unpricedEnergy && !summary.pricedEnergy)) return null;
+  return fmtMoney(summary.cost, settings.currency);
+}
+
+// Disclose partial pricing: shown only when the rendered range mixes priced and
+// unpriceable day energy, so the $ figure beside it is honest about covering
+// only part of the kWh total. Only ever shown beside a rendered summary.
 function setCostNote(visible) {
   const note = $('history-cost-note');
   if (note) note.hidden = !visible;
 }
+
+// ---------- summary + chart ----------
 
 // A saved plan with any unpriced instant advertises it on History: with a
 // schedule, some sessions can be priced at 0.00 without any other signal. Kept as
@@ -169,11 +233,26 @@ function renderSummary() {
     return;
   }
   setText($('history-total'), fmtK(total));
-  const cost = seriesCost(total);
+  let cost = null;
+  let partial = false;
+  if (hasRateSchedule(settings)) {
+    if (historyState === 'no-intraday') {
+      // Today has a total but no hours behind it: the panel copy explains and
+      // the cost stays hidden, exactly as before hourly pricing existed.
+      cost = null;
+    } else {
+      const summary = seriesCostSummary(series, currentPeriod().bucket, settings);
+      cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
+      partial = summary.partial;
+    }
+  } else {
+    // The flat path, byte-identical to the pre-schedule screen.
+    cost = aggregateCostLabel(total, settings);
+  }
   $('history-cost-cell').hidden = !cost;
   $('history-summary').classList.toggle('solo', !cost);
   setText($('history-cost'), cost || '');
-  setCostNote(!cost && hasRateSchedule(settings));
+  setCostNote(partial);
 }
 
 function showChartEmpty(title, line) {
@@ -190,7 +269,7 @@ function showChartEmpty(title, line) {
 
 function buildBar(point, index, slot, barW) {
   const descriptor = currentPeriod();
-  const cost = seriesCost(point.kwh);
+  const cost = seriesCost(point);
   const suffix = point.isCurrent ? PARTIAL_SUFFIX[descriptor.bucket] || '' : '';
   const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
   const group = svgEl('g', {
@@ -270,7 +349,7 @@ function paintSelection(index) {
   const x = Math.max(0, Math.min(series.length - 1, index));
   const point = series[x];
   selectedId = point.id;
-  const cost = seriesCost(point.kwh);
+  const cost = seriesCost(point);
   // The Day period names the selected hour's span; every other period names its
   // bucket (a day or a month). "Today ·" only prefixes a whole-day bucket.
   const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;

@@ -27,7 +27,11 @@ import {
   sectionView,
   sumSeries,
 } from '../../web/js/history.js';
-import { showPlanBanner } from '../../web/js/screens/history.js';
+import {
+  pointCostSummary,
+  seriesCostSummary,
+  showPlanBanner,
+} from '../../web/js/screens/history.js';
 
 test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 0, 5, 12)), '2026-01-05');
@@ -496,6 +500,15 @@ test('hourSeries turns an absent or malformed map into zero points', () => {
   }
 });
 
+test('hour points carry the day their buckets price', () => {
+  // The Day period reads one document for one captured day; every hourly point
+  // carries that day so a schedule can price the bucket's wall-clock span.
+  const points = hourSeries({ '05': 1 }, new Date(2026, 9, 18, 21, 30));
+  assert.equal(points[5].dayId, '2026-10-18');
+  assert.equal(points[0].dayId, '2026-10-18');
+  assert.equal(points[23].dayId, '2026-10-18');
+});
+
 test('periodSeries renders the day period from its single document', () => {
   const today = new Date(2026, 9, 18, 12, 40);
   const points = periodSeries('day', { kwh: 3.75, hours: { 11: 2, 12: 1.75 } }, today);
@@ -572,6 +585,63 @@ test('historySeries aligns docs to days and treats gaps as zero', () => {
     { id: '2026-10-17', kwh: 0, label: 'Sat 17 Oct' },
     { id: '2026-10-18', kwh: 0, label: 'Sun 18 Oct' },
   ]);
+});
+
+test('day points carry their document pricing inputs', () => {
+  const series = historySeries(
+    ['2026-10-16', '2026-10-17', '2026-10-18'],
+    [
+      { id: '2026-10-16', kwh: 4.5, hours: { '03': 4.5 } },
+      // Recorded before hourly capture: a real total, no buckets behind it.
+      { id: '2026-10-18', kwh: 7.25 },
+    ],
+  );
+  assert.deepEqual(series[0].hours, { '03': 4.5 });
+  assert.equal(series[2].hours, null);
+  // A gap day gains no property at all: its point shape is unchanged, so a
+  // genuine zero is priceable at 0.00 rather than an unpriceable gap.
+  assert.equal('hours' in series[1], false);
+  assert.deepEqual(series[1], { id: '2026-10-17', kwh: 0, label: 'Sat 17 Oct' });
+});
+
+test('periodSeries carries the day documents through the week and month buckets', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const docs = [
+    { id: '2026-10-12', kwh: 3, hours: { 22: 3 } },
+    { id: '2026-10-15', kwh: 2.5 },
+  ];
+  const week = periodSeries('week', docs, today);
+  assert.deepEqual(week[0].hours, { 22: 3 });
+  assert.equal(week[3].hours, null);
+  assert.equal('hours' in week[1], false);
+  const month = periodSeries('month', docs, today);
+  assert.deepEqual(month.find((point) => point.id === '2026-10-12').hours, { 22: 3 });
+});
+
+test('year month points carry the day documents that summed into them', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'year',
+    [
+      { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
+      // Energy with no buckets still counts toward the month's kWh — and its
+      // pricing split.
+      { id: '2026-10-18', kwh: 6 },
+      // Outside the 12-month window (2025-11 .. 2026-10), and a no-energy day
+      // inside it.
+      { id: '2025-10-31', kwh: 99 },
+      { id: '2026-10-03', kwh: -4 },
+    ],
+    today,
+  );
+  const october = points.find((point) => point.id === '2026-10');
+  assert.equal(october.kwh, 11);
+  assert.deepEqual(october.days, [
+    { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
+    { id: '2026-10-18', kwh: 6, hours: null },
+  ]);
+  // A month with no recorded energy carries an empty list, not a missing one.
+  assert.deepEqual(points.find((point) => point.id === '2026-05').days, []);
 });
 
 test('sumSeries and maxSeries ignore malformed points', () => {
@@ -683,6 +753,178 @@ test('the plan banner appears exactly when a saved plan has an unpriced instant'
   assert.equal(showPlanBanner(settings([peak])), true);
   // A date season leaves the rest of the year uncovered.
   assert.equal(showPlanBanner(settings([summer])), true);
+});
+
+// ---------- schedule-priced summaries ----------
+//
+// The screen's pricing rules, exercised without a DOM against real series
+// shapes (showPlanBanner's precedent): the flat branch is aggregateCostLabel's
+// byte-identical path and is covered by cost.test.js; these tests pin what the
+// schedule branch shows, hides and discloses.
+
+// cost.test.js's nightly(): a visible all-day base at 0.30 plus a 00:00–06:00
+// night window at 0.10. Winter dates only, so the fixtures hold in any local
+// timezone (no DST transition inside the priced days).
+const NIGHTLY = {
+  rate: 0.3,
+  currency: 'GBP',
+  rates: [
+    {
+      id: 'base',
+      rate: 0.3,
+      days: [0, 1, 2, 3, 4, 5, 6],
+      start: '00:00',
+      end: '00:00',
+      months: null,
+    },
+    {
+      id: 'night',
+      rate: 0.1,
+      days: [0, 1, 2, 3, 4, 5, 6],
+      start: '00:00',
+      end: '06:00',
+      months: null,
+    },
+  ],
+};
+
+test('a schedule fully prices a week whose days all have hourly detail', () => {
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-10-12', kwh: 3, hours: { '02': 2, 12: 1 } },
+      { id: '2026-10-18', kwh: 1, hours: { '03': 1 } },
+    ],
+    new Date(2026, 9, 18, 12),
+  );
+  const summary = seriesCostSummary(points, 'day', NIGHTLY);
+  // 0.50 + 0.10, every day priceable: the full total, nothing to disclose.
+  assert.ok(Math.abs(summary.cost - 0.6) < 1e-9);
+  assert.equal(summary.partial, false);
+});
+
+test('a mixed range shows the priced-only total and flags the note', () => {
+  // One pre-hourly-capture day (a real total, no buckets) beside priced days.
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-10-12', kwh: 3, hours: { '02': 2, 12: 1 } },
+      { id: '2026-10-15', kwh: 4.2 },
+      { id: '2026-10-18', kwh: 1, hours: { '03': 1 } },
+    ],
+    new Date(2026, 9, 18, 12),
+  );
+  const summary = seriesCostSummary(points, 'day', NIGHTLY);
+  assert.ok(Math.abs(summary.cost - 0.6) < 1e-9);
+  assert.equal(summary.partial, true);
+});
+
+test('a range whose energy is all unpriceable hides the cost instead of pricing it free', () => {
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-10-12', kwh: 3 },
+      { id: '2026-10-15', kwh: 4.2 },
+    ],
+    new Date(2026, 9, 18, 12),
+  );
+  const summary = seriesCostSummary(points, 'day', NIGHTLY);
+  assert.equal(summary.cost, null);
+  assert.equal(summary.partial, false);
+});
+
+test('zero-energy days price fully at 0.00 and never read as partial', () => {
+  const empty = seriesCostSummary(
+    periodSeries('week', [], new Date(2026, 9, 18, 12)),
+    'day',
+    NIGHTLY,
+  );
+  assert.equal(empty.cost, 0);
+  assert.equal(empty.partial, false);
+  // Even beside one unpriceable day, a range with no priced energy hides: a
+  // $0.00 would claim the unknown energy was free.
+  const hidden = seriesCostSummary(
+    periodSeries('week', [{ id: '2026-10-15', kwh: 4.2 }], new Date(2026, 9, 18, 12)),
+    'day',
+    NIGHTLY,
+  );
+  assert.equal(hidden.cost, null);
+  assert.equal(hidden.partial, false);
+});
+
+test('day-period hours price from their captured day', () => {
+  const points = hourSeries({ '02': 2, 12: 1 }, new Date(2026, 9, 18, 12, 40));
+  const summary = seriesCostSummary(points, 'hour', NIGHTLY);
+  assert.ok(Math.abs(summary.cost - 0.5) < 1e-9);
+  assert.equal(summary.partial, false);
+  // An hour bucket cannot be partial: it is priced, or it is 0.00.
+  assert.deepEqual(pointCostSummary(points[2], 'hour', NIGHTLY), {
+    cost: 0.2,
+    pricedEnergy: true,
+    unpricedEnergy: false,
+  });
+});
+
+test('year month points price from their day documents', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries(
+    'year',
+    [
+      { id: '2026-10-02', kwh: 1, hours: { '03': 1 } },
+      { id: '2026-10-18', kwh: 6 }, // unpriceable energy inside the month
+    ],
+    today,
+  );
+  const summary = seriesCostSummary(points, 'month', NIGHTLY);
+  assert.ok(Math.abs(summary.cost - 0.1) < 1e-9);
+  assert.equal(summary.partial, true);
+  // The month bar itself shows its partial cost with an honest split.
+  const october = pointCostSummary(
+    points.find((point) => point.id === '2026-10'),
+    'month',
+    NIGHTLY,
+  );
+  assert.ok(Math.abs(october.cost - 0.1) < 1e-9);
+  assert.equal(october.pricedEnergy, true);
+  assert.equal(october.unpricedEnergy, true);
+  // A month whose energy is entirely unpriceable hides its bar figure.
+  const legacy = periodSeries('year', [{ id: '2026-05-06', kwh: 2 }], today);
+  const may = pointCostSummary(
+    legacy.find((point) => point.id === '2026-05'),
+    'month',
+    NIGHTLY,
+  );
+  assert.equal(may.cost, 0);
+  assert.equal(may.pricedEnergy, false);
+  assert.equal(may.unpricedEnergy, true);
+});
+
+test('flat settings keep the schedule summary hidden', () => {
+  // The schedule-only summary never invents a flat price; the screen's flat
+  // branch stays aggregateCostLabel's (byte-identity covered in cost.test.js).
+  const points = periodSeries(
+    'week',
+    [{ id: '2026-10-15', kwh: 4.2, hours: { '03': 4 } }],
+    new Date(2026, 9, 18, 12),
+  );
+  assert.deepEqual(seriesCostSummary(points, 'day', { rate: 0.245, currency: 'GBP' }), {
+    cost: null,
+    partial: false,
+  });
+});
+
+test('an all-unpriceable bar hides its figure instead of pricing it free', () => {
+  // The summary-level twin of this rule is covered above; `seriesCost` is the
+  // per-bar label and stays unexported, so its hide clause is pinned from
+  // source (the sw-shell pattern). Without it an all-unpriceable Year month
+  // bar would render $0.00 as if the energy were free.
+  const source = readFileSync(new URL('../../web/js/screens/history.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function seriesCost(');
+  assert.ok(start >= 0, 'screens/history.js declares seriesCost');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'screens/history.js closes seriesCost');
+  const body = source.slice(start, end + 2);
+  assert.match(body, /unpricedEnergy && !summary\.pricedEnergy\)\) return null/);
 });
 
 // ---------- screen read paths ----------
