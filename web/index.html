@@ -379,7 +379,6 @@
               </div>
               <button id="history-refresh" class="btn refresh" type="button">Refresh</button>
             </div>
-            <p class="lede">Daily energy and recent charging sessions.</p>
             <p class="feedback" id="history-feedback" role="status" aria-live="polite"></p>
           </div>
 
@@ -399,11 +398,6 @@
             </div>
           </section>
 
-          <p class="summary-note" id="history-cost-note" hidden>
-            Some energy in this range has no charging session behind it yet — a charge in progress
-            only records when it ends, and some records can be missing — so the cost covers only the
-            energy those sessions account for.
-          </p>
           <p class="plan-banner" id="history-plan-banner" hidden>
             Some dates or hours have no price and are shown at 0.00.
             <a href="#config">Open settings</a>
@@ -515,7 +509,6 @@
           <div class="panel-head" style="--i: 0">
             <p class="eyebrow">Schedule</p>
             <h1>Charge schedule</h1>
-            <p class="lede">Weekly windows when the charger may charge.</p>
           </div>
 
           <p class="live-window" id="schedule-live" hidden role="status">
@@ -542,13 +535,6 @@
                 </span>
               </label>
             </section>
-
-            <p class="schedule-note" style="--i: 2">
-              The charger enforces these windows itself, so they keep running while this app or the
-              Pi is offline. Edits reach the charger through the Pi, usually within a minute.
-              Current is stored for compatibility but not applied by this firmware — scheduled
-              windows charge at the EVSE's configured limit.
-            </p>
 
             <p
               class="remote-notice"
@@ -599,7 +585,6 @@
           <div class="panel-head" style="--i: 0">
             <p class="eyebrow">Config</p>
             <h1>Configuration</h1>
-            <p class="lede">Charger details, cost estimates, and charging alerts.</p>
           </div>
 
           <section
@@ -879,10 +864,6 @@
           <div class="panel-head" style="--i: 0">
             <p class="eyebrow">Advanced</p>
             <h1>RAPI console</h1>
-            <p class="lede">
-              Send a raw command to the charger. Commands are applied through the Pi, usually within
-              a few seconds.
-            </p>
           </div>
 
           <section class="card-block rapi-card" style="--i: 1" aria-labelledby="rapi-heading">

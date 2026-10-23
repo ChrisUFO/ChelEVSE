@@ -1153,7 +1153,7 @@ test('a live contribution prices into buckets by its own window', () => {
   const totals = sessionBucketCost([contribution], '2026-01-05', 2, settings);
   assert.ok(Math.abs(totals.cost - 0.2) < 1e-9);
   assert.ok(Math.abs(totals.wh - 2000) < 1e-9);
-  // The live Wh covers the accruing day total, so no partial note fires.
+  // The live Wh covers the accruing day total.
   assert.equal(totals.covered, true);
   assert.equal(statusCostLabel(liveStatus(3, at, 7200, 2000), settings), 'GBP 0.20');
   // Other days see none of it.

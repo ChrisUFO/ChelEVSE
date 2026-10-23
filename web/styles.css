@@ -355,13 +355,6 @@ button {
   letter-spacing: -0.02em;
   line-height: 1.15;
 }
-.panel-head .lede {
-  margin: 8px 0 0;
-  max-width: 34ch;
-  color: var(--muted);
-  font-size: 13.5px;
-  line-height: 1.5;
-}
 .placeholder {
   display: grid;
   justify-items: center;
@@ -960,14 +953,6 @@ input[type='range']::-moz-range-thumb {
   margin-left: 3px;
   color: var(--muted);
 }
-/* Shown only while a rate schedule hides the aggregate cost: absence of the
-   "Estimated cost" cell otherwise reads as data loss. */
-.summary-note {
-  margin: 8px 2px 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--muted);
-}
 .plan-banner {
   margin: 8px 2px 0;
   padding: 9px 11px;
@@ -1332,14 +1317,8 @@ input[type='range']::-moz-range-thumb {
 .switch input:disabled + .switch-track {
   opacity: 0.45;
 }
-.schedule-note {
-  margin: 12px 2px 18px;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--muted);
-}
 .remote-notice {
-  margin: -6px 2px 16px;
+  margin: 12px 2px 16px;
   padding: 8px 10px;
   border: 1px solid color-mix(in oklab, var(--warn) 48%, var(--line));
   border-radius: 9px;
@@ -1348,8 +1327,10 @@ input[type='range']::-moz-range-thumb {
   font-size: 12.5px;
   line-height: 1.45;
 }
+/* The Windows heading's spacing from the state card above it: the section's
+   explanatory note is gone (owner call), so the heading carries the gap. */
 .schedule-title-row {
-  padding-top: 2px;
+  padding-top: 20px;
 }
 .rule-list {
   display: grid;

@@ -376,9 +376,10 @@ function monthStartFromId(id) {
 // local midnight costForInterval already splits at, so a session's bucket costs
 // sum to exactly its per-session figure (the reconciliation the summary leans
 // on). kWh totals stay the day documents' (display); `kwh` here only measures
-// coverage for the partial note, with the same max(250 Wh, 2%) tolerance the
-// interval reconciliation uses: attributed Wh that accounts for the bucket
-// means covered, energy with no covering session is disclosed, never priced.
+// coverage, with the same max(250 Wh, 2%) tolerance the interval
+// reconciliation uses: attributed Wh that accounts for the bucket means
+// covered, energy with no covering session hides its figure, never priced
+// free.
 // Returns {cost, wh, covered}, or null without a usable schedule or bucket id
 // (the flat path is and stays aggregateCostLabel's).
 export function sessionBucketCost(sessions, id, kwh, settings) {
@@ -480,8 +481,8 @@ export function liveSessionSettled(span, sessions) {
 // recorded sessions, so its cost lands in exactly the buckets its window
 // overlaps — today's bar, and yesterday's when the charge crossed local
 // midnight — with the same constant-power split every other span prices by, and
-// its Wh counts toward the bucket's coverage, so a live-covered today shows no
-// partial note. It is an estimate, excluded from the recorded reconciliation
+// its Wh counts toward the bucket's coverage, so a live-covered today shows
+// its bar $. It is an estimate, excluded from the recorded reconciliation
 // while live, and settles to the session's own pricing exactly once: whichever
 // input lands first, the guard drops the contribution the moment a recorded
 // span overlaps it.

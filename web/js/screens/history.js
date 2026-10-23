@@ -154,8 +154,8 @@ function svgEl(tag, attrs) {
 //   month bucket  the sessions' energy attributed to that local month
 // Attribution reconciles with the sessions list by construction, and kWh
 // totals stay the day documents' — `point.kwh` only measures coverage, so a
-// bucket whose recorded energy has no covering session hides its figure and
-// flags the partial note instead of pricing itself free.
+// bucket whose recorded energy has no covering session hides its figure
+// instead of pricing itself free.
 export function pointCostSummary(point, bucket, settings, sessions = []) {
   if (bucket === 'hour') {
     const cost = hourCost(point.dayId, point.id, point.kwh, settings);
@@ -174,12 +174,10 @@ export function pointCostSummary(point, bucket, settings, sessions = []) {
 
 // The summary's schedule-priced total over one rendered series: the sum of
 // every priced bucket, hidden when the range's energy is unpriceable and
-// nothing priced sits beside it (a 0.00 there would read as free), with
-// `partial` flagging a mix of priced and uncovered bucket energy for the note.
-// Buckets with no energy are fully priced at 0.00 — an empty range is a $0.00
-// range, not a partial one.
+// nothing priced sits beside it (a 0.00 there would read as free). Buckets
+// with no energy are fully priced at 0.00 — an empty range is a $0.00 range.
 export function seriesCostSummary(points, bucket, settings, sessions = []) {
-  if (!hasRateSchedule(settings)) return { cost: null, partial: false };
+  if (!hasRateSchedule(settings)) return { cost: null };
   let cost = 0;
   let pricedEnergy = false;
   let unpricedEnergy = false;
@@ -191,7 +189,6 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
   }
   return {
     cost: unpricedEnergy && !pricedEnergy ? null : cost,
-    partial: pricedEnergy && unpricedEnergy,
   };
 }
 
@@ -217,14 +214,6 @@ function seriesCost(point) {
   const summary = pointCostSummary(point, currentPeriod().bucket, settings, pricingSessions());
   if (summary.cost == null || (summary.unpricedEnergy && !summary.pricedEnergy)) return null;
   return fmtMoney(summary.cost, settings.currency);
-}
-
-// Disclose partial pricing: shown only when the rendered range mixes priced and
-// unpriceable day energy, so the $ figure beside it is honest about covering
-// only part of the kWh total. Only ever shown beside a rendered summary.
-function setCostNote(visible) {
-  const note = $('history-cost-note');
-  if (note) note.hidden = !visible;
 }
 
 // ---------- summary + chart ----------
@@ -290,12 +279,10 @@ function renderSummary() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
-    setCostNote(false);
     return;
   }
   setText($('history-total'), fmtK(total));
   let cost = null;
-  let partial = false;
   if (hasRateSchedule(settings)) {
     if (historyState === 'no-intraday') {
       // Today has a total but no hours behind it: the panel copy explains and
@@ -309,7 +296,6 @@ function renderSummary() {
         pricingSessions(),
       );
       cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
-      partial = summary.partial;
     }
   } else {
     // The flat path, byte-identical to the pre-schedule screen.
@@ -318,7 +304,6 @@ function renderSummary() {
   $('history-cost-cell').hidden = !cost;
   $('history-summary').classList.toggle('solo', !cost);
   setText($('history-cost'), cost || '');
-  setCostNote(partial);
 }
 
 function showChartEmpty(title, line) {
@@ -488,7 +473,6 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
-    setCostNote(false);
     const copy =
       historyState === 'offline'
         ? { title: OFFLINE_TITLE, line: descriptor.offlineLine }
@@ -1246,7 +1230,6 @@ export function resetHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setText($('history-cost'), '');
-    setCostNote(false);
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);

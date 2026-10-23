@@ -843,7 +843,6 @@ test('a week covered by its sessions prices their sum, not its buckets', () => {
   const summary = seriesCostSummary(points, 'day', NIGHTLY, sessions);
   // 3 kWh + 1 kWh in the 0.10 window — not the 0.30 the noon buckets would pay.
   assert.ok(Math.abs(summary.cost - 0.4) < 1e-9);
-  assert.equal(summary.partial, false);
   // Each day's bar carries its session-attributed figure.
   const monday = pointCostSummary(points[0], 'day', NIGHTLY, sessions);
   assert.ok(Math.abs(monday.cost - 0.3) < 1e-9);
@@ -866,9 +865,8 @@ test('a day whose energy has no covering session is disclosed, never priced free
     today,
   );
   const summary = seriesCostSummary(points, 'day', NIGHTLY, sessions);
-  // The priced-only total beside the note; buckets cannot stand in.
+  // The priced-only total; buckets cannot stand in.
   assert.ok(Math.abs(summary.cost - 0.3) < 1e-9);
-  assert.equal(summary.partial, true);
   // The covered day shows its figure; the uncovered day hides its own.
   const covered = pointCostSummary(points[0], 'day', NIGHTLY, sessions);
   assert.ok(Math.abs(covered.cost - 0.3) < 1e-9);
@@ -976,7 +974,6 @@ test('the live archive week prices every day, including its pre-hourly days', ()
   );
   assert.ok(Math.abs(list - 4.73) < 1e-9);
   assert.ok(Math.abs(summary.cost - 4.73337093) < 1e-6);
-  assert.equal(summary.partial, false);
   // An old bar shows its span-attributed day $, matching its contribution to
   // the summary — the acceptance scenario verbatim.
   const oct19 = pointCostSummary(points[3], 'day', OCTOBER, sessions);
@@ -1003,17 +1000,15 @@ test('a range whose energy is all unpriceable hides the cost instead of pricing 
   );
   const summary = seriesCostSummary(points, 'day', NIGHTLY);
   assert.equal(summary.cost, null);
-  assert.equal(summary.partial, false);
 });
 
-test('zero-energy days price fully at 0.00 and never read as partial', () => {
+test('zero-energy days price fully at 0.00 and uncovered ranges hide', () => {
   const empty = seriesCostSummary(
     periodSeries('week', [], new Date(2026, 9, 18, 12)),
     'day',
     NIGHTLY,
   );
   assert.equal(empty.cost, 0);
-  assert.equal(empty.partial, false);
   // Even beside one unpriceable day, a range with no priced energy hides: a
   // $0.00 would claim the unknown energy was free.
   const hidden = seriesCostSummary(
@@ -1022,7 +1017,6 @@ test('zero-energy days price fully at 0.00 and never read as partial', () => {
     NIGHTLY,
   );
   assert.equal(hidden.cost, null);
-  assert.equal(hidden.partial, false);
 });
 
 test('day-period hours price from their captured day, sessions aside', () => {
@@ -1034,8 +1028,7 @@ test('day-period hours price from their captured day, sessions aside', () => {
   ];
   const summary = seriesCostSummary(points, 'hour', NIGHTLY, sessions);
   assert.ok(Math.abs(summary.cost - 0.5) < 1e-9);
-  assert.equal(summary.partial, false);
-  // An hour bucket cannot be partial: it is priced, or it is 0.00.
+  // An hour bucket is priced, or it is 0.00.
   assert.deepEqual(pointCostSummary(points[2], 'hour', NIGHTLY, sessions), {
     cost: 0.2,
     pricedEnergy: true,
@@ -1058,9 +1051,8 @@ test('year month points price from the sessions attributed into them', () => {
     today,
   );
   const summary = seriesCostSummary(points, 'month', NIGHTLY, sessions);
-  // The priced-only total beside the note: October's session, not its buckets.
+  // The priced-only total: October's session, not its buckets.
   assert.ok(Math.abs(summary.cost - 0.1) < 1e-9);
-  assert.equal(summary.partial, true);
   const october = pointCostSummary(
     points.find((point) => point.id === '2026-10'),
     'month',
@@ -1097,7 +1089,6 @@ test('flat settings keep the schedule summary hidden', () => {
   ];
   assert.deepEqual(seriesCostSummary(points, 'day', { rate: 0.245, currency: 'GBP' }, sessions), {
     cost: null,
-    partial: false,
   });
 });
 
