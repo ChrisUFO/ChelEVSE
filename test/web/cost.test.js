@@ -10,18 +10,19 @@ import {
   adoptedAnchor,
   aggregateCostLabel,
   costSettings,
-  dayCost,
   heldAnchorAfter,
   heldCostLabel,
   heldCostUncovered,
   hourCost,
   liveCostLabel,
-  periodCost,
+  sessionBucketCost,
   sessionCostLabel,
+  sessionCostSpans,
   sessionIntervalsValid,
   statusCostLabel,
   statusCostUncovered,
 } from '../../web/js/cost.js';
+import { costForIntervals, costForSession } from '../../web/js/rates.js';
 import { fmtCost, fmtMoney } from '../../web/js/format.js';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -813,31 +814,17 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
   assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.00');
 });
 
-// ---------- schedule-priced history aggregates ----------
+// ---------- schedule-priced hour buckets (the Day period's bars) ----------
 
-test('dayCost prices each bucket over its own wall-clock hour', () => {
-  // 2 kWh in the 00–06 window (hour 02), 1 kWh at the fallback (hour 12).
-  const cost = dayCost('2026-01-05', { '02': 2, 12: 1 }, 3, nightly());
-  assert.ok(Math.abs(cost - 0.5) < 1e-9);
-  // The label the history screen renders from such a figure.
-  assert.equal(fmtMoney(cost, 'GBP'), 'GBP 0.50');
+test('hourCost prices one bucket over its own wall-clock hour', () => {
+  const settings = nightly();
+  // The 06:00 boundary sits between buckets: 05 is window, 06 is not.
+  assert.ok(Math.abs(hourCost('2026-01-05', '05', 1, settings) - 0.1) < 1e-9);
+  assert.ok(Math.abs(hourCost('2026-01-05', '06', 1, settings) - 0.3) < 1e-9);
   // A window boundary inside one hour splits the bucket: 05:30–06:30 at 0.10
   // leaves hour 05 half window, half fallback.
   const straddle = nightly({ start: '05:30', end: '06:30' });
   assert.ok(Math.abs(hourCost('2026-01-05', '05', 1, straddle) - 0.2) < 1e-9);
-});
-
-test('hourCost is the per-bucket piece dayCost sums', () => {
-  const hours = { '05': 1.5, '06': 2.5 };
-  const settings = nightly();
-  const total = dayCost('2026-01-05', hours, 4, settings);
-  const parts =
-    hourCost('2026-01-05', '05', hours['05'], settings) +
-    hourCost('2026-01-05', '06', hours['06'], settings);
-  assert.ok(Math.abs(total - parts) < 1e-9);
-  // The 06:00 boundary sits between the two buckets: 05 is window, 06 is not.
-  assert.ok(Math.abs(hourCost('2026-01-05', '05', 1, settings) - 0.1) < 1e-9);
-  assert.ok(Math.abs(hourCost('2026-01-05', '06', 1, settings) - 0.3) < 1e-9);
   // Hour ids reach here as the series points' zero-padded strings; a bare
   // number is accepted for direct use, anything else is unusable.
   assert.ok(Math.abs(hourCost('2026-01-05', 5, 1, settings) - 0.1) < 1e-9);
@@ -845,9 +832,11 @@ test('hourCost is the per-bucket piece dayCost sums', () => {
   assert.equal(hourCost('2026-01-05', 'nope', 1, settings), null);
   assert.equal(hourCost('2026-01-05', '05', 'nope', settings), null);
   assert.equal(hourCost('2026-01-05', '05', -1, settings), null);
+  assert.equal(hourCost('2026-02-31', '05', 1, settings), null);
+  assert.equal(hourCost('nope', '05', 1, settings), null);
 });
 
-test('dayCost prices season edges and the new-year tail from the day id', () => {
+test('hour buckets price season edges and the new-year tail from the day id', () => {
   // A date-scoped season: all-day 0.20 from 15 June to 15 September only.
   const summer = {
     rate: 0.3,
@@ -865,87 +854,399 @@ test('dayCost prices season edges and the new-year tail from the day id', () => 
       },
     ],
   };
-  assert.ok(Math.abs(dayCost('2026-06-15', { 12: 1 }, 1, summer) - 0.2) < 1e-9);
+  assert.ok(Math.abs(hourCost('2026-06-15', '12', 1, summer) - 0.2) < 1e-9);
   // The day before the season is outside every season: 0.00, not hidden.
-  assert.equal(dayCost('2026-06-14', { 12: 1 }, 1, summer), 0);
+  assert.equal(hourCost('2026-06-14', '12', 1, summer), 0);
   // A December-only 22:00–06:00 window covers the early hours of 1 January
   // (the tail of the window that started on 31 December), as any interval.
   const december = nightly({ start: '22:00', end: '06:00', months: [12] });
-  assert.ok(Math.abs(dayCost('2026-01-01', { '01': 1 }, 1, december) - 0.1) < 1e-9);
-  assert.ok(Math.abs(dayCost('2026-01-01', { 12: 1 }, 1, december) - 0.3) < 1e-9);
-});
-
-test('DST-shifted day ids price their buckets as the real hours after midnight', () => {
-  const offPeak = nightly({ end: '03:00' });
-  // 2026-03-08 in Denver springs forward at 02:00: the "02" bucket spans the
-  // first instants that exist (wall 03:00–04:00), outside a 00:00–03:00
-  // window, and every later bucket stays one wall hour late.
-  const spring = dayCost('2026-03-08', { '01': 1, '02': 1, '03': 1 }, 3, offPeak);
-  assert.ok(Math.abs(spring - (0.1 + 0.3 + 0.3)) < 1e-9);
-  // 2026-11-01 falls back: the 25-hour day's buckets "01"–"03" all land inside
-  // the three-wall-hour window, so the day prices cheaper than its wall clock
-  // suggests — the accepted midnight + h·3600 s approximation.
-  const autumn = dayCost('2026-11-01', { '01': 1, '02': 1, '03': 1, '04': 1 }, 4, offPeak);
-  assert.ok(Math.abs(autumn - (0.1 + 0.1 + 0.1 + 0.3)) < 1e-9);
-});
-
-test('a day with energy but no usable buckets is unpriceable, not free', () => {
-  // Recorded before hourly capture began: a real total, nothing to split
-  // across windows. Null is distinct from a 0.00 day.
-  assert.equal(dayCost('2026-01-05', null, 4.2, nightly()), null);
-  assert.equal(dayCost('2026-01-05', {}, 4.2, nightly()), null);
-  assert.equal(dayCost('2026-01-05', { '00': 0, '05': -1, '07': 'nope' }, 4.2, nightly()), null);
-  assert.equal(dayCost('2026-01-05', 'nope', 4.2, nightly()), null);
-  // A day with no energy at all is fully priced at 0.00 — never a gap the
-  // partial note has to cover.
-  assert.equal(dayCost('2026-01-05', null, 0, nightly()), 0);
-  assert.equal(dayCost('2026-01-05', {}, 0, nightly()), 0);
-  assert.equal(dayCost('2026-01-05', null, -4, nightly()), 0);
-  // An unusable total says nothing: unknown energy is not free either.
-  assert.equal(dayCost('2026-01-05', null, 'nope', nightly()), null);
-  assert.equal(dayCost('2026-01-05', null, null, nightly()), null);
-  // A malformed day id prices nothing, buckets or not.
-  assert.equal(dayCost('2026-02-31', { '05': 1 }, 1, nightly()), null);
-  assert.equal(dayCost('nope', { '05': 1 }, 1, nightly()), null);
+  assert.ok(Math.abs(hourCost('2026-01-01', '01', 1, december) - 0.1) < 1e-9);
+  assert.ok(Math.abs(hourCost('2026-01-01', '12', 1, december) - 0.3) < 1e-9);
 });
 
 test('hours no base or window covers price 0.00 (the plan-banner rule)', () => {
   // windowOnly prices 16:00–19:00 and nothing else: noon is 0.00, 17:00 pays.
-  const cost = dayCost('2026-01-05', { 12: 1, 17: 1 }, 2, windowOnly());
-  assert.ok(Math.abs(cost - 0.32) < 1e-9);
+  const cost = hourCost('2026-01-05', '12', 1, windowOnly());
+  assert.ok(Math.abs(cost - 0) < 1e-9);
+  assert.ok(Math.abs(hourCost('2026-01-05', '17', 1, windowOnly()) - 0.32) < 1e-9);
   // A zero-energy hour prices 0.00 rather than hiding.
   assert.equal(hourCost('2026-01-05', '12', 0, windowOnly()), 0);
 });
 
-test('periodCost sums priceable days and reports the split for the note', () => {
-  const docs = [
-    { id: '2026-01-05', kwh: 3, hours: { '02': 2, 12: 1 } }, // 0.50
-    { id: '2026-01-06', kwh: 4.2 }, // energy, no buckets: unpriceable
-    { id: '2026-01-07', kwh: 0 }, // zero-energy day: priced at 0.00
-    { id: '2026-01-08', kwh: 1, hours: { '03': 1 } }, // 0.10
-    { id: 'nope', kwh: 1, hours: { '03': 1 } }, // bad id: unpriceable
-    null, // malformed rows are skipped, never thrown
+// ---------- session-attributed period pricing (#123) ----------
+
+test('sessionCostSpans returns the intervals, the span, or nothing', () => {
+  // A reconciling intervals list is the intervals themselves, wh as numbers.
+  const paused = pausedSession();
+  assert.deepEqual(sessionCostSpans(paused), paused.intervals);
+  // A single interval that reconciles is the span with interval precision.
+  const single = session(date(2026, 1, 5, 5, 0), date(2026, 1, 5, 7, 0), 4000);
+  const withInterval = {
+    ...single,
+    intervals: [{ started_at: single.started_at, ended_at: single.ended_at, wh: 4000 }],
+  };
+  assert.deepEqual(sessionCostSpans(withInterval), [
+    { started_at: single.started_at, ended_at: single.ended_at, wh: 4000 },
+  ]);
+  // Absent, empty, malformed or divergent intervals fall back to the span.
+  for (const intervals of [undefined, null, [], 'x', [null], [{ started_at: single.started_at }]]) {
+    assert.deepEqual(
+      sessionCostSpans({ ...single, intervals }),
+      [{ started_at: single.started_at, ended_at: single.ended_at, wh: 4000 }],
+      JSON.stringify(intervals),
+    );
+  }
+  // The restart orphan prices by its span, like its label.
+  const orphan = {
+    wh: 6000,
+    started_at: date(2026, 1, 5, 1, 0),
+    ended_at: date(2026, 1, 5, 2, 30),
+    intervals: [
+      { started_at: date(2026, 1, 5, 2, 0), ended_at: date(2026, 1, 5, 2, 30), wh: 2000 },
+    ],
+  };
+  assert.deepEqual(sessionCostSpans(orphan), [
+    { started_at: orphan.started_at, ended_at: orphan.ended_at, wh: 6000 },
+  ]);
+  // A zero-energy session is a real span (a 0.00); unusable wh or endpoints
+  // price nothing, exactly like the label's null rules.
+  const zero = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 0);
+  assert.deepEqual(sessionCostSpans(zero), [
+    { started_at: zero.started_at, ended_at: zero.ended_at, wh: 0 },
+  ]);
+  for (const bad of [
+    null,
+    'x',
+    {},
+    { wh: 1000 },
+    session(date(2026, 1, 5, 2, 0), date(2026, 1, 5, 1, 0), 2000),
+    { ...zero, wh: 'x' },
+    { ...zero, wh: -1 },
+  ]) {
+    assert.equal(sessionCostSpans(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('a session attributes its exact intervals across local midnights', () => {
+  const item = pausedSession();
+  // 3 kWh in the 18:00–19:00 peak on 5 January, 2 kWh in the 03:00–04:00
+  // off-peak block on 6 January — each day prices its own block.
+  const fifth = sessionBucketCost([item], '2026-01-05', 3, nightly());
+  assert.ok(Math.abs(fifth.cost - 0.9) < 1e-9);
+  assert.ok(Math.abs(fifth.wh - 3000) < 1e-9);
+  assert.equal(fifth.covered, true);
+  const sixth = sessionBucketCost([item], '2026-01-06', 2, nightly());
+  assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
+  assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
+  assert.equal(sixth.covered, true);
+  // The reconciliation the period summary leans on: the two days sum to
+  // exactly the session's own label figure.
+  assert.ok(Math.abs(fifth.cost + sixth.cost - costForIntervals(item.intervals, nightly())) < 1e-9);
+});
+
+test('an interval-less session pro-rates its span across the midnight it spans', () => {
+  // 22:00→02:00, 4 kWh uniformly: half into each side of local midnight, at
+  // the rate each side's window prices — the sessions-list approximation,
+  // applied per day.
+  const overnight = session(date(2026, 1, 5, 22, 0), date(2026, 1, 6, 2, 0), 4000);
+  const fifth = sessionBucketCost([overnight], '2026-01-05', 2, nightly());
+  assert.ok(Math.abs(fifth.cost - 0.6) < 1e-9);
+  assert.ok(Math.abs(fifth.wh - 2000) < 1e-9);
+  const sixth = sessionBucketCost([overnight], '2026-01-06', 2, nightly());
+  assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
+  assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
+  // And the two days reconcile with the span-priced label figure.
+  assert.ok(Math.abs(fifth.cost + sixth.cost - costForSession(overnight, nightly())) < 1e-9);
+});
+
+test('a session straddling the range edges attributes only its in-range energy', () => {
+  // Started the evening before the range's first day: the range's buckets see
+  // only the energy after local midnight, and the rest is not the range's.
+  const straddler = session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 2, 0), 4000);
+  const inside = sessionBucketCost([straddler], '2026-01-05', 2, nightly());
+  assert.ok(Math.abs(inside.cost - 0.2) < 1e-9);
+  assert.ok(Math.abs(inside.wh - 2000) < 1e-9);
+  const outside = sessionBucketCost([straddler], '2026-01-04', 2, nightly());
+  assert.ok(Math.abs(outside.cost - 0.6) < 1e-9);
+  // A session running past the range's last midnight is cut the same way.
+  const tail = session(date(2026, 1, 11, 23, 0), date(2026, 1, 12, 1, 0), 2000);
+  const last = sessionBucketCost([tail], '2026-01-11', 1, nightly());
+  assert.ok(Math.abs(last.wh - 1000) < 1e-9);
+  assert.ok(Math.abs(last.cost - 0.3) < 1e-9);
+});
+
+test('DST-shifted spans attribute by real duration and still reconcile', () => {
+  // Fall-back night (2026-11-01 in Denver is 25 h): 22:00→06:00 is 9 real
+  // hours. 2 kWh land on 31 October at the fallback; 7 real hours of wall
+  // 00:00–06:00 land on 1 November inside the off-peak window.
+  const fall = session(date(2026, 10, 31, 22, 0), date(2026, 11, 1, 6, 0), 9000);
+  const halloween = sessionBucketCost([fall], '2026-10-31', 2, nightly());
+  assert.ok(Math.abs(halloween.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(halloween.cost - 0.6) < 1e-9);
+  const november = sessionBucketCost([fall], '2026-11-01', 7, nightly());
+  assert.ok(Math.abs(november.wh - 7000) < 1e-9);
+  assert.ok(Math.abs(november.cost - 0.7) < 1e-9);
+  assert.ok(Math.abs(halloween.cost + november.cost - costForSession(fall, nightly())) < 1e-9);
+  // Spring-forward night (2026-03-08 in Denver is 23 h): 22:00→06:00 is 7 real
+  // hours, and the wall 00:00–03:00 window is only 2 of the November-side
+  // hours (the "02" hour does not exist).
+  const offPeak = nightly({ end: '03:00' });
+  const spring = session(date(2026, 3, 7, 22, 0), date(2026, 3, 8, 6, 0), 7000);
+  const march7 = sessionBucketCost([spring], '2026-03-07', 2, offPeak);
+  assert.ok(Math.abs(march7.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(march7.cost - 0.6) < 1e-9);
+  const march8 = sessionBucketCost([spring], '2026-03-08', 5, offPeak);
+  assert.ok(Math.abs(march8.wh - 5000) < 1e-9);
+  assert.ok(Math.abs(march8.cost - 1.1) < 1e-9);
+  assert.ok(Math.abs(march7.cost + march8.cost - costForSession(spring, offPeak)) < 1e-9);
+});
+
+test('month buckets slice at local month boundaries, including the year rollover', () => {
+  // 23:00→01:00 across 31 January: an hour of fallback, an hour of window.
+  const crossing = session(date(2026, 1, 31, 23, 0), date(2026, 2, 1, 1, 0), 2000);
+  const january = sessionBucketCost([crossing], '2026-01', 1, nightly());
+  assert.ok(Math.abs(january.wh - 1000) < 1e-9);
+  assert.ok(Math.abs(january.cost - 0.3) < 1e-9);
+  const february = sessionBucketCost([crossing], '2026-02', 1, nightly());
+  assert.ok(Math.abs(february.wh - 1000) < 1e-9);
+  assert.ok(Math.abs(february.cost - 0.1) < 1e-9);
+  // The same shape across New Year prices 1 January's early hours.
+  const newYear = session(date(2025, 12, 31, 23, 0), date(2026, 1, 1, 1, 0), 2000);
+  assert.ok(Math.abs(sessionBucketCost([newYear], '2025-12', 1, nightly()).cost - 0.3) < 1e-9);
+  assert.ok(Math.abs(sessionBucketCost([newYear], '2026-01', 1, nightly()).cost - 0.1) < 1e-9);
+});
+
+test('coverage measures attributed session Wh against the recorded kWh', () => {
+  const settings = nightly();
+  const inside = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000);
+  // Recorded energy with no covering session is disclosed, never priced free.
+  const none = sessionBucketCost([], '2026-01-05', 4.2, settings);
+  assert.deepEqual(none, { cost: 0, wh: 0, covered: false });
+  const full = sessionBucketCost([inside], '2026-01-05', 2, settings);
+  assert.equal(full.covered, true);
+  // The interval reconciliation's tolerance is the coverage tolerance too:
+  // 40 Wh short of 4 kWh is inside the 250 Wh floor…
+  const jitter = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 3960);
+  assert.equal(sessionBucketCost([jitter], '2026-01-05', 4, settings).covered, true);
+  // …300 Wh short is not…
+  const lost = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 3700);
+  const partial = sessionBucketCost([lost], '2026-01-05', 4, settings);
+  assert.equal(partial.covered, false);
+  assert.ok(Math.abs(partial.cost - 0.37) < 1e-9);
+  // …and 2% scales it on a big bucket (600 Wh at 30 kWh).
+  const bigMonth = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 29500);
+  assert.equal(sessionBucketCost([bigMonth], '2026-01', 30, settings).covered, true);
+  assert.equal(
+    sessionBucketCost([{ ...bigMonth, wh: 29300 }], '2026-01', 30, settings).covered,
+    false,
+  );
+  // A zero-energy bucket is covered by nothing at all…
+  assert.equal(sessionBucketCost([], '2026-01-05', 0, settings).covered, true);
+  // …and a zero-energy session covers no recorded energy either.
+  const zero = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 0);
+  const zeroOnly = sessionBucketCost([zero], '2026-01-05', 2, settings);
+  assert.deepEqual(zeroOnly, { cost: 0, wh: 0, covered: false });
+  // An unusable recorded total says nothing to compare: the session figure
+  // stands, covered (the series always carries a number here; this is the
+  // defensive shape).
+  assert.equal(sessionBucketCost([inside], '2026-01-05', 'nope', settings).covered, true);
+});
+
+test('unusable rows, ids and flat settings attribute nothing', () => {
+  const settings = nightly();
+  // Malformed session rows are skipped like the series builders skip them.
+  const junk = sessionBucketCost(
+    [null, 'x', 42, {}, { wh: 1000 }, [{ started_at: date(2026, 1, 5, 1, 0) }]],
+    '2026-01-05',
+    2,
+    settings,
+  );
+  assert.deepEqual(junk, { cost: 0, wh: 0, covered: false });
+  assert.equal(sessionBucketCost(null, '2026-01-05', 2, settings).wh, 0);
+  // Malformed bucket ids price nothing; a day-shaped id never reads as a
+  // month, and a rolling-over month id is no month at all.
+  assert.equal(sessionBucketCost([], 'nope', 2, settings), null);
+  assert.equal(sessionBucketCost([], '2026-02-31', 2, settings), null);
+  assert.equal(sessionBucketCost([], '2026-13', 2, settings), null);
+  assert.equal(sessionBucketCost([], '2026-1', 2, settings), null);
+  // The flat path is aggregateCostLabel's alone.
+  assert.equal(
+    sessionBucketCost(
+      [session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000)],
+      '2026-01-05',
+      2,
+      FLAT,
+    ),
+    null,
+  );
+});
+
+// The week's bucket costs reconcile with the sessions list, by construction:
+// every bucket edge is a boundary costForInterval already splits at. Every
+// session here lies inside the bucketed range — a straddler's label prices its
+// out-of-range energy too, which is not the range's to sum.
+test('a week of mixed sessions sums to exactly their per-session figures', () => {
+  const settings = nightly();
+  const sessions = [
+    pausedSession(),
+    session(date(2026, 1, 5, 22, 0), date(2026, 1, 6, 2, 0), 4000),
+    session(date(2026, 1, 7, 1, 0), date(2026, 1, 7, 2, 0), 2000),
+    session(date(2026, 1, 8, 11, 0), date(2026, 1, 8, 13, 0), 4000),
   ];
-  const totals = periodCost(docs, nightly());
-  assert.equal(totals.pricedDays, 3);
-  assert.equal(totals.unpricedDays, 2);
-  assert.ok(Math.abs(totals.cost - 0.6) < 1e-9);
-  // Empty and non-list inputs are a zeroed split, not a throw.
-  assert.deepEqual(periodCost([], nightly()), { cost: 0, pricedDays: 0, unpricedDays: 0 });
-  assert.deepEqual(periodCost(null, nightly()), { cost: 0, pricedDays: 0, unpricedDays: 0 });
+  let buckets = 0;
+  for (const id of ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09']) {
+    buckets += sessionBucketCost(sessions, id, 0, settings).cost;
+  }
+  const labels =
+    costForIntervals(sessions[0].intervals, settings) +
+    sessions.slice(1).reduce((sum, item) => sum + costForSession(item, settings), 0);
+  assert.ok(Math.abs(buckets - labels) < 1e-9);
+  // Every session's own label agrees with the same engines.
+  for (const item of sessions) {
+    const label = sessionCostLabel(item, settings);
+    assert.ok(label != null && label !== '—');
+  }
+});
+
+// ---------- the live archive (issue #123's evidence, 2026-10-22) ----------
+//
+// Four sessions against the October season rate $0.15303, exactly as the owner
+// reported them: two interval-less spans that straddle local midnights
+// (pro-rated), two with one exact interval each. Denver is the observing
+// timezone, so the UTC spans land on the local Oct 19–22 days the history
+// screen renders.
+
+function octoberRate() {
+  return {
+    rate: 0.15303,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'october',
+        rate: 0.15303,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [10],
+      },
+    ],
+  };
+}
+
+const utc = (year, month, day, hours, minutes) =>
+  new Date(Date.UTC(year, month - 1, day, hours, minutes));
+
+function liveArchive() {
+  return [
+    {
+      id: '1792455533',
+      wh: 11461,
+      started_at: utc(2026, 10, 20, 0, 18),
+      ended_at: utc(2026, 10, 20, 6, 31),
+    },
+    {
+      id: '1792543109',
+      wh: 6841,
+      started_at: utc(2026, 10, 21, 0, 38),
+      ended_at: utc(2026, 10, 21, 7, 0),
+    },
+    {
+      id: '1792613313',
+      wh: 10833,
+      started_at: utc(2026, 10, 21, 20, 8),
+      ended_at: utc(2026, 10, 22, 7, 0),
+      intervals: [
+        {
+          started_at: utc(2026, 10, 21, 20, 8),
+          ended_at: utc(2026, 10, 22, 7, 0),
+          wh: 10833,
+        },
+      ],
+    },
+    {
+      id: '1792698073',
+      wh: 1796,
+      started_at: utc(2026, 10, 22, 19, 41),
+      ended_at: utc(2026, 10, 22, 20, 39),
+      intervals: [
+        {
+          started_at: utc(2026, 10, 22, 19, 41),
+          ended_at: utc(2026, 10, 22, 20, 39),
+          wh: 1796,
+        },
+      ],
+    },
+  ];
+}
+
+test('the live archive attributes across its local midnights exactly once', () => {
+  const sessions = liveArchive();
+  const settings = octoberRate();
+  // Local (MDT, UTC-6) spans and the exact per-day attribution:
+  //   1792455533  Oct 19 18:18 → Oct 20 00:31   (span, 20520 s | 1860 s of 22380 s)
+  //   1792543109  Oct 20 18:38 → Oct 21 01:00   (span, 19320 s |  3600 s of 22920 s)
+  //   1792613313  Oct 21 14:08 → Oct 22 01:00   (interval, 35520 s | 3600 s of 39120 s)
+  //   1792698073  Oct 22 13:41 → Oct 22 14:39   (interval, all Oct 22)
+  const expected = {
+    '2026-10-19': (11461 * 20520) / 22380,
+    '2026-10-20': (11461 * 1860) / 22380 + (6841 * 19320) / 22920,
+    '2026-10-21': (6841 * 3600) / 22920 + (10833 * 35520) / 39120,
+    '2026-10-22': (10833 * 3600) / 39120 + 1796,
+  };
+  for (const [id, wh] of Object.entries(expected)) {
+    const bucket = sessionBucketCost(sessions, id, wh / 1000, settings);
+    assert.ok(Math.abs(bucket.wh - wh) < 1e-6, `${id} wh ${bucket.wh} != ${wh}`);
+    assert.ok(Math.abs(bucket.cost - (wh / 1000) * 0.15303) < 1e-9, id);
+    assert.equal(bucket.covered, true, id);
+  }
+});
+
+test('the live archive week reconciles with the sessions list figures', () => {
+  const sessions = liveArchive();
+  const settings = octoberRate();
+  let week = 0;
+  for (const id of [
+    '2026-10-16',
+    '2026-10-17',
+    '2026-10-18',
+    '2026-10-19',
+    '2026-10-20',
+    '2026-10-21',
+    '2026-10-22',
+  ]) {
+    week += sessionBucketCost(sessions, id, 0, settings).cost;
+  }
+  const list = sessions.reduce(
+    (sum, item) =>
+      sum +
+      (item.intervals
+        ? costForIntervals(item.intervals, settings)
+        : costForSession(item, settings)),
+    0,
+  );
+  // Σ the four sessions at $0.15303: 30.931 kWh → $4.7334, rendered "USD 4.73".
+  assert.ok(Math.abs(list - 4.73337093) < 1e-6);
+  assert.ok(Math.abs(week - list) < 1e-9);
+  assert.equal(fmtMoney(week, 'USD'), 'USD 4.73');
+  // Each session's own label is the same figure the sessions list renders.
+  const labels = sessions.map((item) => sessionCostLabel(item, settings));
+  assert.deepEqual(labels, ['USD 1.75', 'USD 1.05', 'USD 1.66', 'USD 0.27']);
 });
 
 test('flat settings never price through the schedule helpers', () => {
-  // One flat implementation: aggregateCostLabel. The bucket-priced aggregates
-  // return hidden/zeroed under a flat config, so a flat figure on screen can
-  // only ever come from the byte-identical aggregate path.
-  assert.equal(dayCost('2026-01-05', { '02': 2 }, 2, FLAT), null);
+  // One flat implementation: aggregateCostLabel. The bucket- and
+  // session-priced helpers return hidden under a flat config, so a flat figure
+  // on screen can only ever come from the byte-identical aggregate path.
   assert.equal(hourCost('2026-01-05', '02', 2, FLAT), null);
-  assert.deepEqual(periodCost([{ id: '2026-01-05', kwh: 3, hours: { '02': 2 } }], FLAT), {
-    cost: 0,
-    pricedDays: 0,
-    unpricedDays: 0,
-  });
+  assert.equal(
+    sessionBucketCost(
+      [session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000)],
+      '2026-01-05',
+      2,
+      FLAT,
+    ),
+    null,
+  );
 });
 
 test('flat aggregate output stays byte-identical across the input matrix', () => {

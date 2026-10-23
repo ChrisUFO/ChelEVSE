@@ -11,6 +11,19 @@ export function dayId(date) {
   return `${y}-${m}-${d}`;
 }
 
+// Local midnight of a day id — dayId's inverse — or null when the id is
+// malformed or rolls over (2026-02-31). The wall-clock window a stored day id
+// names, shared by the hour-bucket pricing (js/cost.js) and the session range
+// read, so both slice at exactly the midnight the id means.
+export function dayStartFromId(id) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(id));
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) return null;
+  return date;
+}
+
 // The last `count` local day ids, oldest first, ending with `today`.
 // Noon avoids local-midnight DST transitions shifting the calendar date.
 export function lastDayIds(count, today = new Date()) {
