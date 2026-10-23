@@ -15,6 +15,9 @@ import {
   heldCostUncovered,
   hourCost,
   liveCostLabel,
+  liveSessionContribution,
+  liveSessionSettled,
+  liveSessionSpan,
   sessionBucketCost,
   sessionCostLabel,
   sessionCostSpans,
@@ -1106,6 +1109,147 @@ test('a week of mixed sessions sums to exactly their per-session figures', () =>
     const label = sessionCostLabel(item, settings);
     assert.ok(label != null && label !== '—');
   }
+});
+
+// ---------- the live session's period contribution (#126) ----------
+
+test("liveSessionSpan is the status write's own window, or nothing", () => {
+  // The same interval the Status tab prices: [updated_at − elapsed, updated_at]
+  // as raw ms endpoints — the span shape sessionCostSpans' fallback accepts.
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  assert.deepEqual(liveSessionSpan(liveStatus(3, at, 3600, 2000)), {
+    started_at: at - 3600_000,
+    ended_at: at,
+    wh: 2000,
+  });
+  // The liveness gates the live label shares: not charging, the offline
+  // marker, no energy on the meter, no usable elapsed or write time.
+  for (const status of [
+    null,
+    liveStatus(1, at, 3600),
+    liveStatus(3, at, 3600, 1000, { state_label: 'ready' }),
+    liveStatus(3, at, 3600, 1000, { charger_online: false }),
+    liveStatus(3, at, 3600, 0),
+    liveStatus(3, at, 3600, null),
+    liveStatus(3, at, null),
+    liveStatus(3, at, 0),
+    liveStatus(3, at, -60),
+    liveStatus(3, null, 3600),
+  ]) {
+    assert.equal(liveSessionSpan(status), null, JSON.stringify(status));
+  }
+  // Numeric text from a hand-edited document parses like a number.
+  assert.equal(liveSessionSpan(liveStatus(3, at, '3600', '2000')).wh, 2000);
+});
+
+test('a live contribution prices into buckets by its own window', () => {
+  const settings = nightly();
+  // Charging 01:00→03:00, 2 kWh off-peak: the day bucket's figure is exactly
+  // the Status tab's label for the same snapshot — the two screens price one
+  // window, not two approximations of it.
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const contribution = liveSessionContribution(liveStatus(3, at, 7200, 2000), [], settings);
+  assert.ok(contribution);
+  const totals = sessionBucketCost([contribution], '2026-01-05', 2, settings);
+  assert.ok(Math.abs(totals.cost - 0.2) < 1e-9);
+  assert.ok(Math.abs(totals.wh - 2000) < 1e-9);
+  // The live Wh covers the accruing day total, so no partial note fires.
+  assert.equal(totals.covered, true);
+  assert.equal(statusCostLabel(liveStatus(3, at, 7200, 2000), settings), 'GBP 0.20');
+  // Other days see none of it.
+  assert.equal(sessionBucketCost([contribution], '2026-01-04', 2, settings).wh, 0);
+  // Flat configs never price a live contribution: the day total already
+  // accrues under the one rate, so flat output stays byte-identical.
+  assert.equal(liveSessionContribution(liveStatus(3, at, 7200, 2000), [], FLAT), null);
+  // The gates suppress it before any pricing: not charging, offline, junk.
+  assert.equal(liveSessionContribution(liveStatus(1, at, 7200, 2000), [], settings), null);
+  assert.equal(liveSessionContribution(null, [], settings), null);
+  assert.equal(liveSessionContribution(liveStatus(3, null, 7200, 2000), [], settings), null);
+});
+
+test('a midnight-spanning live charge attributes to both local days', () => {
+  const settings = nightly();
+  // 22:00→02:00, 4 kWh uniformly: half at the fallback, half off-peak — the
+  // same pro-rated split the recorded session will price (#125's rule), and
+  // the two days still reconcile with the Status tab's single-window figure.
+  const at = date(2026, 1, 6, 2, 0).getTime();
+  const contribution = liveSessionContribution(liveStatus(3, at, 14400, 4000), [], settings);
+  const fifth = sessionBucketCost([contribution], '2026-01-05', 2, settings);
+  assert.ok(Math.abs(fifth.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(fifth.cost - 0.6) < 1e-9);
+  assert.equal(fifth.covered, true);
+  const sixth = sessionBucketCost([contribution], '2026-01-06', 2, settings);
+  assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
+  assert.equal(sixth.covered, true);
+  assert.equal(statusCostLabel(liveStatus(3, at, 14400, 4000), settings), 'GBP 0.80');
+  assert.ok(Math.abs(fifth.cost + sixth.cost - 0.8) < 1e-9);
+});
+
+test('the settle guard drops a contribution a recorded session already prices', () => {
+  const settings = nightly();
+  // Charging 01:00→03:00 on 5 January; the recorded session covers exactly
+  // that charge (the session document that lands at the stop, beside a status
+  // snapshot that still says charging — one order of the read race).
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
+  assert.equal(liveSessionSettled(liveSessionSpan(status), [recorded]), true);
+  assert.equal(liveSessionContribution(status, [recorded], settings), null);
+  // The bridge writes ended_at at its own finalize instant, which trails the
+  // last charging write: a later endpoint still overlaps.
+  const trailing = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 1), 2000);
+  assert.equal(liveSessionContribution(status, [trailing], settings), null);
+  // A pause-resumed plug-in prices the same way: the recorded prefix (the
+  // pause edge's document) overlaps the live window — the whole-window
+  // estimate cannot be added beside energy the record already prices, so the
+  // contribution drops and the uncovered tail is disclosed, never mispriced.
+  const pausedPrefix = session(date(2026, 1, 5, 0, 0), date(2026, 1, 5, 2, 0), 1000);
+  assert.equal(liveSessionContribution(status, [pausedPrefix], settings), null);
+  // An unrelated earlier charge — ended before this one started — does not
+  // settle anything, and neither does an interval-bearing session whose
+  // charging blocks all lie outside the live window.
+  const earlier = session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 0, 30), 2000);
+  assert.equal(liveSessionSettled(liveSessionSpan(status), [earlier]), false);
+  assert.ok(liveSessionContribution(status, [earlier], settings));
+  const gapped = {
+    ...session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 4, 0), 2000),
+    intervals: [
+      { started_at: date(2026, 1, 4, 22, 0), ended_at: date(2026, 1, 4, 23, 0), wh: 1000 },
+      { started_at: date(2026, 1, 5, 3, 30), ended_at: date(2026, 1, 5, 4, 0), wh: 1000 },
+    ],
+  };
+  assert.equal(liveSessionSettled(liveSessionSpan(status), [gapped]), false);
+  // A session that cannot be priced at all covers nothing: it prices no
+  // bucket, so the estimate beside it is not a double count.
+  const unpriceable = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 'x');
+  assert.ok(liveSessionContribution(status, [unpriceable], settings));
+  // Junk payloads and a missing span settle nothing.
+  assert.equal(liveSessionSettled(liveSessionSpan(status), null), false);
+  assert.equal(liveSessionSettled(liveSessionSpan(status), [null, 'x', {}]), false);
+  assert.equal(liveSessionSettled(null, [recorded]), false);
+});
+
+test('a settled live charge prices exactly once across the transition', () => {
+  const settings = nightly();
+  // The double-count the guard exists for: the same 2 kWh as a recorded
+  // session and an unsettled live contribution would price GBP 0.40 into a
+  // 2 kWh day. With the guard, the bucket carries the recorded figure alone —
+  // whichever listener delivered first, because the predicate reads the
+  // merged payload, not the arrival order.
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
+  const merged = [...[recorded], liveSessionContribution(status, [recorded], settings)].filter(
+    Boolean,
+  );
+  const totals = sessionBucketCost(merged, '2026-01-05', 2, settings);
+  assert.ok(Math.abs(totals.cost - 0.2) < 1e-9);
+  assert.ok(Math.abs(totals.wh - 2000) < 1e-9);
+  // And without the recording — mid-charge — the contribution alone carries
+  // the same figure, so the settled number is the one the estimate promised.
+  const live = [liveSessionContribution(status, [], settings)].filter(Boolean);
+  assert.ok(Math.abs(sessionBucketCost(live, '2026-01-05', 2, settings).cost - 0.2) < 1e-9);
 });
 
 // ---------- the live archive (issue #123's evidence, 2026-10-22) ----------

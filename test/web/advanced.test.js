@@ -68,7 +68,10 @@ test('commandMillis reads Firestore timestamps, numbers, and seconds', () => {
 });
 
 test('a ticker tick cannot detach the focused or expanded command row', () => {
-  const created = { toMillis: () => Date.now() - 65000 };
+  // A fixed timestamp, not a live clock: commandMillis feeds raw millis into
+  // the signature, so a 1 ms tick between the two reads below would flip it.
+  const createdAt = 1759000000000;
+  const created = { toMillis: () => createdAt };
   const commands = [
     { id: 'a', command: '$FS 16', status: 'acked', created_at: created, result: 'OK' },
     { id: 'b', command: '$FS 20', status: 'pending', created_at: created },
@@ -82,7 +85,7 @@ test('a ticker tick cannot detach the focused or expanded command row', () => {
   // The only thing a tick produces is the elapsed labels for the rows already on
   // screen; no row identity or content is emitted, so no node is replaced and
   // the focused/expanded row, its selection and the scroll position survive.
-  const now = Date.now();
+  const now = createdAt + 65000;
   assert.deepEqual(rapiTickLabels(commands, commands.length, now), ['1 min ago', '1 min ago']);
 
   // A changed row (status, command, result, timestamp, or a new document) needs a
