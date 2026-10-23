@@ -1127,6 +1127,12 @@ export function activateHistory() {
     settlePending = false;
     settleVerify = true;
     readHistory();
+  } else if (settleVerify && !loading) {
+    // The settle read's verification, same contract as the push route in
+    // showHistoryStatus: after a stop the bridge goes quiet, so the return
+    // visit — not the next push — spends the one re-read.
+    settleVerify = false;
+    readHistory();
   } else {
     // Status pushes that arrived while the tab was hidden left any live
     // figure unpainted; the return visit renders them (#126).
@@ -1176,8 +1182,9 @@ export function showHistoryStatus(data) {
   }
   // The settle read's verification: exactly one more re-read on the next
   // status push, for the session write the bridge retried after the settle
-  // read fetched. Hidden pushes hold it — the flag waits for a visible one —
-  // and once spent the idle stream re-reads nothing further.
+  // read fetched. Hidden pushes hold it for a visible one — or the return
+  // visit spends it, in activateHistory — and once spent the idle stream
+  // re-reads nothing further.
   if (settleVerify && !loading) {
     settleVerify = false;
     readHistory();

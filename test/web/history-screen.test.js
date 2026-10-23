@@ -115,6 +115,7 @@ const {
   initHistory,
   resetHistory,
   enterHistory,
+  activateHistory,
   mergeSessions,
   monthRange,
   nextSessionsView,
@@ -900,4 +901,92 @@ test('a settle that lands while the tab is hidden is caught up on the next visib
   await readFailed();
   assert.equal(element('history-total').textContent, '—');
   assert.equal(element('history-cost-cell').hidden, true);
+});
+
+test('a settle that lands while the tab is hidden is caught up on the return visit', async () => {
+  resetHistory();
+  enterHistory();
+  // The real boot: the first visit reads through loadAll, which is what marks
+  // the screen loaded and pins the midnight window — the state the direct
+  // applyHistory seam never touches. In Node the read genuinely rejects, and
+  // the apply step below is the payload it would have delivered.
+  await fire('history-refresh', 'click');
+  const today = new Date(2026, 9, 18, 12);
+  const descriptor = periodById('week');
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [],
+  );
+  showHistorySettings(nightly());
+  showHistoryStatus(statusAt(3, today.getTime(), 7200, 1000));
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+
+  // A newer charging write while hidden paints nothing — the catch-up render
+  // belongs to the return visit, and it is the else branch of the settle arm:
+  // no edge queued, so activateHistory only renders.
+  element('panel-history').hidden = true;
+  showHistoryStatus(statusAt(3, today.getTime() + 60_000, 7440, 1030));
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  element('panel-history').hidden = false;
+  activateHistory();
+  assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
+
+  // The stopped push queues the settle while hidden; the return visit spends
+  // it through activateHistory — the loading copy readHistory paints before
+  // it fetches is the proof the re-read fired.
+  element('panel-history').hidden = true;
+  showHistoryStatus(statusAt(1, today.getTime() + 120_000, 7440, 1030));
+  element('panel-history').hidden = false;
+  activateHistory();
+  assert.match(element('chart-empty-title').textContent, /Loading/);
+  await readFailed();
+
+  // The retried write has committed: the settle read's payload — driven
+  // through the same apply seam — prices the recorded session exactly once,
+  // the same number the estimate promised.
+  const recorded = {
+    id: '1765792920',
+    wh: 1030,
+    started_at: new Date(2026, 9, 18, 9, 58),
+    ended_at: new Date(2026, 9, 18, 12, 2),
+  };
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [recorded],
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
+  assert.equal(element('history-cost-note').hidden, true);
+  assert.equal(element('history-total').textContent, '1.00');
+
+  // The settle armed the verification re-read; a hidden push holds it, and
+  // the return visit — not the next push — spends it.
+  element('panel-history').hidden = true;
+  showHistoryStatus(statusAt(1, today.getTime() + 180_000, 7440, 1030));
+  assert.equal(element('history-total').textContent, '1.00');
+  element('panel-history').hidden = false;
+  activateHistory();
+  assert.match(element('chart-empty-title').textContent, /Loading/);
+  await readFailed();
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [recorded],
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-total').textContent, '1.00');
+
+  // Both flags are spent: another return visit re-renders, never re-reads —
+  // a read would have cleared the total synchronously.
+  activateHistory();
+  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
 });
