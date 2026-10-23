@@ -259,3 +259,22 @@ test('a replace that only moves updated_at refreshes the heading, not the panel'
   showConfigData({ hostname: 'driveway', updated_at: clock('2026-10-22T18:02:00') });
   assert.notEqual(panelNodes(), built, 'a changed value must rebuild the panel');
 });
+
+test('each curated group is a collapsed disclosure with its heading in the summary', () => {
+  // The snapshot card's structure contract: one <details class="disclosure
+  // config-group"> per curated group, no `open` attribute — collapsed by
+  // default, so a rebuild (a genuine content change) re-collapses every group
+  // while the signature skip keeps an open group open across a timestamp-only
+  // replace. The summary carries the group's h3, keeping the heading
+  // hierarchy h1 panel → h2 card → h3 group.
+  showConfigData({ hostname: 'garage', gfci_check: true });
+  const groups = panelNodes();
+  assert.ok(groups.length > 0);
+  const [first, second] = groups;
+  assert.equal(first.className, 'disclosure config-group');
+  assert.equal(first.children[0].children[0].textContent, 'Device');
+  assert.equal(second.children[0].children[0].textContent, 'Safety');
+  for (const group of groups) {
+    assert.equal(group.open, undefined, 'a built group is collapsed');
+  }
+});
