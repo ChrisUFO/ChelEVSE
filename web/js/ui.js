@@ -112,6 +112,9 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
           return;
         }
         apply(route);
+        // The hash may have drifted while the dialog was open (another click
+        // was snapped back), so pin it to the route that now applies.
+        history.replaceState(null, '', `#${route}`);
         // A direct click leaves focus on the newly selected tab; the dialog
         // had it instead, so put focus where the click would have left it.
         const activeTab = document.querySelector('.tab[aria-selected="true"]');
@@ -145,6 +148,10 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
 
   for (const tab of tabs) {
     tab.addEventListener('click', () => {
+      // An open confirmation dialog owns the pending navigation; the hash
+      // matches the pending route, so the re-click shortcut below would
+      // otherwise apply it without an answer.
+      if (pendingLeave !== null) return;
       const route = tab.dataset.route;
       if (location.hash === `#${route}`) apply(route);
       else location.hash = route;
