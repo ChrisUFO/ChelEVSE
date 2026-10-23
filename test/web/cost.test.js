@@ -1488,8 +1488,10 @@ test('overlapping recorded documents hide the residual, never add it', () => {
 test('a zero-residual resume keeps its tail and the bar covered', () => {
   const settings = nightly();
   // The resumed block has drawn nothing yet: the record carries the meter's
-  // whole 2 kWh and ends an hour before the write. The tail exists (wh 0) —
-  // nulling it would flip the bucket's covered check for this one write.
+  // whole 2 kWh and ends an hour before the write. The tail is returned by
+  // the uniform contract — the gates passed, so the contribution is the
+  // tail — and its 0 Wh prices 0.00 and adds nothing: the record's own
+  // 2 kWh covers the bar with or without the span.
   const at = date(2026, 1, 5, 3, 0).getTime();
   const status = liveStatus(3, at, 7200, 2000);
   const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000);

@@ -525,9 +525,12 @@ function recordedInWindow(sessions, liveStart, liveEnd) {
 // No tolerance gate exists: the residual IS the accruing current block, so a
 // max(250 Wh, 2%) branch would hide exactly the case #128 exists to price —
 // and downstream "ambiguous" and "settled" are indistinguishable anyway (both
-// null; the bucket's own covered check decides what shows). A zero-residual
-// tail is returned, not nulled: dropping it would flip the bucket's covered
-// check for one write.
+// null; the bucket's own covered check decides what shows). The return
+// contract is uniform — whenever records overlap and the gates pass, the
+// contribution IS the tail, with no special-cased wh ≈ 0 branch: a
+// zero-residual span adds 0 to the bucket's wh and cost alike (identical
+// to the span being absent, so coverage cannot flip either way), while a
+// non-zero tail's Wh is what feeds the bucket's coverage check.
 //
 // Approximation (accepted, the Status tab's own class): the residual energy
 // is priced at constant power over the tail, leading idle included — the
