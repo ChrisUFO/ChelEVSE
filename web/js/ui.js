@@ -58,11 +58,35 @@ export function routeFor(hash) {
 // same screen. Panels are hidden rather than removed so each screen keeps its
 // control state; the document scroll position is saved per route and restored
 // when that route is shown again (first visits start at the top).
-export function initTabbar({ onRoute } = {}) {
+//
+// `confirmLeave(from, to)` lets a screen hold a route change for a
+// confirmation: when the hook returns a promise, the change waits for it — a
+// truthy resolution applies the pending route, anything else (a falsy
+// resolution or a rejection) keeps the current route. Any other return (or
+// no hook) navigates immediately, as before.
+//
+// A tab click asks before the hash moves, so a Stay answer touches no history
+// entry at all. A hashchange the router did not make (back/forward, a typed
+// URL) can only be held after the fact: Stay rewrites that entry back with
+// replaceState. Rewriting a *pushed* entry instead of never pushing it would
+// strand a dead Back press — adjacent entries with the same fragment fire
+// popstate only, and this router listens to hashchange.
+export function initTabbar({ onRoute, confirmLeave } = {}) {
   const tabs = [...document.querySelectorAll('.tab')];
   const tabbar = document.querySelector('.tabbar');
   const scrollByRoute = new Map();
   let currentRoute = null;
+  // The route a confirmation dialog is deciding on. While it is set nothing
+  // applies. A held traversal has already moved the hash (the dialog must
+  // snap it back on stay); a held click has not moved it yet (the push
+  // happens only if the answer is leave). Any further hash movement snaps
+  // back to currentRoute — the route still on screen, whose leave the
+  // dialog is deciding — until the dialog is answered. During a held
+  // click that snap-back rewrites the external move's entry, stranding
+  // one later Back-or-Forward press between identical fragments (the
+  // direction follows the external move; the cost the router note above
+  // names); accepted so the URL keeps naming currentRoute.
+  let pendingLeave = null;
   // Per-route restore below owns the scroll position; browser scroll
   // restoration would otherwise fight it on reload and back/forward.
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
@@ -87,17 +111,97 @@ export function initTabbar({ onRoute } = {}) {
     if (changed && onRoute) onRoute(route);
   }
 
+  function restoreHash() {
+    if (location.hash !== `#${currentRoute}`) history.replaceState(null, '', `#${currentRoute}`);
+  }
+
+  // The guard's question, shared by both entry points. Returns the promise to
+  // wait for, or null when the change may apply immediately (no hook, a
+  // non-promise return, or no route change to ask about).
+  function askLeave(route) {
+    if (!confirmLeave || currentRoute === null || currentRoute === route) return null;
+    const decision = confirmLeave(currentRoute, route);
+    return decision && typeof decision.then === 'function' ? decision : null;
+  }
+
+  // Hold `route` for the dialog's answer. `hashMoved` says whether the hash
+  // already names `route` (a held traversal — the router did not make the
+  // move and cannot undo it, because a hashchange does not report direction);
+  // a held click's push is deferred to the leave answer instead.
+  function guarded(route, decision, hashMoved) {
+    pendingLeave = route;
+    decision.then(
+      (leave) => {
+        if (pendingLeave !== route) return;
+        pendingLeave = null;
+        if (!leave) {
+          // Stay. A held traversal snaps its entry back; a held click has
+          // nothing to undo — no entry was pushed, so Back keeps working.
+          if (hashMoved) restoreHash();
+          return;
+        }
+        apply(route);
+        if (hashMoved) {
+          // The hash may have drifted while the dialog was open (another move
+          // was snapped back), so pin it to the route that now applies.
+          history.replaceState(null, '', `#${route}`);
+        } else {
+          // The held click's own push, now that the answer is leave. The
+          // hashchange it fires re-renders a no-op: the route already
+          // applies, so the guard is not asked again.
+          location.hash = route;
+        }
+        // A direct click leaves focus on the newly selected tab; the dialog
+        // had it instead, so put focus where the click would have left it.
+        const activeTab = document.querySelector('.tab[aria-selected="true"]');
+        if (activeTab) activeTab.focus({ preventScroll: true });
+      },
+      () => {
+        if (pendingLeave !== route) return;
+        pendingLeave = null;
+        if (hashMoved) restoreHash();
+      },
+    );
+  }
+
   function render() {
     const route = routeFor(location.hash);
+    if (pendingLeave !== null) {
+      // An open dialog owns the pending navigation; nothing else moves.
+      // A held click moved nothing itself — but a hashchange only fires
+      // because the hash moved, so whatever landed here was an external
+      // move (back/forward, a typed URL), and its entry is snapped back
+      // to currentRoute — the route still on screen, whose leave the
+      // dialog is deciding (one dead-press cost, noted at pendingLeave
+      // above).
+      restoreHash();
+      return;
+    }
     if (location.hash !== `#${route}`) history.replaceState(null, '', `#${route}`);
+    const decision = askLeave(route);
+    if (decision) {
+      guarded(route, decision, true);
+      return;
+    }
     apply(route);
   }
 
   for (const tab of tabs) {
     tab.addEventListener('click', () => {
+      // An open confirmation dialog owns the pending navigation, whether the
+      // hash moved (a held traversal) or not (a held click): a re-click must
+      // not shortcut past the unanswered dialog.
+      if (pendingLeave !== null) return;
       const route = tab.dataset.route;
       if (location.hash === `#${route}`) apply(route);
-      else location.hash = route;
+      else {
+        // Ask before pushing. Pushing first and rewriting the entry on Stay
+        // would leave two adjacent entries with the current route's fragment
+        // — the next Back press fires popstate only, and appears dead.
+        const decision = askLeave(route);
+        if (decision) guarded(route, decision, false);
+        else location.hash = route;
+      }
     });
   }
 

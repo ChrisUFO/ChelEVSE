@@ -37,9 +37,12 @@ import {
 import {
   initSettings,
   resetSettings,
+  confirmLeaveSettings,
+  isSettingsDirty,
   showSettingsData,
   showSettingsError,
 } from './js/screens/settings.js';
+import { settingsLeaveNeedsConfirm } from './js/settings.js';
 import {
   activateNotifications,
   enterNotifications,
@@ -391,7 +394,16 @@ async function main() {
   initSettings();
   initNotifications();
   initAdvanced();
-  initTabbar({ onRoute: handleRoute });
+  // Unsaved-changes guard (#129): leaving Config with a dirty App settings
+  // form asks first. The gating decision is the pure helper; the dialog and
+  // the dirty flag live in the settings screen.
+  initTabbar({
+    onRoute: handleRoute,
+    confirmLeave: (from, to) =>
+      settingsLeaveNeedsConfirm({ from, to, dirty: isSettingsDirty() })
+        ? confirmLeaveSettings()
+        : null,
+  });
   wireUi();
 
   // The redirect fallback lands back here; surface a failure on the sign-in

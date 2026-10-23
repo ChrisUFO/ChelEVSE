@@ -152,7 +152,11 @@ export function showConfigError() {
 
 export function initConfig() {
   $('config-goto-advanced').addEventListener('click', () => {
-    location.hash = 'advanced';
+    // The Advanced tab's own click handler — the guarded ask-before-push
+    // path. Writing location.hash here would push #advanced first, and the
+    // Stay snap-back would rewrite that pushed entry, stranding a dead Back
+    // press (the defect the tab handler's ordering exists to avoid).
+    document.querySelector('.tab[data-route="advanced"]').click();
   });
   render();
 }
