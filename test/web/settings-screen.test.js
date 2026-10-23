@@ -389,6 +389,7 @@ test('a dirty form asks: Stay keeps the draft, Leave proceeds, Escape stays', as
   await tick();
   assert.equal(answer(), 'pending', 'the router waits for an answer');
   assert.equal(dialogOpen(), true, 'the dialog is the One-rate alertdialog pattern');
+  assert.equal(focusLog.at(-1), 'stay-settings', 'Stay takes focus when the dialog opens');
   // The trigger is the fixed bottom tab bar, reachable at any scroll offset,
   // so opening must reveal the in-flow dialog itself.
   assert.ok(

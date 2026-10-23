@@ -198,7 +198,8 @@ test('an open guard owns the navigation: later hash moves and tab clicks wait fo
 test('a rejected confirmation keeps the current route, restores its hash and frees the guard', async () => {
   const { shell, go, tabVisible } = makeShell();
   let hold = null;
-  initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
+  const routes = [];
+  initTabbar({ onRoute: (route) => routes.push(route), confirmLeave: () => hold });
   go('config'); // No guard in the way yet.
 
   // The dialog promise itself breaks: a rejection is an implicit stay.
@@ -211,16 +212,24 @@ test('a rejected confirmation keeps the current route, restores its hash and fre
   assert.deepEqual(shell.replaces, ['#status', '#config'], 'the restore reuses replaceState');
 
   // The rejection must free the guard, not wedge it: the next leave is held
-  // for its own answer and still settles.
+  // for its own answer, and only an applied Leave can prove it. A wedged
+  // guard swallows the second ask entirely — a Stay-looking outcome (nothing
+  // moves) would be indistinguishable from the wedge.
   let settle;
   hold = new Promise((resolve) => {
     settle = resolve;
   });
   go('schedule');
   assert.equal(tabVisible('schedule'), false, 'a later leave is held again');
-  settle(false);
+  settle(true);
   await tick();
-  assert.equal(globalThis.location.hash, '#config', 'the later Stay restores too');
+  assert.equal(tabVisible('schedule'), true, 'the later Leave applies — the guard was freed');
+  assert.equal(globalThis.location.hash, '#schedule', 'the applied route pins its hash');
+  assert.deepEqual(
+    routes,
+    ['status', 'config', 'schedule'],
+    'the entry hook runs for the applied route',
+  );
 });
 
 function tick() {
