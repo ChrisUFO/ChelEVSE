@@ -80,7 +80,10 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
   // applies. A held traversal has already moved the hash (the dialog must
   // snap it back on stay); a held click has not moved it yet (the push
   // happens only if the answer is leave). Any further hash movement snaps
-  // back until the dialog is answered.
+  // back until the dialog is answered — and during a held click that
+  // snap-back rewrites the external move's entry, stranding one later Back
+  // press between identical fragments (the cost the router note above
+  // names); accepted so the URL keeps naming the undecided route.
   let pendingLeave = null;
   // Per-route restore below owns the scroll position; browser scroll
   // restoration would otherwise fight it on reload and back/forward.
@@ -163,7 +166,11 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
     const route = routeFor(location.hash);
     if (pendingLeave !== null) {
       // An open dialog owns the pending navigation; nothing else moves.
-      // (For a held click the hash never moved, so this rewrites nothing.)
+      // A held click moved nothing itself — but a hashchange only fires
+      // because the hash moved, so whatever landed here was an external
+      // move (back/forward, a typed URL), and its entry is snapped back
+      // to the route the dialog is deciding about (one dead-press cost,
+      // noted at pendingLeave below).
       restoreHash();
       return;
     }

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { initTabbar, routeFor } from '../../web/js/ui.js';
+import { initConfig } from '../../web/js/screens/config.js';
 
 test('routeFor accepts known hashes and canonicalises the rest', () => {
   assert.equal(routeFor('#status'), 'status');
@@ -51,6 +52,11 @@ function makeShell() {
     addEventListener(type, listener) {
       this.listeners.set(type, listener);
     },
+    // HTMLElement.click() dispatches the click listener — how the Config
+    // panel's "Advanced console" link drives the tab.
+    click() {
+      this.listeners.get('click')();
+    },
     setAttribute(name, value) {
       if (name === 'aria-selected') this.ariaSelected = String(value);
     },
@@ -60,6 +66,17 @@ function makeShell() {
   }));
   const panels = {};
   const tabbar = { listeners: new Map(), addEventListener() {} };
+  // Screens wire buttons by id (initConfig below needs more than `hidden`).
+  const element = (id) =>
+    (panels[id] = panels[id] || {
+      hidden: id !== 'panel-status',
+      textContent: '',
+      listeners: new Map(),
+      addEventListener(type, listener) {
+        this.listeners.set(type, listener);
+      },
+      replaceChildren() {},
+    });
   globalThis.document = {
     title: '',
     querySelectorAll: (selector) => (selector === '.tab' ? tabs : []),
@@ -67,9 +84,11 @@ function makeShell() {
       if (selector === '.tabbar') return tabbar;
       if (selector === '.tab[aria-selected="true"]')
         return tabs.find((tab) => tab.ariaSelected === 'true') ?? null;
+      const byRoute = selector.match(/^\.tab\[data-route="(.+)"\]$/);
+      if (byRoute) return tabs.find((tab) => tab.dataset.route === byRoute[1]) ?? null;
       return null;
     },
-    getElementById: (id) => (panels[id] = panels[id] || { hidden: id !== 'panel-status' }),
+    getElementById: element,
   };
   Object.defineProperty(globalThis.document, 'title', {
     get: () => shell.title,
@@ -258,6 +277,47 @@ test('a rejected held click keeps the route, writes no history and frees the gua
   await tick();
   assert.equal(tabVisible('schedule'), true, 'the later Leave applies — the guard was freed');
   assert.deepEqual(routes, ['status', 'config', 'schedule'], 'the entry hook runs once per route');
+});
+
+test('the Config panel link navigates through the guarded tab path, not a raw hash write', async () => {
+  const { shell, go, fireHash, tabVisible } = makeShell();
+  let hold = null;
+  const asks = [];
+  const confirmLeave = (from, to) => {
+    asks.push([from, to]);
+    return hold;
+  };
+  initTabbar({ onRoute: () => {}, confirmLeave });
+  go('config'); // ask 1: clean, navigates.
+
+  // The "Advanced console" link must drive the Advanced tab's own click
+  // handler — ask before push. A direct location.hash write there would push
+  // #advanced first, and the Stay snap-back would rewrite that pushed entry,
+  // stranding a dead Back press between identical fragments.
+  initConfig();
+  const link = globalThis.document.getElementById('config-goto-advanced');
+  let settle;
+  hold = new Promise((resolve) => {
+    settle = resolve;
+  });
+  link.listeners.get('click')();
+
+  assert.deepEqual(asks.at(-1), ['config', 'advanced'], 'the link asks the same guard');
+  assert.equal(globalThis.location.hash, '#config', 'nothing was pushed before the answer');
+  assert.equal(tabVisible('advanced'), false);
+
+  settle(false); // Stay
+  await tick();
+  assert.equal(tabVisible('config'), true, 'Stay keeps the Config panels');
+  assert.equal(globalThis.location.hash, '#config');
+  assert.deepEqual(shell.replaces, ['#status'], 'Stay writes no history at all');
+
+  // Clean form: the link still ends up on Advanced, via the tab's push.
+  hold = null;
+  link.listeners.get('click')();
+  assert.equal(globalThis.location.hash, '#advanced', 'the clean link pushes its entry');
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
 });
 
 test('a held leave keeps the panels on the current route until it resolves', async () => {
