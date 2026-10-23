@@ -21,12 +21,12 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 | **Status**   | Live figures, session energy + cost + elapsed, temperatures, setpoint, schedule badge, and the charging controls.                                                                                                                                                                                                 |
 | **History**  | Day / Week / Month / Year energy chart (24 hourly bars for today, 7 daily, 30 daily or 12 monthly bars, hand-rolled SVG) and recent sessions, each flagged when served from cache or offline. Day reads only today's document; a day with no hourly buckets shows its total and says the hours were not recorded. |
 | **Schedule** | Enable toggle and window editor with per-field validation, optimistic save, and the charger's live window state.                                                                                                                                                                                                  |
-| **Config**   | Charger configuration with secrets redacted, App settings (One rate / Seasons & time-of-use, base rates, daily windows, dates, currency), and the notification opt-in card.                                                                                                                                       |
+| **Config**   | Charger connection (charger address, show temperature) and Electricity price (One rate / Seasons & time-of-use, base rates, daily windows, dates, currency) cards, the notification opt-in card, and the charger configuration with secrets redacted.                                                             |
 | **Advanced** | RAPI console with a per-visit confirmation gate and a 20-entry scrollback showing acked/failed results.                                                                                                                                                                                                           |
 
 ## Electricity rates
 
-App settings have two explicit modes. **One rate** is a single flat price and no schedule. **Seasons &
+**Electricity price** has two explicit modes. **One rate** is a single flat price and no schedule. **Seasons &
 time-of-use** turns the same form into a list of seasons, each with a base price and optional daily
 windows. The stored flat rate stays in the document, but is used for pricing only when there is no
 schedule.
@@ -206,7 +206,7 @@ live session and the whole history immediately.
 
 ## Security model
 
-- The repo is **public**; every deployment value (service-account key, Firebase config, charger default) lives in gitignored files. See `private.example/`. The charger address is the one value that can also be set at runtime: the app's **App settings** writes `settings/current.charger_host` and the running bridge applies it without a restart. `CHARGER_HOST` in `private/bridge.env` is the bootstrap default — used by a fresh Pi, and again once the field is cleared.
+- The repo is **public**; every deployment value (service-account key, Firebase config, charger default) lives in gitignored files. See `private.example/`. The charger address is the one value that can also be set at runtime: the app's **Charger connection** card writes `settings/current.charger_host` and the running bridge applies it without a restart. `CHARGER_HOST` in `private/bridge.env` is the bootstrap default — used by a fresh Pi, and again once the field is cleared.
 - Access control is Google Sign-In (Firebase Auth) plus an owner-managed allowlist: `private/acl.txt` (gitignored) is synced to Firestore grant docs by `pi/acl.py`, and rules only serve data to granted users. Commands are whitelisted and validated; only the bridge's service account writes status/history.
 - Deploys are guarded: `scripts/check-firebase-project.mjs` refuses a release whose target project and service-account key disagree.
 - No inbound connections to the home network — the Pi only makes outbound requests.
