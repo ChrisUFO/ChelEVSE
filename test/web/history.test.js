@@ -637,14 +637,14 @@ test('periodSeries carries the day documents through the week and month buckets'
   assert.deepEqual(month.find((point) => point.id === '2026-10-12').hours, { 22: 3 });
 });
 
-test('year month points carry the day documents that summed into them', () => {
+test('year month points sum their daily documents into kWh alone', () => {
   const today = new Date(2026, 9, 18, 12);
   const points = periodSeries(
     'year',
     [
       { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
-      // Energy with no buckets still counts toward the month's kWh — and its
-      // pricing split.
+      // Energy with no buckets still counts toward the month's kWh — its $
+      // comes from the period's sessions either way.
       { id: '2026-10-18', kwh: 6 },
       // Outside the 12-month window (2025-11 .. 2026-10), and a no-energy day
       // inside it.
@@ -655,12 +655,20 @@ test('year month points carry the day documents that summed into them', () => {
   );
   const october = points.find((point) => point.id === '2026-10');
   assert.equal(october.kwh, 11);
-  assert.deepEqual(october.days, [
-    { id: '2026-10-02', kwh: 5, hours: { 22: 5 } },
-    { id: '2026-10-18', kwh: 6, hours: null },
-  ]);
-  // A month with no recorded energy carries an empty list, not a missing one.
-  assert.deepEqual(points.find((point) => point.id === '2026-05').days, []);
+  // No day-document payload rides on the point (#125): a Year bar prices from
+  // the period's overlapping sessions, so the summed kWh is all it needs —
+  // `days` once claimed to feed a pricing split that no longer exists.
+  assert.equal('days' in october, false);
+  // A month with no recorded energy is a genuine zero point, not a gap.
+  assert.deepEqual(
+    points.find((point) => point.id === '2026-05'),
+    {
+      id: '2026-05',
+      kwh: 0,
+      label: 'May 2026',
+      isCurrent: false,
+    },
+  );
 });
 
 test('sumSeries and maxSeries ignore malformed points', () => {

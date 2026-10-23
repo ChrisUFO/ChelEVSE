@@ -241,10 +241,11 @@ export function sessionsRange(bounds) {
 // { id, kwh, label, isCurrent }. The Day period's data is the single day
 // document (`{ kwh, hours }`) rather than a list, so its series is the hours map
 // itself; every range period aligns an array of daily documents to its slots.
-// A month bucket sums its daily documents by the local YYYY-MM prefix and keeps
-// those documents (`days`) so the point can be priced day by day; days without a
-// document are genuine zero points, not gaps, and the current month is partial
-// because only recorded days exist.
+// A month bucket sums its daily documents by the local YYYY-MM prefix — kWh is
+// all the point carries, because a Year bar's $ comes from the period's
+// overlapping sessions, never from day documents; days without a document are
+// genuine zero points, not gaps, and the current month is partial because only
+// recorded days exist.
 export function periodSeries(period, data, today = new Date()) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') return hourSeries(data && data.hours, today);
@@ -256,7 +257,6 @@ export function periodSeries(period, data, today = new Date()) {
       months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
     }
     const totals = new Map(months.map((id) => [id, 0]));
-    const dayDocs = new Map(months.map((id) => [id, []]));
     for (const doc of docs || []) {
       if (!doc || typeof doc.id !== 'string') continue;
       const bucket = doc.id.slice(0, 7);
@@ -264,7 +264,6 @@ export function periodSeries(period, data, today = new Date()) {
       const kwh = Number(doc.kwh);
       if (Number.isFinite(kwh) && kwh > 0) {
         totals.set(bucket, totals.get(bucket) + kwh);
-        dayDocs.get(bucket).push({ id: doc.id, kwh, hours: doc.hours ?? null });
       }
     }
     const current = monthId(today);
@@ -273,7 +272,6 @@ export function periodSeries(period, data, today = new Date()) {
       kwh: totals.get(id),
       label: monthLabel(id),
       isCurrent: id === current,
-      days: dayDocs.get(id),
     }));
   }
   const current = dayId(today);
