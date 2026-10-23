@@ -756,19 +756,27 @@ function fetchPeriod(descriptor, bounds) {
 // page. The Day period needs none — its hour bars keep the day document's
 // buckets — so it resolves to an empty payload, and a rejected range read
 // settles empty too: the history read still paints its kWh while the cost
-// hides rather than pricing energy it has no session for.
-function fetchPeriodSessions(descriptor, bounds) {
+// hides rather than pricing energy it has no session for. The paged read's
+// envelope ({docs, fromCache}) is unwrapped to its docs at exactly this point —
+// applyHistory expects the sessions themselves, and `fromCache` has no consumer
+// on this path. The read itself arrives as a parameter (defaulting to the
+// store's) so the executed harness can drive a successful read through the
+// real function — Node cannot bind Firestore, and this unwrap is exactly the
+// wiring a source pin could not guard.
+export function fetchPeriodSessions(descriptor, bounds, readRange = fetchSessionsInRange) {
   if (descriptor.source === 'day') return Promise.resolve([]);
   const range = sessionsRange(bounds);
-  return range ? fetchSessionsInRange(range) : Promise.resolve([]);
+  return range ? readRange(range).then((read) => read.docs) : Promise.resolve([]);
 }
 
 // Apply one settled history read. A failed read and an offline cache miss set
 // the state only: points already on screen must never be relabelled as the newly
 // selected period. `sessions` is the same read's session payload and is applied
 // with the points it prices — the previous period's sessions must never price
-// this one's bars.
-function applyHistory(descriptor, result, failure, today, sessions = []) {
+// this one's bars. Exported so the executed harness can drive the fetch→apply
+// step readHistory and loadAll perform (with the store seam stubbed): the
+// payload's shape crossing this boundary is what the harness must observe.
+export function applyHistory(descriptor, result, failure, today, sessions = []) {
   const day = descriptor.source === 'day';
   if (result) historyState = day ? hourReadState(result) : historyReadState(result);
   else historyState = day ? hourReadFailure(failure) : 'error';

@@ -1248,9 +1248,10 @@ test('both history read paths end with the midnight re-check', () => {
   assert.match(body('fetchPeriod'), /fetchHistory\(/);
   // The sessions read is the $ counterpart: Day resolves empty, a range pages
   // the widened started_at window (sessionsRange), and only Firestore can
-  // reject it.
+  // reject it — the unwrap of the paged read's envelope into its docs is
+  // executed by the history-screen harness, not pinned here.
   assert.match(body('fetchPeriodSessions'), /descriptor\.source === 'day'/);
-  assert.match(body('fetchPeriodSessions'), /fetchSessionsInRange\(range\)/);
+  assert.match(body('fetchPeriodSessions'), /readRange\(range\)\.then\(\(read\) => read\.docs\)/);
   // The payload is applied with the points it prices — never painted beside
   // another range's sessions.
   assert.match(body('applyHistory'), /periodSessions = Array\.isArray\(sessions\)/);
