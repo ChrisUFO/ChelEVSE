@@ -37,6 +37,17 @@
 // schedule exists, because one aggregate kWh figure cannot be split across
 // windows; it stays the flat path these schedule helpers never touch.
 //
+// While a charge is live, that same interval is also today's history figure
+// (#126): the period screens merge `liveSessionContribution` — the live window
+// as one pseudo-session — into the sessions a period prices, so the Week/
+// Month/Year summary and today's bar carry the estimate the Status tab shows,
+// attributed across local midnights by the same span machinery (#125). The
+// contribution is schedule-path only (a flat day total already accrues live)
+// and settles exactly once: any recorded session whose spans overlap the live
+// window suppresses it (liveSessionSettled), so the two listener deliveries
+// around a charge's end — the session document and the stopped status write —
+// never double-count whichever order they arrive in.
+//
 // The live interval ends at the snapshot's own `updated_at`, never at the render
 // instant, and only while the snapshot is a live charging one (`liveCharging`:
 // `state_label` charging and not marked offline). `elapsed` is cumulative for the
@@ -409,6 +420,78 @@ export function sessionBucketCost(sessions, id, kwh, settings) {
       ? true
       : wh >= totalWh - intervalEnergyTolerance(totalWh);
   return { cost, wh, covered };
+}
+
+// ---------- the live session's period contribution (#126) ----------
+
+// The in-progress charge as one priceable span `{started_at, ended_at, wh}` —
+// raw ms endpoints, the shape sessionCostSpans' fallback path already accepts —
+// or null. This is exactly the window the Status tab prices (statusCostLabel's):
+// `[updated_at − elapsed, updated_at]`, anchored to the snapshot's own write so
+// a paused, cached or stale write cannot slide it over idle hours, and gated by
+// `liveCharging` so an offline marker or a stopped snapshot contributes nothing
+// (their figures are that screen's held/adopted machinery, not this one). The
+// energy gates mirror the label's null rules: no positive session_energy or
+// elapsed prices nothing rather than guessing a window.
+export function liveSessionSpan(status) {
+  if (!liveCharging(status)) return null;
+  const wh = toNumber(status.session_energy);
+  const seconds = toNumber(status.elapsed);
+  const endMs = snapshotMillis(status);
+  if (!Number.isFinite(wh) || wh <= 0) return null;
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (endMs == null) return null;
+  return { started_at: endMs - seconds * 1000, ended_at: endMs, wh };
+}
+
+// Whether a recorded session already prices part of the live window: the settle
+// guard. The bridge writes the session document at the charging→stopped edge
+// while the stopped status write travels its own listener, so for one render
+// window history's two inputs can arrive in either order — a settled session
+// beside a still-charging snapshot would double-price the same energy. The
+// predicate reads the recorded side through the same sessionCostSpans the
+// bucket pricing uses, so "covers" means "prices": a session with unusable spans
+// prices nothing anywhere and cannot cover anything, and overlap is decided on
+// the spans themselves (intervals where they reconcile, else the whole plug-in
+// span), which keeps the guard exact for a pause-resumed charge — the recorded
+// prefix overlaps the live window, and the whole-window estimate is dropped
+// rather than added beside the energy it already prices.
+export function liveSessionSettled(span, sessions) {
+  const liveStart = valueMillis(span && span.started_at);
+  const liveEnd = valueMillis(span && span.ended_at);
+  if (liveStart == null || liveEnd == null || liveEnd <= liveStart) return false;
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const spans = sessionCostSpans(session);
+    if (!spans) continue;
+    for (const recorded of spans) {
+      const start = valueMillis(recorded.started_at);
+      const end = valueMillis(recorded.ended_at);
+      if (start == null || end == null || end <= start) continue;
+      if (start < liveEnd && end > liveStart) return true;
+    }
+  }
+  return false;
+}
+
+// The live window merged into a period's pricing sessions, or null: schedule
+// only (a flat day total already prices the accruing kWh, so the flat output is
+// byte-identical with or without a charge in progress), live-gated and
+// settle-guarded. The returned span flows through sessionBucketCost beside the
+// recorded sessions, so its cost lands in exactly the buckets its window
+// overlaps — today's bar, and yesterday's when the charge crossed local
+// midnight — with the same constant-power split every other span prices by, and
+// its Wh counts toward the bucket's coverage, so a live-covered today shows no
+// partial note. It is an estimate, excluded from the recorded reconciliation
+// while live, and settles to the session's own pricing exactly once: whichever
+// input lands first, the guard drops the contribution the moment a recorded
+// span overlaps it.
+export function liveSessionContribution(status, sessions, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return null;
+  const span = liveSessionSpan(status);
+  if (!span) return null;
+  if (liveSessionSettled(span, sessions)) return null;
+  return span;
 }
 
 // Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:
