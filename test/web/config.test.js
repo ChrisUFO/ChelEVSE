@@ -195,6 +195,7 @@ function stubElement() {
     hidden: false,
     textContent: '',
     dataset: {},
+    attrs: {},
     children: [],
     replaceChildren(...nodes) {
       this.children = nodes;
@@ -204,7 +205,9 @@ function stubElement() {
       this.children.push(...nodes);
       this.textContent += nodes.map((node) => node.textContent || '').join('');
     },
-    setAttribute() {},
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
     addEventListener() {},
   };
 }
@@ -275,6 +278,7 @@ test('each curated group is a collapsed disclosure with its heading in the summa
   assert.equal(first.children[0].children[0].textContent, 'Device');
   assert.equal(second.children[0].children[0].textContent, 'Safety');
   for (const group of groups) {
+    assert.ok(!('open' in group.attrs), 'a built group sets no open attribute');
     assert.equal(group.open, undefined, 'a built group is collapsed');
   }
 });
