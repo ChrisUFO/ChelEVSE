@@ -14,7 +14,7 @@ function paintNet() {
   const el = $('net');
   if (!el) return;
   el.dataset.net = mode;
-  setText(el, mode === 'live' ? 'Live' : mode === 'cached' ? 'Cached' : 'Offline');
+  setText(el, mode === 'live' ? 'Live' : mode === 'cached' ? 'Syncing…' : 'Offline');
 }
 
 export function setCached(cached) {
