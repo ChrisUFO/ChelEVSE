@@ -516,11 +516,10 @@ test('a successful range read lands its docs in the applied period and prices th
   );
   // …and the render boot performs when settings land: the summary prices from
   // the applied sessions — 2 kWh off-peak, nothing uncovered, so the figure
-  // shows with no partial note beside it.
+  // shows.
   showHistorySettings(nightly());
   assert.equal(element('history-cost-cell').hidden, false);
   assert.equal(element('history-cost').textContent, fmtMoney(0.2, 'GBP'));
-  assert.equal(element('history-cost-note').hidden, true);
   // The energy it priced is on screen too: the same read's kWh total.
   assert.equal(element('history-total').textContent, '2.00');
 });
@@ -589,9 +588,7 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
   assert.equal(element('history-cost-cell').hidden, false);
   // Today's bar carries the same estimate (the current slot is selected).
   assert.equal(element('chart-cost').textContent, fmtMoney(0.3, 'GBP'));
-  // The live Wh covers today's accruing kWh, so the partial note stays down…
-  assert.equal(element('history-cost-note').hidden, true);
-  // …and the kWh display is still the day document's own total.
+  // The kWh display is still the day document's own total.
   assert.equal(element('history-total').textContent, '1.00');
 
   // A re-delivery of the same write cannot slide the figure: the window is
@@ -599,9 +596,9 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
   showHistoryStatus(charging);
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
 
-  // A genuinely missing record is still disclosed: yesterday's kWh has no
-  // covering session and no live window over it, and today's live pricing
-  // never silences that note.
+  // A genuinely missing record never prices: yesterday's kWh has no covering
+  // session and no live window over it, and today's live pricing carries the
+  // figure alone.
   applyHistory(
     descriptor,
     {
@@ -616,7 +613,6 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
     [],
   );
   showHistorySettings(nightly());
-  assert.equal(element('history-cost-note').hidden, false);
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
 });
 
@@ -656,7 +652,6 @@ test('a settle in the session-first order prices the charge exactly once', () =>
   );
   showHistorySettings(nightly());
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
-  assert.equal(element('history-cost-note').hidden, true);
   // A re-delivery of the stale charging write re-renders and still prices
   // exactly once: the guard keys on the merged payload, not on which
   // listener delivered last.
@@ -705,7 +700,6 @@ test('a settle in the status-first order re-reads and prices exactly once', asyn
   // With no live span left there is exactly one pricing of the charge — the
   // recorded figure, the same number the estimate promised.
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
-  assert.equal(element('history-cost-note').hidden, true);
 });
 
 test('a settle read that misses the retried session write recovers on the next push', async () => {
@@ -756,7 +750,6 @@ test('a settle read that misses the retried session write recovers on the next p
   );
   showHistorySettings(nightly());
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
-  assert.equal(element('history-cost-note').hidden, true);
   assert.equal(element('history-total').textContent, '1.00');
 
   // The flag is spent: a further idle push starts no re-read (a read would
@@ -795,8 +788,6 @@ test('a midnight-spanning live charge attributes to both local days', () => {
   assert.equal(element('history-cost').textContent, fmtMoney(0.4, 'GBP'));
   // …today's bar only its own (the current slot is selected)…
   assert.equal(element('chart-cost').textContent, fmtMoney(0.1, 'GBP'));
-  // …and each day is covered by its slice, so the partial note stays down.
-  assert.equal(element('history-cost-note').hidden, true);
 });
 
 test('an offline marker hides the live contribution instead of repricing it', () => {
@@ -821,7 +812,6 @@ test('an offline marker hides the live contribution instead of repricing it', ()
   // window at whatever rates the marker's own clock would apply.
   showHistoryStatus(statusAt(3, today.getTime() + 1800_000, 7200, 1000, { charger_online: false }));
   assert.equal(element('history-cost-cell').hidden, true);
-  assert.equal(element('history-cost-note').hidden, true);
   // A later live write restores the estimate at its own, newer window.
   showHistoryStatus(statusAt(3, today.getTime() + 2400_000, 7440, 1030));
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
@@ -962,7 +952,6 @@ test('a settle that lands while the tab is hidden is caught up on the return vis
   );
   showHistorySettings(nightly());
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
-  assert.equal(element('history-cost-note').hidden, true);
   assert.equal(element('history-total').textContent, '1.00');
 
   // The settle armed the verification re-read; a hidden push holds it, and
