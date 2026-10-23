@@ -7,6 +7,7 @@ import {
   CHART_VIEW_W,
   DEFAULT_PERIOD,
   PERIODS,
+  SESSIONS_LOOKBACK_DAYS,
   chartIndexAt,
   dayId,
   dayLabel,
@@ -25,6 +26,7 @@ import {
   periodById,
   periodSeries,
   sectionView,
+  sessionsRange,
   sumSeries,
 } from '../../web/js/history.js';
 import {
@@ -219,6 +221,22 @@ test('periodBounds keeps 29 February inside a leap-year range', () => {
     startId: '2027-04-01',
     endId: '2028-03-01',
   });
+});
+
+test('sessionsRange bounds the period sessions read half-open with a plug-in lookback', () => {
+  // #123's pricing read: sessions may start up to a week before the range
+  // (a plug-in still charging into it) and until the midnight after its last
+  // day — a session starting on the last day must be included.
+  const week = sessionsRange(periodBounds('week', new Date(2026, 9, 18, 12)));
+  assert.equal(week.start.getTime(), new Date(2026, 9, 5).getTime());
+  assert.equal(week.end.getTime(), new Date(2026, 9, 19).getTime());
+  const year = sessionsRange(periodBounds('year', new Date(2026, 9, 18, 12)));
+  assert.equal(year.start.getTime(), new Date(2025, 9, 25).getTime());
+  assert.equal(year.end.getTime(), new Date(2026, 9, 19).getTime());
+  assert.equal(SESSIONS_LOOKBACK_DAYS, 7);
+  // Malformed bounds read nothing rather than querying garbage.
+  assert.equal(sessionsRange({ startId: 'nope', endId: '2026-10-18' }), null);
+  assert.equal(sessionsRange(null), null);
 });
 
 test('periodBounds stays on local calendar days across a DST change (fixed America/Denver)', () => {
@@ -994,13 +1012,18 @@ test('zero-energy days price fully at 0.00 and never read as partial', () => {
   assert.equal(hidden.partial, false);
 });
 
-test('day-period hours price from their captured day', () => {
+test('day-period hours price from their captured day, sessions aside', () => {
   const points = hourSeries({ '02': 2, 12: 1 }, new Date(2026, 9, 18, 12, 40));
-  const summary = seriesCostSummary(points, 'hour', NIGHTLY);
+  // A session overlapping today must not leak into the hour bars' pricing:
+  // the Day period is the one bucket path left (#123), byte-identical.
+  const sessions = [
+    { wh: 3000, started_at: new Date(2026, 9, 18, 12, 0), ended_at: new Date(2026, 9, 18, 13, 0) },
+  ];
+  const summary = seriesCostSummary(points, 'hour', NIGHTLY, sessions);
   assert.ok(Math.abs(summary.cost - 0.5) < 1e-9);
   assert.equal(summary.partial, false);
   // An hour bucket cannot be partial: it is priced, or it is 0.00.
-  assert.deepEqual(pointCostSummary(points[2], 'hour', NIGHTLY), {
+  assert.deepEqual(pointCostSummary(points[2], 'hour', NIGHTLY, sessions), {
     cost: 0.2,
     pricedEnergy: true,
     unpricedEnergy: false,
@@ -1049,12 +1072,17 @@ test('year month points price from the sessions attributed into them', () => {
 test('flat settings keep the schedule summary hidden', () => {
   // The schedule-only summary never invents a flat price; the screen's flat
   // branch stays aggregateCostLabel's (byte-identity covered in cost.test.js).
+  // Sessions ride along and are ignored: the flat path reads neither buckets
+  // nor sessions.
   const points = periodSeries(
     'week',
     [{ id: '2026-10-15', kwh: 4.2, hours: { '03': 4 } }],
     new Date(2026, 9, 18, 12),
   );
-  assert.deepEqual(seriesCostSummary(points, 'day', { rate: 0.245, currency: 'GBP' }), {
+  const sessions = [
+    { wh: 4200, started_at: new Date(2026, 9, 15, 3, 0), ended_at: new Date(2026, 9, 15, 4, 0) },
+  ];
+  assert.deepEqual(seriesCostSummary(points, 'day', { rate: 0.245, currency: 'GBP' }, sessions), {
     cost: null,
     partial: false,
   });
@@ -1209,12 +1237,23 @@ test('both history read paths end with the midnight re-check', () => {
     // The Day period is read inside these same two functions, so its read gets
     // the guard too; a forked Day read would fail this pin.
     assert.match(body(name), /fetchPeriod\(descriptor/, name);
+    // #123: whichever reader paints the range also fetches its overlapping
+    // sessions — dropping the pricing read from either path fails here.
+    assert.match(body(name), /fetchPeriodSessions\(descriptor, bounds\)/, name);
   }
   // One read chooser, branching on the descriptor's source rather than a period
   // id: the Day document read cannot acquire a tail of its own.
   assert.match(body('fetchPeriod'), /descriptor\.source === 'day'/);
   assert.match(body('fetchPeriod'), /fetchHistoryDay\(/);
   assert.match(body('fetchPeriod'), /fetchHistory\(/);
+  // The sessions read is the $ counterpart: Day resolves empty, a range pages
+  // the widened started_at window (sessionsRange), and only Firestore can
+  // reject it.
+  assert.match(body('fetchPeriodSessions'), /descriptor\.source === 'day'/);
+  assert.match(body('fetchPeriodSessions'), /fetchSessionsInRange\(range\)/);
+  // The payload is applied with the points it prices — never painted beside
+  // another range's sessions.
+  assert.match(body('applyHistory'), /periodSessions = Array\.isArray\(sessions\)/);
   // One mechanism for both: the shared guard owns the staleness check.
   assert.match(body('reloadIfWindowStale'), /windowStale\(\)/);
 });
