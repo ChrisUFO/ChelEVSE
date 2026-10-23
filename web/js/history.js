@@ -305,25 +305,22 @@ export function dayLabel(id) {
 }
 
 // Align Firestore docs to the requested day ids; absent/malformed days are 0.
-// A day that has a document carries its `hours` map beside the total so the
-// screen can price the bucket under a schedule; a day with no document is a
-// genuine zero and carries no pricing input at all — its point stays the exact
-// shape it had before pricing inputs existed.
+// A point carries its kWh total alone: a range period's $ comes from the
+// period's overlapping sessions (#123), so no pricing input rides on the
+// point — `hours` prices only the Day period's own bars, and a day with no
+// document is a genuine zero like any other, not a gap to disclose.
 export function historySeries(ids, docs) {
   const byId = new Map();
   for (const doc of docs || []) {
     if (!doc || typeof doc.id !== 'string') continue;
     const kwh = Number(doc.kwh);
-    byId.set(doc.id, {
-      kwh: Number.isFinite(kwh) && kwh > 0 ? kwh : 0,
-      hours: doc.hours ?? null,
-    });
+    byId.set(doc.id, Number.isFinite(kwh) && kwh > 0 ? kwh : 0);
   }
-  return ids.map((id) => {
-    const doc = byId.get(id);
-    if (!doc) return { id, kwh: 0, label: dayLabel(id) };
-    return { id, kwh: doc.kwh, label: dayLabel(id), hours: doc.hours };
-  });
+  return ids.map((id) => ({
+    id,
+    kwh: byId.get(id) || 0,
+    label: dayLabel(id),
+  }));
 }
 
 export function sumSeries(series) {

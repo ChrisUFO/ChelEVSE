@@ -265,11 +265,9 @@ export async function readScheduleBaseline() {
 // documentId() range is a date range. The SDK resolves an offline read with
 // cached docs (often empty) instead of rejecting, so `fromCache` travels with
 // the result: the screen must not read a cached empty range as "no history".
-// Each document also keeps its pricing inputs: `hours` rides along only when
-// the stored value is a non-array object (fetchHistoryDay's normalization) — a
-// day recorded before hourly capture has `kwh` and no map, and must stay
-// unpriceable rather than gain an empty fabricated one, so a mixed range keeps
-// its partial-pricing disclosure (#120).
+// A range period's $ comes from its overlapping sessions (#123), so a day
+// document contributes its kWh total alone — `hours` rides only on the Day
+// period's own single-document read (fetchHistoryDay below), never here.
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
     query(
@@ -281,11 +279,9 @@ export async function fetchHistory(startId, endId) {
   return {
     docs: snap.docs.map((d) => {
       const data = d.data() || {};
-      const hours = data.hours;
       return {
         id: d.id,
         kwh: data.kwh,
-        hours: hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : null,
       };
     }),
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
@@ -327,19 +323,27 @@ export async function fetchHistoryDay(dayId) {
 // automatic single-field index serves it — no composite index is involved.
 export const SESSION_LIMIT = 20;
 
+// The period-$ range read pages the archive in bigger slices than the list:
+// this read must reach exhaustion, and a 20-doc page would cost an
+// archive/20 sequential round trips per Year render (~18–73 for a mature
+// year). The cursor and short-page termination are unchanged by the size.
+export const RANGE_SESSION_LIMIT = 200;
+
 // Pure options passthrough: `after` is the previous page's last document
 // snapshot, `start`/`end` a half-open started_at range (Date values convert
-// to the Timestamps the bridge stores). Options the caller did not ask for
-// stay absent, so the default shape is exactly the pre-paging query.
-export function sessionsQueryOptions({ after, start, end } = {}) {
-  const options = { field: 'started_at', direction: 'desc', limit: SESSION_LIMIT };
+// to the Timestamps the bridge stores), and `pageSize` a wider page for the
+// internal reads that exhaust the archive (the list keeps SESSION_LIMIT).
+// Options the caller did not ask for stay absent, so the default shape is
+// exactly the pre-paging query.
+export function sessionsQueryOptions({ after, start, end, pageSize } = {}) {
+  const options = { field: 'started_at', direction: 'desc', limit: pageSize ?? SESSION_LIMIT };
   if (after) options.after = after;
   if (start) options.start = start;
   if (end) options.end = end;
   return options;
 }
 
-export async function fetchSessions({ after, range } = {}) {
+export async function fetchSessions({ after, range, pageSize } = {}) {
   const {
     field,
     direction,
@@ -351,6 +355,7 @@ export async function fetchSessions({ after, range } = {}) {
     after,
     start: range ? range.start : undefined,
     end: range ? range.end : undefined,
+    pageSize,
   });
   const constraints = [];
   if (start) constraints.push(where(field, '>=', start));
@@ -371,21 +376,26 @@ export async function fetchSessions({ after, range } = {}) {
 
 // Every session overlapping a range, for the History period's session-primary
 // pricing (#123): the period's $ is the sum of these sessions' own costs, so a
-// 20-doc page must never silently truncate a long month. Pages continue after
+// short page must never silently truncate a long month. Pages continue after
 // the previous page's last document snapshot until a short page concludes the
 // range (disjoint `startAfter` pages cannot repeat a row), and the caller
 // widens `start` by the plug-in lookback (sessionsRange) so a boundary-spanning
-// session is read too. `fromCache` reports whether any page was cache-served;
-// the docs themselves are used either way, like the history reads.
-export async function fetchSessionsInRange(range) {
+// session is read too. The page is the archive-wide RANGE_SESSION_LIMIT so a
+// Year's worth of sessions is a handful of round trips, and `fromCache` reports
+// whether any page was cache-served; the docs themselves are used either way,
+// like the history reads. The read itself arrives as a parameter (defaulting
+// to the store's) so an executed test can drive the real loop — Node cannot
+// bind Firestore, and the cursor advance and termination are exactly what a
+// source pin could not guard.
+export async function fetchSessionsInRange(range, readPage = fetchSessions) {
   const docs = [];
   let cursor = null;
   let fromCache = false;
   for (;;) {
-    const page = await fetchSessions({ after: cursor, range });
+    const page = await readPage({ after: cursor, range, pageSize: RANGE_SESSION_LIMIT });
     docs.push(...page.docs);
     fromCache = fromCache || page.fromCache;
-    if (page.docs.length < SESSION_LIMIT) return { docs, fromCache };
+    if (page.docs.length < RANGE_SESSION_LIMIT) return { docs, fromCache };
     cursor = page.lastDoc;
   }
 }

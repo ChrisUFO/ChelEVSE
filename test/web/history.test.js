@@ -606,7 +606,7 @@ test('historySeries aligns docs to days and treats gaps as zero', () => {
   ]);
 });
 
-test('day points carry their document pricing inputs', () => {
+test('day points carry no pricing payload — their $ comes from the sessions', () => {
   const series = historySeries(
     ['2026-10-16', '2026-10-17', '2026-10-18'],
     [
@@ -615,26 +615,31 @@ test('day points carry their document pricing inputs', () => {
       { id: '2026-10-18', kwh: 7.25 },
     ],
   );
-  assert.deepEqual(series[0].hours, { '03': 4.5 });
-  assert.equal(series[2].hours, null);
-  // A gap day gains no property at all: its point shape is unchanged, so a
-  // genuine zero is priceable at 0.00 rather than an unpriceable gap.
-  assert.equal('hours' in series[1], false);
+  // #123 made every range period session-priced: the buckets a day document
+  // carries price nothing here (only the Day period's own read uses hours), so
+  // `hours` rides on no point — a bucketed day, a pre-hourly-capture day and a
+  // gap day all land in the same shape, and a genuine zero stays a priced 0.00
+  // rather than an unpriceable gap.
+  assert.equal('hours' in series[0], false);
+  assert.equal('hours' in series[2], false);
   assert.deepEqual(series[1], { id: '2026-10-17', kwh: 0, label: 'Sat 17 Oct' });
+  assert.deepEqual(series[0], { id: '2026-10-16', kwh: 4.5, label: 'Fri 16 Oct' });
 });
 
-test('periodSeries carries the day documents through the week and month buckets', () => {
+test('week and month points carry their kWh alone', () => {
   const today = new Date(2026, 9, 18, 12);
   const docs = [
     { id: '2026-10-12', kwh: 3, hours: { 22: 3 } },
     { id: '2026-10-15', kwh: 2.5 },
   ];
   const week = periodSeries('week', docs, today);
-  assert.deepEqual(week[0].hours, { 22: 3 });
-  assert.equal(week[3].hours, null);
-  assert.equal('hours' in week[1], false);
   const month = periodSeries('month', docs, today);
-  assert.deepEqual(month.find((point) => point.id === '2026-10-12').hours, { 22: 3 });
+  // The same shape a Year month point has had since #123: a range bar's $
+  // comes from the period's overlapping sessions, so `hours` — like `days`
+  // before it — would claim a pricing input no consumer reads.
+  assert.equal('hours' in week[0], false);
+  assert.deepEqual(week[0], { id: '2026-10-12', kwh: 3, label: 'Mon 12 Oct', isCurrent: false });
+  assert.equal('hours' in month.find((point) => point.id === '2026-10-12'), false);
 });
 
 test('year month points sum their daily documents into kWh alone', () => {
