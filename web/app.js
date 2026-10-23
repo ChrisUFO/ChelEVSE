@@ -63,6 +63,7 @@ import {
   initHistory,
   resetHistory,
   showHistorySettings,
+  showHistoryStatus,
 } from './js/screens/history.js';
 import {
   activateSchedule,
@@ -252,6 +253,7 @@ function enterApp(user) {
         showStatusError();
         showLiveStatus(null);
         showLifetimeEnergy(null);
+        showHistoryStatus(null);
         return;
       }
       setCached(snap.metadata.fromCache);
@@ -260,6 +262,8 @@ function enterApp(user) {
       showLiveStatus(data);
       // Lifetime kWh lives on the Config screen now (#116).
       showLifetimeEnergy(data && data.total_energy);
+      // History prices the in-progress session from the same snapshot (#126).
+      showHistoryStatus(data);
     },
     onCommands: showCommands,
     onSettings: (settings, meta) => {

@@ -2,7 +2,10 @@
 // bars, plus the sessions list — the 20 most recent by default, pageable deeper
 // into the archive and browsable one month at a time. One-shot reads on first
 // tab activation, on Refresh and on a period switch — deliberately no realtime
-// listener here.
+// listener here — with one pushed input beside them (#126): the status snapshot
+// the app's listener fans out, which prices the in-progress session into the
+// current bucket and, on the charging→stopped edge, triggers the settle re-read
+// that takes the recorded session's pricing over.
 
 import { $, setText } from '../ui.js';
 import {
@@ -36,6 +39,8 @@ import {
   costSettings,
   hasRateSchedule,
   hourCost,
+  liveSessionContribution,
+  liveSessionSpan,
   sessionBucketCost,
   sessionCostLabel,
 } from '../cost.js';
@@ -93,6 +98,15 @@ let historyState = 'idle';
 // series it prices. Cleared with the series; a failed read prices nothing —
 // the figure hides rather than pricing uncovered energy.
 let periodSessions = [];
+// The latest status/current snapshot pushed by the app's listener (#126) — the
+// input the live contribution prices today's bucket from, kept beside the
+// period payload so either input may land first: the contribution is decided
+// against the merged state at render time, never at arrival time.
+let liveStatus = null;
+// The charging→stopped edge was seen after a live-priced write: the bridge
+// records the session on that same edge, so one re-read must take the recorded
+// pricing over before the estimate could linger or vanish unpinned.
+let settlePending = false;
 // Today's daily total, kept separately because a day with no hourly buckets has
 // a real total the series cannot carry (the chart refuses to draw it as zeros).
 let dayTotal = null;
@@ -172,13 +186,26 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
   };
 }
 
+// The sessions a period's $ prices: the recorded payload plus, while a charge
+// is in progress, the live session's contribution (#126) — merged only for a
+// range whose series includes a current bucket (today, or this month); the Day
+// period's hour bars price from the day document's buckets and never see it.
+// The settle guard runs here, against the recorded payload as merged, so
+// whichever of the two inputs — the session document or the status snapshot —
+// lands first, a charge a recorded session already covers prices exactly once.
+function pricingSessions() {
+  if (!series.some((point) => point.isCurrent)) return periodSessions;
+  const live = liveSessionContribution(liveStatus, periodSessions, settings);
+  return live ? [...periodSessions, live] : periodSessions;
+}
+
 // One bucket's cost label, or null to hide: flat keeps aggregateCostLabel's
 // byte-identical path; under a schedule a bucket whose energy is entirely
 // without covering sessions hides rather than showing a figure that covers
 // none of it.
 function seriesCost(point) {
   if (!hasRateSchedule(settings)) return aggregateCostLabel(point.kwh, settings);
-  const summary = pointCostSummary(point, currentPeriod().bucket, settings, periodSessions);
+  const summary = pointCostSummary(point, currentPeriod().bucket, settings, pricingSessions());
   if (summary.cost == null || (summary.unpricedEnergy && !summary.pricedEnergy)) return null;
   return fmtMoney(summary.cost, settings.currency);
 }
@@ -266,7 +293,12 @@ function renderSummary() {
       // the cost stays hidden, exactly as before hourly pricing existed.
       cost = null;
     } else {
-      const summary = seriesCostSummary(series, currentPeriod().bucket, settings, periodSessions);
+      const summary = seriesCostSummary(
+        series,
+        currentPeriod().bucket,
+        settings,
+        pricingSessions(),
+      );
       cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
       partial = summary.partial;
     }
@@ -1074,6 +1106,16 @@ export function activateHistory() {
   // label it "Today"; reload once when the local date has changed.
   recheckWindow();
   if (!loaded && !loading) loadAll();
+  else if (settlePending && !loading) {
+    // The charge ended while another tab was showing: take the recorded
+    // pricing over exactly once, now that this screen is visible again.
+    settlePending = false;
+    readHistory();
+  } else {
+    // Status pushes that arrived while the tab was hidden left any live
+    // figure unpainted; the return visit renders them (#126).
+    renderKeepingFocus();
+  }
 }
 
 // settings/current — costs update in place; no reload needed. The whole document
@@ -1082,15 +1124,57 @@ export function activateHistory() {
 export function showHistorySettings(data) {
   settings = costSettings(data);
   renderPlanBanner();
-  if (series.length) {
-    const hadFocus = $('history-chart').contains(document.activeElement);
-    renderHistory();
-    if (hadFocus) {
-      const index = series.findIndex((point) => point.id === selectedId);
-      if (barEls[index]) barEls[index].focus({ preventScroll: true });
-    }
-  }
+  renderKeepingFocus();
   if (sessionsView.sessions.length) renderSessions();
+}
+
+// status/current — the live session's pricing input (#126). The snapshot is
+// kept whole and priced per render, so the contribution stays anchored to the
+// write's own `updated_at` exactly like the Status tab's figure and cannot
+// slide on a repaint. The charging→stopped edge is also the bridge's
+// session-record edge, so it queues one settle re-read through the same
+// guarded path a period switch takes; the guard inside pricingSessions covers
+// the listener that lands first. Bounded to the visible tab: a push while
+// hidden only updates the snapshot, and activateHistory renders or re-reads
+// on return.
+export function showHistoryStatus(data) {
+  const previous = liveStatus;
+  // A null push is the listener's error state, not a charger observation:
+  // keep the last write rather than dropping the screen's input — the figure
+  // is anchored to that write and cannot slide while it is held.
+  if (data) liveStatus = data;
+  if (!active) return;
+  // The settle edge: a write that ended charging after one that priced live.
+  // The bridge's offline markers keep the charging label and are not an edge —
+  // the charge has not ended, the contribution simply hides until a live
+  // write returns.
+  if (liveSessionSpan(previous) && data && data.state_label !== 'charging') {
+    settlePending = true;
+  }
+  if ($('panel-history').hidden) return;
+  if (settlePending && !loading) {
+    settlePending = false;
+    readHistory();
+    return;
+  }
+  // A repaint only when the push could move a live figure — a live span on
+  // either side of it — so idle polls of a hidden charge never rebuild the
+  // chart.
+  if (series.length && (liveSessionSpan(liveStatus) || liveSessionSpan(previous))) {
+    renderKeepingFocus();
+  }
+}
+
+// A repaint that keeps chart focus: the rebuild replaces the bars, so a
+// keyboard user scrubbing them keeps the selected one focused.
+function renderKeepingFocus() {
+  if (!series.length) return;
+  const hadFocus = $('history-chart').contains(document.activeElement);
+  renderHistory();
+  if (hadFocus) {
+    const index = series.findIndex((point) => point.id === selectedId);
+    if (barEls[index]) barEls[index].focus({ preventScroll: true });
+  }
 }
 
 export function resetHistory() {
@@ -1109,6 +1193,8 @@ export function resetHistory() {
   dayTotal = null;
   todayId = null;
   periodSessions = [];
+  liveStatus = null;
+  settlePending = false;
   sessionsView = emptySessionsView();
   sessionsBusy = false;
   historyState = 'idle';
