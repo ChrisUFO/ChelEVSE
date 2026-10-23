@@ -750,6 +750,9 @@ function windowStale() {
 function recheckWindow() {
   if (!windowStale()) return;
   loaded = false;
+  // A full reload re-reads the period, so a settle queued against the older
+  // window is subsumed rather than re-fired on top of it.
+  settlePending = false;
   if (!loading) loadAll();
 }
 
@@ -761,6 +764,7 @@ function recheckWindow() {
 function reloadIfWindowStale() {
   if (!active || !windowStale()) return;
   loaded = false;
+  settlePending = false;
   loadAll();
 }
 
