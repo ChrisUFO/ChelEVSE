@@ -208,6 +208,35 @@ export function periodBounds(period, today = new Date()) {
   return { startId: ids[0], endId: ids[ids.length - 1] };
 }
 
+// How far before the range a session may have started and still be read.
+// `started_at` is the only span field the sessions query can bound, so a
+// session still running into the range from before it is caught by backing
+// the start up: the bridge merges pause/resume while the vehicle stays
+// connected and caps idle gaps at 48 h (pi/bridge.py SESSION_MERGE_MAX_GAP),
+// so a real plug-in is bounded by its charging pattern — a week covers the
+// weekly schedule shape. A longer plug-in's pre-range energy is not attributed
+// (catching it would need an `ended_at` query Firestore does not offer here).
+export const SESSIONS_LOOKBACK_DAYS = 7;
+
+// The sessions read that prices a range period (#123): every session
+// overlapping the window the day ids name, as a half-open `started_at` range.
+// The end is the midnight after the last day — a session starting on the last
+// day must be included — and the start is the range's first midnight minus the
+// plug-in lookback above. Day-period reads never call this.
+export function sessionsRange(bounds) {
+  const first = dayStartFromId(bounds && bounds.startId);
+  const last = dayStartFromId(bounds && bounds.endId);
+  if (!first || !last) return null;
+  return {
+    start: new Date(
+      first.getFullYear(),
+      first.getMonth(),
+      first.getDate() - SESSIONS_LOOKBACK_DAYS,
+    ),
+    end: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1),
+  };
+}
+
 // One point per rendered slot, oldest first, in one shape for every period:
 // { id, kwh, label, isCurrent }. The Day period's data is the single day
 // document (`{ kwh, hours }`) rather than a list, so its series is the hours map

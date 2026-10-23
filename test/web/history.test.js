@@ -32,6 +32,7 @@ import {
   seriesCostSummary,
   showPlanBanner,
 } from '../../web/js/screens/history.js';
+import { sessionCostLabel } from '../../web/js/cost.js';
 
 test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 0, 5, 12)), '2026-01-05');
@@ -788,68 +789,176 @@ const NIGHTLY = {
   ],
 };
 
-test('a schedule fully prices a week whose days all have hourly detail', () => {
+test('a week covered by its sessions prices their sum, not its buckets', () => {
+  // Session-primary (#123): the $ comes from the sessions overlapping the
+  // range, attributed to their days — the hours maps price only the Day
+  // period's bars now, so a day whose buckets disagree with its sessions
+  // (energy the map puts at noon, the session drew off-peak) prices by the
+  // session. Re-introducing bucket pricing for periods fails here.
+  const today = new Date(2026, 9, 18, 12);
+  const sessions = [
+    { wh: 3000, started_at: new Date(2026, 9, 12, 2, 0), ended_at: new Date(2026, 9, 12, 3, 0) },
+    { wh: 1000, started_at: new Date(2026, 9, 18, 3, 0), ended_at: new Date(2026, 9, 18, 4, 0) },
+  ];
   const points = periodSeries(
     'week',
     [
-      { id: '2026-10-12', kwh: 3, hours: { '02': 2, 12: 1 } },
-      { id: '2026-10-18', kwh: 1, hours: { '03': 1 } },
+      // Buckets claim noon; the sessions drew 00:00–06:00.
+      { id: '2026-10-12', kwh: 3, hours: { 12: 3 } },
+      { id: '2026-10-18', kwh: 1, hours: { 12: 1 } },
     ],
-    new Date(2026, 9, 18, 12),
+    today,
   );
-  const summary = seriesCostSummary(points, 'day', NIGHTLY);
-  // 0.50 + 0.10, every day priceable: the full total, nothing to disclose.
-  assert.ok(Math.abs(summary.cost - 0.6) < 1e-9);
+  const summary = seriesCostSummary(points, 'day', NIGHTLY, sessions);
+  // 3 kWh + 1 kWh in the 0.10 window — not the 0.30 the noon buckets would pay.
+  assert.ok(Math.abs(summary.cost - 0.4) < 1e-9);
   assert.equal(summary.partial, false);
+  // Each day's bar carries its session-attributed figure.
+  const monday = pointCostSummary(points[0], 'day', NIGHTLY, sessions);
+  assert.ok(Math.abs(monday.cost - 0.3) < 1e-9);
+  assert.equal(monday.pricedEnergy, true);
+  assert.equal(monday.unpricedEnergy, false);
 });
 
-test('a mixed range shows the priced-only total and flags the note', () => {
-  // One pre-hourly-capture day (a real total, no buckets) beside priced days.
+test('a day whose energy has no covering session is disclosed, never priced free', () => {
+  const today = new Date(2026, 9, 18, 12);
+  const sessions = [
+    { wh: 3000, started_at: new Date(2026, 9, 12, 2, 0), ended_at: new Date(2026, 9, 12, 3, 0) },
+  ];
   const points = periodSeries(
     'week',
     [
-      { id: '2026-10-12', kwh: 3, hours: { '02': 2, 12: 1 } },
-      { id: '2026-10-15', kwh: 4.2 },
-      { id: '2026-10-18', kwh: 1, hours: { '03': 1 } },
+      { id: '2026-10-12', kwh: 3, hours: { '02': 3 } },
+      // A lost session (bridge crash): recorded energy, nothing behind it.
+      { id: '2026-10-15', kwh: 4.2, hours: { '02': 4.2 } },
     ],
-    new Date(2026, 9, 18, 12),
+    today,
   );
-  const summary = seriesCostSummary(points, 'day', NIGHTLY);
-  assert.ok(Math.abs(summary.cost - 0.6) < 1e-9);
+  const summary = seriesCostSummary(points, 'day', NIGHTLY, sessions);
+  // The priced-only total beside the note; buckets cannot stand in.
+  assert.ok(Math.abs(summary.cost - 0.3) < 1e-9);
   assert.equal(summary.partial, true);
+  // The covered day shows its figure; the uncovered day hides its own.
+  const covered = pointCostSummary(points[0], 'day', NIGHTLY, sessions);
+  assert.ok(Math.abs(covered.cost - 0.3) < 1e-9);
+  assert.equal(covered.unpricedEnergy, false);
+  const lost = pointCostSummary(points[3], 'day', NIGHTLY, sessions);
+  assert.equal(lost.cost, 0);
+  assert.equal(lost.pricedEnergy, false);
+  assert.equal(lost.unpricedEnergy, true);
 });
 
-test('a mixed range read prices its days and discloses the unpriceable ones', () => {
-  // #120's live week, exactly as the range read now returns it: hourly capture
-  // began 2026-10-21, so the days before it carry a real total and `hours:
-  // null` (the projection's explicit no-map shape) beside priced days. The
-  // summary must show the priced days' $ and flag partial — not hide the whole
-  // range as unpriceable, which is what dropping `hours` from the projection
-  // did to every Week/Month/Year period.
+// The live archive (issue #123's evidence, 2026-10-22): four sessions against
+// the October season rate $0.15303, in the local wall-clock spans the owner's
+// UTC evidence lands on (MDT, UTC-6). Hourly capture began 2026-10-21, so the
+// first two days carry a real total and `hours: null` — exactly the days #120's
+// bucket rule could not price, which is the under-count #123 fixes.
+const OCTOBER = {
+  rate: 0.15303,
+  currency: 'USD',
+  rates: [
+    {
+      id: 'october',
+      rate: 0.15303,
+      days: [0, 1, 2, 3, 4, 5, 6],
+      start: '00:00',
+      end: '00:00',
+      months: [10],
+    },
+  ],
+};
+
+function liveArchiveSessions() {
+  return [
+    {
+      id: '1792455533',
+      wh: 11461,
+      started_at: new Date(2026, 9, 19, 18, 18),
+      ended_at: new Date(2026, 9, 20, 0, 31),
+    },
+    {
+      id: '1792543109',
+      wh: 6841,
+      started_at: new Date(2026, 9, 20, 18, 38),
+      ended_at: new Date(2026, 9, 21, 1, 0),
+    },
+    {
+      id: '1792613313',
+      wh: 10833,
+      started_at: new Date(2026, 9, 21, 14, 8),
+      ended_at: new Date(2026, 9, 22, 1, 0),
+      intervals: [
+        {
+          started_at: new Date(2026, 9, 21, 14, 8),
+          ended_at: new Date(2026, 9, 22, 1, 0),
+          wh: 10833,
+        },
+      ],
+    },
+    {
+      id: '1792698073',
+      wh: 1796,
+      started_at: new Date(2026, 9, 22, 13, 41),
+      ended_at: new Date(2026, 9, 22, 14, 39),
+      intervals: [
+        {
+          started_at: new Date(2026, 9, 22, 13, 41),
+          ended_at: new Date(2026, 9, 22, 14, 39),
+          wh: 1796,
+        },
+      ],
+    },
+  ];
+}
+
+test('the live archive week prices every day, including its pre-hourly days', () => {
+  const sessions = liveArchiveSessions();
+  // The day documents' own totals, set to the archive's attribution (the
+  // bridge accumulates both from the same counter). Post-capture days carry
+  // hour maps too — irrelevant for the week, kept to prove they do not price it.
   const points = periodSeries(
     'week',
     [
-      { id: '2026-10-19', kwh: 5.1, hours: null },
-      { id: '2026-10-20', kwh: 3.9, hours: null },
-      { id: '2026-10-21', kwh: 2.4, hours: { '02': 2.4 } },
-      { id: '2026-10-22', kwh: 1.2, hours: { '03': 1.2 } },
+      { id: '2026-10-19', kwh: (11461 * 20520) / 22380 / 1000, hours: null },
+      {
+        id: '2026-10-20',
+        kwh: ((11461 * 1860) / 22380 + (6841 * 19320) / 22920) / 1000,
+        hours: null,
+      },
+      {
+        id: '2026-10-21',
+        kwh: ((6841 * 3600) / 22920 + (10833 * 35520) / 39120) / 1000,
+        hours: { 12: 10 },
+      },
+      { id: '2026-10-22', kwh: ((10833 * 3600) / 39120 + 1796) / 1000, hours: { 12: 2.5 } },
     ],
     new Date(2026, 9, 22, 12),
   );
-  const summary = seriesCostSummary(points, 'day', NIGHTLY);
-  // 2.4 kWh and 1.2 kWh in the night window (0.10/kWh): 0.24 + 0.12.
-  assert.ok(Math.abs(summary.cost - 0.36) < 1e-9);
-  assert.equal(summary.partial, true);
-  // The per-bar split: a priced day shows its figure, a pre-capture day hides
-  // its own rather than pricing itself free — the split the note names.
-  const pricedDay = pointCostSummary(points[5], 'day', NIGHTLY);
-  assert.ok(Math.abs(pricedDay.cost - 0.24) < 1e-9);
-  assert.equal(pricedDay.pricedEnergy, true);
-  assert.equal(pricedDay.unpricedEnergy, false);
-  const legacyDay = pointCostSummary(points[3], 'day', NIGHTLY);
-  assert.equal(legacyDay.cost, null);
-  assert.equal(legacyDay.pricedEnergy, false);
-  assert.equal(legacyDay.unpricedEnergy, true);
+  const summary = seriesCostSummary(points, 'day', OCTOBER, sessions);
+  // The sessions list's own figures, added up: Σ sessionCostLabel over the
+  // four sessions = 30.931 kWh × $0.15303 = $4.7334 — not the $1.45 the
+  // hours-only rule showed. The list renders each at display precision, so
+  // its figures add to $4.73 beside the summary's exact 4.7334.
+  const list = sessions.reduce(
+    (sum, item) => sum + Number(sessionCostLabel(item, OCTOBER).slice(4)),
+    0,
+  );
+  assert.ok(Math.abs(list - 4.73) < 1e-9);
+  assert.ok(Math.abs(summary.cost - 4.73337093) < 1e-6);
+  assert.equal(summary.partial, false);
+  // An old bar shows its span-attributed day $, matching its contribution to
+  // the summary — the acceptance scenario verbatim.
+  const oct19 = pointCostSummary(points[3], 'day', OCTOBER, sessions);
+  assert.ok(Math.abs(oct19.cost - ((11461 * 20520) / 22380 / 1000) * 0.15303) < 1e-9);
+  assert.equal(oct19.pricedEnergy, true);
+  assert.equal(oct19.unpricedEnergy, false);
+  // And the day whose session spans midnight keeps its other half on the
+  // next day, exactly once.
+  const oct20 = pointCostSummary(points[4], 'day', OCTOBER, sessions);
+  assert.ok(
+    Math.abs(oct20.cost - (((11461 * 1860) / 22380 + (6841 * 19320) / 22920) / 1000) * 0.15303) <
+      1e-9,
+  );
 });
 
 test('a range whose energy is all unpriceable hides the cost instead of pricing it free', () => {
@@ -898,34 +1007,39 @@ test('day-period hours price from their captured day', () => {
   });
 });
 
-test('year month points price from their day documents', () => {
+test('year month points price from the sessions attributed into them', () => {
   const today = new Date(2026, 9, 18, 12);
+  const sessions = [
+    // 1 kWh off-peak in October 2026; May's recorded day has no session.
+    { wh: 1000, started_at: new Date(2026, 9, 2, 3, 0), ended_at: new Date(2026, 9, 2, 4, 0) },
+  ];
   const points = periodSeries(
     'year',
     [
-      { id: '2026-10-02', kwh: 1, hours: { '03': 1 } },
-      { id: '2026-10-18', kwh: 6 }, // unpriceable energy inside the month
+      { id: '2026-10-02', kwh: 1, hours: { 12: 1 } },
+      { id: '2026-05-06', kwh: 2 }, // no covering session inside May
     ],
     today,
   );
-  const summary = seriesCostSummary(points, 'month', NIGHTLY);
+  const summary = seriesCostSummary(points, 'month', NIGHTLY, sessions);
+  // The priced-only total beside the note: October's session, not its buckets.
   assert.ok(Math.abs(summary.cost - 0.1) < 1e-9);
   assert.equal(summary.partial, true);
-  // The month bar itself shows its partial cost with an honest split.
   const october = pointCostSummary(
     points.find((point) => point.id === '2026-10'),
     'month',
     NIGHTLY,
+    sessions,
   );
   assert.ok(Math.abs(october.cost - 0.1) < 1e-9);
   assert.equal(october.pricedEnergy, true);
-  assert.equal(october.unpricedEnergy, true);
-  // A month whose energy is entirely unpriceable hides its bar figure.
-  const legacy = periodSeries('year', [{ id: '2026-05-06', kwh: 2 }], today);
+  assert.equal(october.unpricedEnergy, false);
+  // A month whose energy is entirely without a session hides its figure.
   const may = pointCostSummary(
-    legacy.find((point) => point.id === '2026-05'),
+    points.find((point) => point.id === '2026-05'),
     'month',
     NIGHTLY,
+    sessions,
   );
   assert.equal(may.cost, 0);
   assert.equal(may.pricedEnergy, false);

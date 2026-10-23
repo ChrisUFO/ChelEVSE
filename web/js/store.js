@@ -368,3 +368,24 @@ export async function fetchSessions({ after, range } = {}) {
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
   };
 }
+
+// Every session overlapping a range, for the History period's session-primary
+// pricing (#123): the period's $ is the sum of these sessions' own costs, so a
+// 20-doc page must never silently truncate a long month. Pages continue after
+// the previous page's last document snapshot until a short page concludes the
+// range (disjoint `startAfter` pages cannot repeat a row), and the caller
+// widens `start` by the plug-in lookback (sessionsRange) so a boundary-spanning
+// session is read too. `fromCache` reports whether any page was cache-served;
+// the docs themselves are used either way, like the history reads.
+export async function fetchSessionsInRange(range) {
+  const docs = [];
+  let cursor = null;
+  let fromCache = false;
+  for (;;) {
+    const page = await fetchSessions({ after: cursor, range });
+    docs.push(...page.docs);
+    fromCache = fromCache || page.fromCache;
+    if (page.docs.length < SESSION_LIMIT) return { docs, fromCache };
+    cursor = page.lastDoc;
+  }
+}
