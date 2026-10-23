@@ -83,6 +83,7 @@ import {
   segmentNote,
   settingsDraftMatches,
   settingsFields,
+  settingsLeaveNeedsConfirm,
   settingsPayload,
   settingsSaveState,
   settingsSnapshotIsBaseline,
@@ -443,6 +444,30 @@ test('the charger address participates in dirty state by its trimmed value', () 
   const view = settingsSaveState({ draft: settingsFields(stored), confirmed: stored });
   assert.equal(view.canSave, false);
   assert.equal(view.text, '');
+});
+
+// ---------- unsaved-changes guard (#129) ----------
+
+test('the leave guard asks only for a dirty draft on the Config tab', () => {
+  // The gate is pure so the router never has to know why: only the App
+  // settings form keeps unsaved state, so only leaving config with a dirty
+  // draft asks, and every other route change (clean form, any other tab)
+  // applies immediately.
+  const ask = (from, to, dirty) => settingsLeaveNeedsConfirm({ from, to, dirty });
+  assert.equal(ask('config', 'status', true), true);
+  assert.equal(ask('config', 'advanced', true), true);
+  // A clean form never gates, whatever the route.
+  assert.equal(ask('config', 'status', false), false);
+  assert.equal(ask('config', 'status'), false);
+  // Any other origin never gates, even dirty (nothing else is guarded).
+  assert.equal(ask('status', 'config', true), false);
+  assert.equal(ask('history', 'schedule', true), false);
+  // Re-entering Config is not a leave.
+  assert.equal(ask('status', 'config', true), false);
+  // Unknown origin never gates; any non-Config destination (the conservative
+  // read of an unknown route) still does.
+  assert.equal(ask('', 'status', true), false);
+  assert.equal(settingsLeaveNeedsConfirm(), false);
 });
 
 test('a rate-only save keeps the stored charger address in the payload', () => {

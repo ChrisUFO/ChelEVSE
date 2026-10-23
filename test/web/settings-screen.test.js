@@ -96,14 +96,21 @@ globalThis.document = {
   createTextNode: (text) => ({ textContent: text }),
 };
 
-// The screen registers online/offline handlers on the global and focuses
-// through matchMedia-aware scroll paths; node offers neither.
-globalThis.addEventListener ??= () => {};
-globalThis.removeEventListener ??= () => {};
+// The screen registers online/offline handlers and the beforeunload guard on
+// the global, and focuses through matchMedia-aware scroll paths; node offers
+// neither. The recorder keeps attach/detach observable for the guard (#129).
+const windowListeners = new Map();
+globalThis.addEventListener = (type, listener) => {
+  if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+  windowListeners.get(type).add(listener);
+};
+globalThis.removeEventListener = (type, listener) => {
+  windowListeners.get(type)?.delete(listener);
+};
 globalThis.matchMedia ??= () => ({ matches: false });
 globalThis.requestAnimationFrame ??= () => {};
 
-const { initSettings, resetSettings, showSettingsData } =
+const { initSettings, resetSettings, showSettingsData, confirmLeaveSettings, isSettingsDirty } =
   await import('../../web/js/screens/settings.js');
 const { BLOCKED_SAVE_MESSAGE, OFFLINE_MESSAGE } = await import('../../web/js/settings.js');
 
@@ -279,4 +286,157 @@ test('the temperature switch is seeded visible for a stored document without it'
   assert.equal(feedbackText(), 'Unsaved changes.');
   toggle('setting-show-temperature', true);
   assert.equal(feedbackText(), '');
+});
+
+// ---------- unsaved-changes guard (#129) ----------
+//
+// The guard rides the same dirty flag the feedback pipeline maintains, so the
+// screen's own outputs are the oracle: the beforeunload listener's presence on
+// the global, the dialog element's `hidden`, and the promise the router waits
+// on. The route gating itself is pinned pure in test/web/settings.test.js and
+// the router's half in test/web/ui.test.js.
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+// The dialog markup ships `hidden`; the generic stub would otherwise report a
+// never-touched element as open.
+element('leave-settings-confirm').hidden = true;
+
+const beforeUnloadAttached = () => (windowListeners.get('beforeunload')?.size ?? 0) > 0;
+
+const fireBeforeUnload = () => {
+  let prevented = false;
+  const event = {
+    preventDefault() {
+      prevented = true;
+    },
+    returnValue: undefined,
+  };
+  for (const listener of windowListeners.get('beforeunload') || []) listener(event);
+  return { prevented, event };
+};
+
+const clickButton = (id) => {
+  for (const listener of element(id).listeners.get('click') || []) listener();
+};
+
+const pressKey = (id, key) => {
+  for (const listener of element(id).listeners.get('keydown') || []) listener({ key });
+};
+
+const dialogOpen = () => element('leave-settings-confirm').hidden === false;
+
+// Resolves to a getter for the promise's eventual answer ('pending' until then).
+const answerOf = (promise) => {
+  let answer = 'pending';
+  promise.then((value) => {
+    answer = value;
+  });
+  return () => answer;
+};
+
+test('beforeunload attaches only for the dirty window and tears down with the screen', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+  assert.equal(beforeUnloadAttached(), false, 'a clean form never intercepts the unload');
+
+  type('setting-rate', '0.4');
+  assert.equal(isSettingsDirty(), true);
+  assert.equal(beforeUnloadAttached(), true, 'a dirty draft attaches the guard');
+
+  const { prevented, event } = fireBeforeUnload();
+  assert.equal(prevented, true);
+  assert.equal(event.returnValue, '', 'the legacy returnValue flag is set');
+
+  await editRateBackToStored();
+  assert.equal(isSettingsDirty(), false);
+  assert.equal(beforeUnloadAttached(), false, 'editing back to clean detaches the guard');
+
+  type('setting-rate', '0.4');
+  assert.equal(beforeUnloadAttached(), true);
+  resetSettings();
+  assert.equal(beforeUnloadAttached(), false, 'sign-out teardown clears the guard');
+  assert.equal(isSettingsDirty(), false);
+});
+
+test('a clean form resolves the leave immediately and never opens the dialog', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+
+  const answer = answerOf(confirmLeaveSettings());
+  await tick();
+  assert.equal(answer(), true);
+  assert.equal(dialogOpen(), false);
+});
+
+test('a dirty form asks: Stay keeps the draft, Discard proceeds, Escape stays', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+  type('setting-rate', '0.4');
+
+  const answer = answerOf(confirmLeaveSettings());
+  await tick();
+  assert.equal(answer(), 'pending', 'the router waits for an answer');
+  assert.equal(dialogOpen(), true, 'the dialog is the One-rate alertdialog pattern');
+  // Asking again while open returns the same open question, not a second one.
+  const answerAgain = answerOf(confirmLeaveSettings());
+  clickButton('stay-settings');
+  await tick();
+  assert.equal(answer(), false, 'Stay declines the navigation');
+  assert.equal(answerAgain(), false, 'a repeat ask shares the same answer');
+  assert.equal(dialogOpen(), false);
+  assert.equal(element('setting-rate').value, '0.4', 'the draft survives Stay');
+
+  // Escape is the safe action, exactly like the One-rate confirm's Cancel.
+  const escAnswer = answerOf(confirmLeaveSettings());
+  pressKey('leave-settings-confirm', 'Escape');
+  await tick();
+  assert.equal(escAnswer(), false);
+  assert.equal(dialogOpen(), false);
+
+  const discardAnswer = answerOf(confirmLeaveSettings());
+  clickButton('discard-settings');
+  await tick();
+  assert.equal(discardAnswer(), true, 'Discard releases the navigation');
+  assert.equal(dialogOpen(), false);
+  // The edits stay unsaved (the write never ran), exactly as a plain tab
+  // switch leaves them today — the screen keeps its state, panels only hide.
+  assert.equal(isSettingsDirty(), true);
+});
+
+test('an offline save refusal keeps the guard: the draft is still unsaved', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+  type('setting-rate', '0.4');
+
+  navigator.onLine = false;
+  await submitForm();
+  assert.equal(feedbackText(), OFFLINE_MESSAGE);
+  navigator.onLine = true;
+
+  assert.equal(isSettingsDirty(), true, 'the refused save leaves the draft dirty');
+  assert.equal(beforeUnloadAttached(), true);
+  const answer = answerOf(confirmLeaveSettings());
+  clickButton('discard-settings');
+  await tick();
+  assert.equal(answer(), true);
+});
+
+test('a snapshot that un-dirties the form detaches beforeunload and settles an open ask', async () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+  type('setting-rate', '0.4');
+  assert.equal(beforeUnloadAttached(), true);
+
+  const answer = answerOf(confirmLeaveSettings());
+  assert.equal(dialogOpen(), true);
+
+  // The stored document catches up to the typed rate: the draft is confirmed
+  // by the server, so the guard's premise disappears underneath it.
+  showSettingsData({ ...storedDoc, rate: 0.4 });
+  assert.equal(isSettingsDirty(), false);
+  assert.equal(beforeUnloadAttached(), false, 'the snapshot detach is immediate');
+  await tick();
+  assert.equal(answer(), true, 'the pending navigation completes — nothing is at stake now');
+  assert.equal(dialogOpen(), false);
 });
