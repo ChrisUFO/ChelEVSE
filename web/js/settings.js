@@ -1951,6 +1951,14 @@ export function settingsSnapshotIsBaseline(data, meta = {}) {
   return !(meta && meta.fromCache === true);
 }
 
+// Whether a route change needs the unsaved-changes confirmation (#129). Only
+// the App settings form keeps unsaved state, so only leaving the Config tab
+// with a dirty draft asks; every other route change applies immediately. The
+// router owns the asking (it owns the hash); the screen owns the dialog.
+export function settingsLeaveNeedsConfirm({ from = '', to = '', dirty = false } = {}) {
+  return Boolean(dirty) && from === 'config' && to !== 'config';
+}
+
 // The card's whole visible state, derived from the draft and the flags the
 // screen owns. `dirty` is computed and returned so the screen never has to keep
 // a second, possibly divergent copy.

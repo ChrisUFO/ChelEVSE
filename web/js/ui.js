@@ -58,11 +58,21 @@ export function routeFor(hash) {
 // same screen. Panels are hidden rather than removed so each screen keeps its
 // control state; the document scroll position is saved per route and restored
 // when that route is shown again (first visits start at the top).
-export function initTabbar({ onRoute } = {}) {
+//
+// `confirmLeave(from, to)` lets a screen hold a route change for a
+// confirmation: when the hook returns a promise, the change waits for it — a
+// truthy resolution applies the pending route, anything else (a falsy
+// resolution or a rejection) keeps the current route and restores its hash.
+// Any other return (or no hook) navigates immediately, as before.
+export function initTabbar({ onRoute, confirmLeave } = {}) {
   const tabs = [...document.querySelectorAll('.tab')];
   const tabbar = document.querySelector('.tabbar');
   const scrollByRoute = new Map();
   let currentRoute = null;
+  // The route a confirmation dialog is deciding on. While it is set the hash
+  // already points at the pending route but nothing has been applied; any
+  // further hash movement snaps back until the dialog is answered.
+  let pendingLeave = null;
   // Per-route restore below owns the scroll position; browser scroll
   // restoration would otherwise fight it on reload and back/forward.
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
@@ -87,9 +97,49 @@ export function initTabbar({ onRoute } = {}) {
     if (changed && onRoute) onRoute(route);
   }
 
+  function restoreHash() {
+    if (location.hash !== `#${currentRoute}`) history.replaceState(null, '', `#${currentRoute}`);
+  }
+
+  function guarded(route, decision) {
+    pendingLeave = route;
+    decision.then(
+      (leave) => {
+        if (pendingLeave !== route) return;
+        pendingLeave = null;
+        if (!leave) {
+          restoreHash();
+          return;
+        }
+        apply(route);
+        // A direct click leaves focus on the newly selected tab; the dialog
+        // had it instead, so put focus where the click would have left it.
+        const activeTab = document.querySelector('.tab[aria-selected="true"]');
+        if (activeTab) activeTab.focus({ preventScroll: true });
+      },
+      () => {
+        if (pendingLeave !== route) return;
+        pendingLeave = null;
+        restoreHash();
+      },
+    );
+  }
+
   function render() {
     const route = routeFor(location.hash);
+    if (pendingLeave !== null) {
+      // An open dialog owns the pending navigation; nothing else moves.
+      restoreHash();
+      return;
+    }
     if (location.hash !== `#${route}`) history.replaceState(null, '', `#${route}`);
+    if (confirmLeave && currentRoute !== null && currentRoute !== route) {
+      const decision = confirmLeave(currentRoute, route);
+      if (decision && typeof decision.then === 'function') {
+        guarded(route, decision);
+        return;
+      }
+    }
     apply(route);
   }
 

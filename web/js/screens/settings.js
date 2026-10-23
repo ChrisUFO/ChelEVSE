@@ -2498,6 +2498,13 @@ function paintFeedback() {
   });
   // The value comparison is the only dirty rule; keep the flag in step.
   settingsDirty = view.dirty;
+  // The unsaved-changes guard rides the same flag: the native beforeunload
+  // hook exists only for the dirty window, and an open leave dialog whose
+  // premise just disappeared (the save settled, or a matching snapshot
+  // landed) settles as "leave" — the navigation the owner already asked for
+  // is safe now, so it completes instead of waiting for an answer.
+  syncLeaveGuard();
+  if (!settingsDirty && leaveAnswer) settleLeave(true);
   feedback.className = `feedback${view.busy ? ' busy' : ''}${view.kind ? ` ${view.kind}` : ''}`;
   // An over-cap plan has no field-error sentence, so the save row's left column
   // would sit empty while its chip says `· cap`. The cap's remedy belongs next
@@ -2846,6 +2853,78 @@ function revealNode(node) {
   });
 }
 
+// ---------- unsaved-changes guard (#129) ----------
+
+// The native half of the guard: while the draft is dirty, leaving the page
+// (reload, close, an external link) must warn. Attached only for the dirty
+// window — a clean form never intercepts the unload. The browser owns the
+// dialog copy; this only decides whether it appears.
+let beforeUnloadOn = false;
+
+function beforeUnloadGuard(event) {
+  event.preventDefault();
+  event.returnValue = '';
+}
+
+function syncLeaveGuard() {
+  if (settingsDirty) {
+    if (!beforeUnloadOn) {
+      addEventListener('beforeunload', beforeUnloadGuard);
+      beforeUnloadOn = true;
+    }
+    return;
+  }
+  if (beforeUnloadOn) {
+    removeEventListener('beforeunload', beforeUnloadGuard);
+    beforeUnloadOn = false;
+  }
+}
+
+// The dirty flag the router's gate reads — the same one the feedback pipeline
+// maintains, so the guard can never disagree with the "Unsaved changes."
+// status above the Save button.
+export function isSettingsDirty() {
+  return settingsDirty;
+}
+
+// The router's half of the guard: leaving the Config tab with a dirty form
+// asks first. Same alertdialog pattern as the One-rate confirm — role,
+// styling, Escape is the safe action, and focus returns to the tab pattern
+// when the owner stays. Resolves true to leave (the edits stay unsaved, the
+// navigation proceeds), false to stay.
+let leaveAnswer = null; // { promise, resolve } while the dialog is open
+
+export function confirmLeaveSettings() {
+  if (!settingsDirty) return Promise.resolve(true);
+  if (leaveAnswer) return leaveAnswer.promise;
+  let settle;
+  const promise = new Promise((resolve) => {
+    settle = resolve;
+  });
+  leaveAnswer = { promise, resolve: settle };
+  $('leave-settings-confirm').hidden = false;
+  // Stay is the safe action, so it takes focus and the louder button.
+  $('stay-settings').focus({ preventScroll: true });
+  return promise;
+}
+
+// Resolve the open dialog and close it. `leave` is true to proceed with the
+// pending navigation, false to stay.
+function settleLeave(leave) {
+  if (!leaveAnswer) return;
+  const { resolve } = leaveAnswer;
+  leaveAnswer = null;
+  $('leave-settings-confirm').hidden = true;
+  resolve(leave);
+}
+
+function stayOnSettings() {
+  settleLeave(false);
+  // The dialog interrupted a tabbar navigation, so focus rejoins the tab
+  // pattern on the still-selected Config tab.
+  $('tab-config').focus({ preventScroll: true });
+}
+
 // ---------- screen lifecycle ----------
 
 function setPreviewNow() {
@@ -2870,6 +2949,13 @@ export function initSettings() {
   $('cancel-one-rate').addEventListener('click', cancelOneRate);
   $('rate-mode-confirm').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') cancelOneRate();
+  });
+  // The unsaved-changes guard's dialog (#129): Escape is the safe action,
+  // exactly like the One-rate confirm.
+  $('stay-settings').addEventListener('click', stayOnSettings);
+  $('discard-settings').addEventListener('click', () => settleLeave(true));
+  $('leave-settings-confirm').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') stayOnSettings();
   });
   $('fill-gaps').addEventListener('click', fillGaps);
   $('seed-cover').addEventListener('click', fillGaps);
@@ -2917,6 +3003,11 @@ export function resetSettings() {
   settingsWaiting = false;
   settingsSaved = false;
   settingsError = '';
+  // The guard must not outlive the session (closeApp teardown, sign-out):
+  // drop the native beforeunload hook and close any open leave dialog —
+  // teardown answers "stay", so no navigation fires while screens reset.
+  settleLeave(false);
+  syncLeaveGuard();
   expandedPeriods.clear();
   removeConfirmKey = null;
   if (!$('settings-form')) return;

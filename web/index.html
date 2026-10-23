@@ -599,6 +599,23 @@
               </p>
             </div>
             <form id="settings-form" class="settings-form" novalidate>
+              <div
+                class="rate-mode-confirm"
+                id="leave-settings-confirm"
+                role="alertdialog"
+                aria-labelledby="leave-settings-confirm-text"
+                hidden
+              >
+                <p id="leave-settings-confirm-text">
+                  App settings has unsaved changes. Leaving Config will discard them.
+                </p>
+                <div class="rate-mode-confirm-actions">
+                  <button class="btn small solid" id="stay-settings" type="button">Stay</button>
+                  <button class="btn small danger" id="discard-settings" type="button">
+                    Discard changes
+                  </button>
+                </div>
+              </div>
               <div class="rate-editor" role="group" aria-labelledby="rates-heading">
                 <div class="rate-head">
                   <div class="rate-head-copy">
