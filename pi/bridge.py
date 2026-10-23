@@ -841,6 +841,24 @@ class StatusTracker:
         self.open_interval = None
         self.interval_energy = None
         self.interval_seen_at = None
+        # The ``charging_stopped_at`` view for status/current (issue #122):
+        # the instant charging last ended while still plugged in, or None.
+        # The web adopts it as the reconstructed cost anchor on a cold open,
+        # so the value is frozen once written (a literal timestamp, never
+        # SERVER_TIMESTAMP: the accumulated view republishes it on every
+        # later write, and a server stamp would re-resolve each time and
+        # move the anchored figure). ``stamp_write_pending`` is the one-shot
+        # flag that promotes the stop transition's own status write to a
+        # forced write, so the field lands promptly even inside the
+        # rate-limit gap; the sink consumes it under the apply lock.
+        # ``stamp_adopted`` says the tracker has held a stamp at least once
+        # (seeded from the document or stamped on a stop): from then on the
+        # field rides every payload -- its value, or None once cleared --
+        # so a clear always reaches the document. Before the first stamp
+        # the field stays out of the payloads entirely.
+        self.charging_stopped_at = None
+        self.stamp_write_pending = False
+        self.stamp_adopted = False
 
     def seed(self):
         """Seed state from status/current; return True when the read worked.
@@ -861,6 +879,22 @@ class StatusTracker:
         if _is_number(total):
             self.total_energy = float(total)
         state = data.get("state")
+        # A stored stop stamp outlives a restart: adopting it keeps the
+        # tracker's view aligned with the document, so the first write of
+        # the new process carries it forward (writing None here would
+        # null the field a cold-opened page still needs) and a later
+        # clear -- a new charge or the session's reset -- really clears.
+        # This sits outside the ``has_state`` gate below on purpose: a
+        # boot seed that failed and retried after live ticks already has
+        # state, and skipping adoption there would strand the stored
+        # stamp -- the sink's merge gate never opens, so no later clear
+        # could reach the document. ``stamp_adopted`` keeps a retry from
+        # resurrecting: once this process has held a stamp -- stamped on
+        # a stop or adopted -- the stored value never overwrites the view.
+        stored_stamp = data.get("charging_stopped_at")
+        if isinstance(stored_stamp, datetime) and not self.stamp_adopted:
+            self.charging_stopped_at = stored_stamp
+            self.stamp_adopted = True
         if not self.has_state:
             # Only the first successful seed establishes the state machine. A
             # retry after live ticks must restore the stored baseline without
@@ -929,6 +963,21 @@ class StatusTracker:
             # goes quiet. An empty accumulator is a no-op, so an interval
             # flush that just fired cannot double it.
             self.history.flush("session close")
+            self._note_stop_stamp(data)
+        # A session reset while charging had already stopped (the vehicle
+        # disconnected after a plugged-in-complete stretch): the counters
+        # zeroed, so the plug-in is over and its stop stamp is void. The
+        # same energy gate the web's hold uses, so the field is meaningful
+        # exactly while a later snapshot could still adopt it. A stop tick
+        # that disconnects outright is covered by _note_stop_stamp above.
+        new_energy = data.get("session_energy")
+        if (
+            state != 3
+            and _is_number(self.session_energy)
+            and self.session_energy > 0
+            and not (_is_number(new_energy) and new_energy > 0)
+        ):
+            self.charging_stopped_at = None
         self.previous_state = state
         self.has_state = True
         self.state = state
@@ -1000,7 +1049,34 @@ class StatusTracker:
             }
             baseline = f"{float(current):.0f} Wh" if _is_number(current) else "unknown"
             log(f"interval opened: baseline {baseline}")
+            # A new charging block voids the previous block's stop stamp: the
+            # web re-anchors on this block's own writes, and the next stop
+            # restamps. Cleared here rather than on the state edge so the
+            # restart-mid-charge case (no state change, but no open interval
+            # either) clears too.
+            self.charging_stopped_at = None
         self.open_interval["wh"] += delta
+
+    def _note_stop_stamp(self, data):
+        """Record ``charging_stopped_at`` on the charging-state stop edge.
+
+        The edge the session machinery already sees (``_finalize_session``
+        runs beside this): charging ended, and ``vehicle`` says whether the
+        plug-in continues. Still connected -- the plugged-in-complete end
+        state the web's frozen anchor covers -- stamps the stop instant and
+        asks the sink for one prompt write; disconnected is the session's
+        own end, when the counters zero and there is nothing to anchor (the
+        web hides the figure on reset regardless), so any earlier stamp from
+        the same plug-in is cleared instead. The stamp is the observation
+        time of the first not-charging tick, the same convention a closed
+        interval's ``ended_at`` uses.
+        """
+        if _vehicle_connected(data):
+            self.charging_stopped_at = _utcnow()
+            self.stamp_write_pending = True
+            self.stamp_adopted = True
+        else:
+            self.charging_stopped_at = None
 
     def _close_interval(self):
         """Detach the open interval for the record being written, ending now.
@@ -2007,7 +2083,8 @@ class WritePolicy:
       heartbeats -- ``charging_heartbeat`` while state 3, ``idle_heartbeat``
       otherwise. ``elapsed`` in particular never triggers anything; the app
       interpolates it locally from the write anchor.
-    - A forced write (a completed command) bypasses both cadences and the gap.
+    - A forced write (a completed command, or the stop stamp of issue #122)
+      bypasses both cadences and the gap.
 
     A heartbeat is always a full curated payload backed by a fresh
     observation, never a timestamp-only merge: a fresh ``updated_at`` on stale
@@ -2489,6 +2566,27 @@ class StatusSink:
             is_charging = fields.get("state") == 3
             tracker.record_history(fields.get("total_energy"))
             tracker.observe(fields)
+            # The stop stamp rides the accumulated view (issue #122): the
+            # tracker's charging_stopped_at is what the document should
+            # carry. It merges only once one exists -- seeded from the
+            # document or stamped on a stop -- or to clear one that did, so
+            # payloads stay byte-identical until the first stamp, and a
+            # tracker that never saw a stamp never writes the field at all.
+            if (
+                tracker.charging_stopped_at is not None
+                or tracker.stamp_adopted
+                or "charging_stopped_at" in self._latest
+            ):
+                self._latest["charging_stopped_at"] = tracker.charging_stopped_at
+            if tracker.stamp_write_pending:
+                # One forced write per charging block's stop: the same write
+                # the state change already owes the policy, published at the
+                # apply instead of the next gap-open scheduler opportunity,
+                # so a reload right after the stop finds the field. The flag
+                # is consumed here; a write that fails leaves the policy's
+                # forced flag armed for the next tick's publish_pending.
+                tracker.stamp_write_pending = False
+                self.policy.forced = True
             body = _transition_body(had_state, was_charging, is_charging)
             if body is not None:
                 self.notifier.enqueue(body)

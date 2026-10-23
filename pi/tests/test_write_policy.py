@@ -188,9 +188,12 @@ class RateLimitTests(WritePolicyBase):
         self.clock.advance(1)  # t=10: the gap is satisfied
         self.tick()
         self.assertEqual(self.write_times, [0, self.GAP])
-        # A second trigger waits out its own gap window.
+        # A second trigger waits out its own gap window. (The trigger stays
+        # inside state 3 on purpose: a snapshot that *leaves* charging while
+        # plugged in is the stop stamp's forced write (#122), which publishes
+        # at the apply and is covered by the stop-stamp tests.)
         self.clock.advance(self.GAP / 2)
-        self.apply("mqtt", vehicle=1)
+        self.apply("mqtt", state=3, vehicle=1)
         self.tick()
         self.assertEqual(self.write_times, [0, self.GAP])
         self.clock.advance(self.GAP / 2 + 1)

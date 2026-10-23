@@ -7,6 +7,7 @@ import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  adoptedAnchor,
   aggregateCostLabel,
   costSettings,
   dayCost,
@@ -381,6 +382,89 @@ test('heldAnchorAfter captures, holds, clears and re-anchors', () => {
   // no anchor without a document.
   assert.equal(heldAnchorAfter(laterAnchor, liveStatus(3, null, 3600)), null);
   assert.equal(heldAnchorAfter(laterAnchor, null), null);
+});
+
+// ---------- cold-open adoption (the bridge's stop stamp) ----------
+
+// The stamp fixture: a Firestore Timestamp surface over a fixed instant.
+function stampAt(ms) {
+  return { toMillis: () => ms };
+}
+
+test('adoptedAnchor reconstructs the stop pair from a stamped snapshot', () => {
+  // Charge complete 06:30, still plugged in; the page opens at 08:30 to a
+  // write whose elapsed has grown with the pause. The anchor takes the
+  // stamp as its ms and the snapshot's own elapsed — the pairing the
+  // pair-freeze pricer expects.
+  const stop = date(2026, 1, 5, 6, 30).getTime();
+  const later = liveStatus(2, date(2026, 1, 5, 8, 30).getTime(), 3 * 3600, 1000, {
+    charging_stopped_at: stampAt(stop),
+  });
+  assert.deepEqual(adoptedAnchor(later), { ms: stop, elapsed: 3 * 3600 });
+  // The reconstructed anchor prices through the same held pricer, and its
+  // figure freezes exactly like a captured one (the single-span
+  // approximation: pause time folds into the pro-rated window).
+  assert.equal(heldCostLabel(1000, 3 * 3600, stop, nightly()), 'GBP 0.13');
+});
+
+test('adoptedAnchor hides without a usable stamp or usable energy', () => {
+  const t = date(2026, 1, 5, 8, 30).getTime();
+  const stopped = (overrides) => liveStatus(2, t, 3600, 1000, overrides);
+  // Absent (an older or pre-deploy bridge) or malformed stamps never adopt.
+  for (const malformed of [undefined, null, 0, 'x', {}, { toMillis: null }, { toMillis: 'x' }]) {
+    assert.equal(
+      adoptedAnchor(stopped({ charging_stopped_at: malformed })),
+      null,
+      String(malformed),
+    );
+  }
+  // A stamp that resolves to nothing is as good as absent.
+  assert.equal(adoptedAnchor(stopped({ charging_stopped_at: stampAt(null) })), null);
+  // The live path governs a charging snapshot regardless of the field.
+  assert.equal(
+    adoptedAnchor(liveStatus(3, t, 3600, 1000, { charging_stopped_at: stampAt(t) })),
+    null,
+  );
+  // The bridge's offline marker over a stopped session is not live: the
+  // frozen figure still adopts (parity with the held machine's hold).
+  assert.notEqual(
+    adoptedAnchor(stopped({ charger_online: false, charging_stopped_at: stampAt(t) })),
+    null,
+  );
+  // No energy on the meter: nothing to price, captured or adopted.
+  for (const wh of [0, null, -1, 'x', ' ']) {
+    assert.equal(
+      adoptedAnchor(stopped({ charging_stopped_at: stampAt(t), session_energy: wh })),
+      null,
+      String(wh),
+    );
+  }
+  assert.equal(adoptedAnchor(null), null);
+});
+
+test('a captured anchor outranks the stamp, and adoption never re-adopts', () => {
+  // The screen's exact wiring: the held machine first, adoption only for
+  // the null it leaves. Precedence must be explicit — the figures agree by
+  // construction when both saw the same stop, but a stale anchor must not
+  // be rebuilt from whatever stamp a later poll carries.
+  const screen = (prev, status) => heldAnchorAfter(prev, status) ?? adoptedAnchor(status);
+  const t0 = date(2026, 1, 5, 6, 30).getTime();
+  const captured = heldAnchorAfter(null, liveStatus(3, t0, 3600));
+  const stop = liveStatus(2, t0 + 2 * HOUR_MS, 3 * 3600, 1000, {
+    charging_stopped_at: stampAt(t0),
+  });
+  // The page-open path keeps its captured anchor, stamp or no stamp.
+  assert.equal(screen(captured, stop), captured);
+  // The cold open adopts once; later polls — even a *newer* stamp — hold it.
+  const adopted = screen(null, stop);
+  assert.deepEqual(adopted, { ms: t0, elapsed: 3 * 3600 });
+  const later = liveStatus(2, t0 + 6 * HOUR_MS, 7 * 3600, 1000, {
+    charging_stopped_at: stampAt(t0 + 6 * HOUR_MS),
+  });
+  assert.equal(screen(adopted, later), adopted);
+  // The session reset clears it, and only a fresh snapshot can re-adopt.
+  const reset = liveStatus(2, t0 + 6 * HOUR_MS, 0, 0);
+  assert.equal(screen(adopted, reset), null);
 });
 
 // ---------- finished sessions ----------
