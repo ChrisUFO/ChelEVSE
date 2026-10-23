@@ -1,5 +1,6 @@
-// Config screen: a read-only, curated view of status/config plus the complete
-// snapshot in a collapsed Raw JSON panel. Changes go through the Advanced
+// Config screen: a read-only, curated view of status/config — each curated
+// group a collapsed disclosure, the complete snapshot behind a Raw JSON
+// disclosure at the end of the same card. Changes go through the Advanced
 // console; the data layer keeps this screen a pure renderer.
 
 import { $, setText } from '../ui.js';
@@ -78,10 +79,17 @@ function render() {
   const curated = buildConfigSections(config);
   sections.replaceChildren(
     ...curated.map((section) => {
-      const card = el('section', 'config-card');
-      card.setAttribute('aria-labelledby', `config-${section.id}`);
+      // One collapsed disclosure per curated group — the Raw JSON block's own
+      // pattern, promoted to the group level. No `open` attribute, so a
+      // rebuild (a genuine content change) re-collapses every group; the
+      // signature skip is what keeps an open group open across a
+      // timestamp-only replace.
+      const group = el('details', 'disclosure config-group');
+      group.setAttribute('aria-labelledby', `config-${section.id}`);
       const heading = el('h3', null, section.title);
       heading.id = `config-${section.id}`;
+      const summary = el('summary');
+      summary.append(heading);
       const list = el('dl', 'config-list');
       for (const row of section.rows) {
         const line = el('div', 'config-row');
@@ -93,8 +101,8 @@ function render() {
         line.append(el('dt', null, row.label), value);
         list.append(line);
       }
-      card.append(heading, list);
-      return card;
+      group.append(summary, list);
+      return group;
     }),
   );
 

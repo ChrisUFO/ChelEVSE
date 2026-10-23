@@ -887,6 +887,19 @@ input[type='range']::-moz-range-thumb {
 .advanced-note {
   color: var(--muted);
 }
+/* An action spelled as a word inside a sentence (the Advanced-console link,
+   a season's "Set times"): underlined accent, the prose's own size. */
+.link-btn {
+  display: inline;
+  padding: 0;
+  color: var(--accent);
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.link-btn:hover {
+  color: var(--text);
+}
 .section-state {
   margin: 0;
   padding: 18px 16px;
@@ -1620,8 +1633,7 @@ input[aria-invalid='true'] {
   border-radius: 16px;
   background: var(--surface);
 }
-.card-block + .card-block,
-.card-block + .config-title-row {
+.card-block + .card-block {
   margin-top: 12px;
 }
 .block-head {
@@ -1640,6 +1652,11 @@ input[aria-invalid='true'] {
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--muted);
+}
+/* A mono note riding a card heading (the Charger snapshot's "Synced HH:MM")
+   shares the heading's baseline, like the section-title-row notes. */
+.block-head .head-row {
+  align-items: baseline;
 }
 
 /* app settings */
@@ -2446,17 +2463,6 @@ input[aria-invalid='true'] {
   font-size: 14px;
   color: var(--text);
 }
-.link-btn {
-  min-height: 44px;
-  padding: 0 8px;
-  border-radius: 8px;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-}
-.link-btn:hover {
-  background: color-mix(in oklab, var(--accent) 10%, transparent);
-}
 .save-blockers {
   flex: none;
   padding: 3px 8px;
@@ -3079,56 +3085,20 @@ input[aria-invalid='true']:focus-visible {
   border-color: transparent;
 }
 
-/* curated charger config */
-.config-title-row {
-  padding: 22px 2px 8px;
-}
-.config-note {
-  margin: -2px 2px 12px;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--muted);
-}
+/* charger snapshot — one card, its curated groups collapsed disclosures */
 /* Lifetime energy's one-line home since the Status tile became the session
    cost (#116): a footnote to the charger snapshot, not a figure. */
 .lifetime-note {
-  margin: -6px 2px 14px;
+  margin: -8px 0 10px;
   color: var(--muted);
-}
-.link-btn {
-  display: inline;
-  padding: 0;
-  color: var(--accent);
-  font-size: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-.link-btn:hover {
-  color: var(--text);
 }
 .config-sections {
   display: grid;
   gap: 10px;
 }
-.config-card {
-  padding: 14px 16px 4px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
-}
-.config-card h3 {
+.config-group .config-list {
   margin: 0;
-  padding-bottom: 6px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.config-list {
-  margin: 0;
-  padding: 0;
+  padding: 4px 14px 10px;
 }
 .config-row {
   display: flex;
@@ -3174,49 +3144,64 @@ input[aria-invalid='true']:focus-visible {
   color: var(--muted);
 }
 
-/* raw JSON */
-.raw-config {
-  margin-top: 12px;
+/* disclosures — the snapshot card's collapsible blocks (curated groups,
+   Raw JSON), inset like the rate editor's nested cards */
+.disclosure {
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: var(--surface);
+  background: color-mix(in oklab, var(--bg) 72%, transparent);
   overflow: hidden;
 }
-.raw-config summary {
+.disclosure summary {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 13px 14px;
   cursor: pointer;
   list-style: none;
   font-size: 13px;
   font-weight: 600;
   color: var(--muted);
 }
-.raw-config summary::-webkit-details-marker {
+.disclosure summary::-webkit-details-marker {
   display: none;
 }
 /* The global 2 px ring is drawn outside the summary, and `overflow: hidden` on
    the details clips it entirely while closed; inset it so keyboard focus on the
    disclosure is visible. */
-.raw-config summary:focus-visible {
+.disclosure summary:focus-visible {
   outline-offset: -3px;
 }
-/* The scrollable snapshot is its own keyboard focus target (overflowing scroll
-   containers are focusable), and the same clipped edge would hide an outset
-   ring. Inset it independently of the disclosure. */
-.raw-json:focus-visible {
-  outline-offset: -3px;
-}
-.raw-config summary::after {
+.disclosure summary::after {
   content: '▾';
   flex: none;
   margin-left: 2px;
   color: var(--faint);
   transition: transform 0.15s ease;
 }
-.raw-config[open] summary::after {
+.disclosure[open] summary::after {
   transform: rotate(180deg);
+}
+.disclosure[open] summary {
+  border-bottom: 1px solid var(--line);
+}
+/* A curated group's summary is its heading: the mono label the old always-open
+   cards carried. `margin-right: auto` parks the caret at the far edge, where
+   the Raw JSON summary keeps its hint. */
+.config-group summary h3 {
+  margin: 0;
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* raw JSON — the last disclosure inside the snapshot card */
+.raw-config {
+  margin-top: 10px;
 }
 .raw-hint {
   margin-left: auto;
@@ -3225,12 +3210,15 @@ input[aria-invalid='true']:focus-visible {
   font-weight: 400;
   color: var(--muted);
 }
-.raw-config[open] summary {
-  border-bottom: 1px solid var(--line);
+/* The scrollable snapshot is its own keyboard focus target (overflowing scroll
+   containers are focusable), and the same clipped edge would hide an outset
+   ring. Inset it independently of the disclosure. */
+.raw-json:focus-visible {
+  outline-offset: -3px;
 }
 .raw-json {
   margin: 0;
-  padding: 14px 16px 16px;
+  padding: 12px 14px 14px;
   max-height: 360px;
   overflow: auto;
   font-family: var(--mono);
@@ -3539,17 +3527,17 @@ input[aria-invalid='true']:focus-visible {
     flex: 1 1 100%;
     order: -1;
   }
-  .config-card {
-    padding: 12px 12px 3px;
+  .config-group .config-list {
+    padding: 3px 13px 9px;
   }
   .config-row {
     padding: 7px 0;
   }
-  .raw-config summary {
-    padding: 13px 13px;
+  .disclosure summary {
+    padding: 12px 13px;
   }
   .raw-json {
-    padding: 12px 13px 14px;
+    padding: 11px 13px 12px;
   }
   .rapi-item {
     padding: 10px 11px;
