@@ -707,6 +707,64 @@ test('a settle in the status-first order re-reads and prices exactly once', asyn
   assert.equal(element('history-cost-note').hidden, true);
 });
 
+test('a settle read that misses the retried session write recovers on the next push', async () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 9, 18, 12);
+  const descriptor = periodById('week');
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [],
+  );
+  showHistorySettings(nightly());
+  showHistoryStatus(statusAt(3, today.getTime(), 7200, 1000));
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+
+  // The stopped push fires the settle re-read, but the bridge's session write
+  // failed and is retried on its next tick — so the read fetches before the
+  // record commits. In Node the read genuinely rejects, the same outcome for
+  // this path: the settle read ended without the recorded session.
+  showHistoryStatus(statusAt(1, today.getTime() + 60_000, 7200, 1000));
+  await readFailed();
+
+  // An idle push has no live span on either side of it, so nothing but the
+  // verification re-read could move the screen: the loading copy painted
+  // synchronously by readHistory is the proof the one-shot re-read fired.
+  showHistoryStatus(statusAt(1, today.getTime() + 120_000, 7200, 1000));
+  assert.match(element('chart-empty-title').textContent, /Loading/);
+  await readFailed();
+
+  // The retried write has committed: the verify read's payload — driven
+  // through the same apply seam — prices the recorded session exactly once,
+  // the same number the estimate promised.
+  const recorded = {
+    id: '1765792800',
+    wh: 1000,
+    started_at: new Date(2026, 9, 18, 10),
+    ended_at: new Date(2026, 9, 18, 12, 1),
+  };
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [recorded],
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  assert.equal(element('history-cost-note').hidden, true);
+  assert.equal(element('history-total').textContent, '1.00');
+
+  // The flag is spent: a further idle push starts no re-read (a read would
+  // clear the total synchronously), so the idle stream settles for good.
+  showHistoryStatus(statusAt(1, today.getTime() + 180_000, 7200, 1000));
+  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+});
+
 test('a midnight-spanning live charge attributes to both local days', () => {
   resetHistory();
   enterHistory();

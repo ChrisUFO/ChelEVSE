@@ -5,7 +5,9 @@
 // listener here — with one pushed input beside them (#126): the status snapshot
 // the app's listener fans out, which prices the in-progress session into the
 // current bucket and, on the charging→stopped edge, triggers the settle re-read
-// that takes the recorded session's pricing over.
+// that takes the recorded session's pricing over — with one verification
+// re-read behind it, for a session write the bridge retried after the settle
+// read fetched.
 
 import { $, setText } from '../ui.js';
 import {
@@ -107,6 +109,12 @@ let liveStatus = null;
 // records the session on that same edge, so one re-read must take the recorded
 // pricing over before the estimate could linger or vanish unpinned.
 let settlePending = false;
+// One verification re-read follows a settle re-read: the bridge keeps a failed
+// session write pending and retries it on its next tick, so the settle read can
+// fetch just before the record commits. The next status push earns exactly one
+// more re-read — one-shot, so an idle status stream never re-reads forever, and
+// idempotent under the render-time settle guard.
+let settleVerify = false;
 // Today's daily total, kept separately because a day with no hourly buckets has
 // a real total the series cannot carry (the chart refuses to draw it as zeros).
 let dayTotal = null;
@@ -751,8 +759,10 @@ function recheckWindow() {
   if (!windowStale()) return;
   loaded = false;
   // A full reload re-reads the period, so a settle queued against the older
-  // window is subsumed rather than re-fired on top of it.
+  // window — and the verification re-read behind it — is subsumed rather than
+  // re-fired on top of it.
   settlePending = false;
+  settleVerify = false;
   if (!loading) loadAll();
 }
 
@@ -765,6 +775,7 @@ function reloadIfWindowStale() {
   if (!active || !windowStale()) return;
   loaded = false;
   settlePending = false;
+  settleVerify = false;
   loadAll();
 }
 
@@ -1114,6 +1125,7 @@ export function activateHistory() {
     // The charge ended while another tab was showing: take the recorded
     // pricing over exactly once, now that this screen is visible again.
     settlePending = false;
+    settleVerify = true;
     readHistory();
   } else {
     // Status pushes that arrived while the tab was hidden left any live
@@ -1158,6 +1170,16 @@ export function showHistoryStatus(data) {
   if ($('panel-history').hidden) return;
   if (settlePending && !loading) {
     settlePending = false;
+    settleVerify = true;
+    readHistory();
+    return;
+  }
+  // The settle read's verification: exactly one more re-read on the next
+  // status push, for the session write the bridge retried after the settle
+  // read fetched. Hidden pushes hold it — the flag waits for a visible one —
+  // and once spent the idle stream re-reads nothing further.
+  if (settleVerify && !loading) {
+    settleVerify = false;
     readHistory();
     return;
   }
@@ -1199,6 +1221,7 @@ export function resetHistory() {
   periodSessions = [];
   liveStatus = null;
   settlePending = false;
+  settleVerify = false;
   sessionsView = emptySessionsView();
   sessionsBusy = false;
   historyState = 'idle';
