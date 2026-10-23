@@ -114,6 +114,7 @@ import {
   rateWindowsKey,
   validateRateWindows,
 } from '../../web/js/rates.js';
+import { routeFor } from '../../web/js/ui.js';
 
 test('validateSettings mirrors the rules shape', () => {
   assert.deepEqual(validateSettings({ rate: '0.31', currency: 'USD' }), {
@@ -468,6 +469,25 @@ test('the leave guard asks only for a dirty draft on the Config tab', () => {
   // read of an unknown route) still does.
   assert.equal(ask('', 'status', true), false);
   assert.equal(settingsLeaveNeedsConfirm(), false);
+});
+
+test('the gate speaks the router own route names', () => {
+  // app.js composes the gate with the router's vocabulary and no test imports
+  // app.js, so the glue can silently die with the suite green. Pin the two
+  // assumptions that can rot: routeFor must still resolve '#config' to the
+  // gate's hard-coded 'config' (a ROUTES rename would silence the whole
+  // guard), and the router's destination names must reach the gate as real
+  // routes, not hashes.
+  assert.equal(
+    settingsLeaveNeedsConfirm({ from: routeFor('#config'), to: routeFor('#status'), dirty: true }),
+    true,
+    'the router vocabulary can still arm the guard',
+  );
+  assert.equal(
+    settingsLeaveNeedsConfirm({ from: routeFor('#config'), to: routeFor('#status'), dirty: false }),
+    false,
+    'a clean form never gates in the composed wiring',
+  );
 });
 
 test('a rate-only save keeps the stored charger address in the payload', () => {

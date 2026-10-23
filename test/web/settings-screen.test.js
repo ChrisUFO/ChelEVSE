@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 // Harness decision (#85/#102, recorded so the two issues cannot diverge): the
 // repo's screen-level harness is the module-mock-free DOM stub proven in
@@ -459,4 +460,15 @@ test('a snapshot that un-dirties the form detaches beforeunload and settles an o
   await tick();
   assert.equal(answer(), true, 'the pending navigation completes — nothing is at stake now');
   assert.equal(dialogOpen(), false);
+});
+
+test('index.html ships the leave dialog the screen wires', () => {
+  // The harness above answers any id on demand, so the wiring is pinned from
+  // source (the config-lifetime convention): drop or rename one of these in
+  // the markup and initSettings throws on a null element at boot — loud, but
+  // only when a browser loads the page.
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  assert.match(source, /id="leave-settings-confirm"/);
+  assert.match(source, /id="stay-settings"/);
+  assert.match(source, /id="discard-settings"/);
 });
