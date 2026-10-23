@@ -676,7 +676,7 @@ function createWindowCard(entry, periodCard) {
 
   const head = el('div', 'rate-window-head');
   const heading = el('div', 'rate-window-title');
-  const title = el('h6', 'rate-title');
+  const title = el('h5', 'rate-title');
   const summary = el('p', 'rate-summary');
   heading.append(title, summary);
   const remove = el('button', 'rate-remove', 'Remove');
@@ -1292,7 +1292,7 @@ function paintCoverage(card) {
 function createBaseBlock(card, period, index) {
   const block = el('section', 'base-block');
   const head = el('div', 'base-head');
-  const title = el('h6', 'base-title', 'Base rate');
+  const title = el('h5', 'base-title', 'Base rate');
   head.append(title);
   const baseEntry = period.base;
   const baseErrorId = `period-${index}-base-error`;
@@ -1472,7 +1472,7 @@ function createPeriodCard(period, index) {
     cards: [],
   };
 
-  const heading = el('h5', 'period-heading');
+  const heading = el('h4', 'period-heading');
   const toggle = el('button', 'period-toggle');
   toggle.type = 'button';
   const bodyId = `period-body-${index}`;
@@ -1533,7 +1533,7 @@ function createPeriodCard(period, index) {
   scopeEditor.setAttribute('aria-labelledby', seasonDatesTitleId);
 
   const datesHead = el('div', 'season-dates-head');
-  const datesTitle = el('h6', 'season-dates-title', 'Season dates');
+  const datesTitle = el('h5', 'season-dates-title', 'Season dates');
   datesTitle.id = seasonDatesTitleId;
   const allYearLabel = el('label', 'months-toggle season-all-year');
   const allYear = el('input');
@@ -1708,7 +1708,7 @@ function createPeriodCard(period, index) {
   addButton.addEventListener('click', () => addWindow(card));
 
   const windowsSection = el('section', 'windows-section');
-  const windowsTitle = el('h6', 'windows-title', 'Daily windows (optional)');
+  const windowsTitle = el('h5', 'windows-title', 'Daily windows (optional)');
   const windowsHint = el(
     'p',
     'windows-hint',

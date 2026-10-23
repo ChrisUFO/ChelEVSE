@@ -1659,10 +1659,26 @@ input[aria-invalid='true'] {
   align-items: baseline;
 }
 
-/* app settings */
+/* app settings — one form, two headed cards: connection first, then pricing.
+   The form (not the cards) is the panel's animated block; its gap carries the
+   12px card rhythm, the sibling margin folds into it so the pair doesn't
+   double-space, and the form paces the cards after it the same way. */
 .settings-form {
   display: grid;
+  gap: 12px;
+}
+.settings-form > .card-block + .card-block {
+  margin-top: 0;
+}
+.settings-form + .card-block {
+  margin-top: 12px;
+}
+.connection-card {
+  display: grid;
   gap: 14px;
+}
+.connection-card .block-head {
+  margin-bottom: 0;
 }
 
 /* rate plan editor — the flat price first, then the season plan and
@@ -1672,28 +1688,6 @@ input[aria-invalid='true'] {
   gap: 12px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
-}
-.rate-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.rate-head-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-.rate-head h3 {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.rate-head .block-sub {
-  margin: 0;
 }
 .rate-mode {
   display: grid;
@@ -2806,7 +2800,7 @@ input[aria-invalid='true'] {
   display: grid;
   gap: 2px;
 }
-.preview-head h4 {
+.preview-head h3 {
   margin: 0;
   font-size: 13px;
   font-weight: 650;
@@ -2982,6 +2976,7 @@ input[aria-invalid='true']:focus-visible {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 10px;
+  margin-top: 14px;
 }
 .settings-actions .feedback {
   flex: 1;
