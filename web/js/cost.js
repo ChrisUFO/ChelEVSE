@@ -43,10 +43,17 @@
 // Month/Year summary and today's bar carry the estimate the Status tab shows,
 // attributed across local midnights by the same span machinery (#125). The
 // contribution is schedule-path only (a flat day total already accrues live)
-// and settles exactly once: any recorded session whose spans overlap the live
-// window suppresses it (liveSessionSettled), so the two listener deliveries
-// around a charge's end — the session document and the stopped status write —
-// never double-count whichever order they arrive in.
+// and settles exactly once: whichever of the two listener deliveries around a
+// charge's end — the session document or the stopped status write — lands
+// first, a recorded span that reaches the write's own instant drops it. A
+// recorded span that ends *inside* the window no longer drops the whole
+// estimate (#128): a pause-resumed charge's recorded prefix prices its own
+// slice while the residual — the meter's reading minus the recorded energy
+// clipped to the window — returns as the uncovered tail's own span, so the
+// resumed block's history figure reconciles with the Status tab's full-window
+// estimate instead of hiding beside the energy the record already prices.
+// Two validity gates hide it (hide-not-misprice): a negative residual, and a
+// recorded end at or past the write's own instant — see liveSessionContribution.
 //
 // The live interval ends at the snapshot's own `updated_at`, never at the render
 // instant, and only while the snapshot is a live charging one (`liveCharging`:
@@ -423,7 +430,7 @@ export function sessionBucketCost(sessions, id, kwh, settings) {
   return { cost, wh, covered };
 }
 
-// ---------- the live session's period contribution (#126) ----------
+// ---------- the live session's period contribution (#126, residual #128) ----------
 
 // The in-progress charge as one priceable span `{started_at, ended_at, wh}` —
 // raw ms endpoints, the shape sessionCostSpans' fallback path already accepts —
@@ -445,22 +452,30 @@ export function liveSessionSpan(status) {
   return { started_at: endMs - seconds * 1000, ended_at: endMs, wh };
 }
 
-// Whether a recorded session already prices part of the live window: the settle
-// guard. The bridge writes the session document at the charging→stopped edge
-// while the stopped status write travels its own listener, so for one render
-// window history's two inputs can arrive in either order — a settled session
-// beside a still-charging snapshot would double-price the same energy. The
-// predicate reads the recorded side through the same sessionCostSpans the
-// bucket pricing uses, so "covers" means "prices": a session with unusable spans
-// prices nothing anywhere and cannot cover anything, and overlap is decided on
-// the spans themselves (intervals where they reconcile, else the whole plug-in
-// span), which keeps the guard exact for a pause-resumed charge — the recorded
-// prefix overlaps the live window, and the whole-window estimate is dropped
-// rather than added beside the energy it already prices.
-export function liveSessionSettled(span, sessions) {
-  const liveStart = valueMillis(span && span.started_at);
-  const liveEnd = valueMillis(span && span.ended_at);
-  if (liveStart == null || liveEnd == null || liveEnd <= liveStart) return false;
+// The recorded side of the residual derivation: the energy the merged payload
+// already prices inside the live window, and where that pricing ends.
+//
+// `recorded` is every span of `sessions` — read through the same
+// sessionCostSpans the bucket pricing reads, on both of its paths
+// (reconciling intervals and the whole-span fallback) — that overlaps the
+// window under the settle predicate's own half-open test
+// (`start < liveEnd && end > liveStart`: a span touching either edge prices
+// none of it). Parity with sessionBucketCost's span set is the
+// no-double-count proof: the subtraction below removes exactly the energy the
+// bucket will add beside the contribution. Each span's in-window share is its
+// duration-pro-rated energy — span.wh × overlap / span duration, the same
+// clip the bucket applies at its own edges — and never the whole record's
+// `wh`: a straddling record's out-of-window energy is not in the meter
+// reading the residual divides, so subtracting it wholesale would drive the
+// residual negative and hide a tail the record does not price (a quiet
+// misprice).
+//
+// Returns `{recordedWh, tailStart}`; tailStart — the latest end among the
+// overlapping spans, the instant the record stops pricing — is null when
+// nothing overlaps (a fresh plug-in, or records entirely outside the window).
+function recordedInWindow(sessions, liveStart, liveEnd) {
+  let recordedWh = 0;
+  let tailStart = null;
   for (const session of Array.isArray(sessions) ? sessions : []) {
     const spans = sessionCostSpans(session);
     if (!spans) continue;
@@ -468,31 +483,71 @@ export function liveSessionSettled(span, sessions) {
       const start = valueMillis(recorded.started_at);
       const end = valueMillis(recorded.ended_at);
       if (start == null || end == null || end <= start) continue;
-      if (start < liveEnd && end > liveStart) return true;
+      if (!(start < liveEnd && end > liveStart)) continue;
+      const overlap = Math.min(end, liveEnd) - Math.max(start, liveStart);
+      recordedWh += (recorded.wh * overlap) / (end - start);
+      if (tailStart == null || end > tailStart) tailStart = end;
     }
   }
-  return false;
+  return { recordedWh, tailStart };
 }
 
 // The live window merged into a period's pricing sessions, or null: schedule
-// only (a flat day total already prices the accruing kWh, so the flat output is
-// byte-identical with or without a charge in progress), live-gated and
+// only (a flat day total already prices the accruing kWh, so the flat output
+// is byte-identical with or without a charge in progress), live-gated and
 // settle-guarded. The returned span flows through sessionBucketCost beside the
 // recorded sessions, so its cost lands in exactly the buckets its window
 // overlaps — today's bar, and yesterday's when the charge crossed local
-// midnight — with the same constant-power split every other span prices by, and
-// its Wh counts toward the bucket's coverage, so a live-covered today shows
-// its bar $. It is an estimate, excluded from the recorded reconciliation
-// while live, and settles to the session's own pricing exactly once: whichever
-// input lands first, the guard drops the contribution the moment a recorded
-// span overlaps it.
+// midnight — with the same constant-power split every other span prices by,
+// and its Wh counts toward the bucket's coverage, so a live-covered today
+// shows its bar $.
+//
+// With nothing recorded inside the window this is the whole live span,
+// byte-identical to #126's fresh-charge contribution. Once a recorded span
+// overlaps it, the whole-window estimate would double-price the slice the
+// record already prices, so what returns is the residual tail (#128):
+// `session_energy` (already Wh — no kWh conversion; costForInterval does
+// that) minus the recorded energy clipped to the window, as one span over
+// [tailStart, liveEnd] — the TAIL only, never a general complement, because
+// interior idle gaps drew nothing and the current block's energy must not
+// spread backwards across hours-old rate boundaries.
+//
+// Exactly two gates hide the contribution before any bucket sees it:
+//   - residual < 0 — the records price more energy inside the window than the
+//     meter read: an in-block counter reset's overshoot, a foreign overlap,
+//     or an overlapping-documents defect. The negative span must be gated
+//     here, upstream of sessionBucketCost: costForInterval hides a negative
+//     energy, and one null slice nulls the bucket's whole figure
+//     (hide-into-breakage — the one place this rule can regress).
+//   - tailStart ≥ liveEnd — the record prices through the write's own
+//     instant: the settle race's session-first order. The whole window is
+//     already priced, exactly once, by the record itself.
+// No tolerance gate exists: the residual IS the accruing current block, so a
+// max(250 Wh, 2%) branch would hide exactly the case #128 exists to price —
+// and downstream "ambiguous" and "settled" are indistinguishable anyway (both
+// null; the bucket's own covered check decides what shows). A zero-residual
+// tail is returned, not nulled: dropping it would flip the bucket's covered
+// check for one write.
+//
+// Approximation (accepted, the Status tab's own class): the residual energy
+// is priced at constant power over the tail, leading idle included — the
+// resume rarely lands exactly on the record's end — exactly as
+// statusCostLabel spreads the whole reading uniformly across the full window.
+// On a zero-idle tail the two figures agree exactly; the reconciliation
+// target is the Status tab's.
 export function liveSessionContribution(status, sessions, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return null;
   const span = liveSessionSpan(status);
   if (!span) return null;
-  if (liveSessionSettled(span, sessions)) return null;
-  return span;
+  const liveStart = valueMillis(span.started_at);
+  const liveEnd = valueMillis(span.ended_at);
+  const { recordedWh, tailStart } = recordedInWindow(sessions, liveStart, liveEnd);
+  if (tailStart == null) return span;
+  const residualWh = span.wh - recordedWh;
+  if (residualWh < 0) return null;
+  if (tailStart >= liveEnd) return null;
+  return { started_at: tailStart, ended_at: liveEnd, wh: residualWh };
 }
 
 // Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:

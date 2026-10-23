@@ -16,7 +16,6 @@ import {
   hourCost,
   liveCostLabel,
   liveSessionContribution,
-  liveSessionSettled,
   liveSessionSpan,
   sessionBucketCost,
   sessionCostLabel,
@@ -1190,28 +1189,38 @@ test('the settle guard drops a contribution a recorded session already prices', 
   const settings = nightly();
   // Charging 01:00→03:00 on 5 January; the recorded session covers exactly
   // that charge (the session document that lands at the stop, beside a status
-  // snapshot that still says charging — one order of the read race).
+  // snapshot that still says charging — one order of the read race). The
+  // record prices through the write's own instant, so the whole window is
+  // already priced exactly once and the contribution is null.
   const at = date(2026, 1, 5, 3, 0).getTime();
   const status = liveStatus(3, at, 7200, 2000);
   const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [recorded]), true);
   assert.equal(liveSessionContribution(status, [recorded], settings), null);
   // The bridge writes ended_at at its own finalize instant, which trails the
-  // last charging write: a later endpoint still overlaps.
+  // last charging write: a later endpoint still settles — and a materially
+  // skewed one (half an hour past the write) is the same gate, never a
+  // residual priced past the meter's own instant.
   const trailing = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 1), 2000);
   assert.equal(liveSessionContribution(status, [trailing], settings), null);
-  // A pause-resumed plug-in prices the same way: the recorded prefix (the
-  // pause edge's document) overlaps the live window — the whole-window
-  // estimate cannot be added beside energy the record already prices, so the
-  // contribution drops and the uncovered tail is disclosed, never mispriced.
+  const skewed = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 30), 2000);
+  assert.equal(liveSessionContribution(status, [skewed], settings), null);
+  // A pause-resumed plug-in keeps its estimate (#128): the recorded prefix
+  // (the pause edge's document) ends inside the window, so it prices its own
+  // slice and the contribution shrinks to the residual tail — the meter's
+  // 2000 Wh minus the record's in-window 500 Wh over [02:00, 03:00] — instead
+  // of dropping beside the energy the record prices.
   const pausedPrefix = session(date(2026, 1, 5, 0, 0), date(2026, 1, 5, 2, 0), 1000);
-  assert.equal(liveSessionContribution(status, [pausedPrefix], settings), null);
+  assert.deepEqual(liveSessionContribution(status, [pausedPrefix], settings), {
+    started_at: date(2026, 1, 5, 2, 0).getTime(),
+    ended_at: at,
+    wh: 1500,
+  });
   // An unrelated earlier charge — ended before this one started — does not
   // settle anything, and neither does an interval-bearing session whose
-  // charging blocks all lie outside the live window.
+  // charging blocks all lie outside the live window: both leave today's
+  // full-window span, byte-identical to a fresh charge's.
   const earlier = session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 0, 30), 2000);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [earlier]), false);
-  assert.ok(liveSessionContribution(status, [earlier], settings));
+  assert.deepEqual(liveSessionContribution(status, [earlier], settings), liveSessionSpan(status));
   const gapped = {
     ...session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 4, 0), 2000),
     intervals: [
@@ -1219,15 +1228,21 @@ test('the settle guard drops a contribution a recorded session already prices', 
       { started_at: date(2026, 1, 5, 3, 30), ended_at: date(2026, 1, 5, 4, 0), wh: 1000 },
     ],
   };
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [gapped]), false);
+  assert.deepEqual(liveSessionContribution(status, [gapped], settings), liveSessionSpan(status));
   // A session that cannot be priced at all covers nothing: it prices no
   // bucket, so the estimate beside it is not a double count.
   const unpriceable = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 'x');
-  assert.ok(liveSessionContribution(status, [unpriceable], settings));
+  assert.deepEqual(
+    liveSessionContribution(status, [unpriceable], settings),
+    liveSessionSpan(status),
+  );
   // Junk payloads and a missing span settle nothing.
-  assert.equal(liveSessionSettled(liveSessionSpan(status), null), false);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [null, 'x', {}]), false);
-  assert.equal(liveSessionSettled(null, [recorded]), false);
+  assert.deepEqual(liveSessionContribution(status, null, settings), liveSessionSpan(status));
+  assert.deepEqual(
+    liveSessionContribution(status, [null, 'x', {}], settings),
+    liveSessionSpan(status),
+  );
+  assert.equal(liveSessionContribution(null, [recorded], settings), null);
 });
 
 test('a settled live charge prices exactly once across the transition', () => {
