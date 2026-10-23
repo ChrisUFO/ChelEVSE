@@ -11,6 +11,19 @@ export function dayId(date) {
   return `${y}-${m}-${d}`;
 }
 
+// Local midnight of a day id — dayId's inverse — or null when the id is
+// malformed or rolls over (2026-02-31). The wall-clock window a stored day id
+// names, shared by the hour-bucket pricing (js/cost.js) and the session range
+// read, so both slice at exactly the midnight the id means.
+export function dayStartFromId(id) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(id));
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) return null;
+  return date;
+}
+
 // The last `count` local day ids, oldest first, ending with `today`.
 // Noon avoids local-midnight DST transitions shifting the calendar date.
 export function lastDayIds(count, today = new Date()) {
@@ -195,14 +208,44 @@ export function periodBounds(period, today = new Date()) {
   return { startId: ids[0], endId: ids[ids.length - 1] };
 }
 
+// How far before the range a session may have started and still be read.
+// `started_at` is the only span field the sessions query can bound, so a
+// session still running into the range from before it is caught by backing
+// the start up: the bridge merges pause/resume while the vehicle stays
+// connected and caps idle gaps at 48 h (pi/bridge.py SESSION_MERGE_MAX_GAP),
+// so a real plug-in is bounded by its charging pattern — a week covers the
+// weekly schedule shape. A longer plug-in's pre-range energy is not attributed
+// (catching it would need an `ended_at` query Firestore does not offer here).
+export const SESSIONS_LOOKBACK_DAYS = 7;
+
+// The sessions read that prices a range period (#123): every session
+// overlapping the window the day ids name, as a half-open `started_at` range.
+// The end is the midnight after the last day — a session starting on the last
+// day must be included — and the start is the range's first midnight minus the
+// plug-in lookback above. Day-period reads never call this.
+export function sessionsRange(bounds) {
+  const first = dayStartFromId(bounds && bounds.startId);
+  const last = dayStartFromId(bounds && bounds.endId);
+  if (!first || !last) return null;
+  return {
+    start: new Date(
+      first.getFullYear(),
+      first.getMonth(),
+      first.getDate() - SESSIONS_LOOKBACK_DAYS,
+    ),
+    end: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1),
+  };
+}
+
 // One point per rendered slot, oldest first, in one shape for every period:
 // { id, kwh, label, isCurrent }. The Day period's data is the single day
 // document (`{ kwh, hours }`) rather than a list, so its series is the hours map
 // itself; every range period aligns an array of daily documents to its slots.
-// A month bucket sums its daily documents by the local YYYY-MM prefix and keeps
-// those documents (`days`) so the point can be priced day by day; days without a
-// document are genuine zero points, not gaps, and the current month is partial
-// because only recorded days exist.
+// A month bucket sums its daily documents by the local YYYY-MM prefix — kWh is
+// all the point carries, because a Year bar's $ comes from the period's
+// overlapping sessions, never from day documents; days without a document are
+// genuine zero points, not gaps, and the current month is partial because only
+// recorded days exist.
 export function periodSeries(period, data, today = new Date()) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') return hourSeries(data && data.hours, today);
@@ -214,7 +257,6 @@ export function periodSeries(period, data, today = new Date()) {
       months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
     }
     const totals = new Map(months.map((id) => [id, 0]));
-    const dayDocs = new Map(months.map((id) => [id, []]));
     for (const doc of docs || []) {
       if (!doc || typeof doc.id !== 'string') continue;
       const bucket = doc.id.slice(0, 7);
@@ -222,7 +264,6 @@ export function periodSeries(period, data, today = new Date()) {
       const kwh = Number(doc.kwh);
       if (Number.isFinite(kwh) && kwh > 0) {
         totals.set(bucket, totals.get(bucket) + kwh);
-        dayDocs.get(bucket).push({ id: doc.id, kwh, hours: doc.hours ?? null });
       }
     }
     const current = monthId(today);
@@ -231,7 +272,6 @@ export function periodSeries(period, data, today = new Date()) {
       kwh: totals.get(id),
       label: monthLabel(id),
       isCurrent: id === current,
-      days: dayDocs.get(id),
     }));
   }
   const current = dayId(today);
@@ -265,25 +305,22 @@ export function dayLabel(id) {
 }
 
 // Align Firestore docs to the requested day ids; absent/malformed days are 0.
-// A day that has a document carries its `hours` map beside the total so the
-// screen can price the bucket under a schedule; a day with no document is a
-// genuine zero and carries no pricing input at all — its point stays the exact
-// shape it had before pricing inputs existed.
+// A point carries its kWh total alone: a range period's $ comes from the
+// period's overlapping sessions (#123), so no pricing input rides on the
+// point — `hours` prices only the Day period's own bars, and a day with no
+// document is a genuine zero like any other, not a gap to disclose.
 export function historySeries(ids, docs) {
   const byId = new Map();
   for (const doc of docs || []) {
     if (!doc || typeof doc.id !== 'string') continue;
     const kwh = Number(doc.kwh);
-    byId.set(doc.id, {
-      kwh: Number.isFinite(kwh) && kwh > 0 ? kwh : 0,
-      hours: doc.hours ?? null,
-    });
+    byId.set(doc.id, Number.isFinite(kwh) && kwh > 0 ? kwh : 0);
   }
-  return ids.map((id) => {
-    const doc = byId.get(id);
-    if (!doc) return { id, kwh: 0, label: dayLabel(id) };
-    return { id, kwh: doc.kwh, label: dayLabel(id), hours: doc.hours };
-  });
+  return ids.map((id) => ({
+    id,
+    kwh: byId.get(id) || 0,
+    label: dayLabel(id),
+  }));
 }
 
 export function sumSeries(series) {

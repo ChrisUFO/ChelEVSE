@@ -1,5 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { periodById, periodBounds, sessionsRange } from '../../web/js/history.js';
+import { fmtMoney } from '../../web/js/format.js';
+
+// Pin the zone before any Date is built (#123): the period-pricing pass below
+// asserts a nightly-window figure, which is only deterministic in a known
+// timezone. Mid-month dates keep it away from every DST edge.
+process.env.TZ = 'America/Denver';
 
 // Harness decision (recorded in test/web/settings-screen.test.js, #85/#102):
 // the module-mock-free DOM stub plus a plain `await import` of the real screen
@@ -15,7 +22,9 @@ import assert from 'node:assert/strict';
 // the real failure path (a genuine rejection through loadAll and the paging
 // handlers), control painting on reset and failure, and the month/Recent
 // round-trip's effect on the controls. It cannot cover layout, real DOM events
-// or a successful read's painting.
+// or a successful read's painting — except through the period-pricing seam
+// below, whose store read is injectable (#123 Gap: the payload's unwrap at the
+// fetch→apply boundary was invisible to every pure test and regex pin).
 
 function stubElement() {
   const classes = new Set();
@@ -87,6 +96,10 @@ globalThis.document = {
   documentElement: { style: { setProperty() {} } },
   getElementById: (id) => element(id),
   createElement: () => stubElement(),
+  // renderChart builds its SVG bars through the namespace creator (#123: the
+  // pricing pass below is the first harness read to succeed, so the chart
+  // actually renders here).
+  createElementNS: () => stubElement(),
   createTextNode: (text) => ({ textContent: text }),
   // initHistory registers a visibilitychange listener and paints the period
   // switch through querySelectorAll.
@@ -105,6 +118,9 @@ const {
   monthRange,
   nextSessionsView,
   sessionsControls,
+  applyHistory,
+  fetchPeriodSessions,
+  showHistorySettings,
 } = await import('../../web/js/screens/history.js');
 
 initHistory();
@@ -402,4 +418,108 @@ test('resetHistory clears the browse controls with the view', () => {
   assert.equal(element('sessions-more').disabled, false);
   assert.equal(element('sessions-count').textContent, '');
   assert.equal(element('sessions-state').hidden, true);
+});
+
+// ---------- the period pricing pipeline, executed (#123) ----------
+//
+// The Gap this section exists for: `fetchPeriodSessions` once resolved the
+// paged read's envelope ({docs, fromCache}) verbatim, and `applyHistory`'s
+// Array.isArray guard quietly turned it into zero sessions — Week/Month/Year
+// showed no $ under a schedule while every pure test and regex wiring pin
+// stayed green, because none of them executed the payload crossing the
+// fetch→apply boundary. The store seam is injectable for exactly this read, so
+// this drives the real functions the real read path calls: fetch, then the
+// apply step readHistory/loadAll perform, then the render boot performs when
+// settings land (showHistorySettings re-renders the applied series).
+
+// The cost.test.js nightly shape: a visible base at 0.30 with an off-peak
+// 00:00–06:00 window at 0.10.
+function nightly() {
+  return {
+    rate: 0.3,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'base',
+        rate: 0.3,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: null,
+      },
+      {
+        id: 'night',
+        rate: 0.1,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '06:00',
+        months: null,
+      },
+    ],
+  };
+}
+
+test('a successful range read lands its docs in the applied period and prices the summary', async () => {
+  resetHistory();
+  const today = new Date(2026, 9, 18, 12);
+  const descriptor = periodById('week');
+  const bounds = periodBounds('week', today);
+
+  // One session wholly inside Wed 14 Oct's off-peak hours: 2 kWh at 0.10.
+  const session = {
+    id: 's1',
+    wh: 2000,
+    started_at: new Date(2026, 9, 14, 1),
+    ended_at: new Date(2026, 9, 14, 3),
+  };
+  // The store seam, stubbed the way Node's harness must: the raw paged-read
+  // envelope Firestore path returns.
+  const seen = [];
+  const readRange = async (range) => {
+    seen.push(range);
+    return { docs: [session], fromCache: true };
+  };
+
+  const sessions = await fetchPeriodSessions(descriptor, bounds, readRange);
+  // The unwrap is the fix: what crosses into applyHistory is the read's docs,
+  // never the envelope around them (an object here priced nothing).
+  assert.ok(Array.isArray(sessions), 'the applied payload is the docs array');
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0], session);
+  // The read still derives its window from the bounds: the widened started_at
+  // range with the 7-day plug-in lookback.
+  assert.deepEqual(seen, [sessionsRange(bounds)]);
+
+  // The apply step both read paths perform, with the history read's docs
+  // beside the session payload…
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-14', kwh: 2 }], fromCache: false },
+    null,
+    today,
+    sessions,
+  );
+  // …and the render boot performs when settings land: the summary prices from
+  // the applied sessions — 2 kWh off-peak, nothing uncovered, so the figure
+  // shows with no partial note beside it.
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost-cell').hidden, false);
+  assert.equal(element('history-cost').textContent, fmtMoney(0.2, 'GBP'));
+  assert.equal(element('history-cost-note').hidden, true);
+  // The energy it priced is on screen too: the same read's kWh total.
+  assert.equal(element('history-total').textContent, '2.00');
+});
+
+test('the period sessions read keeps its empty and rejecting edges', async () => {
+  const bounds = periodBounds('week', new Date(2026, 9, 18, 12));
+  const fail = async () => {
+    throw new Error('offline');
+  };
+  // The Day period never reads the archive: no store call, an empty payload.
+  assert.deepEqual(await fetchPeriodSessions(periodById('day'), bounds, fail), []);
+  // A range period with no derivable window (malformed bounds) reads nothing.
+  assert.deepEqual(await fetchPeriodSessions(periodById('week'), {}, fail), []);
+  // A rejected range read rejects — the callers' allSettled fallback owns the
+  // empty payload, so the fetch itself must not swallow the failure.
+  await assert.rejects(fetchPeriodSessions(periodById('week'), bounds, fail), /offline/);
 });

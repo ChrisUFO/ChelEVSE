@@ -5,7 +5,13 @@
 // listener here.
 
 import { $, setText } from '../ui.js';
-import { SESSION_LIMIT, fetchHistory, fetchHistoryDay, fetchSessions } from '../store.js';
+import {
+  SESSION_LIMIT,
+  fetchHistory,
+  fetchHistoryDay,
+  fetchSessions,
+  fetchSessionsInRange,
+} from '../store.js';
 import {
   CHART_VIEW_W,
   DEFAULT_PERIOD,
@@ -22,15 +28,15 @@ import {
   periodById,
   periodSeries,
   sectionView,
+  sessionsRange,
   sumSeries,
 } from '../history.js';
 import {
   aggregateCostLabel,
   costSettings,
-  dayCost,
   hasRateSchedule,
   hourCost,
-  periodCost,
+  sessionBucketCost,
   sessionCostLabel,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
@@ -82,6 +88,11 @@ let sessionsBusy = false;
 // never speaks for the other, and so freshness is never inferred from how much
 // data is on screen.
 let historyState = 'idle';
+// The sessions that price the current period's $ (#123): every session
+// overlapping the range, read beside the day documents and kept beside the
+// series it prices. Cleared with the series; a failed read prices nothing —
+// the figure hides rather than pricing uncovered energy.
+let periodSessions = [];
 // Today's daily total, kept separately because a day with no hourly buckets has
 // a real total the series cannot carry (the chart refuses to draw it as zeros).
 let dayTotal = null;
@@ -111,42 +122,46 @@ function svgEl(tag, attrs) {
 // One rendered bucket's schedule-priced cost and what of its energy it covers.
 // Pure — `settings` arrives per call — and schedule-only by design: the flat
 // path is aggregateCostLabel's and stays byte-identical, so a flat misuse
-// returns a hidden figure, never a flat price.
-//   hour bucket   one wall-clock hour of the day the Day period's read targeted
-//   day bucket    the day document's own hourly buckets (Week/Month bars)
-//   month bucket  the day documents that summed into the month (Year bars); a
-//                 partially covered month shows its partial cost, disclosed by
-//                 the same note as the period total
-export function pointCostSummary(point, bucket, settings) {
+// returns a hidden figure, never a flat price. `sessions` is the period read's
+// overlapping-sessions payload and prices exactly one bucket kind:
+//   hour bucket   one wall-clock hour of the day the Day period's read
+//                 targeted, priced from the day document's own `hours` map —
+//                 the one bucket path left (#123)
+//   day bucket    the sessions' energy attributed to that local day
+//   month bucket  the sessions' energy attributed to that local month
+// Attribution reconciles with the sessions list by construction, and kWh
+// totals stay the day documents' — `point.kwh` only measures coverage, so a
+// bucket whose recorded energy has no covering session hides its figure and
+// flags the partial note instead of pricing itself free.
+export function pointCostSummary(point, bucket, settings, sessions = []) {
   if (bucket === 'hour') {
     const cost = hourCost(point.dayId, point.id, point.kwh, settings);
     return { cost, pricedEnergy: point.kwh > 0, unpricedEnergy: false };
   }
-  if (bucket === 'month') {
-    const totals = periodCost(point.days, settings);
-    return {
-      cost: totals.cost,
-      pricedEnergy: totals.pricedDays > 0,
-      unpricedEnergy: totals.unpricedDays > 0,
-    };
+  const totals = sessionBucketCost(sessions, point.id, point.kwh, settings);
+  if (!totals) {
+    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0 };
   }
-  const cost = dayCost(point.id, point.hours, point.kwh, settings);
-  return { cost, pricedEnergy: cost != null && point.kwh > 0, unpricedEnergy: cost == null };
+  return {
+    cost: totals.cost,
+    pricedEnergy: totals.wh > 0,
+    unpricedEnergy: !totals.covered,
+  };
 }
 
 // The summary's schedule-priced total over one rendered series: the sum of
 // every priced bucket, hidden when the range's energy is unpriceable and
 // nothing priced sits beside it (a 0.00 there would read as free), with
-// `partial` flagging a mix of priced and unpriceable day energy for the note.
-// Days with no energy are fully priced at 0.00 — an empty range is a $0.00
+// `partial` flagging a mix of priced and uncovered bucket energy for the note.
+// Buckets with no energy are fully priced at 0.00 — an empty range is a $0.00
 // range, not a partial one.
-export function seriesCostSummary(points, bucket, settings) {
+export function seriesCostSummary(points, bucket, settings, sessions = []) {
   if (!hasRateSchedule(settings)) return { cost: null, partial: false };
   let cost = 0;
   let pricedEnergy = false;
   let unpricedEnergy = false;
   for (const point of points || []) {
-    const one = pointCostSummary(point, bucket, settings);
+    const one = pointCostSummary(point, bucket, settings, sessions);
     if (one.cost != null) cost += one.cost;
     if (one.pricedEnergy) pricedEnergy = true;
     if (one.unpricedEnergy) unpricedEnergy = true;
@@ -159,10 +174,11 @@ export function seriesCostSummary(points, bucket, settings) {
 
 // One bucket's cost label, or null to hide: flat keeps aggregateCostLabel's
 // byte-identical path; under a schedule a bucket whose energy is entirely
-// unpriceable hides rather than showing a figure that covers none of it.
+// without covering sessions hides rather than showing a figure that covers
+// none of it.
 function seriesCost(point) {
   if (!hasRateSchedule(settings)) return aggregateCostLabel(point.kwh, settings);
-  const summary = pointCostSummary(point, currentPeriod().bucket, settings);
+  const summary = pointCostSummary(point, currentPeriod().bucket, settings, periodSessions);
   if (summary.cost == null || (summary.unpricedEnergy && !summary.pricedEnergy)) return null;
   return fmtMoney(summary.cost, settings.currency);
 }
@@ -250,7 +266,7 @@ function renderSummary() {
       // the cost stays hidden, exactly as before hourly pricing existed.
       cost = null;
     } else {
-      const summary = seriesCostSummary(series, currentPeriod().bucket, settings);
+      const summary = seriesCostSummary(series, currentPeriod().bucket, settings, periodSessions);
       cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
       partial = summary.partial;
     }
@@ -735,16 +751,39 @@ function fetchPeriod(descriptor, bounds) {
     : fetchHistory(bounds.startId, bounds.endId);
 }
 
+// The period's session archive read, the $ counterpart of fetchPeriod (#123):
+// every session overlapping the range, independent of the sessions list's own
+// page. The Day period needs none — its hour bars keep the day document's
+// buckets — so it resolves to an empty payload, and a rejected range read
+// settles empty too: the history read still paints its kWh while the cost
+// hides rather than pricing energy it has no session for. The paged read's
+// envelope ({docs, fromCache}) is unwrapped to its docs at exactly this point —
+// applyHistory expects the sessions themselves, and `fromCache` has no consumer
+// on this path. The read itself arrives as a parameter (defaulting to the
+// store's) so the executed harness can drive a successful read through the
+// real function — Node cannot bind Firestore, and this unwrap is exactly the
+// wiring a source pin could not guard.
+export function fetchPeriodSessions(descriptor, bounds, readRange = fetchSessionsInRange) {
+  if (descriptor.source === 'day') return Promise.resolve([]);
+  const range = sessionsRange(bounds);
+  return range ? readRange(range).then((read) => read.docs) : Promise.resolve([]);
+}
+
 // Apply one settled history read. A failed read and an offline cache miss set
 // the state only: points already on screen must never be relabelled as the newly
-// selected period.
-function applyHistory(descriptor, result, failure, today) {
+// selected period. `sessions` is the same read's session payload and is applied
+// with the points it prices — the previous period's sessions must never price
+// this one's bars. Exported so the executed harness can drive the fetch→apply
+// step readHistory and loadAll perform (with the store seam stubbed): the
+// payload's shape crossing this boundary is what the harness must observe.
+export function applyHistory(descriptor, result, failure, today, sessions = []) {
   const day = descriptor.source === 'day';
   if (result) historyState = day ? hourReadState(result) : historyReadState(result);
   else historyState = day ? hourReadFailure(failure) : 'error';
   if (historyState === 'offline' || historyState === 'error') return;
   // A Day read's payload is the day document itself; a range read's is its list
   // of daily documents.
+  periodSessions = Array.isArray(sessions) ? sessions : [];
   series = periodSeries(descriptor, day ? result : result.docs, today);
   const kwh = Number(result.kwh);
   dayTotal = day && Number.isFinite(kwh) && kwh > 0 ? kwh : null;
@@ -769,18 +808,24 @@ async function readHistory() {
   series = [];
   selectedId = null;
   dayTotal = null;
+  periodSessions = [];
   historyServer = false;
   historyState = 'loading';
   renderHistory();
-  let result = null;
-  let failure = null;
-  try {
-    result = await fetchPeriod(descriptor, bounds);
-  } catch (err) {
-    failure = err;
-  }
+  // The session read is a sibling, not a gate: a rejected session payload
+  // prices nothing (the $ hides) while the history read still paints.
+  const [hist, sess] = await Promise.allSettled([
+    fetchPeriod(descriptor, bounds),
+    fetchPeriodSessions(descriptor, bounds),
+  ]);
   if (gen !== generation || seq !== historySeq) return;
-  applyHistory(descriptor, result, failure, today);
+  applyHistory(
+    descriptor,
+    hist.status === 'fulfilled' ? hist.value : null,
+    hist.status === 'rejected' ? hist.reason : null,
+    today,
+    sess.status === 'fulfilled' ? sess.value : [],
+  );
   renderHistory();
   reloadIfWindowStale();
 }
@@ -866,11 +911,13 @@ async function loadAll() {
   const today = new Date();
   const bounds = periodRange(descriptor, today);
   // Refresh re-reads the current view's first page — the month the picker
-  // names, or the recent list when none is picked.
+  // names, or the recent list when none is picked — beside the period's own
+  // day documents and overlapping sessions.
   const month = pickedMonth();
-  const [hist, sess] = await Promise.allSettled([
+  const [hist, sess, periodSess] = await Promise.allSettled([
     fetchPeriod(descriptor, bounds),
     fetchSessions({ range: monthRange(month) }),
+    fetchPeriodSessions(descriptor, bounds),
   ]);
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
@@ -885,6 +932,7 @@ async function loadAll() {
       hist.status === 'fulfilled' ? hist.value : null,
       hist.status === 'rejected' ? hist.reason : null,
       today,
+      periodSess.status === 'fulfilled' ? periodSess.value : [],
     );
   }
   // Same contract for the sessions view: only the newest sessions read paints,
@@ -1060,6 +1108,7 @@ export function resetHistory() {
   selectedId = null;
   dayTotal = null;
   todayId = null;
+  periodSessions = [];
   sessionsView = emptySessionsView();
   sessionsBusy = false;
   historyState = 'idle';
