@@ -111,11 +111,16 @@ test("the history range read carries each day's kWh total and no pricing payload
   const end = source.indexOf('\n}\n', start);
   assert.ok(end > start, 'store.js closes fetchHistory');
   const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
-  // The mapping's contract: the id and the kWh total, and nothing else.
+  // The mapping's contract: the id and the kWh total, and nothing else. The
+  // no-`hours` guard scopes to the returned projection alone — the word names
+  // the Day read's own payload, so a correct comment elsewhere in the read
+  // must not trip it; a stray key would have to appear inside the return.
   assert.match(body, /docs: snap\.docs\.map\(\(d\) => \{/);
   assert.match(body, /id: d\.id,/);
   assert.match(body, /kwh: data\.kwh,/);
-  assert.doesNotMatch(body, /hours/);
+  const projectionStart = body.indexOf('return {');
+  assert.ok(projectionStart >= 0, 'fetchHistory returns its projection');
+  assert.doesNotMatch(body.slice(projectionStart), /hours/);
 });
 
 test("the Day period's single-document read keeps its hours normalization", () => {
@@ -206,4 +211,26 @@ test('an empty range read resolves empty after one page', async () => {
   });
   assert.equal(calls.length, 1);
   assert.deepEqual(read, { docs: [], fromCache: true });
+});
+
+test("the range read's default page reader forwards its page size into the query", () => {
+  // The loop above drives an injected reader, so its executed pins see the
+  // page size it asks for — never whether the production reader honors it.
+  // fetchSessions needs a live Firestore `db` (Node cannot bind it), so its
+  // forwarding is pinned from source, the same sw-shell pattern as the
+  // history reads above: the loop requests RANGE_SESSION_LIMIT-sized pages
+  // and terminates on a page shorter than that request, so a lost `pageSize`
+  // forwarding falls every range page back to the list's 20-doc default and
+  // silently truncates the period $ (the newest 20 sessions read as a
+  // "short" page) with no failing test and no note on screen.
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export async function fetchSessions(');
+  assert.ok(start >= 0, 'store.js declares fetchSessions');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes fetchSessions');
+  const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  // The size the caller asked for reaches the options, and the options'
+  // limit reaches the query's constraints.
+  assert.match(body, /sessionsQueryOptions\(\{[^}]*pageSize,/);
+  assert.match(body, /constraints\.push\(limit\(max\)\)/);
 });
