@@ -16,7 +16,6 @@ import {
   hourCost,
   liveCostLabel,
   liveSessionContribution,
-  liveSessionSettled,
   liveSessionSpan,
   sessionBucketCost,
   sessionCostLabel,
@@ -25,7 +24,7 @@ import {
   statusCostLabel,
   statusCostUncovered,
 } from '../../web/js/cost.js';
-import { costForIntervals, costForSession } from '../../web/js/rates.js';
+import { costForInterval, costForIntervals, costForSession } from '../../web/js/rates.js';
 import { fmtCost, fmtMoney } from '../../web/js/format.js';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -1190,28 +1189,38 @@ test('the settle guard drops a contribution a recorded session already prices', 
   const settings = nightly();
   // Charging 01:00→03:00 on 5 January; the recorded session covers exactly
   // that charge (the session document that lands at the stop, beside a status
-  // snapshot that still says charging — one order of the read race).
+  // snapshot that still says charging — one order of the read race). The
+  // record prices through the write's own instant, so the whole window is
+  // already priced exactly once and the contribution is null.
   const at = date(2026, 1, 5, 3, 0).getTime();
   const status = liveStatus(3, at, 7200, 2000);
   const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [recorded]), true);
   assert.equal(liveSessionContribution(status, [recorded], settings), null);
   // The bridge writes ended_at at its own finalize instant, which trails the
-  // last charging write: a later endpoint still overlaps.
+  // last charging write: a later endpoint still settles — and a materially
+  // skewed one (half an hour past the write) is the same gate, never a
+  // residual priced past the meter's own instant.
   const trailing = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 1), 2000);
   assert.equal(liveSessionContribution(status, [trailing], settings), null);
-  // A pause-resumed plug-in prices the same way: the recorded prefix (the
-  // pause edge's document) overlaps the live window — the whole-window
-  // estimate cannot be added beside energy the record already prices, so the
-  // contribution drops and the uncovered tail is disclosed, never mispriced.
+  const skewed = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 30), 2000);
+  assert.equal(liveSessionContribution(status, [skewed], settings), null);
+  // A pause-resumed plug-in keeps its estimate (#128): the recorded prefix
+  // (the pause edge's document) ends inside the window, so it prices its own
+  // slice and the contribution shrinks to the residual tail — the meter's
+  // 2000 Wh minus the record's in-window 500 Wh over [02:00, 03:00] — instead
+  // of dropping beside the energy the record prices.
   const pausedPrefix = session(date(2026, 1, 5, 0, 0), date(2026, 1, 5, 2, 0), 1000);
-  assert.equal(liveSessionContribution(status, [pausedPrefix], settings), null);
+  assert.deepEqual(liveSessionContribution(status, [pausedPrefix], settings), {
+    started_at: date(2026, 1, 5, 2, 0).getTime(),
+    ended_at: at,
+    wh: 1500,
+  });
   // An unrelated earlier charge — ended before this one started — does not
   // settle anything, and neither does an interval-bearing session whose
-  // charging blocks all lie outside the live window.
+  // charging blocks all lie outside the live window: both leave today's
+  // full-window span, byte-identical to a fresh charge's.
   const earlier = session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 0, 30), 2000);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [earlier]), false);
-  assert.ok(liveSessionContribution(status, [earlier], settings));
+  assert.deepEqual(liveSessionContribution(status, [earlier], settings), liveSessionSpan(status));
   const gapped = {
     ...session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 4, 0), 2000),
     intervals: [
@@ -1219,15 +1228,21 @@ test('the settle guard drops a contribution a recorded session already prices', 
       { started_at: date(2026, 1, 5, 3, 30), ended_at: date(2026, 1, 5, 4, 0), wh: 1000 },
     ],
   };
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [gapped]), false);
+  assert.deepEqual(liveSessionContribution(status, [gapped], settings), liveSessionSpan(status));
   // A session that cannot be priced at all covers nothing: it prices no
   // bucket, so the estimate beside it is not a double count.
   const unpriceable = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 'x');
-  assert.ok(liveSessionContribution(status, [unpriceable], settings));
+  assert.deepEqual(
+    liveSessionContribution(status, [unpriceable], settings),
+    liveSessionSpan(status),
+  );
   // Junk payloads and a missing span settle nothing.
-  assert.equal(liveSessionSettled(liveSessionSpan(status), null), false);
-  assert.equal(liveSessionSettled(liveSessionSpan(status), [null, 'x', {}]), false);
-  assert.equal(liveSessionSettled(null, [recorded]), false);
+  assert.deepEqual(liveSessionContribution(status, null, settings), liveSessionSpan(status));
+  assert.deepEqual(
+    liveSessionContribution(status, [null, 'x', {}], settings),
+    liveSessionSpan(status),
+  );
+  assert.equal(liveSessionContribution(null, [recorded], settings), null);
 });
 
 test('a settled live charge prices exactly once across the transition', () => {
@@ -1250,6 +1265,345 @@ test('a settled live charge prices exactly once across the transition', () => {
   // the same figure, so the settled number is the one the estimate promised.
   const live = [liveSessionContribution(status, [], settings)].filter(Boolean);
   assert.ok(Math.abs(sessionBucketCost(live, '2026-01-05', 2, settings).cost - 0.2) < 1e-9);
+});
+
+// ---------- residual attribution: the resumed block's uncovered tail (#128) ----------
+//
+// A pause-resumed plug-in's recorded prefix ends inside the live window, so
+// from #128 on the contribution is the residual tail — the meter's reading
+// minus the recorded energy clipped to the window, priced over [recorded end,
+// updated_at]. Primary reconciliation fixtures are zero-idle tails (resume at
+// the record's own end) asserting history == Status EXACTLY at 1e-9, so a
+// 2× double-count or a dropped block fails loudly; long-idle fixtures carry
+// structural asserts only (Wh sums, day attribution) with a documented
+// divergence bound.
+
+test('a pause-resumed block contributes its residual tail, exactly the Status figure', () => {
+  const settings = nightly();
+  // The #128 shape: charging 04:00→08:00 (4 kWh, uniform 1 kW), paused at
+  // 06:00 and resumed at the record's own end — a zero-idle tail. The Status
+  // tab prices the full window: 2 kWh off-peak then 2 kWh at the base.
+  const at = date(2026, 1, 5, 8, 0).getTime();
+  const status = liveStatus(3, at, 14400, 4000);
+  assert.equal(statusCostLabel(status, settings), 'GBP 0.80');
+  // A fresh plug-in — nothing recorded in the payload — is #126's full-window
+  // span, byte-identical.
+  assert.deepEqual(liveSessionContribution(status, [], settings), liveSessionSpan(status));
+  const recorded = {
+    wh: 2000,
+    started_at: date(2026, 1, 5, 4, 0),
+    ended_at: date(2026, 1, 5, 6, 0),
+    intervals: [{ started_at: date(2026, 1, 5, 4, 0), ended_at: date(2026, 1, 5, 6, 0), wh: 2000 }],
+  };
+  // The record's whole 2 kWh lies in-window; the residual is the meter's
+  // 4 kWh minus it, priced over the tail [06:00, 08:00] alone.
+  const tail = liveSessionContribution(status, [recorded], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 6, 0).getTime(),
+    ended_at: at,
+    wh: 2000,
+  });
+  // Zero-idle tail: the bucket carries the record's 2 kWh at 0.10 plus the
+  // tail's 2 kWh at 0.30 — exactly the Status figure, never GBP 1.60 beside
+  // the record and never the pre-#128 hide.
+  const merged = sessionBucketCost([recorded, tail], '2026-01-05', 4, settings);
+  assert.ok(Math.abs(merged.cost - 0.8) < 1e-9);
+  assert.ok(Math.abs(merged.wh - 4000) < 1e-9);
+  assert.equal(merged.covered, true);
+  // The settle race, both orders, prices the same figure exactly once:
+  // status-first — the estimate alone, before any record merged —…
+  const live = [liveSessionContribution(status, [], settings)].filter(Boolean);
+  assert.ok(Math.abs(sessionBucketCost(live, '2026-01-05', 4, settings).cost - 0.8) < 1e-9);
+  // …and session-first, once the final record covers through the write's own
+  // instant (both blocks recorded): the contribution drops and the record
+  // alone carries the same number.
+  const settled = {
+    wh: 4000,
+    started_at: date(2026, 1, 5, 4, 0),
+    ended_at: date(2026, 1, 5, 8, 0),
+    intervals: [
+      { started_at: date(2026, 1, 5, 4, 0), ended_at: date(2026, 1, 5, 6, 0), wh: 2000 },
+      { started_at: date(2026, 1, 5, 6, 0), ended_at: date(2026, 1, 5, 8, 0), wh: 2000 },
+    ],
+  };
+  assert.equal(liveSessionContribution(status, [settled], settings), null);
+  assert.ok(Math.abs(sessionBucketCost([settled], '2026-01-05', 4, settings).cost - 0.8) < 1e-9);
+});
+
+test('a residual tail crossing local midnight attributes to both days exactly', () => {
+  const settings = nightly();
+  // The midnight pattern, resumed: 22:00→02:00 at 4 kWh, the pause edge's
+  // record covering the first hour and the tail [23:00, 02:00] crossing
+  // midnight. Zero-idle tail, so the split reconciles with Status EXACTLY.
+  const at = date(2026, 1, 6, 2, 0).getTime();
+  const status = liveStatus(3, at, 14400, 4000);
+  assert.equal(statusCostLabel(status, settings), 'GBP 0.80');
+  const recorded = {
+    wh: 1000,
+    started_at: date(2026, 1, 5, 22, 0),
+    ended_at: date(2026, 1, 5, 23, 0),
+    intervals: [
+      { started_at: date(2026, 1, 5, 22, 0), ended_at: date(2026, 1, 5, 23, 0), wh: 1000 },
+    ],
+  };
+  const tail = liveSessionContribution(status, [recorded], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 23, 0).getTime(),
+    ended_at: at,
+    wh: 3000,
+  });
+  const fifth = sessionBucketCost([recorded, tail], '2026-01-05', 2, settings);
+  // The record's hour at the base plus the tail's 23:00–00:00 slice.
+  assert.ok(Math.abs(fifth.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(fifth.cost - 0.6) < 1e-9);
+  assert.equal(fifth.covered, true);
+  const sixth = sessionBucketCost([recorded, tail], '2026-01-06', 2, settings);
+  // The tail's off-peak hours after midnight.
+  assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
+  assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
+  assert.equal(sixth.covered, true);
+  assert.ok(Math.abs(fifth.cost + sixth.cost - 0.8) < 1e-9);
+});
+
+test('a straddling record clips at the window edge, never subtracts its whole wh', () => {
+  const settings = nightly();
+  // A merge-extended record (the bridge folds plug-ins up to 48 h apart into
+  // one span) whose span opens three hours before the live window: charging
+  // 01:00→04:00 at 2.5 kWh, the record 22:00→02:00 at 3 kWh.
+  const at = date(2026, 1, 5, 4, 0).getTime();
+  const status = liveStatus(3, at, 10800, 2500);
+  const merged = session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 2, 0), 3000);
+  // Only the record's last hour is in-window: one quarter of its span, so
+  // 750 Wh of its 3 kWh — the same duration share the bucket will price —
+  // and the residual is 2500 − 750 over [02:00, 04:00].
+  const tail = liveSessionContribution(status, [merged], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 2, 0).getTime(),
+    ended_at: at,
+    wh: 1750,
+  });
+  // Why the clip exists: subtracting the record's whole 3000 Wh from the
+  // meter's 2500 goes negative — the negative gate would then hide a tail the
+  // record does not price, a quiet misprice the duration share never commits.
+  assert.ok(2500 - 3000 < 0);
+  // Structural (long-idle class): the record's pre-window energy stays on its
+  // own day, and the residual lands wholly on the write's day. The record's
+  // day slices span their own hours (Jan 4 the 22:00–00:00 base slice, Jan 5
+  // the 00:00–02:00 off-peak slice), beside the tail's 1750 Wh off-peak.
+  const fourth = sessionBucketCost([merged, tail], '2026-01-04', 1.5, settings);
+  assert.ok(Math.abs(fourth.wh - 1500) < 1e-9);
+  assert.ok(Math.abs(fourth.cost - 0.45) < 1e-9);
+  const fifth = sessionBucketCost([merged, tail], '2026-01-05', 3.25, settings);
+  assert.ok(Math.abs(fifth.wh - 3250) < 1e-9);
+  assert.ok(Math.abs(fifth.cost - 0.325) < 1e-9);
+  assert.equal(fifth.covered, true);
+});
+
+test('interior idle in a merged record prices nothing in the residual', () => {
+  const settings = nightly();
+  // Structural fixture (long-idle class): charging 04:00→08:00 at 3 kWh
+  // cumulative, the record's blocks at 04:00–05:00 and 07:00–07:30 — the
+  // window's interior idle (05:00–07:00) drew nothing, and the resumed
+  // block's energy rides the tail [07:30, 08:00] alone.
+  const at = date(2026, 1, 5, 8, 0).getTime();
+  const status = liveStatus(3, at, 14400, 3000);
+  const recorded = {
+    wh: 1125,
+    started_at: date(2026, 1, 5, 4, 0),
+    ended_at: date(2026, 1, 5, 7, 30),
+    intervals: [
+      { started_at: date(2026, 1, 5, 4, 0), ended_at: date(2026, 1, 5, 5, 0), wh: 750 },
+      { started_at: date(2026, 1, 5, 7, 0), ended_at: date(2026, 1, 5, 7, 30), wh: 375 },
+    ],
+  };
+  const tail = liveSessionContribution(status, [recorded], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 7, 30).getTime(),
+    ended_at: at,
+    wh: 1875,
+  });
+  const totals = sessionBucketCost([recorded, tail], '2026-01-05', 3, settings);
+  // The window's own energy sums exactly: 750 + 375 recorded, 1875 residual.
+  assert.ok(Math.abs(totals.wh - 3000) < 1e-9);
+  assert.ok(Math.abs(totals.cost - 0.75) < 1e-9);
+  assert.equal(totals.covered, true);
+  // Documented divergence bound: the Status figure spreads the same 3 kWh
+  // uniformly over the whole window (1.5 kWh off-peak, 1.5 at the base =
+  // GBP 0.60); the two attributions differ only in where the residual's
+  // 1875 Wh sits, so they cannot diverge by more than the schedule's rate
+  // spread × the residual (0.20 × 1.875 kWh). This fixture sits inside it —
+  // structural asserts only, per the long-idle rule.
+  const estimate = costForInterval(3000, date(2026, 1, 5, 4, 0).getTime(), at, settings);
+  assert.ok(Math.abs(estimate - 0.6) < 1e-9);
+  assert.ok(Math.abs(totals.cost - estimate) <= (0.3 - 0.1) * 1.875);
+  assert.ok(totals.cost > estimate);
+});
+
+test('a counter-reset overshoot gates the residual before any bucket sees it', () => {
+  const settings = nightly();
+  // The in-block reset: the intervals kept counting through it, so the record
+  // carries 3 kWh against a meter that read 2 — the clipped subtraction goes
+  // negative and the contribution must hide, never price the defect.
+  const at = date(2026, 1, 5, 4, 0).getTime();
+  const status = liveStatus(3, at, 10800, 2000);
+  const reset = {
+    wh: 3000,
+    started_at: date(2026, 1, 5, 1, 0),
+    ended_at: date(2026, 1, 5, 3, 0),
+    intervals: [{ started_at: date(2026, 1, 5, 1, 0), ended_at: date(2026, 1, 5, 3, 0), wh: 3000 }],
+  };
+  assert.equal(liveSessionContribution(status, [reset], settings), null);
+  // The trap the gate pins: an ungated residual here would be a −1000 Wh
+  // pseudo-session entering the pricing pipeline — energy no pricing layer
+  // accepts (costForInterval refuses a negative energy, and one null slice
+  // nulls sessionBucketCost's whole figure). The gate fires upstream of all
+  // of it, so the merged payload keeps a figure instead of breaking.
+  const ungated = { started_at: date(2026, 1, 5, 3, 0), ended_at: at, wh: -1000 };
+  assert.equal(sessionCostSpans(ungated), null);
+  const merged = [...[reset], liveSessionContribution(status, [reset], settings)].filter(Boolean);
+  const totals = sessionBucketCost(merged, '2026-01-05', 2, settings);
+  assert.notEqual(totals, null);
+  assert.ok(Math.abs(totals.cost - 0.3) < 1e-9);
+  assert.ok(Math.abs(totals.wh - 3000) < 1e-9);
+});
+
+test('overlapping recorded documents hide the residual, never add it', () => {
+  const settings = nightly();
+  // The overlapping-documents defect: two records for the same charge. Their
+  // clipped sum (3 kWh) exceeds the meter (2 kWh), so the residual is
+  // negative and the contribution hides — whatever the payload double-prices
+  // is its own pre-existing defect; the residual never rides on top of it.
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  const docs = [
+    session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 1500),
+    session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 1500),
+  ];
+  assert.equal(liveSessionContribution(status, docs, settings), null);
+  const totals = sessionBucketCost(docs, '2026-01-05', 2, settings);
+  assert.ok(Math.abs(totals.cost - 0.3) < 1e-9);
+  assert.ok(Math.abs(totals.wh - 3000) < 1e-9);
+});
+
+test('a zero-residual resume keeps its tail and the bar covered', () => {
+  const settings = nightly();
+  // The resumed block has drawn nothing yet: the record carries the meter's
+  // whole 2 kWh and ends an hour before the write. The tail is returned by
+  // the uniform contract — the gates passed, so the contribution is the
+  // tail — and its 0 Wh prices 0.00 and adds nothing: the record's own
+  // 2 kWh covers the bar with or without the span.
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000);
+  const tail = liveSessionContribution(status, [recorded], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 2, 0).getTime(),
+    ended_at: at,
+    wh: 0,
+  });
+  const withTail = sessionBucketCost([recorded, tail], '2026-01-05', 2, settings);
+  const withoutTail = sessionBucketCost([recorded], '2026-01-05', 2, settings);
+  // The figure is unchanged — a 0-Wh tail prices 0.00 — and stays covered.
+  assert.ok(Math.abs(withTail.cost - withoutTail.cost) < 1e-9);
+  assert.ok(Math.abs(withTail.cost - 0.2) < 1e-9);
+  assert.equal(withTail.covered, true);
+});
+
+test('a restart orphan subtracts on the fallback whole span the bucket prices', () => {
+  const settings = nightly();
+  // A mid-charge bridge restart seeds the counter baseline: the pre-restart
+  // energy is in `wh` but in no interval, the list cannot reconcile, and the
+  // spans fall back to the whole plug-in span — the very span the bucket
+  // prices, so the subtraction removes exactly what the bucket adds.
+  const at = date(2026, 1, 5, 4, 0).getTime();
+  const status = liveStatus(3, at, 10800, 3500);
+  const orphan = {
+    wh: 3000,
+    started_at: date(2026, 1, 5, 1, 0),
+    ended_at: date(2026, 1, 5, 3, 0),
+    intervals: [{ started_at: date(2026, 1, 5, 1, 0), ended_at: date(2026, 1, 5, 2, 0), wh: 1000 }],
+  };
+  const tail = liveSessionContribution(status, [orphan], settings);
+  assert.deepEqual(tail, {
+    started_at: date(2026, 1, 5, 3, 0).getTime(),
+    ended_at: at,
+    wh: 500,
+  });
+  const totals = sessionBucketCost([orphan, tail], '2026-01-05', 3.5, settings);
+  assert.ok(Math.abs(totals.wh - 3500) < 1e-9);
+  assert.ok(
+    Math.abs(
+      totals.cost -
+        (costForSession(orphan, settings) +
+          costForInterval(500, date(2026, 1, 5, 3, 0).getTime(), at, settings)),
+    ) < 1e-9,
+  );
+  assert.equal(totals.covered, true);
+});
+
+test('records touching the window edge do not overlap it (half-open)', () => {
+  const settings = nightly();
+  // Overlap is the settle predicate's own half-open test: a record ending at
+  // the window's start, or starting at its end, prices none of it — touching
+  // is not overlapping — so the contribution is the full window, exactly as
+  // with an empty payload (the fresh plug-in, byte-identical).
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  const touching = [
+    session(date(2026, 1, 4, 22, 0), date(2026, 1, 5, 1, 0), 2000),
+    session(date(2026, 1, 5, 3, 0), date(2026, 1, 5, 4, 0), 2000),
+  ];
+  assert.deepEqual(liveSessionContribution(status, touching, settings), liveSessionSpan(status));
+  assert.deepEqual(liveSessionContribution(status, [], settings), liveSessionSpan(status));
+});
+
+test('the residual subtracts exactly the spans the bucket prices', () => {
+  const settings = nightly();
+  // The no-double-count proof, pinned: the recorded side is read through
+  // sessionCostSpans on both of its paths — recomputed here from the same
+  // export, for every shape the archive can hold — so the subtraction cannot
+  // diverge from what sessionBucketCost adds beside the contribution.
+  const at = date(2026, 1, 5, 4, 0).getTime();
+  const liveStart = at - 10800_000;
+  const status = liveStatus(3, at, 10800, 6000);
+  const gallery = [
+    session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 1000), // whole-span fallback
+    {
+      // reconciling intervals
+      wh: 1500,
+      started_at: date(2026, 1, 5, 2, 0),
+      ended_at: date(2026, 1, 5, 2, 30),
+      intervals: [
+        { started_at: date(2026, 1, 5, 2, 0), ended_at: date(2026, 1, 5, 2, 30), wh: 1500 },
+      ],
+    },
+    {
+      // restart orphan: intervals too short of wh, so the fallback span
+      wh: 1000,
+      started_at: date(2026, 1, 5, 3, 0),
+      ended_at: date(2026, 1, 5, 3, 30),
+      intervals: [
+        { started_at: date(2026, 1, 5, 3, 0), ended_at: date(2026, 1, 5, 3, 15), wh: 200 },
+      ],
+    },
+    session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 'x'), // unpriceable
+  ];
+  let recordedWh = 0;
+  let tailStart = null;
+  for (const item of gallery) {
+    for (const span of sessionCostSpans(item) || []) {
+      const start = span.started_at.getTime();
+      const end = span.ended_at.getTime();
+      if (!(start < at && end > liveStart)) continue;
+      recordedWh += (span.wh * (Math.min(end, at) - Math.max(start, liveStart))) / (end - start);
+      if (tailStart == null || end > tailStart) tailStart = end;
+    }
+  }
+  assert.deepEqual(liveSessionContribution(status, gallery, settings), {
+    started_at: tailStart,
+    ended_at: at,
+    wh: 6000 - recordedWh,
+  });
 });
 
 // ---------- the live archive (issue #123's evidence, 2026-10-22) ----------

@@ -790,6 +790,44 @@ test('a midnight-spanning live charge attributes to both local days', () => {
   assert.equal(element('chart-cost').textContent, fmtMoney(0.1, 'GBP'));
 });
 
+test('a resumed block carries its residual tail and reconciles with the Status figure', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 9, 18, 1); // 01:00 Sunday 18 October
+  const descriptor = periodById('week');
+  const docs = [
+    { id: '2026-10-17', kwh: 1 },
+    { id: '2026-10-18', kwh: 1 },
+  ];
+  applyHistory(descriptor, { docs, fromCache: false }, null, today, []);
+  showHistorySettings(nightly());
+  // The #128 shape on the midnight pattern: 23:00 Saturday → 01:00 Sunday at
+  // 2 kWh, paused at midnight and resumed at the record's own end — a
+  // zero-idle tail. The Status tab prices the full window: 1 kWh at the base
+  // then 1 kWh off-peak.
+  const charging = statusAt(3, today.getTime(), 7200, 2000);
+  assert.equal(statusCostLabel(charging, nightly()), fmtMoney(0.4, 'GBP'));
+  showHistoryStatus(charging);
+  assert.equal(element('history-cost').textContent, fmtMoney(0.4, 'GBP'));
+
+  // The pause edge's merged record lands (the settle read's payload): the
+  // first hour is now the record's to price, and the estimate shrinks to the
+  // residual tail instead of dropping — history keeps reconciling with the
+  // Status figure exactly, where pre-#128 it hid beside the record.
+  const recorded = {
+    id: '1765789200',
+    wh: 1000,
+    started_at: new Date(2026, 9, 17, 23),
+    ended_at: new Date(2026, 9, 18, 0),
+  };
+  applyHistory(descriptor, { docs, fromCache: false }, null, today, [recorded]);
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost').textContent, fmtMoney(0.4, 'GBP'));
+  // Today's bar carries only its own slice of it (the current slot is
+  // selected): the off-peak hour after midnight.
+  assert.equal(element('chart-cost').textContent, fmtMoney(0.1, 'GBP'));
+});
+
 test('an offline marker hides the live contribution instead of repricing it', () => {
   resetHistory();
   enterHistory();
