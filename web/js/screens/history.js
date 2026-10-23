@@ -111,9 +111,10 @@ let liveStatus = null;
 let settlePending = false;
 // One verification re-read follows a settle re-read: the bridge keeps a failed
 // session write pending and retries it on its next tick, so the settle read can
-// fetch just before the record commits. The next status push earns exactly one
-// more re-read — one-shot, so an idle status stream never re-reads forever, and
-// idempotent under the render-time settle guard.
+// fetch just before the record commits. The next status push — or the next
+// History activation — earns exactly one more re-read: one-shot, so an idle
+// status stream never re-reads forever, and idempotent under the render-time
+// settle guard.
 let settleVerify = false;
 // Today's daily total, kept separately because a day with no hourly buckets has
 // a real total the series cannot carry (the chart refuses to draw it as zeros).
