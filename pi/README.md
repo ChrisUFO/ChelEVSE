@@ -49,7 +49,7 @@ real environment variables take precedence.
 
 | Variable                          | Default               | Meaning                                                                                                       |
 | --------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's App settings value overrides it at runtime (below)                       |
+| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's Charger connection value overrides it at runtime (below)                 |
 | `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                                               |
 | `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root)                     |
 | `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                                          |

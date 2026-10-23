@@ -1952,7 +1952,7 @@ export function settingsSnapshotIsBaseline(data, meta = {}) {
 }
 
 // Whether a route change needs the unsaved-changes confirmation (#129). Only
-// the App settings form keeps unsaved state, so only leaving the Config tab
+// the settings form keeps unsaved state, so only leaving the Config tab
 // with a dirty draft asks; every other route change applies immediately. The
 // router owns the asking (it owns the hash); the screen owns the dialog.
 export function settingsLeaveNeedsConfirm({ from = '', to = '', dirty = false } = {}) {

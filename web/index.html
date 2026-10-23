@@ -587,43 +587,71 @@
             <h1>Configuration</h1>
           </div>
 
-          <section
-            class="card-block settings-card"
-            style="--i: 1"
-            aria-labelledby="settings-heading"
-          >
-            <div class="block-head">
-              <h2 id="settings-heading">App settings</h2>
-              <p class="block-sub">
-                The charger address, and the prices behind the cost estimates on Status and History.
+          <form id="settings-form" class="settings-form" style="--i: 1" novalidate>
+            <div
+              class="rate-mode-confirm"
+              id="leave-settings-confirm"
+              role="alertdialog"
+              aria-labelledby="leave-settings-confirm-text"
+              hidden
+            >
+              <p id="leave-settings-confirm-text">
+                You have unsaved changes. Leaving Config leaves them unsaved.
               </p>
-            </div>
-            <form id="settings-form" class="settings-form" novalidate>
-              <div
-                class="rate-mode-confirm"
-                id="leave-settings-confirm"
-                role="alertdialog"
-                aria-labelledby="leave-settings-confirm-text"
-                hidden
-              >
-                <p id="leave-settings-confirm-text">
-                  App settings has unsaved changes. Leaving Config leaves them unsaved.
-                </p>
-                <div class="rate-mode-confirm-actions">
-                  <button class="btn small solid" id="stay-settings" type="button">Stay</button>
-                  <button class="btn small danger" id="discard-settings" type="button">
-                    Leave without saving
-                  </button>
-                </div>
+              <div class="rate-mode-confirm-actions">
+                <button class="btn small solid" id="stay-settings" type="button">Stay</button>
+                <button class="btn small danger" id="discard-settings" type="button">
+                  Leave without saving
+                </button>
               </div>
-              <div class="rate-editor" role="group" aria-labelledby="rates-heading">
-                <div class="rate-head">
-                  <div class="rate-head-copy">
-                    <h3 id="rates-heading">Electricity price</h3>
-                    <p class="block-sub">Times are local, and every price is per kWh.</p>
-                  </div>
-                </div>
+            </div>
 
+            <section class="card-block connection-card" aria-labelledby="connection-heading">
+              <div class="block-head">
+                <h2 id="connection-heading">Charger connection</h2>
+                <p class="block-sub">
+                  Where this app finds your charger, and whether its temperature shows on Status.
+                </p>
+              </div>
+              <div class="field">
+                <label class="field-label" for="setting-charger-host">Charger address</label>
+                <input
+                  id="setting-charger-host"
+                  class="text-input"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-describedby="charger-host-hint charger-host-error"
+                />
+                <span class="field-hint" id="charger-host-hint"
+                  >IPv4 or hostname — blank uses the Pi’s default</span
+                >
+                <span class="field-error" id="charger-host-error" hidden></span>
+              </div>
+              <label class="switch-row" for="setting-show-temperature">
+                <span class="switch-copy">
+                  <span class="switch-title">Show temperature</span>
+                  <span class="switch-sub"
+                    >The Temperature stat on the Status page. Hide it when the charger reports no
+                    sensors.</span
+                  >
+                </span>
+                <span class="switch">
+                  <input id="setting-show-temperature" type="checkbox" role="switch" checked />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
+            </section>
+
+            <section class="card-block settings-card" aria-labelledby="settings-heading">
+              <div class="block-head">
+                <h2 id="settings-heading">Electricity price</h2>
+                <p class="block-sub">
+                  The prices behind the cost estimates on Status and History. Times are local, and
+                  every price is per kWh.
+                </p>
+              </div>
+              <div class="rate-editor">
                 <div class="rate-mode" id="rate-mode" role="radiogroup" aria-label="Rate mode">
                   <button
                     class="rate-mode-option"
@@ -668,7 +696,7 @@
 
                 <div class="fallback-card" id="fallback-card">
                   <div class="fallback-head" id="fallback-head">
-                    <h4 class="fallback-title">One rate</h4>
+                    <h3 class="fallback-title">One rate</h3>
                     <p class="fallback-note">The price for every hour.</p>
                   </div>
                   <div class="settings-grid">
@@ -706,28 +734,13 @@
                       <span class="field-hint" id="currency-hint">1–8 characters</span>
                       <span class="field-error" id="currency-error" hidden></span>
                     </div>
-                    <div class="field">
-                      <label class="field-label" for="setting-charger-host">Charger address</label>
-                      <input
-                        id="setting-charger-host"
-                        class="text-input"
-                        type="text"
-                        autocomplete="off"
-                        spellcheck="false"
-                        aria-describedby="charger-host-hint charger-host-error"
-                      />
-                      <span class="field-hint" id="charger-host-hint"
-                        >IPv4 or hostname — blank uses the Pi’s default</span
-                      >
-                      <span class="field-error" id="charger-host-error" hidden></span>
-                    </div>
                   </div>
                 </div>
 
                 <div class="rate-plan" id="rates-plan" hidden>
                   <div class="plan-head">
                     <div class="plan-head-copy">
-                      <h4 class="plan-title">Your plan</h4>
+                      <h3 class="plan-title">Your plan</h3>
                       <p class="plan-summary" id="plan-summary">
                         <span id="plan-summary-text"></span>
                         <span class="plan-problem" id="plan-problem" hidden></span>
@@ -768,7 +781,7 @@
 
                   <section class="preview-card" id="preview-card" aria-labelledby="preview-heading">
                     <div class="preview-head">
-                      <h4 id="preview-heading">What applies at</h4>
+                      <h3 id="preview-heading">What applies at</h3>
                       <p class="block-sub">
                         Check any moment against this plan. It reads your edits, saved or not.
                       </p>
@@ -796,19 +809,6 @@
                   </section>
                 </div>
               </div>
-              <label class="switch-row" for="setting-show-temperature">
-                <span class="switch-copy">
-                  <span class="switch-title">Show temperature</span>
-                  <span class="switch-sub"
-                    >The Temperature stat on the Status page. Hide it when the charger reports no
-                    sensors.</span
-                  >
-                </span>
-                <span class="switch">
-                  <input id="setting-show-temperature" type="checkbox" role="switch" checked />
-                  <span class="switch-track" aria-hidden="true"></span>
-                </span>
-              </label>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
                 <span class="save-blockers" id="save-blockers" hidden></span>
@@ -816,8 +816,8 @@
                   Save settings
                 </button>
               </div>
-            </form>
-          </section>
+            </section>
+          </form>
 
           <section
             class="card-block notify-card"

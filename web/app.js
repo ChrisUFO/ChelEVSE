@@ -394,7 +394,7 @@ async function main() {
   initSettings();
   initNotifications();
   initAdvanced();
-  // Unsaved-changes guard (#129): leaving Config with a dirty App settings
+  // Unsaved-changes guard (#129): leaving Config with a dirty settings
   // form asks first. The gating decision is the pure helper; the dialog and
   // the dirty flag live in the settings screen.
   initTabbar({

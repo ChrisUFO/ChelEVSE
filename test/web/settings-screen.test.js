@@ -472,3 +472,44 @@ test('index.html ships the leave dialog the screen wires', () => {
   assert.match(source, /id="stay-settings"/);
   assert.match(source, /id="discard-settings"/);
 });
+
+test('index.html groups the charger address into the connection card, ahead of pricing', () => {
+  // The Config regroup (#129 → #135) is placement, not behaviour: every
+  // binding in this file is id-only, so moving the charger address back under
+  // pricing (or swapping the cards) would keep the whole harness green. The
+  // grouping is pinned from source, the same convention as the dialog ids
+  // above: the connection card comes first and owns the address, the
+  // Electricity price card follows, and its single save bar submits both.
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  const at = {
+    form: source.indexOf('id="settings-form"'),
+    connectionCard: source.indexOf('class="card-block connection-card"'),
+    chargerHost: source.indexOf('id="setting-charger-host"'),
+    pricingCard: source.indexOf('class="card-block settings-card"'),
+    pricingHeading: source.indexOf('id="settings-heading"'),
+    rateEditor: source.indexOf('class="rate-editor"'),
+    fallbackCard: source.indexOf('class="fallback-card"'),
+    saveBar: source.indexOf('id="save-settings"'),
+  };
+  for (const [marker, position] of Object.entries(at)) {
+    assert.notEqual(position, -1, `${marker} is missing from web/index.html`);
+  }
+  assert.ok(
+    at.form < at.connectionCard &&
+      at.connectionCard < at.chargerHost &&
+      at.chargerHost < at.pricingCard,
+    'the charger address sits inside the connection card, before the pricing card',
+  );
+  assert.ok(
+    at.pricingCard < at.pricingHeading &&
+      at.pricingHeading < at.rateEditor &&
+      at.rateEditor < at.fallbackCard,
+    'the Electricity price card follows — heading, rate editor, then fallback rate',
+  );
+  assert.ok(at.rateEditor < at.saveBar, 'the save bar closes the pricing card after its editor');
+  assert.equal(
+    source.match(/id="save-settings"/g)?.length,
+    1,
+    'exactly one save bar submits the whole form',
+  );
+});
