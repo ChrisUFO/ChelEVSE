@@ -158,9 +158,9 @@ test('a confirmed leave applies the pending route, pins its hash and focuses its
   go('schedule');
   assert.equal(tabVisible('schedule'), false);
 
-  settle(true); // Discard
+  settle(true); // Leave
   await tick();
-  assert.equal(tabVisible('schedule'), true, 'Discard applies the pending route');
+  assert.equal(tabVisible('schedule'), true, 'Leave applies the pending route');
   assert.equal(globalThis.location.hash, '#schedule');
   assert.deepEqual(routes, ['status', 'config', 'schedule'], 'the entry hook runs once per route');
   assert.equal(shell.focused, 'schedule', 'focus lands on the newly selected tab');
@@ -193,6 +193,34 @@ test('an open guard owns the navigation: later hash moves and tab clicks wait fo
   await tick();
   assert.equal(tabVisible('history'), true);
   assert.equal(globalThis.location.hash, '#history');
+});
+
+test('a rejected confirmation keeps the current route, restores its hash and frees the guard', async () => {
+  const { shell, go, tabVisible } = makeShell();
+  let hold = null;
+  initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
+  go('config'); // No guard in the way yet.
+
+  // The dialog promise itself breaks: a rejection is an implicit stay.
+  hold = Promise.reject(new Error('the dialog broke'));
+  go('history');
+  await tick();
+  assert.equal(tabVisible('history'), false, 'the pending route is not applied');
+  assert.equal(tabVisible('config'), true, 'the panels stay on the current route');
+  assert.equal(globalThis.location.hash, '#config', 'the hash snaps back');
+  assert.deepEqual(shell.replaces, ['#status', '#config'], 'the restore reuses replaceState');
+
+  // The rejection must free the guard, not wedge it: the next leave is held
+  // for its own answer and still settles.
+  let settle;
+  hold = new Promise((resolve) => {
+    settle = resolve;
+  });
+  go('schedule');
+  assert.equal(tabVisible('schedule'), false, 'a later leave is held again');
+  settle(false);
+  await tick();
+  assert.equal(globalThis.location.hash, '#config', 'the later Stay restores too');
 });
 
 function tick() {

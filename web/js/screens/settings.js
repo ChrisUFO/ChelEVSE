@@ -2903,7 +2903,13 @@ export function confirmLeaveSettings() {
   });
   leaveAnswer = { promise, resolve: settle };
   $('leave-settings-confirm').hidden = false;
-  // Stay is the safe action, so it takes focus and the louder button.
+  // The dialog is in-flow at the top of the form, but its trigger — the tab
+  // bar — is fixed at the viewport bottom and works at any scroll offset, so
+  // the form's top (and the dialog with it) can sit above view when it opens.
+  // Unlike the One-rate confirm, whose trigger sits beside its dialog, focus
+  // alone would not reveal it: reveal it first. Stay is the safe action, so
+  // it takes focus and the louder button.
+  revealNode($('leave-settings-confirm'));
   $('stay-settings').focus({ preventScroll: true });
   return promise;
 }

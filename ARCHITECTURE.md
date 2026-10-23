@@ -193,7 +193,7 @@ Firestore bills per document written. Per-state table and rationale:
 
 ### Shell and lifecycle
 
-- One `index.html` with five mutually exclusive screens: `booting`, `boot-error`, `signin`, `noaccess`, and `app`. `app` holds a five-tab `tablist` and five `tabpanel` sections (Status, History, Schedule, Config, Advanced). Hash routing selects the tab; `aria-selected` and roving focus follow the APG tabs pattern. A route change can also be held for confirmation: leaving Config with a dirty App settings form asks Discard/Stay first — Stay keeps the route and restores its hash, Discard applies the pending one.
+- One `index.html` with five mutually exclusive screens: `booting`, `boot-error`, `signin`, `noaccess`, and `app`. `app` holds a five-tab `tablist` and five `tabpanel` sections (Status, History, Schedule, Config, Advanced). Hash routing selects the tab; `aria-selected` and roving focus follow the APG tabs pattern. A route change can also be held for confirmation: leaving Config with a dirty App settings form asks Stay / Leave-without-saving first — Stay keeps the route and restores its hash, Leave without saving applies the pending one (the edits stay in the form, unsaved).
 - Boot: dynamic Firebase SDK init → screen `init*` wiring → tab bar → auth subscription. A missing/invalid `web/firebase-config.js` produces `boot-error`; a missing grant produces `noaccess` with a sign-out control.
 - `app.js` owns auth fan-out, data subscriptions, the status ticker lifecycle, lazy history load, Config-time notification refresh, and push toast display. Sign-out closes the store, resets every screen and releases the push token (bounded to 3 s); a revoked grant only releases the token for `no-access`.
 - `closeApp` is the teardown boundary: subscriptions stop, screen state resets, `activeUser` clears.
@@ -327,7 +327,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 | Suite | Command                                                | Current size | Scope                                                                                                                  |
 | ----- | ------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Web   | `npm test`                                             | 473 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse and settings screen; no browser or Firebase       |
+| Web   | `npm test`                                             | 474 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse and settings screen; no browser or Firebase       |
 | Rules | `npm run test:rules`                                   | 39 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                                                    |
 | Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 291 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes |
 

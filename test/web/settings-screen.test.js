@@ -23,6 +23,12 @@ import assert from 'node:assert/strict';
 // save-state view (`settingsSaveState` over `readFields()`), which reports the
 // form clean exactly when the submit draft re-sends every stored field.
 
+// What the screen focuses and reveals, in order — the guard's a11y
+// commitments (#129) are observable only through this log, exactly as the
+// router harness records focus in test/web/ui.test.js.
+const focusLog = [];
+const scrollLog = [];
+
 function stubElement() {
   const classes = new Set();
   const listeners = new Map();
@@ -72,9 +78,13 @@ function stubElement() {
       listeners.get(type).push(listener);
     },
     removeEventListener() {},
-    focus() {},
+    focus() {
+      focusLog.push(this.id);
+    },
     click() {},
-    scrollIntoView() {},
+    scrollIntoView() {
+      scrollLog.push(this.id);
+    },
   };
 }
 
@@ -84,6 +94,7 @@ function element(id) {
   let el = elements.get(id);
   if (!el) {
     el = stubElement();
+    el.id = id;
     elements.set(id, el);
   }
   return el;
@@ -369,7 +380,7 @@ test('a clean form resolves the leave immediately and never opens the dialog', a
   assert.equal(dialogOpen(), false);
 });
 
-test('a dirty form asks: Stay keeps the draft, Discard proceeds, Escape stays', async () => {
+test('a dirty form asks: Stay keeps the draft, Leave proceeds, Escape stays', async () => {
   resetSettings();
   showSettingsData(storedDoc);
   type('setting-rate', '0.4');
@@ -378,13 +389,21 @@ test('a dirty form asks: Stay keeps the draft, Discard proceeds, Escape stays', 
   await tick();
   assert.equal(answer(), 'pending', 'the router waits for an answer');
   assert.equal(dialogOpen(), true, 'the dialog is the One-rate alertdialog pattern');
+  // The trigger is the fixed bottom tab bar, reachable at any scroll offset,
+  // so opening must reveal the in-flow dialog itself.
+  assert.ok(
+    scrollLog.includes('leave-settings-confirm'),
+    'opening the dialog scrolls it into view',
+  );
   // Asking again while open returns the same open question, not a second one.
   const answerAgain = answerOf(confirmLeaveSettings());
+  focusLog.length = 0;
   clickButton('stay-settings');
   await tick();
   assert.equal(answer(), false, 'Stay declines the navigation');
   assert.equal(answerAgain(), false, 'a repeat ask shares the same answer');
   assert.equal(dialogOpen(), false);
+  assert.equal(focusLog.at(-1), 'tab-config', 'Stay returns focus to the Config tab');
   assert.equal(element('setting-rate').value, '0.4', 'the draft survives Stay');
 
   // Escape is the safe action, exactly like the One-rate confirm's Cancel.
@@ -397,7 +416,7 @@ test('a dirty form asks: Stay keeps the draft, Discard proceeds, Escape stays', 
   const discardAnswer = answerOf(confirmLeaveSettings());
   clickButton('discard-settings');
   await tick();
-  assert.equal(discardAnswer(), true, 'Discard releases the navigation');
+  assert.equal(discardAnswer(), true, 'Leave releases the navigation');
   assert.equal(dialogOpen(), false);
   // The edits stay unsaved (the write never ran), exactly as a plain tab
   // switch leaves them today — the screen keeps its state, panels only hide.
