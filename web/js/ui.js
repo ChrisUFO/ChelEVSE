@@ -1,5 +1,7 @@
 // Small shared UI helpers: DOM lookup/building and the header network badge.
 
+import { DAY_NAMES } from './schedule.js';
+
 export const $ = (id) => document.getElementById(id);
 
 export const setText = (el, text) => {
@@ -13,6 +15,53 @@ export function el(tag, className, text) {
   if (className) node.className = className;
   if (text != null) node.textContent = text;
   return node;
+}
+
+// Toggle one weekday in an editor's `days` array: the result keeps the array
+// sorted and unique, the shared edit idiom of both day-chip editors.
+export function toggleDay(days, day) {
+  if (days.includes(day)) return days.filter((value) => value !== day);
+  return [...days, day].sort((a, b) => a - b);
+}
+
+// The weekday-chip group both editors render: a role=group of DAY_NAMES
+// buttons bound to a live `days` array. Options:
+//   className   the group element's class
+//   chipClass   each chip's class
+//   describeId  the group's aria-describedby (its error line's id)
+//   label       the group's aria-label, or null when a later paint owns it
+//   getDays     live read of the bound days array
+//   pressed     (day) => whether a chip starts aria-pressed, or null for never
+//   chipLabel   (day) => a per-chip aria-label, or null for none
+//   dataDay     whether each chip carries data-day (for repaint lookups)
+//   onToggle    (day, nextDays, chip) — applies the edit and repaints
+export function buildDayPicker({
+  className,
+  chipClass,
+  describeId,
+  label = null,
+  getDays,
+  pressed = null,
+  chipLabel = null,
+  dataDay = false,
+  onToggle,
+}) {
+  const group = el('div', className);
+  group.setAttribute('role', 'group');
+  if (label) group.setAttribute('aria-label', label);
+  group.setAttribute('aria-describedby', describeId);
+  DAY_NAMES.forEach((name, day) => {
+    const chip = el('button', chipClass, name);
+    chip.type = 'button';
+    if (dataDay) chip.dataset.day = String(day);
+    if (pressed) chip.setAttribute('aria-pressed', String(pressed(day)));
+    if (chipLabel) chip.setAttribute('aria-label', chipLabel(day));
+    chip.addEventListener('click', () => {
+      onToggle(day, toggleDay(getDays(), day), chip);
+    });
+    group.append(chip);
+  });
+  return group;
 }
 
 let netOnline = typeof navigator === 'undefined' ? true : navigator.onLine;

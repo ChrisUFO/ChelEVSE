@@ -9,8 +9,7 @@
 // still reconciles back to the last confirmed server state.
 
 import { fmtRate } from '../format.js';
-import { DAY_NAMES } from '../schedule.js';
-import { $, el, setText } from '../ui.js';
+import { $, buildDayPicker, el, setText } from '../ui.js';
 import {
   DAY_PRESETS,
   LOAD_FAILED_MESSAGE,
@@ -613,23 +612,17 @@ function createDayControl(card) {
     presets.append(button);
   });
 
-  const days = el('div', 'plan-days');
-  days.setAttribute('role', 'group');
-  days.setAttribute('aria-describedby', card.errorId);
-  DAY_NAMES.forEach((name, day) => {
-    const chip = el('button', 'plan-day', name);
-    chip.type = 'button';
-    chip.dataset.day = String(day);
-    chip.addEventListener('click', () => {
-      if (card.row.days.includes(day)) {
-        card.row.days = card.row.days.filter((value) => value !== day);
-      } else {
-        card.row.days = [...card.row.days, day].sort((a, b) => a - b);
-      }
+  const days = buildDayPicker({
+    className: 'plan-days',
+    chipClass: 'plan-day',
+    describeId: card.errorId,
+    getDays: () => card.row.days,
+    dataDay: true,
+    onToggle: (day, nextDays) => {
+      card.row.days = nextDays;
       card.customDays = true;
       commitRowShape(card);
-    });
-    days.append(chip);
+    },
   });
   wrap.append(presets, days);
   card.presetsEl = presets;
