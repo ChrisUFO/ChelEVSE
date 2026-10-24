@@ -9,7 +9,7 @@
 // re-read behind it, for a session write the bridge retried after the settle
 // read fetched.
 
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
 import {
   SESSION_LIMIT,
   fetchHistory,
@@ -126,13 +126,6 @@ let barEls = [];
 let generation = 0;
 let scrubbing = false;
 let scrubPointer = null;
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 function svgEl(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);

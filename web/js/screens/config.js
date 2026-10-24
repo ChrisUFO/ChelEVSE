@@ -3,7 +3,7 @@
 // disclosure at the end of the same card. Changes go through the Advanced
 // console; the data layer keeps this screen a pure renderer.
 
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
 import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
 import { fmtK, toNumber } from '../format.js';
 
@@ -17,13 +17,6 @@ let renderedSignature = null;
 // status/current.total_energy (kWh) — the Lifetime figure's small home since
 // the Status figures row gave its tile to the session cost (#116).
 let lifetime = null;
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 // "Synced", not "Updated": under MQTT the bridge replaces `status/config` only
 // when the charger's `config_version` changes, so `updated_at` marks the

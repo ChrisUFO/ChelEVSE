@@ -3,7 +3,7 @@
 // leaving the tab re-arms it. The scrollback is the realtime RAPI history the
 // store subscribes to (type == 'rapi', newest first, 20 entries).
 
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
 import {
   GATE_INITIAL,
   commandMillis,
@@ -30,13 +30,6 @@ let renderedLogSignature = null;
 let sendGeneration = 0;
 let gate = { ...GATE_INITIAL };
 let ticker = null;
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 function formatResult(value) {
   if (typeof value === 'string') return value;

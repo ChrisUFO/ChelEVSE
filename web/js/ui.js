@@ -1,10 +1,19 @@
-// Small shared UI helpers: DOM lookup and the header network badge.
+// Small shared UI helpers: DOM lookup/building and the header network badge.
 
 export const $ = (id) => document.getElementById(id);
 
 export const setText = (el, text) => {
   if (el && el.textContent !== text) el.textContent = text;
 };
+
+// The smallest DOM builder every screen shares: a tag, an optional class and
+// an optional text child.
+export function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
 
 let netOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 let netCached = false;

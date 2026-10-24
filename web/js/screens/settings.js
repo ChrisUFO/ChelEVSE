@@ -10,7 +10,7 @@
 
 import { fmtRate } from '../format.js';
 import { DAY_NAMES } from '../schedule.js';
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
 import {
   DAY_PRESETS,
   LOAD_FAILED_MESSAGE,
@@ -305,13 +305,6 @@ function renderErrors(errors = {}) {
 }
 
 // ---------- small DOM helpers ----------
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 function scrollToNode(node) {
   node.scrollIntoView({

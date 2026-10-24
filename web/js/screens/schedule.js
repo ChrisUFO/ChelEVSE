@@ -12,7 +12,7 @@
 // Those repeats are guarded by transition, never applied as new data, and they
 // never erase a notice that explains the last real change.
 
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
 import { readScheduleBaseline, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
@@ -97,13 +97,6 @@ let editGeneration = 0;
 let live = { inWindow: false, activeRuleId: null };
 let cards = [];
 let generation = 0;
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 function clone(schedule) {
   return normalizeSchedule(schedule);
