@@ -128,10 +128,10 @@ export function showLifetimeEnergy(totalKwh) {
 }
 
 function renderLifetime() {
-  const el = $('lifetime-note');
+  const note = $('lifetime-note');
   const kwh = toNumber(lifetime);
-  el.hidden = !(Number.isFinite(kwh) && kwh > 0);
-  setText(el, `Lifetime energy: ${fmtK(kwh)} kWh`);
+  note.hidden = !(Number.isFinite(kwh) && kwh > 0);
+  setText(note, `Lifetime energy: ${fmtK(kwh)} kWh`);
 }
 
 export function showConfigError() {

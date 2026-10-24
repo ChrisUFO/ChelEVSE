@@ -69,10 +69,10 @@ let netCached = false;
 
 function paintNet() {
   const mode = !netOnline ? 'offline' : netCached ? 'cached' : 'live';
-  const el = $('net');
-  if (!el) return;
-  el.dataset.net = mode;
-  setText(el, mode === 'live' ? 'Live' : mode === 'cached' ? 'Syncing…' : 'Offline');
+  const badge = $('net');
+  if (!badge) return;
+  badge.dataset.net = mode;
+  setText(badge, mode === 'live' ? 'Live' : mode === 'cached' ? 'Syncing…' : 'Offline');
 }
 
 export function setCached(cached) {
