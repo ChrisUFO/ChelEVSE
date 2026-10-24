@@ -41,8 +41,10 @@ import {
   hourCost,
   liveSessionContribution,
   liveSessionSpan,
+  pointCostSummary,
   sessionBucketCost,
   sessionCostLabel,
+  seriesCostSummary,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, formatDuration, fmtMoney, toNumber } from '../format.js';
@@ -133,55 +135,9 @@ function svgEl(tag, attrs) {
 
 // ---------- summary + chart costing ----------
 
-// One rendered bucket's schedule-priced cost and what of its energy it covers.
-// Pure — `settings` arrives per call — and schedule-only by design: the flat
-// path is aggregateCostLabel's and stays byte-identical, so a flat misuse
-// returns a hidden figure, never a flat price. `sessions` is the period read's
-// overlapping-sessions payload and prices exactly one bucket kind:
-//   hour bucket   one wall-clock hour of the day the Day period's read
-//                 targeted, priced from the day document's own `hours` map —
-//                 the one bucket path left (#123)
-//   day bucket    the sessions' energy attributed to that local day
-//   month bucket  the sessions' energy attributed to that local month
-// Attribution reconciles with the sessions list by construction, and kWh
-// totals stay the day documents' — `point.kwh` only measures coverage, so a
-// bucket whose recorded energy has no covering session hides its figure
-// instead of pricing itself free.
-export function pointCostSummary(point, bucket, settings, sessions = []) {
-  if (bucket === 'hour') {
-    const cost = hourCost(point.dayId, point.id, point.kwh, settings);
-    return { cost, pricedEnergy: point.kwh > 0, unpricedEnergy: false };
-  }
-  const totals = sessionBucketCost(sessions, point.id, point.kwh, settings);
-  if (!totals) {
-    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0 };
-  }
-  return {
-    cost: totals.cost,
-    pricedEnergy: totals.wh > 0,
-    unpricedEnergy: !totals.covered,
-  };
-}
-
-// The summary's schedule-priced total over one rendered series: the sum of
-// every priced bucket, hidden when the range's energy is unpriceable and
-// nothing priced sits beside it (a 0.00 there would read as free). Buckets
-// with no energy are fully priced at 0.00 — an empty range is a $0.00 range.
-export function seriesCostSummary(points, bucket, settings, sessions = []) {
-  if (!hasRateSchedule(settings)) return { cost: null };
-  let cost = 0;
-  let pricedEnergy = false;
-  let unpricedEnergy = false;
-  for (const point of points || []) {
-    const one = pointCostSummary(point, bucket, settings, sessions);
-    if (one.cost != null) cost += one.cost;
-    if (one.pricedEnergy) pricedEnergy = true;
-    if (one.unpricedEnergy) unpricedEnergy = true;
-  }
-  return {
-    cost: unpricedEnergy && !pricedEnergy ? null : cost,
-  };
-}
+// The bucket/series cost summaries live in js/cost.js beside the pricing
+// helpers they call; re-exported here so the screen's tests keep this path.
+export { pointCostSummary, seriesCostSummary } from '../cost.js';
 
 // The sessions a period's $ prices: the recorded payload plus, while a charge
 // is in progress, the live session's contribution (#126) — merged only for a
