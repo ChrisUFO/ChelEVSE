@@ -1423,3 +1423,76 @@ export function formatPreviewWhen(date, now = new Date()) {
   const year = date.getFullYear() === now.getFullYear() ? '' : ` ${date.getFullYear()}`;
   return `${day} ${date.getDate()} ${month}${year}, ${timeInputValue(date)}`;
 }
+
+// ---------- season date fields ----------
+
+// The date inputs are real date pickers, but only a month and day are stored.
+// The picker still needs a year to render a month-day, and the old fixed
+// reference year (2024) opened the calendar years in the past and refused every
+// date forward of it. The reference year is now the current local year, so the
+// picker opens in the present and forward navigation works. No `min`/`max` is
+// set: a native date input would reject a typed or picked year outside those
+// bounds (`rangeOverflow`), and any year is a valid way to name a month and day.
+// Any year the owner picks is still discarded on save.
+export function referenceStartYear(now = new Date()) {
+  return now.getFullYear();
+}
+
+// The first leap year at or after `startYear`, used to render a stored
+// 29 February. Four consecutive years normally contain exactly one leap year,
+// but a century that is not divisible by 400 breaks that: 2097–2100 contains
+// none, while 2104 does. Reaching to the next leap year keeps the field on the
+// current calendar while never losing the leap day.
+function leapYearFrom(startYear) {
+  let year = startYear;
+  while (!isLeapYear(year)) year += 1;
+  return year;
+}
+
+// A stored `MM-DD` as a native date value. The year is a rendering reference and
+// is discarded on save. A stored 02-29 renders in the next leap year: any other
+// year would be an invalid date, and the browser blanks the field.
+export function dateInputForBound(value, now = new Date()) {
+  const parsed = parseMonthDay(value);
+  if (!parsed) return '';
+  const start = referenceStartYear(now);
+  const year = parsed.month === 2 && parsed.day === 29 ? leapYearFrom(start) : start;
+  return `${year}-${String(parsed.month).padStart(2, '0')}-${String(parsed.day).padStart(2, '0')}`;
+}
+
+// A native date value is YYYY-MM-DD. The year is deliberately discarded: the
+// season repeats annually, so a picked 2026-10-15 and a picked 2028-02-29 store
+// `10-15` and `02-29`. A blank value becomes the 00-00 sentinel so date mode
+// survives until validation explains the missing half, instead of the period
+// silently falling back to an old month scope.
+export function boundFromDateInput(value) {
+  const match = /^\d{4}-(\d{2})-(\d{2})$/.exec(typeof value === 'string' ? value : '');
+  if (!match) return '00-00';
+  const monthDay = `${match[1]}-${match[2]}`;
+  return parseMonthDay(monthDay) ? monthDay : '00-00';
+}
+
+// The collapsed band's words. `dateRangeText` is shared with coverage rows,
+// segment labels and sibling notes, where a recurrence suffix would be noise,
+// so the cue lives here. Only a real date pair names its recurrence: All year
+// and a month-only season already say their scope, and a malformed pair needs
+// fixing before recurrence means anything. "yearly" rather than "every year"
+// is a width decision: at 320 px a wrapped range ("(wraps)" included) plus the
+// longer phrase pushed the band below the title and the status flag onto a
+// third line.
+export function periodBandCopy(period) {
+  const dateMode = periodHasDates(period);
+  const bounds = periodDateBounds(period);
+  const dates = dateMode && bounds.from && bounds.to ? dateRangeText(bounds.from, bounds.to) : '';
+  return {
+    dateMode,
+    dateText: dates,
+    text: dateMode
+      ? dates
+        ? `${dates} · yearly`
+        : 'Dates need fixing'
+      : period.monthText !== period.title
+        ? period.monthText
+        : '',
+  };
+}
