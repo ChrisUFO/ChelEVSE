@@ -4,8 +4,8 @@ import { DAY_NAMES } from './schedule.js';
 
 export const $ = (id) => document.getElementById(id);
 
-export const setText = (el, text) => {
-  if (el && el.textContent !== text) el.textContent = text;
+export const setText = (node, text) => {
+  if (node && node.textContent !== text) node.textContent = text;
 };
 
 // The smallest DOM builder every screen shares: a tag, an optional class and
