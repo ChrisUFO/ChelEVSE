@@ -3897,3 +3897,26 @@ test('plan edits never change the stored flat rate', () => {
     currency: 'USD',
   });
 });
+
+test('settings.js barrel exports exactly the union of its sources', async () => {
+  // The barrel star-exports the three ./settings/ modules; per the ES module
+  // spec a name exported by two of them would be silently dropped, failing
+  // only at runtime. Pin the enumerated surface against the sources so a
+  // future duplicate (or a dropped re-export) fails here instead.
+  const [barrel, plan, validate, state] = await Promise.all([
+    import('../../web/js/settings.js'),
+    import('../../web/js/settings/plan.js'),
+    import('../../web/js/settings/validate.js'),
+    import('../../web/js/settings/state.js'),
+  ]);
+  const expected = [
+    ...new Set([
+      'RATE_MAX',
+      'RATE_MIN',
+      ...Object.keys(plan),
+      ...Object.keys(validate),
+      ...Object.keys(state),
+    ]),
+  ].sort();
+  assert.deepEqual(Object.keys(barrel).sort(), expected);
+});

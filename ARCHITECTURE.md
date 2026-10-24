@@ -115,7 +115,7 @@ Data flow, in one line: charger → bridge → Firestore → PWA, and PWA → Fi
 - **Overlap rejection:** windows that can both match one local instant are rejected by the editor. Validation compares annual date sets on a 366-slot leap ring (month-day positions, with 29 February as a real slot) and the four main/tail combinations, so adjacent seasons sharing a month but no day do not collide, a December wrap and January's early hours do, and 29 February is exact.
 - **Payload:** a month row is `{id, rate, days, start, end, months}` unchanged; a date row appends `from`/`to` after `months`, whose value is derived from the dates (`10-15` → `04-15` = `[10,11,12,1,2,3,4]`). Old clients ignore the dates, read the derived months and over-apply at month edges.
 - **Legacy overlaps:** a document written outside the editor may still contain same-tier overlaps. Matching is deterministic: a matching override wins over a base, and within each tier the **last matching row in list order wins**. A base plus override is not a legacy collision but the model. The editor blocks the next save until same-tier overlaps are resolved, and payload order is preserved so grouping never changes legacy semantics.
-- **Limits:** ≤ 24 windows. `web/js/rates.js` owns normalization, matching, overlap detection and interval costing; `web/js/settings.js` owns form validation, normalization/dirty comparison and the save payload.
+- **Limits:** ≤ 24 windows. `web/js/rates.js` owns normalization, matching, overlap detection and interval costing; the `web/js/settings/` modules (behind the `web/js/settings.js` public barrel) own form validation, normalization/dirty comparison and the save payload.
 
 ### Cost semantics
 
@@ -356,7 +356,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 ## 11. Known gaps and future work
 
-- **TOU/seasonality editor (#58):** shipped in #63, superseded by the unified base/override editor in #76. Season-first periods, immediate month apply, own/effective coverage tables with named sibling periods, a draft-live checker, and now explicit uncovered-date/hour warnings at 0.00. Residual: the settings form's `addEventListener('submit')` binding is covered only by the external harness, not an in-repo DOM test.
+- **TOU/seasonality editor (#58):** shipped in #63, superseded by the unified base/override editor in #76. Season-first periods, immediate month apply, own/effective coverage tables with named sibling periods, a draft-live checker, and now explicit uncovered-date/hour warnings at 0.00.
 - **Date-precision seasons and season rates (#65):** shipped in #75. Dates are the primary visible scope: native Starts/Ends pickers with a 2024 reference year, All year, a repeat hint, and Edit dates on a collapsed header; legacy month scopes keep **Advanced: month ranges**.
 - **Unified season pricing (#76):** shipped in PR #75 (this change), closing #76. Two explicit modes (One rate / Seasons & time-of-use), no fallback: a season is dates + a base + optional daily overrides, gaps cost 0.00 with Fill gaps/Add base warnings, and the checker/history/status name uncovered dates, unpriced hours and unpriced live time. No new schema field: the all-day, every-day row is the base.
 - **OTA is not implemented.** The bridge has no firmware upload/version/rollback path. `ARCHITECTURE.md` and `docs/DEPLOY.md` historically described OTA as an HTTP responsibility; treat firmware updates as manual until the code exists.

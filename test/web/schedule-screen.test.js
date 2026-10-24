@@ -340,3 +340,48 @@ test('the plan count and empty state follow the rendered rules', () => {
     assert.equal(chip.attrs.get('aria-pressed'), String([0, 1, 2, 3, 4].includes(day)));
   });
 });
+
+test('syncControls drives the save/add/discard disabled states and the editor lock', () => {
+  // Clean, unlocked form: nothing to save or discard, room for more rules.
+  adoptOneRule();
+  assert.equal(element('save-schedule').disabled, true);
+  assert.equal(element('discard-schedule').disabled, true);
+  assert.equal(element('add-rule').disabled, false);
+
+  // A valid edit unlocks save and discard together.
+  const card = element('rule-list').children[0];
+  fire(card.children[1].children[6], 'click');
+  assert.equal(element('save-schedule').disabled, false);
+  assert.equal(element('discard-schedule').disabled, false);
+
+  // An invalid draft re-locks save alone: canSave stays true, saveValid() goes false.
+  const startInput = card.children[2].children[0].children[1];
+  startInput.value = '';
+  fire(startInput, 'input');
+  assert.equal(element('save-schedule').disabled, true);
+  assert.equal(element('discard-schedule').disabled, false);
+
+  // The rule cap locks add-rule while the draft stays editable.
+  resetSchedule();
+  enterSchedule();
+  showSchedule(document_);
+  while (element('rule-list').children.length < MAX_RULES) fire(element('add-rule'), 'click');
+  assert.equal(element('add-rule').disabled, true);
+  assert.equal(element('save-schedule').disabled, false);
+
+  // Lock loop: a load error disables every input and button inside the editor.
+  // In the real DOM the id-bound controls live in #schedule-editor; the shared
+  // stub returns no children for querySelectorAll, so this test aliases them
+  // in for the selector the loop uses.
+  const editor = element('schedule-editor');
+  const controls = [element('save-schedule'), element('add-rule'), element('discard-schedule')];
+  const originalQuerySelectorAll = editor.querySelectorAll;
+  editor.querySelectorAll = (selector) => (selector === 'input, button' ? controls : []);
+  try {
+    showScheduleError();
+    for (const control of controls) assert.equal(control.disabled, true);
+    assert.equal(element('panel-schedule').attrs.get('aria-busy'), 'false');
+  } finally {
+    editor.querySelectorAll = originalQuerySelectorAll;
+  }
+});
