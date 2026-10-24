@@ -222,16 +222,16 @@ Firestore bills per document written. Per-state table and rationale:
 
 **DOM / Firebase-facing:**
 
-| Module                         | Responsibility                                                                                                           |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `app.js`                       | boot, auth wiring, screen fan-out, push toast                                                                            |
-| `js/firebase.js`               | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                                     |
-| `js/auth.js`                   | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                                |
-| `js/store.js`                  | all Firestore subscriptions and writes                                                                                   |
-| `js/ui.js`                     | `$`/`setText`, network badge, tab router (route changes can be held for confirmation)                                    |
-| `js/screens/*`                 | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes                |
-| `js/screens/settings-paint.js` | the Config rate-plan paint pipeline (period/window card builders and paint passes); imported only by the Settings screen |
-| `js/screens/history-chart.js`  | the History chart's SVG geometry and bar builder; imported only by the History screen                                    |
+| Module                         | Responsibility                                                                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.js`                       | boot, auth wiring, screen fan-out, push toast                                                                                                       |
+| `js/firebase.js`               | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                                                                |
+| `js/auth.js`                   | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                                                           |
+| `js/store.js`                  | all Firestore subscriptions and writes                                                                                                              |
+| `js/ui.js`                     | `$`/`setText`/`el`, shared day-chip editors (`toggleDay`, `buildDayPicker`), network badge, tab router (route changes can be held for confirmation) |
+| `js/screens/*`                 | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes                                           |
+| `js/screens/settings-paint.js` | the Config rate-plan paint pipeline (period/window card builders and paint passes); imported only by the Settings screen                            |
+| `js/screens/history-chart.js`  | the History chart's SVG geometry and bar builder; imported only by the History screen                                                               |
 
 Screens never contain business rules that belong in a pure module; pure modules never import DOM or Firebase. This is the main testability boundary.
 
@@ -330,11 +330,11 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 ## 9. Testing and quality gates
 
-| Suite | Command                                                | Current size | Scope                                                                                                                  |
-| ----- | ------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Web   | `npm test`                                             | 493 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse and settings screen; no browser or Firebase       |
-| Rules | `npm run test:rules`                                   | 39 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                                                    |
-| Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 291 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes |
+| Suite | Command                                                | Current size | Scope                                                                                                                       |
+| ----- | ------------------------------------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Web   | `npm test`                                             | 513 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse, settings and schedule screens; no browser or Firebase |
+| Rules | `npm run test:rules`                                   | 39 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                                                         |
+| Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 454 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes      |
 
 - **No CI.** Gates are local and operator-enforced: hooks (Prettier pre-commit/pre-push), full test runs, a reviewed head SHA, and squash merges with `--match-head-commit`.
 - The browser harness under `/tmp/opencode/chelevse-preview` is an ephemeral manual/preview tool; it is not part of the repo and must not be a merge dependency.
