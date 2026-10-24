@@ -10,6 +10,8 @@ import { fmtRate } from '../format.js';
 import {
   DAY_PRESETS,
   MONTH_NAMES,
+  boundFromDateInput,
+  canDuplicatePeriod,
   complementScope,
   dateInputForBound,
   dateRangeHint,
@@ -35,6 +37,7 @@ import {
   rateSegmentLabel,
   rateTierFor,
   rateWindowSummary,
+  scopesOverlap,
   segmentNote,
   siblingNote,
   timeFieldsVisible,

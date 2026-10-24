@@ -50,21 +50,21 @@ Data flow, in one line: charger → bridge → Firestore → PWA, and PWA → Fi
 
 ## 3. Repository map
 
-| Path                                                         | Role                                                                                                                              |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `pi/`                                                        | Python bridge (`bridge.py`, `mqtt_source.py`, `acl.py`), systemd unit, installer, venv requirements, `tests/`, operational README |
-| `web/`                                                       | Static PWA: `index.html`, `app.js`, `js/` pure modules, `js/screens/` DOM screens, `sw.js`, `styles.css`, manifest, icon          |
-| `docs/`                                                      | `DEPLOY.md` (setup/runbook) and `VALIDATION.md` (acceptance and evidence)                                                         |
-| `test/web/`                                                  | `node:test` unit tests for the pure web modules and the service-worker shell                                                      |
-| `test/rules/`                                                | Firestore emulator tests for `firestore.rules`                                                                                    |
-| `scripts/`                                                   | `check-firebase-project.mjs` deploy guard                                                                                         |
-| `private.example/`                                           | Committed templates for `private/` (ACL, env, service account)                                                                    |
-| `private/`                                                   | Gitignored deployment values: ACL, bridge env, service-account keys                                                               |
-| `web/firebase-config.js`                                     | Gitignored Firebase web config                                                                                                    |
-| `firebase.json`, `firestore.rules`, `firestore.indexes.json` | Firebase project config, security rules, indexes                                                                                  |
-| `.firebaserc`                                                | Gitignored default project id (`chelevse`)                                                                                        |
-| `.githooks/`                                                 | Prettier pre-commit/pre-push hooks                                                                                                |
-| `node_modules/`, `pi/.venv/`, `__pycache__/`, `.firebase/`   | Generated; never committed                                                                                                        |
+| Path                                                         | Role                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pi/`                                                        | Python bridge — `bridge.py` as the facade over 11 extracted modules (`write_counter`, `history_accumulator`, `write_policy`, `notify`, `charger_host`, `env_config`, `parsing`, `schedule`, `transport`, `status_tracker`, `status_sink`) plus `mqtt_source.py` and `acl.py`; systemd unit, installer, venv requirements, `tests/`, operational README |
+| `web/`                                                       | Static PWA: `index.html`, `app.js`, `js/` pure modules, `js/screens/` DOM screens, `sw.js`, `styles.css`, manifest, icon                                                                                                                                                                                                                               |
+| `docs/`                                                      | `DEPLOY.md` (setup/runbook) and `VALIDATION.md` (acceptance and evidence)                                                                                                                                                                                                                                                                              |
+| `test/web/`                                                  | `node:test` unit tests for the pure web modules and the service-worker shell                                                                                                                                                                                                                                                                           |
+| `test/rules/`                                                | Firestore emulator tests for `firestore.rules`                                                                                                                                                                                                                                                                                                         |
+| `scripts/`                                                   | `check-firebase-project.mjs` deploy guard                                                                                                                                                                                                                                                                                                              |
+| `private.example/`                                           | Committed templates for `private/` (ACL, env, service account)                                                                                                                                                                                                                                                                                         |
+| `private/`                                                   | Gitignored deployment values: ACL, bridge env, service-account keys                                                                                                                                                                                                                                                                                    |
+| `web/firebase-config.js`                                     | Gitignored Firebase web config                                                                                                                                                                                                                                                                                                                         |
+| `firebase.json`, `firestore.rules`, `firestore.indexes.json` | Firebase project config, security rules, indexes                                                                                                                                                                                                                                                                                                       |
+| `.firebaserc`                                                | Gitignored default project id (`chelevse`)                                                                                                                                                                                                                                                                                                             |
+| `.githooks/`                                                 | Prettier pre-commit/pre-push hooks                                                                                                                                                                                                                                                                                                                     |
+| `node_modules/`, `pi/.venv/`, `__pycache__/`, `.firebase/`   | Generated; never committed                                                                                                                                                                                                                                                                                                                             |
 
 `PLAN.md` and `.review/` are local workflow artifacts (gitignored) and are not part of the deployed system.
 
@@ -202,31 +202,36 @@ Firestore bills per document written. Per-state table and rationale:
 
 **Pure / DOM-free** (unit-tested under `node:test`):
 
-| Module                       | Responsibility                                                                                                             |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `js/write.js`                | `settleWrite`: 10 s UI bound plus late reconciliation for Firestore writes                                                 |
-| `js/format.js`               | state map, numeric/clock/money formatting, `liveCharging`, `freshnessState`, `elapsedClock`                                |
-| `js/rates.js`                | rate-window normalize/validate/overlap/match, `costForInterval`, `costForSession`                                          |
-| `js/cost.js`                 | flat-vs-schedule presentation labels for status/history; session-attributed period pricing                                 |
-| `js/settings.js`             | settings validate/normalize/draft compare/save-state machine                                                               |
-| `js/schedule.js`             | schedule validation, queue/discard state machines, snapshot routing                                                        |
-| `js/history.js`              | period descriptors/bounds/series (day/hour, week, month, year), read classification, hit test, the period's sessions range |
-| `js/config.js`               | curated config rows, raw JSON, signature                                                                                   |
-| `js/advanced.js`             | RAPI validation, confirmation gate, scrollback helpers                                                                     |
-| `js/notifications.js`        | notification card copy, token decision/result                                                                              |
-| `js/notification-session.js` | DOM-free FCM token lifecycle (generations, retry markers, sign-out races)                                                  |
-| `js/push.js`                 | push payload reduction, visible-client selection, dedupe                                                                   |
+| Module                       | Responsibility                                                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `js/write.js`                | `settleWrite`: 10 s UI bound plus late reconciliation for Firestore writes                                                                                  |
+| `js/format.js`               | state map, numeric/clock/money formatting, `liveCharging`, `freshnessState`, `elapsedClock`                                                                 |
+| `js/rates.js`                | rate-window normalize/validate/overlap/match, `costForInterval`, `costForSession`                                                                           |
+| `js/cost.js`                 | flat-vs-schedule presentation labels for status/history; session-attributed period pricing                                                                  |
+| `js/settings.js`             | public-surface barrel over the `js/settings/` modules                                                                                                       |
+| `js/settings/plan.js`        | rate-plan scope/date algebra: months, seasons, coverage, labels, preview                                                                                    |
+| `js/settings/validate.js`    | charger-address grammar; settings document validation, normalization, form fields                                                                           |
+| `js/settings/state.js`       | rate-editor validation and the settings save lifecycle: submit gating, payload, draft compare, save-state messages                                          |
+| `js/schedule.js`             | schedule validation, queue/discard state machines, snapshot routing                                                                                         |
+| `js/history.js`              | period descriptors/bounds/series (day/hour, week, month, year), read classification, hit test, the period's sessions range, sessions-list paging view rules |
+| `js/config.js`               | curated config rows, raw JSON, signature                                                                                                                    |
+| `js/advanced.js`             | RAPI validation, confirmation gate, scrollback helpers                                                                                                      |
+| `js/notifications.js`        | notification card copy, token decision/result                                                                                                               |
+| `js/notification-session.js` | DOM-free FCM token lifecycle (generations, retry markers, sign-out races)                                                                                   |
+| `js/push.js`                 | push payload reduction, visible-client selection, dedupe                                                                                                    |
 
 **DOM / Firebase-facing:**
 
-| Module           | Responsibility                                                                                            |
-| ---------------- | --------------------------------------------------------------------------------------------------------- |
-| `app.js`         | boot, auth wiring, screen fan-out, push toast                                                             |
-| `js/firebase.js` | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                      |
-| `js/auth.js`     | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                 |
-| `js/store.js`    | all Firestore subscriptions and writes                                                                    |
-| `js/ui.js`       | `$`/`setText`, network badge, tab router (route changes can be held for confirmation)                     |
-| `js/screens/*`   | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes |
+| Module                         | Responsibility                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `app.js`                       | boot, auth wiring, screen fan-out, push toast                                                                            |
+| `js/firebase.js`               | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                                     |
+| `js/auth.js`                   | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                                |
+| `js/store.js`                  | all Firestore subscriptions and writes                                                                                   |
+| `js/ui.js`                     | `$`/`setText`, network badge, tab router (route changes can be held for confirmation)                                    |
+| `js/screens/*`                 | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes                |
+| `js/screens/settings-paint.js` | the Config rate-plan paint pipeline (period/window card builders and paint passes); imported only by the Settings screen |
+| `js/screens/history-chart.js`  | the History chart's SVG geometry and bar builder; imported only by the History screen                                    |
 
 Screens never contain business rules that belong in a pure module; pure modules never import DOM or Firebase. This is the main testability boundary.
 

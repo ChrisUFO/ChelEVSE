@@ -72,7 +72,22 @@ function stubElement(tag = '') {
     remove() {},
     contains: () => false,
     querySelector: () => null,
-    querySelectorAll: () => [],
+    // The one selector the paint pipeline resyncs through that the harness
+    // observes: the day chips' pressed state (paintDayControl). Every other
+    // query stays invisible, as before — enabling more selectors is a
+    // per-finding decision, not a harness goal.
+    querySelectorAll(selector) {
+      if (selector !== '[data-day]') return [];
+      const found = [];
+      const walk = (node) => {
+        for (const child of node.children || []) {
+          if (child.dataset && child.dataset.day != null) found.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return found;
+    },
     setAttribute(name, value) {
       attrs.set(name, String(value));
     },
@@ -347,15 +362,128 @@ test('day chips toggle individual days and move the row to a custom set', () => 
   click(presetButton(card, 'custom'));
 
   // Sat joins the weekday set in sorted position; the row is no longer a named
-  // preset, so the selection lands on Custom.
+  // preset, so the selection lands on Custom. The chip's own pressed state
+  // comes from the repaint's resync pass (paintDayControl walks [data-day]),
+  // so asserting it pins that loop — not just the row mutation.
   click(dayChip(card, 5));
   assert.equal(summary.textContent, 'Mon, Tue, Wed, Thu, Fri, Sat · 22:00–06:00 next day');
   assert.equal(presetButton(card, 'custom').attrs.get('aria-pressed'), 'true');
+  assert.equal(dayChip(card, 5).attrs.get('aria-pressed'), 'true');
+  assert.equal(dayChip(card, 0).attrs.get('aria-pressed'), 'true');
   assert.equal(feedbackText(), 'Unsaved changes.');
 
   // Mon leaves the same way.
   click(dayChip(card, 0));
   assert.equal(summary.textContent, 'Tue, Wed, Thu, Fri, Sat · 22:00–06:00 next day');
+  assert.equal(dayChip(card, 0).attrs.get('aria-pressed'), 'false');
+  assert.equal(dayChip(card, 5).attrs.get('aria-pressed'), 'true');
+  assert.equal(isSettingsDirty(), true);
+});
+
+// ---------- scoped seasons and the season date editor ----------
+//
+// A months- or date-scoped season is the plan editor's other render mode: the
+// action row consults the plan algebra (complementScope, the complement
+// overlap check, the duplicate cap) and the card carries the season date
+// editor whose commit discards the year of a picked date. Every other render
+// test uses an all-year single-window document, which never reaches these
+// branches — the gap that hid a dropped import in the paint split.
+
+const seasonCard = () => {
+  const cards = nodesByClass(element('rate-periods'), 'rate-period');
+  assert.equal(cards.length, 1, 'one season card renders');
+  return cards[0];
+};
+
+const duplicateButton = (card) => {
+  const button = nodesByClass(card, 'btn small').find(
+    (entry) => entry.dataset.action === 'duplicate',
+  );
+  assert.ok(button, 'the Duplicate action renders on the season card');
+  return button;
+};
+
+const seasonDateInput = (card, field) => {
+  const input = nodesByClass(card, 'season-date-input').find(
+    (entry) => entry.dataset.field === field,
+  );
+  assert.ok(input, `the ${field} season date input renders`);
+  return input;
+};
+
+test('a months-scoped season renders with its duplicate action offered', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'summer', months: [6, 7, 8, 9] }],
+  });
+
+  // The complement (Jan–May, Oct–Dec) is unoccupied and the plan is under the
+  // window cap, so Duplicate is offered: the render decided it through the
+  // plan algebra, the branch an all-year document never executes.
+  const card = seasonCard();
+  assert.equal(duplicateButton(card).hidden, false);
+  assert.equal(duplicateButton(card).disabled, false);
+  assert.equal(feedbackText(), '');
+});
+
+test('two months-scoped seasons occupy each other’s complement, so Duplicate is withheld', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [
+      { ...night, id: 'summer', months: [6, 7, 8, 9] },
+      { ...night, id: 'winter', months: [1, 2, 3] },
+    ],
+  });
+
+  // Both seasons render, and each sits inside the other's complement: the
+  // overlap check ran for every card and correctly withholds the button — a
+  // duplicate with nowhere to go reads as a broken action.
+  const cards = nodesByClass(element('rate-periods'), 'rate-period');
+  assert.equal(cards.length, 2);
+  for (const card of cards) {
+    assert.equal(duplicateButton(card).hidden, true);
+  }
+  assert.equal(feedbackText(), '');
+});
+
+test('a date-scoped season renders its date editor seeded from the stored bounds', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'jun-sep', from: '06-15', to: '09-15' }],
+  });
+
+  // One wrapping complement range, unoccupied and under the cap: Duplicate is
+  // offered, and both native date inputs render seeded with the stored
+  // month-day in the reference year (the year is a rendering detail).
+  const card = seasonCard();
+  assert.equal(duplicateButton(card).hidden, false);
+  assert.match(seasonDateInput(card, 'from-date').value, /-06-15$/);
+  assert.match(seasonDateInput(card, 'to-date').value, /-09-15$/);
+  assert.equal(feedbackText(), '');
+});
+
+test('a season date edit commits through the card wiring and unsaves the draft', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'jun-sep', from: '06-15', to: '09-15' }],
+  });
+
+  // The owner picks a new start date: the native input carries a full date,
+  // the commit discards the year (boundFromDateInput stores MM-DD), and the
+  // changed bound is a real edit — the same unsaved state as any keystroke.
+  const card = seasonCard();
+  const from = seasonDateInput(card, 'from-date');
+  from.value = `${from.value.slice(0, 4)}-06-01`;
+  for (const listener of from.listeners.get('change') || []) listener();
+  assert.equal(feedbackText(), 'Unsaved changes.');
   assert.equal(isSettingsDirty(), true);
 });
 
