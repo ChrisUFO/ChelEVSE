@@ -16,7 +16,7 @@ import {
 // list is a season plan; the stored flat rate is used only when no usable row
 // remains. Its rows are validated by validateRateWindows (rules only guard the
 // container).
-export const CURRENCY_MAX = 8;
+const CURRENCY_MAX = 8;
 
 // The charger address grammar (issue #54), mirrored exactly by the bridge's
 // `_normalize_charger_host` (pi/bridge.py) so the app rejects and normalizes the

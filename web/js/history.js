@@ -59,7 +59,7 @@ export const CHART_VIEW_W = 300;
 
 // One bucket per local hour of the day; the bridge keys them with strftime's
 // zero-padded "%H" ('00'–'23').
-export const HOURS_PER_DAY = 24;
+const HOURS_PER_DAY = 24;
 
 // '05' for hour 5. The stored keys are zero-padded in the document, not just in
 // the UI, so the same helper serves both.

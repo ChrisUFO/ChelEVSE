@@ -336,6 +336,10 @@ test('a day preset click commits the preset through the real card wiring', () =>
   assert.equal(isSettingsDirty(), true);
 });
 
+// Pairs with "a day preset click commits the preset through the real card
+// wiring" above: that test drives the day-control wiring with editor state and
+// this one without it — together they pin the state-threading regression, so a
+// dedupe pass must keep both.
 test('the Custom preset only reveals the chips — the days and the clean draft stay put', () => {
   resetSettings();
   showSettingsData(storedDoc);
@@ -411,6 +415,10 @@ const seasonDateInput = (card, field) => {
   return input;
 };
 
+// Pairs with "two months-scoped seasons occupy each other’s complement, so
+// Duplicate is withheld" below: only that test forces scopesOverlap across
+// cards — together they pin the scoped-season render helpers, so a dedupe pass
+// must keep both.
 test('a months-scoped season renders with its duplicate action offered', () => {
   resetSettings();
   showSettingsData({

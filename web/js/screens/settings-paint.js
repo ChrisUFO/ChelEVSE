@@ -401,7 +401,7 @@ function paintMonthEditor(card) {
 // The scope in the terms the date block needs: the canonical All-year state,
 // raw date bounds, and the derived first/last date a legacy month range can
 // show. A non-contiguous or invalid month scope has no single date range.
-export function seasonDateState(period) {
+function seasonDateState(period) {
   const allYear = period.kind === 'all';
   const dateMode = periodHasDates(period);
   const raw = periodDateBounds(period);
