@@ -23,7 +23,6 @@ import {
   hourReadFailure,
   hourReadState,
   maxSeries,
-  mergeSessions,
   nextSessionsView,
   periodBounds,
   periodById,
