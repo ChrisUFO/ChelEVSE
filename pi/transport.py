@@ -4,7 +4,9 @@ Extracted from ``bridge.py`` (behavior-preserving move): ``ChargerTransport``
 (the process's one locked charger Session), the command-application paths
 (direct HTTP, MQTT override with firmware confirmation, MQTT RAPI
 transactions) and the confirmation matchers they wait on. The MQTT-ready
-gate ``mqtt_command_ready`` lives here too — ``command_loop`` imports it.
+gate ``mqtt_command_ready`` lives here too — ``command_loop`` imports it —
+as do the shared ``_require_ok``/``_http_reason`` charger-HTTP reply checks
+that ``schedule.py`` and the facade import from here.
 """
 
 import json
@@ -15,7 +17,6 @@ import requests
 from charger_host import HTTP_TIMEOUT
 from mqtt_source import MqttPublishError
 from parsing import CommandError
-from schedule import _require_ok
 
 
 def log(message):
@@ -63,6 +64,18 @@ class ChargerTransport:
     def delete(self, url, **kwargs):
         with self._lock:
             return self._session.delete(url, **kwargs)
+
+
+def _http_reason(resp):
+    """Short HTTP failure reason with a bounded body snippet."""
+    body = " ".join((resp.text or "").split())[:120]
+    reason = f"HTTP {resp.status_code}"
+    return f"{reason}: {body}" if body else reason
+
+
+def _require_ok(resp):
+    if not 200 <= resp.status_code < 300:
+        raise CommandError(_http_reason(resp))
 
 
 def _require_command_ok(resp):

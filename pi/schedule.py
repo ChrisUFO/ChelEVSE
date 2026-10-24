@@ -5,8 +5,8 @@ normalization and overlap dropping, the canonical schedule hash, the
 rules -> firmware events mapping, the active-window state published into
 ``status/current``, and the idempotent sync that upserts changed firmware
 events and deletes stale ones. The shared ``_require_ok``/``_http_reason``
-charger-HTTP response checks live here too: this is the first extracted
-charger-HTTP caller, and ``transport.py`` imports them from here.
+charger-HTTP response checks moved down to ``transport.py`` (the module that
+owns the charger HTTP session); this module imports ``_require_ok`` from there.
 """
 
 import hashlib
@@ -15,7 +15,8 @@ import math
 import re
 
 from charger_host import HTTP_TIMEOUT
-from parsing import CommandError, _is_number
+from parsing import _is_number
+from transport import _require_ok
 
 
 def log(message):
@@ -344,15 +345,3 @@ FIRMWARE_DAYS = (
     "friday",
     "saturday",
 )
-def _http_reason(resp):
-    """Short HTTP failure reason with a bounded body snippet."""
-    body = " ".join((resp.text or "").split())[:120]
-    reason = f"HTTP {resp.status_code}"
-    return f"{reason}: {body}" if body else reason
-
-
-def _require_ok(resp):
-    if not 200 <= resp.status_code < 300:
-        raise CommandError(_http_reason(resp))
-
-
