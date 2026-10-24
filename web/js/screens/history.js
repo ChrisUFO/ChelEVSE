@@ -12,7 +12,6 @@
 import { $, el, setText } from '../ui.js';
 import { fetchHistory, fetchHistoryDay, fetchSessions, fetchSessionsInRange } from '../store.js';
 import {
-  CHART_VIEW_W,
   DEFAULT_PERIOD,
   PERIODS,
   chartIndexAt,
@@ -48,20 +47,7 @@ import {
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, formatDuration, fmtMoney, toNumber } from '../format.js';
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const VIEW_W = CHART_VIEW_W;
-const VIEW_H = 132;
-const TOP = 10;
-const BASE = 118;
-const PLOT_H = BASE - TOP;
-// A bar keeps this share of its slot. 0.56 reproduces the 5.6-unit bar of the
-// original 30-slot chart at VIEW_W / 30 and fills the viewBox for 7, 12 or 24
-// bars.
-const BAR_RATIO = 0.56;
-// A partial current slot says so in its accessible name: a month holds only its
-// recorded days, and an hour holds only what has been recorded so far.
-const PARTIAL_SUFFIX = { month: ' (current month)', hour: ' (this hour so far)' };
+import { BASE, BAR_RATIO, VIEW_W, buildBar, svgEl } from './history-chart.js';
 
 let active = false;
 let loaded = false;
@@ -126,12 +112,6 @@ let barEls = [];
 let generation = 0;
 let scrubbing = false;
 let scrubPointer = null;
-
-function svgEl(tag, attrs) {
-  const node = document.createElementNS(SVG_NS, tag);
-  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
-  return node;
-}
 
 // ---------- summary + chart costing ----------
 
@@ -265,49 +245,6 @@ function showChartEmpty(title, line) {
   setText($('chart-empty-line'), line);
 }
 
-function buildBar(point, index, slot, barW) {
-  const descriptor = currentPeriod();
-  const cost = seriesCost(point);
-  const suffix = point.isCurrent ? PARTIAL_SUFFIX[descriptor.bucket] || '' : '';
-  const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
-  const group = svgEl('g', {
-    class: 'bar',
-    role: 'button',
-    tabindex: '-1',
-    'data-index': String(index),
-    'aria-label': `${label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
-  });
-  const hit = svgEl('rect', {
-    class: 'bar-hit',
-    x: String(index * slot),
-    y: '0',
-    width: String(slot),
-    height: String(VIEW_H),
-    fill: 'transparent',
-  });
-  const guide = svgEl('rect', {
-    class: 'bar-guide',
-    x: String(index * slot + (slot - barW) / 2),
-    y: String(TOP),
-    width: String(barW),
-    height: String(PLOT_H),
-    rx: '2',
-  });
-  const max = maxSeries(series);
-  const height = point.kwh > 0 && max > 0 ? Math.max(2, (point.kwh / max) * (PLOT_H - 2)) : 2;
-  const fill = svgEl('rect', {
-    class: 'bar-fill',
-    x: String(index * slot + (slot - barW) / 2),
-    y: String(BASE - height),
-    width: String(barW),
-    height: String(height),
-    rx: '1.2',
-  });
-  group.append(guide, hit, fill);
-  if (point.kwh <= 0) group.classList.add('zero');
-  return group;
-}
-
 function renderChart() {
   const svg = $('history-chart');
   const bars = $('chart-bars');
@@ -325,8 +262,17 @@ function renderChart() {
   // 12 and 30 bars all use the full width and the hit test has no dead slots.
   const slot = VIEW_W / Math.max(1, series.length);
   const barW = slot * BAR_RATIO;
+  // The screen resolves each bar's inputs — the period's bucket kind, the
+  // resolved cost label, the shared series maximum; the chart module owns the
+  // geometry.
+  const bucket = currentPeriod().bucket;
+  const max = maxSeries(series);
   barEls = series.map((point, index) => {
-    const group = buildBar(point, index, slot, barW);
+    const group = buildBar(point, index, slot, barW, {
+      bucket,
+      cost: seriesCost(point),
+      max,
+    });
     bars.append(group);
     return group;
   });
