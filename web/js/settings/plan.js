@@ -1178,7 +1178,7 @@ export function rateWeek(rows, fallbackRate, month, year = new Date().getFullYea
 // covers every weekday, and a shorter one leaves the other weekdays absent —
 // they genuinely are not part of the season. A sample that includes 29 February
 // moves to a leap year as a whole, so its weekdays stay consecutive.
-export function rateWeekForDates(rows, fallbackRate, dates, year = new Date().getFullYear()) {
+function rateWeekForDates(rows, fallbackRate, dates, year = new Date().getFullYear()) {
   const base = parseRateValue(fallbackRate);
   const schedule = { rate: Number.isFinite(base) ? base : null, rates: rows };
   const list = Array.isArray(dates) ? dates : [];

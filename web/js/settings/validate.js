@@ -23,8 +23,8 @@ export const CURRENCY_MAX = 8;
 // same values the running bridge does. `firestore.rules` enforces only the
 // coarse part (length, character set, first/last alphanumeric): rules cannot
 // split labels or compare octets.
-export const CHARGER_HOST_MAX = 253;
-export const CHARGER_HOST_LABEL_MAX = 63;
+const CHARGER_HOST_MAX = 253;
+const CHARGER_HOST_LABEL_MAX = 63;
 const CHARGER_HOST_RE = /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 const CHARGER_HOST_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
 const OCTET_RE = /^[0-9]+$/;
