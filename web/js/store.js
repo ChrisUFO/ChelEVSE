@@ -21,6 +21,7 @@ import {
   documentId,
 } from './firebase.js';
 import { settingsPayload } from './settings.js';
+import { SESSION_LIMIT } from './history.js';
 
 let unsubStatus = null;
 let unsubCmds = null;
@@ -321,7 +322,9 @@ export async function fetchHistoryDay(dayId) {
 // (`startAfter`), and an optional started_at range narrows it to one month.
 // The range filters the same field the query orders by, so Firestore's
 // automatic single-field index serves it — no composite index is involved.
-export const SESSION_LIMIT = 20;
+// The number lives in history.js beside the paging model that concludes
+// exhaustion from it; re-exported so store importers keep this path.
+export { SESSION_LIMIT };
 
 // The period-$ range read pages the archive in bigger slices than the list:
 // this read must reach exhaustion, and a 20-doc page would cost an
