@@ -15,18 +15,16 @@ config_version change. Everything still flows through one apply_status path.
 Config: env vars with fallback to <repo root>/private/bridge.env.
 """
 
-import hashlib
 import json
 import math
 import os
 import queue
-import re
 import signal
 import sys
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
