@@ -332,7 +332,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 | Suite | Command                                                | Current size | Scope                                                                                                                       |
 | ----- | ------------------------------------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| Web   | `npm test`                                             | 513 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse, settings and schedule screens; no browser or Firebase |
+| Web   | `npm test`                                             | 515 tests    | pure modules, store helpers, router, SW shell, DOM-stub status pulse, settings and schedule screens; no browser or Firebase |
 | Rules | `npm run test:rules`                                   | 39 tests     | emulator `demo-chelevse`; command/auth/schedule/settings/FCM shapes                                                         |
 | Pi    | `pi/.venv/bin/python -m unittest discover -s pi/tests` | 454 tests    | bridge parsing, commands, MQTT, schedule, history, sessions (incl. charging intervals), watchdog, ACL; in-memory fakes      |
 

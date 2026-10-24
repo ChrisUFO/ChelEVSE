@@ -1,5 +1,6 @@
 // Pure history helpers — local calendar dates, chart periods and the read
-// classification. No DOM, no Firebase; covered by test/web/history.test.js.
+// classification. No DOM, no Firebase; covered by test/web/history.test.js;
+// the sessions paging block by test/web/history-screen.test.js.
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
