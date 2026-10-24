@@ -10,13 +10,13 @@ import { fmtRate } from '../format.js';
 import {
   DAY_PRESETS,
   MONTH_NAMES,
-  RATE_CAP_REMEDY,
   complementScope,
   dateInputForBound,
   dateRangeHint,
   dateSetText,
   dayPresetFor,
   isAllDayWindow,
+  mergeDateRanges,
   minutesToClock,
   monthEditorIsLegacy,
   periodBandCopy,
@@ -28,7 +28,6 @@ import {
   periodHasBaseOverlap,
   periodHasDates,
   planHasUnpriced,
-  planProblemText,
   rateIsUsable,
   rateMonthsText,
   ratePlanRange,
@@ -42,10 +41,9 @@ import {
   toggledMonthScope,
   uncoveredDateRanges,
   uncoveredGapScopes,
-  validationProblemCount,
   windowLabel,
-  mergeDateRanges,
-} from '../settings.js';
+} from '../settings/plan.js';
+import { RATE_CAP_REMEDY, planProblemText, validationProblemCount } from '../settings/state.js';
 import { MAX_RATE_WINDOWS, isBaseWindow, parseMonthDay, parseRateValue } from '../rates.js';
 
 // ---------- small helpers ----------
@@ -84,7 +82,7 @@ function segmentClass(segment, state) {
   return tierClass(rateSegmentLabel(segment, rates, base));
 }
 
-function windowName(row, period = null, state = null) {
+function windowName(row, period = null, state) {
   const tier = bandName(row, period, state);
   return `${tier ? `${tier} ` : ''}${rateWindowSummary(row)}`;
 }
@@ -96,7 +94,7 @@ function windowName(row, period = null, state = null) {
 // the legend rank against, so a card can never say "Peak" where its row says
 // "Window". A season with no base has no reference price at all: its windows are
 // "Window" everywhere instead of being ranked against another season's base.
-function bandName(row, period = null, state = null) {
+function bandName(row, period = null, state) {
   if (isBaseWindow(row)) return 'Base';
   const base = period ? periodBaseRate(period) : null;
   if (period && base == null) return 'Window';
@@ -176,7 +174,7 @@ function paintTimeControl(card) {
   card.allDayRow.hidden = show;
 }
 
-function paintWindowCard(card, state = null) {
+function paintWindowCard(card, state) {
   const row = card.row;
   const period = card.periodCard ? card.periodCard.period : null;
   const name = windowName(row, period, state);
@@ -312,7 +310,7 @@ function createWindowCard(entry, periodCard, state) {
   });
   card.rateInput = rateInput;
 
-  const dayControl = createDayControl(card);
+  const dayControl = createDayControl(card, state);
   card.dayControl = dayControl;
 
   const timeBlock = el('div', 'time-block');

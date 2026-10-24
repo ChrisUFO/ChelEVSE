@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { initTabbar, routeFor } from '../../web/js/ui.js';
+import { initTabbar, routeFor, buildDayPicker, toggleDay } from '../../web/js/ui.js';
 import { initConfig } from '../../web/js/screens/config.js';
+import { DAY_NAMES } from '../../web/js/schedule.js';
 
 test('routeFor accepts known hashes and canonicalises the rest', () => {
   assert.equal(routeFor('#status'), 'status');
@@ -17,6 +18,126 @@ test('routeFor ignores inherited object keys', () => {
   for (const hash of ['#constructor', '#__proto__', '#toString', '#valueOf']) {
     assert.equal(routeFor(hash), 'status', hash);
   }
+});
+
+// ---------- shared day-picker surface ----------
+//
+// `toggleDay` and `buildDayPicker` are load-bearing for both day-chip editors
+// (schedule rules and the settings plan editor); before the shared extraction
+// they were pinned only indirectly through those screens. These pins hold the
+// edit idiom (sorted, unique) and the builder's attribute contract — the
+// `data-day`/aria-pressed surface the screens' repaint passes read back.
+
+test('toggleDay adds in sorted position, removes, and never duplicates', () => {
+  // Add: the day lands in sorted position, not append order.
+  assert.deepEqual(toggleDay([2, 4], 0), [0, 2, 4]);
+  assert.deepEqual(toggleDay([0, 4], 2), [0, 2, 4]);
+  // Remove: the day leaves, the rest keep their order.
+  assert.deepEqual(toggleDay([0, 2, 4], 2), [0, 4]);
+  assert.deepEqual(toggleDay([0, 2, 4], 4), [0, 2]);
+  // An unsorted input still toggles against its own membership, and an add
+  // normalises to sorted; duplicates can only shrink the result.
+  assert.deepEqual(toggleDay([4, 4, 2], 4), [2]);
+  assert.deepEqual(toggleDay([4, 2], 0), [0, 2, 4]);
+});
+
+// A minimal node for the builder: the picker only needs element creation, so a
+// local stub keeps this file free of the heavier screen harnesses.
+function pickerNode(tag) {
+  const attrs = new Map();
+  const listeners = new Map();
+  return {
+    tag,
+    className: '',
+    textContent: '',
+    type: '',
+    dataset: {},
+    attrs,
+    listeners,
+    children: [],
+    append(...nodes) {
+      this.children.push(...nodes);
+    },
+    setAttribute(name, value) {
+      attrs.set(name, String(value));
+    },
+    getAttribute: (name) => (attrs.has(name) ? attrs.get(name) : null),
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+  };
+}
+
+function installPickerDoc() {
+  globalThis.document = { createElement: (tag) => pickerNode(tag) };
+}
+
+test('buildDayPicker renders the chip group and drives onToggle with sorted unique days', () => {
+  installPickerDoc();
+  const days = [0, 1, 2, 3, 4];
+  const toggles = [];
+  const group = buildDayPicker({
+    className: 'plan-days',
+    chipClass: 'plan-day',
+    describeId: 'rate-window-error-0',
+    label: 'Days for the night window',
+    getDays: () => days,
+    pressed: (day) => days.includes(day),
+    dataDay: true,
+    onToggle: (day, nextDays, chip) => {
+      days.length = 0;
+      days.push(...nextDays);
+      toggles.push([day, chip.dataset.day]);
+    },
+  });
+
+  assert.equal(group.className, 'plan-days');
+  assert.equal(group.attrs.get('role'), 'group');
+  assert.equal(group.attrs.get('aria-label'), 'Days for the night window');
+  assert.equal(group.attrs.get('aria-describedby'), 'rate-window-error-0');
+  assert.equal(group.children.length, DAY_NAMES.length);
+
+  group.children.forEach((chip, day) => {
+    assert.equal(chip.className, 'plan-day');
+    assert.equal(chip.textContent, DAY_NAMES[day]);
+    assert.equal(chip.type, 'button');
+    assert.equal(chip.dataset.day, String(day), 'data-day survives for repaint lookups');
+    assert.equal(chip.attrs.get('aria-pressed'), String(day <= 4));
+  });
+
+  // A click on Sat: the callback receives the day, the next (sorted, unique)
+  // set, and the chip itself.
+  group.children[5].listeners.get('click')();
+  assert.deepEqual(days, [0, 1, 2, 3, 4, 5]);
+  assert.deepEqual(toggles, [[5, '5']]);
+
+  // Clicking it again removes it; clicking an already-listed weekday removes
+  // that one — membership, not position, decides.
+  group.children[5].listeners.get('click')();
+  assert.deepEqual(days, [0, 1, 2, 3, 4]);
+  group.children[0].listeners.get('click')();
+  assert.deepEqual(days, [1, 2, 3, 4]);
+});
+
+test('buildDayPicker leaves the label and per-chip aria off unless asked', () => {
+  installPickerDoc();
+  const group = buildDayPicker({
+    className: 'days',
+    chipClass: 'day',
+    describeId: 'rule-error-0',
+    getDays: () => [0],
+    onToggle: () => {},
+  });
+
+  assert.equal(group.attrs.has('aria-label'), false);
+  // Without `pressed`, no chip claims a state; without `dataDay`, no chip
+  // carries data-day — the settings editor opts into both, the schedule
+  // editor's initial paint opts into pressed only.
+  group.children.forEach((chip) => {
+    assert.equal(chip.attrs.has('aria-pressed'), false);
+    assert.equal(chip.attrs.has('aria-label'), false);
+    assert.equal('day' in chip.dataset, false);
+  });
 });
 
 // ---------- initTabbar: route-change confirmation seam (#129) ----------
