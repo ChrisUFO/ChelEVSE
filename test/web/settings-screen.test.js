@@ -30,12 +30,15 @@ import { readFileSync } from 'node:fs';
 const focusLog = [];
 const scrollLog = [];
 
-function stubElement() {
+function stubElement(tag = '') {
   const classes = new Set();
   const listeners = new Map();
+  const attrs = new Map();
   return {
+    tag,
     classes,
     listeners,
+    attrs,
     classList: {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -69,10 +72,29 @@ function stubElement() {
     remove() {},
     contains: () => false,
     querySelector: () => null,
-    querySelectorAll: () => [],
-    setAttribute() {},
-    removeAttribute() {},
-    getAttribute: () => null,
+    // The one selector the paint pipeline resyncs through that the harness
+    // observes: the day chips' pressed state (paintDayControl). Every other
+    // query stays invisible, as before — enabling more selectors is a
+    // per-finding decision, not a harness goal.
+    querySelectorAll(selector) {
+      if (selector !== '[data-day]') return [];
+      const found = [];
+      const walk = (node) => {
+        for (const child of node.children || []) {
+          if (child.dataset && child.dataset.day != null) found.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return found;
+    },
+    setAttribute(name, value) {
+      attrs.set(name, String(value));
+    },
+    getAttribute: (name) => (attrs.has(name) ? attrs.get(name) : null),
+    removeAttribute(name) {
+      attrs.delete(name);
+    },
     toggleAttribute() {},
     addEventListener(type, listener) {
       if (!listeners.has(type)) listeners.set(type, []);
@@ -104,7 +126,7 @@ function element(id) {
 globalThis.document = {
   documentElement: { style: { setProperty() {} } },
   getElementById: (id) => element(id),
-  createElement: () => stubElement(),
+  createElement: (tag) => stubElement(tag),
   createTextNode: (text) => ({ textContent: text }),
 };
 
@@ -246,6 +268,231 @@ test('a stored rate row survives the same rate-only path', async () => {
   // Clean again only if the draft still carries the row: dropping
   // `rates: draftRates` from `readFields()` leaves the form forever dirty.
   await editRateBackToStored();
+});
+
+// ---------- plan-editor day controls ----------
+//
+// The day presets and custom day chips are the plan editor's primary edit
+// gesture, and the paint pipeline wires them through the `state` verbs
+// (commitRowShape → markEdited/refresh), not module closures — a missed
+// argument in that threading is exactly the class of regression the green
+// suite could not see before these tests. Each click below drives the real
+// listener on the really-rendered card, the same way the owner's pointer does.
+
+// Depth-first over the stub tree: the harness keeps no parent links and the
+// card builders nest the controls (window → day-control → presets/chips), so
+// class lookup is the pointer's own path to a control.
+const nodesByClass = (node, className, found = []) => {
+  for (const child of node.children || []) {
+    if (child.className === className) found.push(child);
+    nodesByClass(child, className, found);
+  }
+  return found;
+};
+
+const windowCard = () => {
+  const cards = nodesByClass(element('rate-periods'), 'rate-window');
+  assert.equal(cards.length, 1, 'one window card renders for the stored row');
+  return cards[0];
+};
+
+const presetButton = (card, id) => {
+  const button = nodesByClass(card, 'preset').find((entry) => entry.dataset.preset === id);
+  assert.ok(button, `the ${id} preset button renders`);
+  return button;
+};
+
+const dayChip = (card, day) => {
+  const chip = nodesByClass(card, 'plan-day').find((entry) => entry.dataset.day === String(day));
+  assert.ok(chip, `the day-${day} chip renders`);
+  return chip;
+};
+
+const chipGroup = (card) => nodesByClass(card, 'plan-days')[0];
+
+const click = (node) => {
+  for (const listener of node.listeners.get('click') || []) listener();
+};
+
+test('a day preset click commits the preset through the real card wiring', () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+
+  const card = windowCard();
+  const summary = nodesByClass(card, 'rate-summary')[0];
+  assert.equal(summary.textContent, 'Weekdays · 22:00–06:00 next day');
+  assert.equal(presetButton(card, 'weekdays').attrs.get('aria-pressed'), 'true');
+  assert.equal(feedbackText(), '');
+
+  // Weekends: the row's days become the preset, the selection moves to it, and
+  // the draft turns unsaved — the whole commit path, not just the mutation.
+  click(presetButton(card, 'weekends'));
+  assert.equal(summary.textContent, 'Weekends · 22:00–06:00 next day');
+  assert.equal(presetButton(card, 'weekends').attrs.get('aria-pressed'), 'true');
+  assert.equal(presetButton(card, 'weekdays').attrs.get('aria-pressed'), 'false');
+  assert.equal(presetButton(card, 'every').attrs.get('aria-pressed'), 'false');
+  assert.equal(chipGroup(card).hidden, true, 'a preset folds the custom chips away');
+  assert.equal(feedbackText(), 'Unsaved changes.');
+  assert.equal(isSettingsDirty(), true);
+});
+
+// Custom takes the preset click's no-days branch, which never touches state:
+// the state-threading regression is pinned by the preset-commit test above
+// and "day chips toggle…" below (both reach state.commitRowShape). Keep this
+// one for the reveal itself, not for that pin.
+test('the Custom preset only reveals the chips — the days and the clean draft stay put', () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+
+  const card = windowCard();
+  const summary = nodesByClass(card, 'rate-summary')[0];
+  assert.equal(chipGroup(card).hidden, true, 'a preset-shaped row starts folded');
+
+  click(presetButton(card, 'custom'));
+  assert.equal(chipGroup(card).hidden, false, 'Custom reveals the chip editor');
+  assert.equal(presetButton(card, 'custom').attrs.get('aria-pressed'), 'true');
+  assert.equal(presetButton(card, 'weekdays').attrs.get('aria-pressed'), 'false');
+  assert.equal(summary.textContent, 'Weekdays · 22:00–06:00 next day', 'no day changed');
+  assert.equal(feedbackText(), '', 'revealing chips is not an edit');
+  assert.equal(isSettingsDirty(), false);
+});
+
+test('day chips toggle individual days and move the row to a custom set', () => {
+  resetSettings();
+  showSettingsData(storedDoc);
+
+  const card = windowCard();
+  const summary = nodesByClass(card, 'rate-summary')[0];
+  click(presetButton(card, 'custom'));
+
+  // Sat joins the weekday set in sorted position; the row is no longer a named
+  // preset, so the selection lands on Custom. The chip's own pressed state
+  // comes from the repaint's resync pass (paintDayControl walks [data-day]),
+  // so asserting it pins that loop — not just the row mutation.
+  click(dayChip(card, 5));
+  assert.equal(summary.textContent, 'Mon, Tue, Wed, Thu, Fri, Sat · 22:00–06:00 next day');
+  assert.equal(presetButton(card, 'custom').attrs.get('aria-pressed'), 'true');
+  assert.equal(dayChip(card, 5).attrs.get('aria-pressed'), 'true');
+  assert.equal(dayChip(card, 0).attrs.get('aria-pressed'), 'true');
+  assert.equal(feedbackText(), 'Unsaved changes.');
+
+  // Mon leaves the same way.
+  click(dayChip(card, 0));
+  assert.equal(summary.textContent, 'Tue, Wed, Thu, Fri, Sat · 22:00–06:00 next day');
+  assert.equal(dayChip(card, 0).attrs.get('aria-pressed'), 'false');
+  assert.equal(dayChip(card, 5).attrs.get('aria-pressed'), 'true');
+  assert.equal(isSettingsDirty(), true);
+});
+
+// ---------- scoped seasons and the season date editor ----------
+//
+// A months- or date-scoped season is the plan editor's other render mode: the
+// action row consults the plan algebra (complementScope, the complement
+// overlap check, the duplicate cap) and the card carries the season date
+// editor whose commit discards the year of a picked date. Every other render
+// test uses an all-year single-window document, which never reaches these
+// branches — the gap that hid a dropped import in the paint split.
+
+const seasonCard = () => {
+  const cards = nodesByClass(element('rate-periods'), 'rate-period');
+  assert.equal(cards.length, 1, 'one season card renders');
+  return cards[0];
+};
+
+const duplicateButton = (card) => {
+  const button = nodesByClass(card, 'btn small').find(
+    (entry) => entry.dataset.action === 'duplicate',
+  );
+  assert.ok(button, 'the Duplicate action renders on the season card');
+  return button;
+};
+
+const seasonDateInput = (card, field) => {
+  const input = nodesByClass(card, 'season-date-input').find(
+    (entry) => entry.dataset.field === field,
+  );
+  assert.ok(input, `the ${field} season date input renders`);
+  return input;
+};
+
+// Pairs with "two months-scoped seasons occupy each other’s complement, so
+// Duplicate is withheld" below: only that test forces scopesOverlap across
+// cards — together they pin the scoped-season render helpers, so a dedupe pass
+// must keep both.
+test('a months-scoped season renders with its duplicate action offered', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'summer', months: [6, 7, 8, 9] }],
+  });
+
+  // The complement (Jan–May, Oct–Dec) is unoccupied and the plan is under the
+  // window cap, so Duplicate is offered: the render decided it through the
+  // plan algebra, the branch an all-year document never executes.
+  const card = seasonCard();
+  assert.equal(duplicateButton(card).hidden, false);
+  assert.equal(duplicateButton(card).disabled, false);
+  assert.equal(feedbackText(), '');
+});
+
+test('two months-scoped seasons occupy each other’s complement, so Duplicate is withheld', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [
+      { ...night, id: 'summer', months: [6, 7, 8, 9] },
+      { ...night, id: 'winter', months: [1, 2, 3] },
+    ],
+  });
+
+  // Both seasons render, and each sits inside the other's complement: the
+  // overlap check ran for every card and correctly withholds the button — a
+  // duplicate with nowhere to go reads as a broken action.
+  const cards = nodesByClass(element('rate-periods'), 'rate-period');
+  assert.equal(cards.length, 2);
+  for (const card of cards) {
+    assert.equal(duplicateButton(card).hidden, true);
+  }
+  assert.equal(feedbackText(), '');
+});
+
+test('a date-scoped season renders its date editor seeded from the stored bounds', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'jun-sep', from: '06-15', to: '09-15' }],
+  });
+
+  // One wrapping complement range, unoccupied and under the cap: Duplicate is
+  // offered, and both native date inputs render seeded with the stored
+  // month-day in the reference year (the year is a rendering detail).
+  const card = seasonCard();
+  assert.equal(duplicateButton(card).hidden, false);
+  assert.match(seasonDateInput(card, 'from-date').value, /-06-15$/);
+  assert.match(seasonDateInput(card, 'to-date').value, /-09-15$/);
+  assert.equal(feedbackText(), '');
+});
+
+test('a season date edit commits through the card wiring and unsaves the draft', () => {
+  resetSettings();
+  showSettingsData({
+    rate: 0.31,
+    currency: 'USD',
+    rates: [{ ...night, id: 'jun-sep', from: '06-15', to: '09-15' }],
+  });
+
+  // The owner picks a new start date: the native input carries a full date,
+  // the commit discards the year (boundFromDateInput stores MM-DD), and the
+  // changed bound is a real edit — the same unsaved state as any keystroke.
+  const card = seasonCard();
+  const from = seasonDateInput(card, 'from-date');
+  from.value = `${from.value.slice(0, 4)}-06-01`;
+  for (const listener of from.listeners.get('change') || []) listener();
+  assert.equal(feedbackText(), 'Unsaved changes.');
+  assert.equal(isSettingsDirty(), true);
 });
 
 // The temperature switch (issue #117) rides the same #102 carry-through as the

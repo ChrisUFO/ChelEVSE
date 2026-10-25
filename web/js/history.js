@@ -1,5 +1,6 @@
 // Pure history helpers — local calendar dates, chart periods and the read
-// classification. No DOM, no Firebase; covered by test/web/history.test.js.
+// classification. No DOM, no Firebase; covered by test/web/history.test.js;
+// the sessions paging block by test/web/history-screen.test.js.
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -58,7 +59,7 @@ export const CHART_VIEW_W = 300;
 
 // One bucket per local hour of the day; the bridge keys them with strftime's
 // zero-padded "%H" ('00'–'23').
-export const HOURS_PER_DAY = 24;
+const HOURS_PER_DAY = 24;
 
 // '05' for hour 5. The stored keys are zero-padded in the document, not just in
 // the UI, so the same helper serves both.
@@ -393,4 +394,91 @@ export function sectionView(state, hasPreviousData) {
     };
   }
   return { showData: false, stale: false, claimEmpty: false };
+}
+
+// ---------- sessions view (pure) ----------
+
+// The sessions list's page size: the query cap store.js reads and the
+// short-page rule below concludes exhaustion from — one number, one home.
+export const SESSION_LIMIT = 20;
+
+// A view with nothing shown: the state every first read starts from.
+export function emptySessionsView() {
+  return {
+    sessions: [],
+    month: null,
+    cursor: null,
+    exhausted: false,
+    state: 'idle',
+  };
+}
+
+// Pages are disjoint by construction — `startAfter` continues past the last
+// shown document — but a re-read or a cache overlap must never render a row
+// twice, so pages merge by id (the bridge's id is the start epoch, unique per
+// session). The query's newest-first order is the kept order; nothing re-sorts.
+export function mergeSessions(shown = [], page = []) {
+  const merged = Array.isArray(shown) ? [...shown] : [];
+  const seen = new Set(merged.map((item) => item && item.id));
+  for (const item of Array.isArray(page) ? page : []) {
+    if (!item || seen.has(item.id)) continue;
+    seen.add(item.id);
+    merged.push(item);
+  }
+  return merged;
+}
+
+// The sessions view after one settled read; `read` null means the read failed.
+//   kind 'first'  page one of the view named by `month` ('YYYY-MM') or null
+//                 (recent): a read the server or the cache answered adopts
+//                 that view and replaces the list — refresh, a month pick and
+//                 the Recent reset all land here — while a failed read or an
+//                 offline cache miss keeps the previous view on screen.
+//   kind 'more'   the next page of the rendered view: appended without
+//                 duplicates, the cursor advanced past it.
+// Exhaustion is concluded only by a server-answered short page: a cached short
+// page is the cache answering, not the archive ending.
+export function nextSessionsView(view, read, { kind = 'first', month = null } = {}) {
+  const current = view || emptySessionsView();
+  if (!read) {
+    // A failed read changes nothing but the state: the rendered list stays
+    // exactly as it was, ready for a retry.
+    return { ...current, state: 'error' };
+  }
+  const state = historyReadState(read);
+  if (state === 'offline') {
+    // An offline cache miss is not an answer: keep the previous view the way
+    // the pre-paging screen kept its last loaded list.
+    return { ...current, state };
+  }
+  const short = !read.fromCache && read.docs.length < SESSION_LIMIT;
+  if (kind === 'more') {
+    const sessions = mergeSessions(current.sessions, read.docs);
+    return {
+      ...current,
+      // An empty page ends the archive without erasing it: the kept list is
+      // complete, which is a current presentation, not "no sessions".
+      state: state === 'empty' && sessions.length ? 'fresh' : state,
+      sessions,
+      cursor: read.lastDoc || current.cursor,
+      exhausted: current.exhausted || short,
+    };
+  }
+  return {
+    state,
+    month,
+    sessions: read.docs,
+    cursor: read.lastDoc || null,
+    exhausted: short,
+  };
+}
+
+// The "show more" control's painting: offered only beside a rendered list that
+// no server-answered short page has concluded, whatever the read state — a
+// failed or cached page leaves it usable for a retry. Previous data is "rows
+// exist", not payload provenance: a cached view survives an offline or failed
+// read the same way a server-sourced one does.
+export function sessionsControls(view) {
+  const section = sectionView(view.state, view.sessions.length > 0);
+  return { more: Boolean(section.showData) && !view.exhausted && view.sessions.length > 0 };
 }

@@ -9,30 +9,26 @@
 // re-read behind it, for a session write the bridge retried after the settle
 // read fetched.
 
-import { $, setText } from '../ui.js';
+import { $, el, setText } from '../ui.js';
+import { fetchHistory, fetchHistoryDay, fetchSessions, fetchSessionsInRange } from '../store.js';
 import {
-  SESSION_LIMIT,
-  fetchHistory,
-  fetchHistoryDay,
-  fetchSessions,
-  fetchSessionsInRange,
-} from '../store.js';
-import {
-  CHART_VIEW_W,
   DEFAULT_PERIOD,
   PERIODS,
   chartIndexAt,
   dayId,
   dayLabel,
+  emptySessionsView,
   historyReadState,
   hourRange,
   hourReadFailure,
   hourReadState,
   maxSeries,
+  nextSessionsView,
   periodBounds,
   periodById,
   periodSeries,
   sectionView,
+  sessionsControls,
   sessionsRange,
   sumSeries,
 } from '../history.js';
@@ -40,28 +36,15 @@ import {
   aggregateCostLabel,
   costSettings,
   hasRateSchedule,
-  hourCost,
   liveSessionContribution,
   liveSessionSpan,
-  sessionBucketCost,
+  pointCostSummary,
   sessionCostLabel,
+  seriesCostSummary,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, formatDuration, fmtMoney, toNumber } from '../format.js';
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const VIEW_W = CHART_VIEW_W;
-const VIEW_H = 132;
-const TOP = 10;
-const BASE = 118;
-const PLOT_H = BASE - TOP;
-// A bar keeps this share of its slot. 0.56 reproduces the 5.6-unit bar of the
-// original 30-slot chart at VIEW_W / 30 and fills the viewBox for 7, 12 or 24
-// bars.
-const BAR_RATIO = 0.56;
-// A partial current slot says so in its accessible name: a month holds only its
-// recorded days, and an hour holds only what has been recorded so far.
-const PARTIAL_SUFFIX = { month: ' (current month)', hour: ' (this hour so far)' };
+import { BASE, BAR_RATIO, VIEW_W, buildBar, svgEl } from './history-chart.js';
 
 let active = false;
 let loaded = false;
@@ -127,70 +110,11 @@ let generation = 0;
 let scrubbing = false;
 let scrubPointer = null;
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
-
-function svgEl(tag, attrs) {
-  const node = document.createElementNS(SVG_NS, tag);
-  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
-  return node;
-}
-
 // ---------- summary + chart costing ----------
 
-// One rendered bucket's schedule-priced cost and what of its energy it covers.
-// Pure — `settings` arrives per call — and schedule-only by design: the flat
-// path is aggregateCostLabel's and stays byte-identical, so a flat misuse
-// returns a hidden figure, never a flat price. `sessions` is the period read's
-// overlapping-sessions payload and prices exactly one bucket kind:
-//   hour bucket   one wall-clock hour of the day the Day period's read
-//                 targeted, priced from the day document's own `hours` map —
-//                 the one bucket path left (#123)
-//   day bucket    the sessions' energy attributed to that local day
-//   month bucket  the sessions' energy attributed to that local month
-// Attribution reconciles with the sessions list by construction, and kWh
-// totals stay the day documents' — `point.kwh` only measures coverage, so a
-// bucket whose recorded energy has no covering session hides its figure
-// instead of pricing itself free.
-export function pointCostSummary(point, bucket, settings, sessions = []) {
-  if (bucket === 'hour') {
-    const cost = hourCost(point.dayId, point.id, point.kwh, settings);
-    return { cost, pricedEnergy: point.kwh > 0, unpricedEnergy: false };
-  }
-  const totals = sessionBucketCost(sessions, point.id, point.kwh, settings);
-  if (!totals) {
-    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0 };
-  }
-  return {
-    cost: totals.cost,
-    pricedEnergy: totals.wh > 0,
-    unpricedEnergy: !totals.covered,
-  };
-}
-
-// The summary's schedule-priced total over one rendered series: the sum of
-// every priced bucket, hidden when the range's energy is unpriceable and
-// nothing priced sits beside it (a 0.00 there would read as free). Buckets
-// with no energy are fully priced at 0.00 — an empty range is a $0.00 range.
-export function seriesCostSummary(points, bucket, settings, sessions = []) {
-  if (!hasRateSchedule(settings)) return { cost: null };
-  let cost = 0;
-  let pricedEnergy = false;
-  let unpricedEnergy = false;
-  for (const point of points || []) {
-    const one = pointCostSummary(point, bucket, settings, sessions);
-    if (one.cost != null) cost += one.cost;
-    if (one.pricedEnergy) pricedEnergy = true;
-    if (one.unpricedEnergy) unpricedEnergy = true;
-  }
-  return {
-    cost: unpricedEnergy && !pricedEnergy ? null : cost,
-  };
-}
+// The bucket/series cost summaries live in js/cost.js beside the pricing
+// helpers they call; re-exported here so the screen's tests keep this path.
+export { pointCostSummary, seriesCostSummary } from '../cost.js';
 
 // The sessions a period's $ prices: the recorded payload plus, while a charge
 // is in progress, the live session's contribution (#126) — merged only for a
@@ -318,49 +242,6 @@ function showChartEmpty(title, line) {
   setText($('chart-empty-line'), line);
 }
 
-function buildBar(point, index, slot, barW) {
-  const descriptor = currentPeriod();
-  const cost = seriesCost(point);
-  const suffix = point.isCurrent ? PARTIAL_SUFFIX[descriptor.bucket] || '' : '';
-  const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
-  const group = svgEl('g', {
-    class: 'bar',
-    role: 'button',
-    tabindex: '-1',
-    'data-index': String(index),
-    'aria-label': `${label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
-  });
-  const hit = svgEl('rect', {
-    class: 'bar-hit',
-    x: String(index * slot),
-    y: '0',
-    width: String(slot),
-    height: String(VIEW_H),
-    fill: 'transparent',
-  });
-  const guide = svgEl('rect', {
-    class: 'bar-guide',
-    x: String(index * slot + (slot - barW) / 2),
-    y: String(TOP),
-    width: String(barW),
-    height: String(PLOT_H),
-    rx: '2',
-  });
-  const max = maxSeries(series);
-  const height = point.kwh > 0 && max > 0 ? Math.max(2, (point.kwh / max) * (PLOT_H - 2)) : 2;
-  const fill = svgEl('rect', {
-    class: 'bar-fill',
-    x: String(index * slot + (slot - barW) / 2),
-    y: String(BASE - height),
-    width: String(barW),
-    height: String(height),
-    rx: '1.2',
-  });
-  group.append(guide, hit, fill);
-  if (point.kwh <= 0) group.classList.add('zero');
-  return group;
-}
-
 function renderChart() {
   const svg = $('history-chart');
   const bars = $('chart-bars');
@@ -378,8 +259,17 @@ function renderChart() {
   // 12 and 30 bars all use the full width and the hit test has no dead slots.
   const slot = VIEW_W / Math.max(1, series.length);
   const barW = slot * BAR_RATIO;
+  // The screen resolves each bar's inputs — the period's bucket kind, the
+  // resolved cost label, the shared series maximum; the chart module owns the
+  // geometry.
+  const bucket = currentPeriod().bucket;
+  const max = maxSeries(series);
   barEls = series.map((point, index) => {
-    const group = buildBar(point, index, slot, barW);
+    const group = buildBar(point, index, slot, barW, {
+      bucket,
+      cost: seriesCost(point),
+      max,
+    });
     bars.append(group);
     return group;
   });
@@ -545,86 +435,9 @@ function renderSession(item) {
 
 // ---------- sessions view (pure) ----------
 
-// A view with nothing shown: the state every first read starts from.
-export function emptySessionsView() {
-  return {
-    sessions: [],
-    month: null,
-    cursor: null,
-    exhausted: false,
-    state: 'idle',
-  };
-}
-
-// Pages are disjoint by construction — `startAfter` continues past the last
-// shown document — but a re-read or a cache overlap must never render a row
-// twice, so pages merge by id (the bridge's id is the start epoch, unique per
-// session). The query's newest-first order is the kept order; nothing re-sorts.
-export function mergeSessions(shown = [], page = []) {
-  const merged = Array.isArray(shown) ? [...shown] : [];
-  const seen = new Set(merged.map((item) => item && item.id));
-  for (const item of Array.isArray(page) ? page : []) {
-    if (!item || seen.has(item.id)) continue;
-    seen.add(item.id);
-    merged.push(item);
-  }
-  return merged;
-}
-
-// The sessions view after one settled read; `read` null means the read failed.
-//   kind 'first'  page one of the view named by `month` ('YYYY-MM') or null
-//                 (recent): a read the server or the cache answered adopts
-//                 that view and replaces the list — refresh, a month pick and
-//                 the Recent reset all land here — while a failed read or an
-//                 offline cache miss keeps the previous view on screen.
-//   kind 'more'   the next page of the rendered view: appended without
-//                 duplicates, the cursor advanced past it.
-// Exhaustion is concluded only by a server-answered short page: a cached short
-// page is the cache answering, not the archive ending.
-export function nextSessionsView(view, read, { kind = 'first', month = null } = {}) {
-  const current = view || emptySessionsView();
-  if (!read) {
-    // A failed read changes nothing but the state: the rendered list stays
-    // exactly as it was, ready for a retry.
-    return { ...current, state: 'error' };
-  }
-  const state = historyReadState(read);
-  if (state === 'offline') {
-    // An offline cache miss is not an answer: keep the previous view the way
-    // the pre-paging screen kept its last loaded list.
-    return { ...current, state };
-  }
-  const short = !read.fromCache && read.docs.length < SESSION_LIMIT;
-  if (kind === 'more') {
-    const sessions = mergeSessions(current.sessions, read.docs);
-    return {
-      ...current,
-      // An empty page ends the archive without erasing it: the kept list is
-      // complete, which is a current presentation, not "no sessions".
-      state: state === 'empty' && sessions.length ? 'fresh' : state,
-      sessions,
-      cursor: read.lastDoc || current.cursor,
-      exhausted: current.exhausted || short,
-    };
-  }
-  return {
-    state,
-    month,
-    sessions: read.docs,
-    cursor: read.lastDoc || null,
-    exhausted: short,
-  };
-}
-
-// The "show more" control's painting: offered only beside a rendered list that
-// no server-answered short page has concluded, whatever the read state — a
-// failed or cached page leaves it usable for a retry. Previous data is "rows
-// exist", not payload provenance: a cached view survives an offline or failed
-// read the same way a server-sourced one does.
-export function sessionsControls(view) {
-  const section = sectionView(view.state, view.sessions.length > 0);
-  return { more: Boolean(section.showData) && !view.exhausted && view.sessions.length > 0 };
-}
+// The sessions paging model lives in js/history.js beside its read-state
+// helpers; re-exported here so the screen's harness keeps its import path.
+export { mergeSessions, nextSessionsView, sessionsControls } from '../history.js';
 
 // A month id's half-open [start, end) range: Date values convert to the
 // Timestamps `started_at` stores, and the filter rides the orderBy's automatic

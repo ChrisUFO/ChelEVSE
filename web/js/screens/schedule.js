@@ -12,7 +12,7 @@
 // Those repeats are guarded by transition, never applied as new data, and they
 // never erase a notice that explains the last real change.
 
-import { $, setText } from '../ui.js';
+import { $, buildDayPicker, el, setText } from '../ui.js';
 import { readScheduleBaseline, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
@@ -97,13 +97,6 @@ let editGeneration = 0;
 let live = { inWindow: false, activeRuleId: null };
 let cards = [];
 let generation = 0;
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text != null) node.textContent = text;
-  return node;
-}
 
 function clone(schedule) {
   return normalizeSchedule(schedule);
@@ -403,20 +396,6 @@ function validateAndPaint() {
   renderLive();
 }
 
-function dayChip(rule, day, index) {
-  const button = el('button', 'day', DAY_NAMES[day]);
-  button.type = 'button';
-  button.setAttribute('aria-pressed', String(rule.days.includes(day)));
-  button.setAttribute('aria-label', `${DAY_NAMES[day]} for window ${index + 1}`);
-  button.addEventListener('click', () => {
-    if (rule.days.includes(day)) rule.days = rule.days.filter((d) => d !== day);
-    else rule.days = [...rule.days, day].sort((a, b) => a - b);
-    button.setAttribute('aria-pressed', String(rule.days.includes(day)));
-    markDirty();
-  });
-  return button;
-}
-
 function createCard(rule, index) {
   const node = el('article', 'rule-card');
   node.dataset.id = rule.id;
@@ -435,11 +414,20 @@ function createCard(rule, index) {
   });
   head.append(remove);
 
-  const days = el('div', 'days');
-  days.setAttribute('role', 'group');
-  days.setAttribute('aria-label', `Days for window ${index + 1}`);
-  days.setAttribute('aria-describedby', errorId);
-  DAY_NAMES.forEach((_, day) => days.append(dayChip(rule, day, index)));
+  const days = buildDayPicker({
+    className: 'days',
+    chipClass: 'day',
+    describeId: errorId,
+    label: `Days for window ${index + 1}`,
+    getDays: () => rule.days,
+    pressed: (day) => rule.days.includes(day),
+    chipLabel: (day) => `${DAY_NAMES[day]} for window ${index + 1}`,
+    onToggle: (day, nextDays, chip) => {
+      rule.days = nextDays;
+      chip.setAttribute('aria-pressed', String(rule.days.includes(day)));
+      markDirty();
+    },
+  });
 
   const times = el('div', 'time-row');
   const startInput = el('input');
