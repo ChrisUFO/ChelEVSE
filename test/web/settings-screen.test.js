@@ -336,10 +336,10 @@ test('a day preset click commits the preset through the real card wiring', () =>
   assert.equal(isSettingsDirty(), true);
 });
 
-// Pairs with "a day preset click commits the preset through the real card
-// wiring" above: that test drives the day-control wiring with editor state and
-// this one without it — together they pin the state-threading regression, so a
-// dedupe pass must keep both.
+// Custom takes the preset click's no-days branch, which never touches state:
+// the state-threading regression is pinned by the preset-commit test above
+// and "day chips toggle…" below (both reach state.commitRowShape). Keep this
+// one for the reveal itself, not for that pin.
 test('the Custom preset only reveals the chips — the days and the clean draft stay put', () => {
   resetSettings();
   showSettingsData(storedDoc);
