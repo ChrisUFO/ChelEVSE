@@ -1214,6 +1214,164 @@ def status_loop(
     )
 
 
+def _config_transport_view(mqtt, config_event):
+    """Read the MQTT surface one config tick decides against.
+
+    Returns ``(connected, mqtt_mode)``: whether the broker link is up at
+    all, and whether the version event can drive this tick. A granted
+    subscription is what makes the event a sync trigger: a broker that
+    accepts the connection and then denies ``<topic>/#`` delivers no
+    ``config_version`` ever, so waiting on the event would freeze
+    ``status/config`` for as long as the link stays up. A gateway that
+    announced ``disconnected`` publishes nothing at all, so it is
+    treated the same way: no event will arrive, and the HTTP poll
+    resumes.
+    """
+    if mqtt is None:
+        return False, False
+    connected = mqtt.connected
+    mqtt_mode = (
+        connected
+        and mqtt.announced is not False
+        and config_event is not None
+        and mqtt.subscribed
+    )
+    return connected, mqtt_mode
+
+
+def _config_source_detail(mqtt, config_event, connected, mqtt_mode):
+    """Word the config source edge: what just changed about the version feed."""
+    if mqtt_mode:
+        return "mqtt connected"
+    if not connected:
+        return "mqtt not connected"
+    if mqtt.announced is False:
+        return "mqtt connected, gateway announced disconnected"
+    if config_event is None:
+        return "mqtt connected, no config version trigger"
+    return f"mqtt connected, {mqtt.subscription} not subscribed"
+
+
+def _config_source_edge(mqtt, config_event, source, connected, mqtt_mode):
+    """Decide whether the config source moved, and word the journal edge.
+
+    Returns ``(current, detail)`` when the source word moved, ``(None,
+    None)`` when it did not (or there is no MQTT surface at all). The
+    caller owns the ``source`` write, which must land before the journal
+    line: a log failure mid-edge must not replay the edge next tick.
+    """
+    if mqtt is None:
+        return None, None
+    current = "mqtt" if mqtt_mode else "http"
+    if current != source:
+        return current, _config_source_detail(
+            mqtt, config_event, connected, mqtt_mode
+        )
+    return None, None
+
+
+def _note_config_version(mqtt, version_missing_logged):
+    """Track ``config_version`` and the silent-subscription one-shot.
+
+    A granted subscription can be silent too (topic mismatch,
+    charger-side MQTT off, no retained version): waiting on an event
+    that never comes would leave ``status/config`` stale forever. The
+    degraded state is worth exactly one journal line per bout, so the
+    flag arms on the first version-less tick and clears once a version
+    arrives. Returns ``(version_known, version_missing_logged)``.
+    """
+    version_known = getattr(mqtt, "config_version", None) is not None
+    if version_known:
+        return True, False
+    if not version_missing_logged:
+        log(
+            "config: mqtt subscribed but no config_version observed; "
+            f"syncing over HTTP every {CONFIG_SAFETY_RESYNC_SEC:g}s "
+            "until one arrives"
+        )
+    return False, True
+
+
+def _config_safety_resync_due(version_known, pending, now, next_sync):
+    """Whether a version-less, nothing-owed tick should idle on the event.
+
+    That wait is the bootstrap cadence: HTTP safety syncs every
+    ``CONFIG_SAFETY_RESYNC_SEC`` until a ``config_version`` arrives.
+    """
+    return not version_known and not pending and now < next_sync
+
+
+def _wait_out_config_backoff(pending, now, retry_at, config_event, tick):
+    """Wait out a failed sync's backoff unless the version event fires.
+
+    A new version is a reason to retry now rather than when the backoff
+    expires. Returns True when the wait ran out still pending — that
+    event wait was the tick's wait, so the caller skips its tail wait.
+    """
+    if pending and now < retry_at:
+        return not config_event.wait(min(tick, retry_at - now))
+    return False
+
+
+def _idle_config_wait(version_known, pending, config_event, tick):
+    """Idle-wait one tick for a ``config_version`` change.
+
+    Only a config_version change (or a reconnect republish) syncs while
+    the subscription is live, a version is known and nothing is owed.
+    Returns True when the wait timed out with no change (again: that
+    wait was the tick's).
+    """
+    if version_known and not pending:
+        return not config_event.wait(tick)
+    return False
+
+
+def _fetch_config(transport, host, auth):
+    """Fetch and validate ``/config``; returns the parsed JSON object."""
+    resp = transport.get(f"{host.base}/config", auth=auth, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("config response is not a JSON object")
+    return data
+
+
+def _write_config_doc(config_doc, data):
+    """Replace-write ``status/config``: redact, then coerce, then set."""
+    redacted = redact_config(data)
+    safe_data = firestore_safe(redacted)
+    config_doc.set({**safe_data, "updated_at": firestore.SERVER_TIMESTAMP})
+
+
+def _consume_config_version_trigger(mqtt, config_event, mqtt_mode, version):
+    """Consume the version trigger after a good write; re-arm on a move."""
+    if config_event is not None:
+        config_event.clear()
+        if mqtt_mode and getattr(mqtt, "config_version", None) != version:
+            # The version moved while the fetch was in flight: keep the
+            # newer change pending instead of losing it.
+            config_event.set()
+
+
+def _log_config_synced(data, last_synced):
+    """Journal one config sync — only when the document would change.
+
+    This loop runs every minute and would otherwise spam the journal.
+    Returns the new last-synced snapshot (unchanged when the config did
+    not move); the caller owns the write, which lands after the lines —
+    a log failure must leave the old snapshot so the lines replay.
+    """
+    if data != last_synced:
+        secret_count = sum(1 for key in data if key in SECRET_CONFIG_KEYS)
+        if secret_count:
+            log(f"config: redacted {secret_count} credential fields")
+        if firestore_safe(data) != data:
+            log("config: coerced values Firestore cannot store")
+        log("config synced")
+        return data
+    return last_synced
+
+
 def config_loop(
     db,
     host,
@@ -1264,22 +1422,6 @@ def config_loop(
     # value so a mid-tick failure still waits the mode it died in.
     mqtt_mode = False
 
-    def retry(exc):
-        """Consume the trigger and arm the bounded retry after a failed sync."""
-        nonlocal retry_delay, retry_at, pending
-        retry_delay = min(
-            max(retry_delay * 2, CONFIG_RETRY_MIN_SEC), CONFIG_RETRY_MAX_SEC
-        )
-        retry_at = time.monotonic() + retry_delay
-        # The owed retry is tracked here, so the trigger is consumed; a *new*
-        # version still retries immediately.
-        config_event.clear()
-        pending = True
-        log(
-            f"config sync failed ({exc.__class__.__name__}); "
-            f"retrying in {retry_delay:g}s"
-        )
-
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
@@ -1289,76 +1431,60 @@ def config_loop(
         nonlocal mqtt_mode, source, next_sync, version_missing_logged
         nonlocal pending, retry_delay, retry_at, last_synced
 
+        def retry(exc):
+            """Consume the trigger and arm the bounded retry after a failed sync.
+
+            Kept as one_tick's own closure on purpose: unpicking it into
+            a module-level helper would move ``pending = True`` (and the
+            backoff writes) across the journal ``log()`` call that ends
+            the sequence — a log failure after a failed sync must still
+            leave the retry armed, so the state writes stay right here
+            in their original order around ``config_event.clear()`` and
+            ``log()`` (the exception-path divergence class this
+            decomposition must not introduce).
+            """
+            nonlocal retry_delay, retry_at, pending
+            retry_delay = min(
+                max(retry_delay * 2, CONFIG_RETRY_MIN_SEC), CONFIG_RETRY_MAX_SEC
+            )
+            retry_at = time.monotonic() + retry_delay
+            # The owed retry is tracked here, so the trigger is consumed; a *new*
+            # version still retries immediately.
+            config_event.clear()
+            pending = True
+            log(
+                f"config sync failed ({exc.__class__.__name__}); "
+                f"retrying in {retry_delay:g}s"
+            )
+
         mqtt_mode = False
         version = None
-        connected = mqtt is not None and mqtt.connected
-        # A granted subscription is what makes the version event a sync
-        # trigger: a broker that accepts the connection and then denies
-        # ``<topic>/#`` delivers no ``config_version`` ever, so waiting on
-        # the event would freeze ``status/config`` for as long as the link
-        # stays up. Until the SUBACK grants it the HTTP poll is the source
-        # and keeps its own cadence. A gateway that announced
-        # ``disconnected`` publishes nothing at all, so it is treated the
-        # same way: no event will arrive, and the HTTP poll resumes.
-        mqtt_mode = (
-            connected
-            and mqtt.announced is not False
-            and config_event is not None
-            and mqtt.subscribed
+        connected, mode = _config_transport_view(mqtt, config_event)
+        mqtt_mode = mode
+        current, detail = _config_source_edge(
+            mqtt, config_event, source, connected, mqtt_mode
         )
-        if mqtt is not None:
-            current = "mqtt" if mqtt_mode else "http"
-            if current != source:
-                source = current
-                if mqtt_mode:
-                    detail = "mqtt connected"
-                elif not connected:
-                    detail = "mqtt not connected"
-                elif mqtt.announced is False:
-                    detail = "mqtt connected, gateway announced disconnected"
-                elif config_event is None:
-                    detail = "mqtt connected, no config version trigger"
-                else:
-                    detail = f"mqtt connected, {mqtt.subscription} not subscribed"
-                log(f"config source: {current} ({detail})")
+        if current is not None:
+            source = current
+            log(f"config source: {current} ({detail})")
         if mqtt_mode:
             now = time.monotonic()
-            version_known = getattr(mqtt, "config_version", None) is not None
-            if not version_known:
-                # A granted subscription with no version: the event may
-                # never be set, so bootstrap over HTTP and keep a slow
-                # safety resync instead of waiting on it.
-                if not version_missing_logged:
-                    log(
-                        "config: mqtt subscribed but no config_version observed; "
-                        f"syncing over HTTP every {CONFIG_SAFETY_RESYNC_SEC:g}s "
-                        "until one arrives"
-                    )
-                    version_missing_logged = True
-                if not pending and now < next_sync:
-                    config_event.wait(min(tick, next_sync - now))
-                    return True  # waited on the event; skip the tail wait
-            elif version_missing_logged:
-                version_missing_logged = False
-            if pending and now < retry_at:
-                # Waiting out a failed sync's backoff; a new version is a
-                # reason to retry now rather than when it expires.
-                if not config_event.wait(min(tick, retry_at - now)):
-                    return True  # waited on the event; skip the tail wait
-            elif version_known and not pending and not config_event.wait(tick):
-                # Only a config_version change (or a reconnect republish)
-                # syncs.
+            version_known, version_missing_logged = _note_config_version(
+                mqtt, version_missing_logged
+            )
+            if _config_safety_resync_due(version_known, pending, now, next_sync):
+                config_event.wait(min(tick, next_sync - now))
+                return True  # waited on the event; skip the tail wait
+            if _wait_out_config_backoff(pending, now, retry_at, config_event, tick):
+                return True  # waited on the event; skip the tail wait
+            elif _idle_config_wait(version_known, pending, config_event, tick):
                 return True  # waited on the event; skip the tail wait
             # Advance the safety deadline before the fetch: a failure must
             # not leave it in the past and turn the tick into a hot loop.
             next_sync = time.monotonic() + CONFIG_SAFETY_RESYNC_SEC
             version = getattr(mqtt, "config_version", None)
         try:
-            resp = transport.get(f"{host.base}/config", auth=auth, timeout=HTTP_TIMEOUT)
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, dict):
-                raise ValueError("config response is not a JSON object")
+            data = _fetch_config(transport, host, auth)
         except (requests.RequestException, ValueError) as exc:
             if mqtt_mode:
                 retry(exc)
@@ -1366,11 +1492,7 @@ def config_loop(
                 log(f"config sync failed ({exc.__class__.__name__})")
         else:
             try:
-                redacted = redact_config(data)
-                safe_data = firestore_safe(redacted)
-                config_doc.set(
-                    {**safe_data, "updated_at": firestore.SERVER_TIMESTAMP}
-                )
+                _write_config_doc(config_doc, data)
             except Exception as exc:
                 counter.note_failure(exc)
                 if not mqtt_mode:
@@ -1383,31 +1505,13 @@ def config_loop(
                 retry(exc)
             else:
                 counter.record("config")
-                if config_event is not None:
-                    config_event.clear()
-                    if (
-                        mqtt_mode
-                        and getattr(mqtt, "config_version", None) != version
-                    ):
-                        # The version moved while the fetch was in flight:
-                        # keep the newer change pending instead of losing it.
-                        config_event.set()
+                _consume_config_version_trigger(
+                    mqtt, config_event, mqtt_mode, version
+                )
                 pending = False
                 retry_delay = 0.0
                 retry_at = 0.0
-                # Only log when the charger config actually changed: this
-                # loop runs every minute and would otherwise spam the
-                # journal.
-                if data != last_synced:
-                    secret_count = sum(
-                        1 for key in data if key in SECRET_CONFIG_KEYS
-                    )
-                    if secret_count:
-                        log(f"config: redacted {secret_count} credential fields")
-                    if firestore_safe(data) != data:
-                        log("config: coerced values Firestore cannot store")
-                    log("config synced")
-                    last_synced = data
+                last_synced = _log_config_synced(data, last_synced)
 
     def wait_one_tick():
         if mqtt_mode:
