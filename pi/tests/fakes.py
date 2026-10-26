@@ -1,13 +1,16 @@
 """In-memory Firestore and HTTP fakes for the pi bridge unit tests.
 
 Nothing here touches the charger, Firestore, or FCM; the fakes implement only
-the small surface bridge.py and acl.py use.
+the small surface bridge.py and acl.py use. The module also hosts the helpers
+shared across test modules (loop-stop stand-in, host and status factories).
 """
 
 import json
 
 import requests
 from firebase_admin import firestore
+
+import bridge
 
 
 def _is_number(value):
@@ -444,4 +447,50 @@ class FakeMqttFactory:
     @property
     def client(self):
         return self.clients[-1]
+
+
+# -- shared loop-test helpers --------------------------------------------
+
+
+def _host(value="charger"):
+    """A fresh charger-address holder: loops must not share mutable state."""
+    return bridge.ChargerHost(value)
+
+
+class _StopAfter:
+    """Stand-in for the module stop event: ends the loop after N polls."""
+
+    def __init__(self, polls, on_wait=None):
+        self._polls = polls
+        self._waited = 0
+        self._on_wait = on_wait
+
+    def is_set(self):
+        return self._waited >= self._polls
+
+    def wait(self, interval):
+        self._waited += 1
+        if self._on_wait is not None:
+            self._on_wait()
+        return True
+
+
+def _status_payload(**overrides):
+    """A healthy /status reply for the loop and watchdog tests."""
+    payload = {
+        "state": 1,
+        "amp": 0,
+        "voltage": 240,
+        "power": 0,
+        "session_energy": 0,
+        "total_energy": 100,
+        "elapsed": 0,
+        "vehicle": 0,
+        "comm_sent": 10,
+        "comm_success": 10,
+        "rapi_connected": True,
+        "evse_connected": True,
+    }
+    payload.update(overrides)
+    return payload
 

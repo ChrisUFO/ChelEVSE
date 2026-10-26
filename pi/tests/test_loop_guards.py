@@ -17,8 +17,14 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bridge  # noqa: E402
-from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
-from test_bridge import _StopAfter, _host, _status_payload  # noqa: E402
+from fakes import (  # noqa: E402
+    FakeDB,
+    FakeResponse,
+    FakeSession,
+    _StopAfter,
+    _host,
+    _status_payload,
+)
 
 
 def _flaky_once(error, real):

@@ -14,14 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests  # noqa: E402
 
 import bridge  # noqa: E402
-from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
+from fakes import (  # noqa: E402
+    FakeDB,
+    FakeResponse,
+    FakeSession,
+    _StopAfter,
+    _host,
+    _status_payload,
+)
 
 UTC = timezone.utc
-
-
-def _host(value="charger"):
-    """A fresh charger-address holder: loops must not share mutable state."""
-    return bridge.ChargerHost(value)
 
 
 class FirestoreSafeTests(unittest.TestCase):
@@ -1311,24 +1313,6 @@ class CommandTests(unittest.TestCase):
         self.assertEqual([doc.id for doc in docs], ["no-ts", "later"])
 
 
-class _StopAfter:
-    """Stand-in for the module stop event: ends the loop after N polls."""
-
-    def __init__(self, polls, on_wait=None):
-        self._polls = polls
-        self._waited = 0
-        self._on_wait = on_wait
-
-    def is_set(self):
-        return self._waited >= self._polls
-
-    def wait(self, interval):
-        self._waited += 1
-        if self._on_wait is not None:
-            self._on_wait()
-        return True
-
-
 class CommandLoopTests(unittest.TestCase):
     def run_loop(self, db, polls, on_wait=None):
         session = FakeSession()
@@ -2154,26 +2138,6 @@ class ControllerHealthTests(unittest.TestCase):
 
     def test_non_dict_latest_is_healthy(self):
         self.assertTrue(bridge.controller_healthy(self.status(), None))
-
-
-def _status_payload(**overrides):
-    """A healthy /status reply for the watchdog integration tests."""
-    payload = {
-        "state": 1,
-        "amp": 0,
-        "voltage": 240,
-        "power": 0,
-        "session_energy": 0,
-        "total_energy": 100,
-        "elapsed": 0,
-        "vehicle": 0,
-        "comm_sent": 10,
-        "comm_success": 10,
-        "rapi_connected": True,
-        "evse_connected": True,
-    }
-    payload.update(overrides)
-    return payload
 
 
 class _Clock:
