@@ -7,7 +7,9 @@ decomposition (#137–#139), with one novel mid-tick failure per loop: the exact
 line is emitted and the next tick still runs. The status loop's prologue —
 the transport-edge read and health write the #139 decomposition widened into
 the guard (a novel exception there used to kill the poller) — is pinned the
-same way. ``settings_loop`` and
+same way, as is the other preservation constraint that decomposition added:
+a config tick that already waited on the version event must not stack the
+tail wait on top of it. ``settings_loop`` and
 ``mqtt_status_loop`` have structurally different (narrower) guards and are out
 of scope.
 """
@@ -106,8 +108,15 @@ class StatusLoopGuardTests(unittest.TestCase):
             )
         self.assertEqual(logs.count("status loop error (RuntimeError: novel blip)"), 1)
         # The crash struck the prologue's edge block: its source line is the
-        # last thing logged before the health write raised.
-        self.assertIn("status source: mqtt (mqtt connected)", logs)
+        # last thing logged before the health write raised — the exact prefix,
+        # not merely membership.
+        self.assertEqual(
+            logs[:2],
+            [
+                "status source: mqtt (mqtt connected)",
+                "status loop error (RuntimeError: novel blip)",
+            ],
+        )
         # The crashing tick died before its poll; the second tick ran anyway
         # and completed the reconcile poll.
         self.assertEqual(
@@ -135,6 +144,71 @@ class ConfigLoopGuardTests(unittest.TestCase):
             [call[1] for call in session.calls], ["http://charger/config"] * 2
         )
         self.assertIn("config synced", logs)
+
+
+class _ReadyMqtt:
+    """The MQTT surface config_loop reads, mid-session: fully usable."""
+
+    def __init__(self):
+        self.connected = True
+        self.subscribed = True
+        self.subscription = "chelevse/#"
+        self.config_version = 1
+        self.announced = None
+
+
+class _TimingOutEvent:
+    """A config_version event that times out N times, then fires.
+
+    Waits are counted so the pin can assert them; nothing blocks, so the
+    tick sequence is deterministic without threads or timers.
+    """
+
+    def __init__(self, timeouts):
+        self._timeouts = timeouts
+        self.waits = 0
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        return self.waits > self._timeouts
+
+    def set(self):
+        pass
+
+    def clear(self):
+        pass
+
+
+class RunLoopEventWaitTests(unittest.TestCase):
+    def test_an_event_wait_pass_skips_the_tail_wait(self):
+        # A config tick that waited on the version event returns True so
+        # run_loop skips the tail wait (the old loop expressed the same skip
+        # as continue). If that regressed, every event-driven tick would
+        # stack a second wait on top of the event wait and slow config syncs
+        # — with no other test noticing — so pin the wait counts directly.
+        event = _TimingOutEvent(timeouts=1)
+        session = FakeSession([FakeResponse(200, {"firmware": "master"})])
+        transport = bridge.ChargerTransport(session)
+        stop = _StopAfter(1)
+        with mock.patch.object(bridge, "_stop", stop):
+            bridge.config_loop(
+                FakeDB(),
+                _host(),
+                None,
+                transport,
+                60,
+                0,
+                _ReadyMqtt(),
+                event,
+                tick=0,
+            )
+        # Tick 1 timed out on the event and skipped its tail wait; tick 2
+        # fired, synced over HTTP, and took the one tail wait that tripped
+        # _StopAfter. A regressed skip would tail-wait after tick 1 too,
+        # end the loop there, and never reach the fetch.
+        self.assertEqual(event.waits, 2)
+        self.assertEqual(stop._waited, 1)
+        self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
 
 
 class CommandLoopGuardTests(unittest.TestCase):
