@@ -14,14 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests  # noqa: E402
 
 import bridge  # noqa: E402
-from fakes import FakeDB, FakeResponse, FakeSession  # noqa: E402
+from fakes import (  # noqa: E402
+    FakeDB,
+    FakeResponse,
+    FakeSession,
+    _StopAfter,
+    _host,
+    _status_payload,
+)
 
 UTC = timezone.utc
-
-
-def _host(value="charger"):
-    """A fresh charger-address holder: loops must not share mutable state."""
-    return bridge.ChargerHost(value)
 
 
 class FirestoreSafeTests(unittest.TestCase):
@@ -1311,24 +1313,6 @@ class CommandTests(unittest.TestCase):
         self.assertEqual([doc.id for doc in docs], ["no-ts", "later"])
 
 
-class _StopAfter:
-    """Stand-in for the module stop event: ends the loop after N polls."""
-
-    def __init__(self, polls, on_wait=None):
-        self._polls = polls
-        self._waited = 0
-        self._on_wait = on_wait
-
-    def is_set(self):
-        return self._waited >= self._polls
-
-    def wait(self, interval):
-        self._waited += 1
-        if self._on_wait is not None:
-            self._on_wait()
-        return True
-
-
 class CommandLoopTests(unittest.TestCase):
     def run_loop(self, db, polls, on_wait=None):
         session = FakeSession()
@@ -2154,26 +2138,6 @@ class ControllerHealthTests(unittest.TestCase):
 
     def test_non_dict_latest_is_healthy(self):
         self.assertTrue(bridge.controller_healthy(self.status(), None))
-
-
-def _status_payload(**overrides):
-    """A healthy /status reply for the watchdog integration tests."""
-    payload = {
-        "state": 1,
-        "amp": 0,
-        "voltage": 240,
-        "power": 0,
-        "session_energy": 0,
-        "total_energy": 100,
-        "elapsed": 0,
-        "vehicle": 0,
-        "comm_sent": 10,
-        "comm_success": 10,
-        "rapi_connected": True,
-        "evse_connected": True,
-    }
-    payload.update(overrides)
-    return payload
 
 
 class _Clock:
@@ -3396,6 +3360,54 @@ class MainSeedingTests(unittest.TestCase):
                 bridge.main()
         self.assertIn("SETTINGS_INTERVAL", str(raised.exception))
         init.assert_not_called()
+
+
+class MainExitTests(unittest.TestCase):
+    """main()'s startup exits: bad intervals and failed Firestore init.
+
+    Each exit must fire before run() — the bridge never starts polling on a
+    broken environment (the fail-loud rule).
+    """
+
+    MESSAGE = (
+        "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
+        "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
+        "must be numbers."
+    )
+
+    def exit_main(self, env=None, init_raises=None):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, env or {}, clear=True
+        ), mock.patch.object(
+            bridge, "init_firestore", side_effect=init_raises
+        ) as init, mock.patch.object(
+            bridge, "run"
+        ) as run:
+            with self.assertRaises(SystemExit) as raised:
+                bridge.main()
+        return str(raised.exception.code), init, run
+
+    def test_any_bad_interval_exits_before_firestore_or_run(self):
+        for name in (
+            "STATUS_INTERVAL",
+            "CONFIG_INTERVAL",
+            "SCHEDULE_INTERVAL",
+            "SCHEDULE_RECONCILE_INTERVAL",
+            "COMMAND_INTERVAL",
+            "SETTINGS_INTERVAL",
+        ):
+            with self.subTest(variable=name):
+                code, init, run = self.exit_main(env={name: "not-a-number"})
+                self.assertEqual(code, self.MESSAGE)
+                init.assert_not_called()
+                run.assert_not_called()
+
+    def test_failed_firestore_init_exits_with_the_reason(self):
+        reason = "service-account key not found: /nowhere/key.json"
+        code, init, run = self.exit_main(init_raises=RuntimeError(reason))
+        init.assert_called_once_with()
+        self.assertEqual(code, reason)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":
