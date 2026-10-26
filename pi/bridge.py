@@ -856,6 +856,237 @@ def run_loop(name, tick, wait):
             wait()
 
 
+def _mqtt_transport_state(mqtt, transport_state):
+    """Read the MQTT transport view one status tick decides against.
+
+    Returns ``(announced, mqtt_connected, mqtt_ready, current, changed)``:
+    the gateway's announcement, whether the broker link is a usable path to
+    the charger, whether the topics are a status source yet, the source
+    that implies, and whether the (source, link, announcement) triplet
+    moved — the edge the loop logs and health-records. Without MQTT the
+    view is the idle one, the source ``http``, and the triplet never
+    changes.
+    """
+    if mqtt is None:
+        return None, False, False, "http", False
+    announced = mqtt.announced
+    # The usable path to the charger, not just our link: a gateway that has
+    # announced `disconnected` (its Last Will) is gone even while the broker
+    # connection stays up, so status falls back to HTTP and health says so.
+    mqtt_connected = mqtt.connected and announced is not False
+    # A granted subscription is what makes the topics a status source: a
+    # broker that accepts the connection and then denies ``<topic>/#``
+    # delivers nothing, which looks exactly like an idle charger. Until the
+    # SUBACK grants it the HTTP poll is the source, and a denial keeps it
+    # there (logged once per source change) with the 10 s cadence.
+    mqtt_ready = mqtt.mqtt_ready and announced is not False
+    current = "mqtt" if mqtt_ready else "http"
+    # The triplet, not just the source: a link that drops while the source
+    # stays ``http`` (a denied subscription, then a disconnect) still has to
+    # refresh ``status/health.mqtt_connected``, and the first announcement
+    # must land even though nothing else changed.
+    changed = (current, mqtt_connected, announced) != transport_state
+    return announced, mqtt_connected, mqtt_ready, current, changed
+
+
+def _announce_status_source(
+    db, mqtt, sink, previous_state, source, mqtt_connected, announced, mqtt_ready
+):
+    """Log one status transport-source change and record its health.
+
+    ``previous_state`` is the pre-change triplet: its source words the edge
+    (a disconnect says what stopped). The health write rides the same edge
+    even when nothing else changed — the first announcement must land, and a
+    link that drops while the source stays ``http`` still has to refresh
+    ``status/health.mqtt_connected``.
+    """
+    previous = previous_state[0] if previous_state is not None else None
+    if mqtt_ready:
+        detail = "mqtt connected"
+    elif mqtt.connected and not mqtt.mqtt_ready:
+        detail = f"mqtt connected, {mqtt.subscription} not subscribed"
+    elif mqtt.connected:
+        detail = "mqtt connected, gateway announced disconnected"
+    elif previous == "mqtt":
+        detail = f"mqtt disconnected after {mqtt.messages} messages"
+    else:
+        detail = "mqtt not connected"
+    log(f"status source: {source} ({detail})")
+    write_transport_health(
+        db,
+        source,
+        mqtt_connected,
+        announced,
+        mqtt.last_lwt_at,
+        counter=sink.counter,
+    )
+
+
+def _due_heartbeat(sink):
+    """Resolve the write-policy heartbeat for this tick.
+
+    A due heartbeat forces a fresh HTTP observation before any publish: a
+    heartbeat is a full curated payload, never a republish of stale values.
+    The forced poll is paced once per heartbeat period so a failing one
+    keeps the reconcile cadence. Returns ``(heartbeat, watermark,
+    force_poll)``.
+    """
+    heartbeat, watermark = sink.heartbeat_due()
+    return heartbeat, watermark, heartbeat and sink.heartbeat_poll_due()
+
+
+def _pace_heartbeat_poll(sink, heartbeat):
+    """Pace the heartbeat's forced poll a full period out.
+
+    This poll serves the heartbeat, forced or not: pace the next heartbeat
+    poll a full period out so a failing reconcile keeps the reconcile
+    cadence (two failures a second apart would flag an outage an idle
+    charger does not deserve).
+    """
+    if heartbeat:
+        sink.note_heartbeat_poll()
+
+
+def _status_poll_due(mqtt, now, next_poll, force_poll):
+    """Whether this tick polls the charger.
+
+    Without MQTT the wait interval is the cadence (unchanged): every tick
+    polls, and the heartbeat then just publishes what the poll applied.
+    With MQTT the loop ticks every second and polls when reconciliation is
+    due, the source just changed, or a heartbeat needs its fresh
+    observation.
+    """
+    return mqtt is None or now >= next_poll or force_poll
+
+
+def _next_status_deadline(now, mqtt_ready, interval, reconcile_interval):
+    """The next poll deadline, computed to be set before the poll body.
+
+    The deadline advances before the poll body: a Firestore failure inside
+    the apply must not leave it overdue, or the 1 s tick turns into a 1 Hz
+    charger poll for the whole outage.
+    """
+    return now + (reconcile_interval if mqtt_ready else interval)
+
+
+def _poll_marks(sink, mqtt):
+    """Generation marks bracketing one HTTP poll (both None without MQTT).
+
+    MQTT applies that land while the GET is in flight make this response
+    stale: it was generated before them. A flush that is only queued has
+    not applied yet, so the apply counter stands still; its arrival counter
+    is what catches that race.
+    """
+    if mqtt is None:
+        return None, None
+    return sink.mqtt_generation(), mqtt.arrival_generation()
+
+
+def _observe_status(transport, host, auth):
+    """Fetch and parse one /status observation from the charger.
+
+    Returns ``(fields, payload)`` — the raw payload rides along because the
+    MQTT seed and the watchdog read it. Anything but a JSON object shaped
+    like a status response raises into the caller's outage handling.
+    """
+    resp = transport.get(f"{host.base}/status", auth=auth, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        raise ValueError("status response is not a JSON object")
+    return parse_status(payload), payload
+
+
+def _snapshot_arrived(mqtt, mqtt_ready, mqtt_snapshots):
+    """Whether the charger published since the last reconcile baseline.
+
+    The snapshots moved, so the charger is publishing: the failure belongs
+    to the reconciliation path, not to the charger.
+    """
+    return mqtt_ready and mqtt.snapshots != mqtt_snapshots
+
+
+def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
+    """Escalate one failed reconcile with no snapshot since the last one.
+
+    The charger may be idle (normal) or gone, and one failed poll cannot
+    tell them apart, so ask for consecutive evidence before writing an
+    outage and pushing it. Returns True when a flush landed between the
+    comparison and the offline decision — the same proof of life a fresh
+    snapshot is, so the caller refuses the outage and restarts the streak
+    from this snapshot.
+    """
+    if reconcile_failures < MQTT_OUTAGE_FAILURES:
+        log(
+            f"status reconcile failed ({_offline_reason(exc)}); "
+            "no mqtt snapshot, outage unconfirmed"
+        )
+        return False
+    if sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc)):
+        return False
+    log(
+        f"status reconcile failed ({_offline_reason(exc)}); "
+        "mqtt snapshot arrived, outage refused"
+    )
+    return True
+
+
+def _apply_http_status(sink, mqtt, fields, payload, mqtt_mark, mqtt_arrivals):
+    """Apply one fresh HTTP observation through the sink's locked merge.
+
+    Seed before applying: the snapshot then carries the fields MQTT never
+    publishes (comm_*, rapi_connected). The seed stays raw; every delivery
+    is parsed. Freshness and seed are one compare-and-merge in the source,
+    and the apply is one locked decision with it, so a reply a flush or an
+    apply overtook can neither rewind the snapshot nor be applied. Returns
+    whether the observation applied; an MQTT snapshot that applied (or a
+    flush that queued one) while this poll was in flight makes the reply
+    predate it — applying it would rewind the tracker and re-fire a
+    transition (a stale state=3 after an MQTT stop) — so it is discarded.
+    """
+    seed_snapshot = (
+        (lambda: mqtt.seed_if_current(mqtt_arrivals, payload))
+        if mqtt is not None
+        else None
+    )
+    if not sink.apply_status(
+        fields,
+        "http",
+        mqtt_mark=mqtt_mark,
+        seed=seed_snapshot,
+        arrival=mqtt_arrivals,
+    ):
+        log("status reconcile discarded (mqtt advanced during the poll)")
+        return False
+    return True
+
+
+def _publish_due_heartbeat(sink, heartbeat, watermark):
+    """Publish the heartbeat, but only from a fresher observation.
+
+    Publishes only when the poll (or an MQTT apply that landed during it)
+    produced an observation newer than the watermark; a failed poll never
+    stamps stale values fresh.
+    """
+    if heartbeat:
+        sink.publish_heartbeat(watermark)
+
+
+def _status_scheduler_tick(sink):
+    """Run the write-policy scheduler's per-tick hand-offs.
+
+    Deferred triggers, forced writes and owed retries resolve here, one
+    scheduler tick at a time. The history accumulator's charging interval
+    resolves here too (issue #94): applies carry it between ticks, and a
+    tick covers an apply gap. The write counter's hourly journal summary
+    (issue #96) rides the same tick: the counter keeps its own lock and its
+    own clock, so this is just the scheduler opportunity.
+    """
+    sink.publish_pending()
+    sink.consider_history_flush()
+    sink.counter.maybe_summary()
+
+
 def status_loop(
     db,
     host,
@@ -904,128 +1135,56 @@ def status_loop(
         nonlocal mqtt_snapshots, reconcile_failures
 
         now = time.monotonic()
-        announced = mqtt.announced if mqtt is not None else None
-        # The usable path to the charger, not just our link: a gateway that has
-        # announced `disconnected` (its Last Will) is gone even while the broker
-        # connection stays up, so status falls back to HTTP and health says so.
-        mqtt_connected = (
-            mqtt is not None and mqtt.connected and announced is not False
-        )
-        # A granted subscription is what makes the topics a status source: a
-        # broker that accepts the connection and then denies ``<topic>/#``
-        # delivers nothing, which looks exactly like an idle charger. Until the
-        # SUBACK grants it the HTTP poll is the source, and a denial keeps it
-        # there (logged once per source change) with the 10 s cadence.
-        mqtt_ready = mqtt is not None and mqtt.mqtt_ready and announced is not False
-        current = "mqtt" if mqtt_ready else "http"
-        # The triplet, not just the source: a link that drops while the source
-        # stays ``http`` (a denied subscription, then a disconnect) still has to
-        # refresh ``status/health.mqtt_connected``, and the first announcement
-        # must land even though nothing else changed.
-        if (
-            mqtt is not None
-            and (current, mqtt_connected, announced) != transport_state
-        ):
+        (
+            announced,
+            mqtt_connected,
+            mqtt_ready,
+            current,
+            changed,
+        ) = _mqtt_transport_state(mqtt, transport_state)
+        if changed:
             previous, transport_state = transport_state, (
                 current,
                 mqtt_connected,
                 announced,
             )
-            previous = previous[0] if previous is not None else None
             source = current
             if mqtt_ready:
-                detail = "mqtt connected"
                 mqtt_snapshots = mqtt.snapshots
-            elif mqtt.connected and not mqtt.mqtt_ready:
-                detail = f"mqtt connected, {mqtt.subscription} not subscribed"
-            elif mqtt.connected:
-                detail = "mqtt connected, gateway announced disconnected"
-            elif previous == "mqtt":
-                detail = f"mqtt disconnected after {mqtt.messages} messages"
-            else:
-                detail = "mqtt not connected"
-            log(f"status source: {source} ({detail})")
-            write_transport_health(
+            _announce_status_source(
                 db,
+                mqtt,
+                sink,
+                previous,
                 source,
                 mqtt_connected,
                 announced,
-                mqtt.last_lwt_at,
-                counter=sink.counter,
+                mqtt_ready,
             )
             reconcile_failures = 0
             next_poll = now
-        # A due heartbeat forces a fresh HTTP observation before any
-        # publish: a heartbeat is a full curated payload, never a
-        # republish of stale values. The forced poll is paced once per
-        # heartbeat period so a failing one keeps the reconcile cadence.
-        heartbeat, watermark = sink.heartbeat_due()
-        force_poll = heartbeat and sink.heartbeat_poll_due()
-        # Without MQTT the wait interval is the cadence (unchanged): every
-        # tick polls, and the heartbeat then just publishes what the poll
-        # applied. With MQTT the loop ticks every second and polls when
-        # reconciliation is due, the source just changed, or a heartbeat
-        # needs its fresh observation.
-        if mqtt is None or now >= next_poll or force_poll:
-            if heartbeat:
-                # This poll serves the heartbeat, forced or not: pace the
-                # next heartbeat poll a full period out so a failing
-                # reconcile keeps the reconcile cadence (two failures a
-                # second apart would flag an outage an idle charger does
-                # not deserve).
-                sink.note_heartbeat_poll()
-            # The deadline advances before the poll body: a Firestore
-            # failure inside the apply must not leave it overdue, or the 1 s
-            # tick turns into a 1 Hz charger poll for the whole outage.
-            next_poll = now + (reconcile_interval if mqtt_ready else interval)
+        heartbeat, watermark, force_poll = _due_heartbeat(sink)
+        if _status_poll_due(mqtt, now, next_poll, force_poll):
+            _pace_heartbeat_poll(sink, heartbeat)
+            next_poll = _next_status_deadline(
+                now, mqtt_ready, interval, reconcile_interval
+            )
             sink.maybe_seed()
-            # MQTT applies that land while the GET is in flight make this
-            # response stale: it was generated before them. A flush that is
-            # only queued has not applied yet, so the apply counter stands
-            # still; its arrival counter is what catches that race.
-            mqtt_mark = sink.mqtt_generation() if mqtt is not None else None
-            mqtt_arrivals = mqtt.arrival_generation() if mqtt is not None else None
+            mqtt_mark, mqtt_arrivals = _poll_marks(sink, mqtt)
             try:
-                resp = transport.get(
-                    f"{host.base}/status", auth=auth, timeout=HTTP_TIMEOUT
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                if not isinstance(payload, dict):
-                    raise ValueError("status response is not a JSON object")
-                fields = parse_status(payload)
+                fields, payload = _observe_status(transport, host, auth)
             except (requests.RequestException, ValueError) as exc:
-                if mqtt_ready and mqtt.snapshots != mqtt_snapshots:
-                    # The charger is publishing: the failure belongs to the
-                    # reconciliation path, not to the charger.
+                if _snapshot_arrived(mqtt, mqtt_ready, mqtt_snapshots):
                     log(f"status reconcile failed ({_offline_reason(exc)})")
                     # Compare the next failure against this check, not the
                     # last successful poll (which may be long past).
                     mqtt_snapshots = mqtt.snapshots
                     reconcile_failures = 0
                 elif mqtt_ready:
-                    # No snapshot since the last reconcile: the charger may
-                    # be idle (normal) or gone, and one failed poll cannot
-                    # tell them apart. Ask for consecutive evidence before
-                    # writing an outage and pushing it.
                     reconcile_failures += 1
-                    if reconcile_failures < MQTT_OUTAGE_FAILURES:
-                        log(
-                            f"status reconcile failed ({_offline_reason(exc)}); "
-                            "no mqtt snapshot, outage unconfirmed"
-                        )
-                    elif not sink.apply_offline_if_no_snapshot(
-                        mqtt_snapshots, _offline_reason(exc)
+                    if _escalate_reconcile_failure(
+                        sink, mqtt_snapshots, reconcile_failures, exc
                     ):
-                        # A flush landed between the comparison above and
-                        # the offline decision. That is the same proof of
-                        # life the first branch uses, so the outage is
-                        # refused and the streak restarts from this
-                        # snapshot.
-                        log(
-                            f"status reconcile failed ({_offline_reason(exc)}); "
-                            "mqtt snapshot arrived, outage refused"
-                        )
                         mqtt_snapshots = mqtt.snapshots
                         reconcile_failures = 0
                 else:
@@ -1038,51 +1197,15 @@ def status_loop(
                 # failure still means what it always meant to the watchdog.
                 watchdog.observe_failure(tracker.state == 3)
             else:
-                # Seed before applying: the snapshot then carries the
-                # fields MQTT never publishes (comm_*, rapi_connected).
-                # The seed stays raw; every delivery is parsed. Freshness
-                # and seed are one compare-and-merge in the source, and the
-                # apply is one locked decision with it, so a reply a flush or
-                # an apply overtook can neither rewind the snapshot nor be
-                # applied.
-                seed_snapshot = (
-                    (lambda: mqtt.seed_if_current(mqtt_arrivals, payload))
-                    if mqtt is not None
-                    else None
-                )
-                if not sink.apply_status(
-                    fields,
-                    "http",
-                    mqtt_mark=mqtt_mark,
-                    seed=seed_snapshot,
-                    arrival=mqtt_arrivals,
+                if _apply_http_status(
+                    sink, mqtt, fields, payload, mqtt_mark, mqtt_arrivals
                 ):
-                    # An MQTT snapshot applied, or a flush queued one, while
-                    # this poll was in flight, so the reply predates it;
-                    # applying it would rewind the tracker and re-fire a
-                    # transition (a stale state=3 after an MQTT stop).
-                    log("status reconcile discarded (mqtt advanced during the poll)")
-                else:
                     if mqtt is not None:
                         mqtt_snapshots = mqtt.snapshots
                     reconcile_failures = 0
                 watchdog.record_success(payload)
-        if heartbeat:
-            # Publishes only when the poll (or an MQTT apply that landed
-            # during it) produced an observation newer than the watermark;
-            # a failed poll never stamps stale values fresh.
-            sink.publish_heartbeat(watermark)
-        # Deferred triggers, forced writes and owed retries resolve here,
-        # one scheduler tick at a time.
-        sink.publish_pending()
-        # The history accumulator's charging interval resolves here too
-        # (issue #94): applies carry it between ticks, and a tick covers
-        # an apply gap.
-        sink.consider_history_flush()
-        # The write counter's hourly journal summary (issue #96) rides
-        # the same tick: the counter keeps its own lock and its own
-        # clock, so this is just the scheduler opportunity.
-        sink.counter.maybe_summary()
+        _publish_due_heartbeat(sink, heartbeat, watermark)
+        _status_scheduler_tick(sink)
 
     run_loop(
         "status",
