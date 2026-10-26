@@ -3398,5 +3398,53 @@ class MainSeedingTests(unittest.TestCase):
         init.assert_not_called()
 
 
+class MainExitTests(unittest.TestCase):
+    """main()'s startup exits: bad intervals and failed Firestore init.
+
+    Each exit must fire before run() — the bridge never starts polling on a
+    broken environment (the fail-loud rule).
+    """
+
+    MESSAGE = (
+        "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
+        "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
+        "must be numbers."
+    )
+
+    def exit_main(self, env=None, init_raises=None):
+        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
+            os.environ, env or {}, clear=True
+        ), mock.patch.object(
+            bridge, "init_firestore", side_effect=init_raises
+        ) as init, mock.patch.object(
+            bridge, "run"
+        ) as run:
+            with self.assertRaises(SystemExit) as raised:
+                bridge.main()
+        return str(raised.exception.code), init, run
+
+    def test_any_bad_interval_exits_before_firestore_or_run(self):
+        for name in (
+            "STATUS_INTERVAL",
+            "CONFIG_INTERVAL",
+            "SCHEDULE_INTERVAL",
+            "SCHEDULE_RECONCILE_INTERVAL",
+            "COMMAND_INTERVAL",
+            "SETTINGS_INTERVAL",
+        ):
+            with self.subTest(variable=name):
+                code, init, run = self.exit_main(env={name: "not-a-number"})
+                self.assertEqual(code, self.MESSAGE)
+                init.assert_not_called()
+                run.assert_not_called()
+
+    def test_failed_firestore_init_exits_with_the_reason(self):
+        reason = "service-account key not found: /nowhere/key.json"
+        code, init, run = self.exit_main(init_raises=RuntimeError(reason))
+        init.assert_called_once_with()
+        self.assertEqual(code, reason)
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

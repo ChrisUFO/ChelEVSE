@@ -376,6 +376,21 @@ class WriteSiteTests(unittest.TestCase):
         )
         self.assertEqual(self.kinds()["health"], 1)
 
+    def test_a_failed_transport_health_write_notes_the_failure_and_logs(self):
+        # The merge write is best-effort: a Firestore failure is one log line
+        # and a noted write failure, never a raise into the caller's loop.
+        self.db.fail_writes = True
+        counter = mock.Mock()
+        counter.health_fields.return_value = {}
+        bridge.write_transport_health(self.db, "mqtt", True, counter=counter)
+        counter.record.assert_not_called()
+        counter.note_failure.assert_called_once()
+        (failure,) = counter.note_failure.call_args.args
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertEqual(
+            self.logs, ["health transport write failed (RuntimeError: write failed)"]
+        )
+
     def test_a_watchdog_health_write_counts_health(self):
         watchdog = bridge.Watchdog(
             self.db,
