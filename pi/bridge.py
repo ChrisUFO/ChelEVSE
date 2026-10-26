@@ -1314,6 +1314,127 @@ def pending_commands(db):
     return docs[:COMMAND_BATCH]
 
 
+def _fail_stale_command(doc, counter):
+    """Settle one stale command as failed in Firestore; retried when it fails."""
+    reason = f"stale command (older than {COMMAND_MAX_AGE}s)"
+    try:
+        doc.reference.update({"status": "failed", "error": reason})
+    except Exception as exc:
+        counter.note_failure(exc)
+        log(
+            f"command {doc.id} stale update failed "
+            f"({exc.__class__.__name__}: {exc})"
+        )
+        return
+    counter.record("command")
+    log(f"command {doc.id} failed: {reason}")
+
+
+def _command_outcome(transport, host, auth, cmd, source):
+    """Apply one command; the status fields to settle it with, either way."""
+    try:
+        extra = apply_command(transport, host, auth, cmd, source=source)
+    except CommandError as exc:
+        # `transport` names the path that carried the request;
+        # a command rejected before any send has none.
+        fields = {"status": "failed", "error": str(exc)}
+        if exc.transport is not None:
+            fields["transport"] = exc.transport
+    except requests.RequestException as exc:
+        # Only an HTTP command send raises these: the MQTT
+        # reconcile catches its own request errors.
+        fields = {
+            "status": "failed",
+            "error": f"charger request failed ({exc.__class__.__name__})",
+            "transport": "http",
+        }
+    else:
+        extra.setdefault("transport", "http")
+        fields = {"status": "acked", **extra}
+    return fields
+
+
+def _transport_edge_detail(used, selected):
+    """Why the transport edge log names this transport for this command."""
+    if used == "mqtt":
+        return "mqtt connected and subscribed"
+    if selected == "mqtt":
+        return "mqtt publish was refused"
+    return "mqtt unavailable before publish"
+
+
+def _complete_command(doc, cmd, fields, sink):
+    """Log the settled outcome; an acked command also forces a status write."""
+    if fields["status"] == "acked":
+        log(f"command {doc.id} acked: {cmd.get('type')}")
+        # The app's holdAfterSnapshot holds its session clock until
+        # a *status* write lands; this document's own write does
+        # not release it, so a completed command forces one
+        # immediately, bypassing the write policy's cadences
+        # (issue #93). A failed command forces nothing: the app
+        # clears its hold only when the send itself fails
+        # client-side, so a bridge-reported failure leaves the
+        # held clock frozen until the next heartbeat (<=60 s
+        # while charging) -- self-clearing, and cheaper than a
+        # write per failed command.
+        if sink is not None:
+            try:
+                sink.force_write()
+            except Exception as exc:
+                log(
+                    f"forced status write failed "
+                    f"({exc.__class__.__name__}: {exc}); will retry"
+                )
+    else:
+        log(f"command {doc.id} failed: {fields['error']}")
+
+
+def _settle_command_doc(
+    doc, settled, transport, host, auth, source, sink, counter, last_transport, selected
+):
+    """Dispatch one pending command document.
+
+    A doc already in ``settled`` was applied — acked or failed — and only its
+    status write is retried, never the command (an accepted MQTT publish must
+    not be repeated). Returns ``(last_transport, selected)``: both outlive a
+    single doc and tick, because the transport edge log compares against the
+    previous command's transport and a retried settled doc reuses the last
+    selection for its wording.
+    """
+    cmd = _command_data(doc)
+    if doc.id in settled:
+        # Already settled; only its status write still needs to land.
+        fields = settled[doc.id]
+    else:
+        if command_is_stale(cmd):
+            _fail_stale_command(doc, counter)
+            return last_transport, selected
+        # Readiness from the command being picked up, used only to word the
+        # transport edge log (a retried settled doc may reuse it).
+        selected = "mqtt" if mqtt_command_ready(source) else "http"
+        fields = _command_outcome(transport, host, auth, cmd, source)
+        settled[doc.id] = fields
+        while len(settled) > COMMAND_ACK_MEMORY:
+            settled.popitem(last=False)
+    used = fields.get("transport")
+    if used is not None and used != last_transport:
+        log(f"command transport: {used} ({_transport_edge_detail(used, selected)})")
+        last_transport = used
+    try:
+        doc.reference.update(fields)
+    except Exception as exc:
+        counter.note_failure(exc)
+        log(
+            f"command {doc.id} status update failed "
+            f"({exc.__class__.__name__}: {exc}); will retry without re-applying"
+        )
+        return last_transport, selected
+    counter.record("command")
+    settled.pop(doc.id, None)
+    _complete_command(doc, cmd, fields, sink)
+    return last_transport, selected
+
+
 def command_loop(
     db, host, auth, transport, interval, source=None, sink=None, counter=None
 ):
@@ -1331,98 +1452,21 @@ def command_loop(
     while not _stop.is_set():
         try:
             for doc in pending_commands(db):
-                cmd = _command_data(doc)
-                if doc.id in settled:
-                    # Already settled; only its status write still needs to land.
-                    fields = settled[doc.id]
-                else:
-                    if command_is_stale(cmd):
-                        reason = f"stale command (older than {COMMAND_MAX_AGE}s)"
-                        try:
-                            doc.reference.update({"status": "failed", "error": reason})
-                        except Exception as exc:
-                            counter.note_failure(exc)
-                            log(
-                                f"command {doc.id} stale update failed "
-                                f"({exc.__class__.__name__}: {exc})"
-                            )
-                            continue
-                        counter.record("command")
-                        log(f"command {doc.id} failed: {reason}")
-                        continue
-                    selected = "mqtt" if mqtt_command_ready(source) else "http"
-                    try:
-                        extra = apply_command(
-                            transport, host, auth, cmd, source=source
-                        )
-                    except CommandError as exc:
-                        # `transport` names the path that carried the request;
-                        # a command rejected before any send has none.
-                        fields = {"status": "failed", "error": str(exc)}
-                        if exc.transport is not None:
-                            fields["transport"] = exc.transport
-                    except requests.RequestException as exc:
-                        # Only an HTTP command send raises these: the MQTT
-                        # reconcile catches its own request errors.
-                        fields = {
-                            "status": "failed",
-                            "error": f"charger request failed ({exc.__class__.__name__})",
-                            "transport": "http",
-                        }
-                    else:
-                        extra.setdefault("transport", "http")
-                        fields = {"status": "acked", **extra}
-                    settled[doc.id] = fields
-                    while len(settled) > COMMAND_ACK_MEMORY:
-                        settled.popitem(last=False)
-                used = fields.get("transport")
-                if used is not None and used != last_transport:
-                    if used == "mqtt":
-                        detail = "mqtt connected and subscribed"
-                    elif selected == "mqtt":
-                        detail = "mqtt publish was refused"
-                    else:
-                        detail = "mqtt unavailable before publish"
-                    log(f"command transport: {used} ({detail})")
-                    last_transport = used
-                try:
-                    doc.reference.update(fields)
-                except Exception as exc:
-                    counter.note_failure(exc)
-                    log(
-                        f"command {doc.id} status update failed "
-                        f"({exc.__class__.__name__}: {exc}); will retry without re-applying"
-                    )
-                    continue
-                counter.record("command")
-                settled.pop(doc.id, None)
-                if fields["status"] == "acked":
-                    log(f"command {doc.id} acked: {cmd.get('type')}")
-                    # The app's holdAfterSnapshot holds its session clock until
-                    # a *status* write lands; this document's own write does
-                    # not release it, so a completed command forces one
-                    # immediately, bypassing the write policy's cadences
-                    # (issue #93). A failed command forces nothing: the app
-                    # clears its hold only when the send itself fails
-                    # client-side, so a bridge-reported failure leaves the
-                    # held clock frozen until the next heartbeat (<=60 s
-                    # while charging) -- self-clearing, and cheaper than a
-                    # write per failed command.
-                    if sink is not None:
-                        try:
-                            sink.force_write()
-                        except Exception as exc:
-                            log(
-                                f"forced status write failed "
-                                f"({exc.__class__.__name__}: {exc}); will retry"
-                            )
-                else:
-                    log(f"command {doc.id} failed: {fields['error']}")
+                last_transport, selected = _settle_command_doc(
+                    doc,
+                    settled,
+                    transport,
+                    host,
+                    auth,
+                    source,
+                    sink,
+                    counter,
+                    last_transport,
+                    selected,
+                )
         except Exception as exc:  # anything else (e.g. Firestore blip): log, keep going
             log(f"command loop error ({exc.__class__.__name__}: {exc})")
         _stop.wait(interval)
-
-
 
 
 def schedule_loop(
