@@ -436,10 +436,18 @@ class HistoryTests(unittest.TestCase):
         self.db = FakeDB()
         self.tracker = bridge.StatusTracker(self.db)
         self.tracker.seeded = True
+        self.boot = 1000.0
+        self._last_when = None
 
     def record(self, total, when=None):
         when = when or datetime(2026, 10, 21, 21, 30, tzinfo=UTC)
-        with mock.patch.object(bridge, "_localnow", return_value=when):
+        if self._last_when is not None:
+            elapsed = (when - self._last_when).total_seconds()
+            self.boot += elapsed if elapsed > 0 else 3600.0
+        self._last_when = when
+        with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
+            bridge.time, "clock_gettime", return_value=self.boot
+        ), mock.patch.object(bridge.time, "monotonic", return_value=self.boot):
             self.tracker.record_history(total)
 
     def drain(self):
@@ -480,8 +488,8 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(merge, ["kwh", "hours.`21`", "updated_at"])
 
     def test_hours_stay_separate_and_kwh_carries_their_sum(self):
-        self.record(100.0)
-        self.record(112.5, datetime(2026, 10, 21, 21, 30, tzinfo=UTC))
+        self.record(100.0, datetime(2026, 10, 21, 21, 0, tzinfo=UTC))
+        self.record(112.5, datetime(2026, 10, 21, 21, 40, tzinfo=UTC))
         self.record(118.0, datetime(2026, 10, 21, 22, 10, tzinfo=UTC))
         (day,) = self.history()
         self.assertAlmostEqual(self.history()[day]["kwh"], 18.0)
@@ -498,18 +506,18 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len(self.history_writes()), 1)
 
     def test_local_midnight_rolls_to_the_new_day_and_leaves_the_old_one_alone(self):
-        self.record(100.0)
+        self.record(100.0, datetime(2026, 10, 21, 23, 45, 0, tzinfo=UTC))
         self.record(103.0, datetime(2026, 10, 21, 23, 59, 50, tzinfo=UTC))
-        self.record(105.0, datetime(2026, 10, 22, 0, 0, 10, tzinfo=UTC))
+        self.record(103.05, datetime(2026, 10, 22, 0, 0, 10, tzinfo=UTC))
         self.assertEqual(sorted(self.history()), ["2026-10-21", "2026-10-22"])
         first = self.history()["2026-10-21"]
         self.assertAlmostEqual(first["kwh"], 3.0)
         self.assertEqual(list(first["hours"]), ["23"])
         self.assertAlmostEqual(first["hours"]["23"], 3.0)
         second = self.history()["2026-10-22"]
-        self.assertAlmostEqual(second["kwh"], 2.0)
+        self.assertAlmostEqual(second["kwh"], 0.05)
         self.assertEqual(list(second["hours"]), ["00"])
-        self.assertAlmostEqual(second["hours"]["00"], 2.0)
+        self.assertAlmostEqual(second["hours"]["00"], 0.05)
         # One write per day document, each carrying only its own day's hours.
         self.assertEqual(
             [(write[2], write[4]) for write in self.history_writes()],
@@ -520,18 +528,18 @@ class HistoryTests(unittest.TestCase):
         )
 
     def test_failed_write_keeps_the_delta_for_a_later_retry_hour(self):
-        self.record(100.0)
+        self.record(100.0, datetime(2026, 10, 21, 21, 10, tzinfo=UTC))
         self.db.fail_writes = True
         self.record(110.0, datetime(2026, 10, 21, 21, 55, tzinfo=UTC))
-        self.record(115.0, datetime(2026, 10, 21, 22, 2, tzinfo=UTC))
-        # Both flush attempts failed (the drain and the 22:02 rollover), so
+        self.record(115.0, datetime(2026, 10, 21, 22, 15, tzinfo=UTC))
+        # Both flush attempts failed (the drain and the 22:15 rollover), so
         # the accumulator kept everything; the baseline advanced on
         # observation and the energy lives in the pending buckets.
         self.assertFalse(self.drain())
         self.assertEqual(self.tracker.total_energy, 115.0)
         self.assertEqual(self.history(), {})
         self.db.fail_writes = False
-        self.record(116.0, datetime(2026, 10, 21, 22, 5, tzinfo=UTC))
+        self.record(116.0, datetime(2026, 10, 21, 22, 20, tzinfo=UTC))
         # The retry lands every observed delta in its observed hour, in one
         # write, exactly as a shutdown drain would.
         self.assertTrue(self.drain())

@@ -511,14 +511,14 @@ class StatusSinkTests(unittest.TestCase):
 
     def test_a_repeated_snapshot_does_not_double_count_history(self):
         self.apply(status_payload(total_energy=100), "http")
-        self.apply(status_payload(total_energy=110), "mqtt")
-        self.apply(status_payload(total_energy=110), "http")
+        self.apply(status_payload(total_energy=100.04), "mqtt")
+        self.apply(status_payload(total_energy=100.04), "http")
         # No flush point fired yet, so the delta is still pending -- but it
         # is pending exactly once however often the unchanged reading lands.
-        self.assertEqual(self.tracker.history.pending_kwh, 10.0)
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 0.04)
         self.tracker.history.flush("shutdown")
         (day,) = self.db.data["history"]
-        self.assertAlmostEqual(self.db.data["history"][day]["kwh"], 10.0)
+        self.assertAlmostEqual(self.db.data["history"][day]["kwh"], 0.04)
 
     def test_a_stale_http_response_cannot_reopen_a_closed_session(self):
         # The exact race: charging, an MQTT stop, then the reconcile reply that
