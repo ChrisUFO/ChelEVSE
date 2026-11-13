@@ -697,10 +697,7 @@ would count as today's usage); at startup that baseline is seeded from the
 existing `status/current` document. If the seed read fails (e.g. the Pi booted
 before the network), the bridge retries it on later status ticks (at most every
 30 s) and pauses history until it succeeds, so the eventual first delta still
-starts at the last stored reading instead of dropping the downtime energy. If
-`total_energy` drops (firmware reset), the bridge logs
-`total_energy reset; rebaselining history` and starts a new baseline without
-writing a negative delta. A failed history write does not advance the in-memory
+starts at the last stored reading instead of dropping the downtime energy. A transient `total_energy == 0` reading when `total_energy > 0` is ignored and logged without wiping the baseline or advancing the observation clock, so a reconnect spike cannot follow a false zero reset; a genuine non-zero drop (`0 < total < previous`, firmware reset) logs `total_energy reset; rebaselining history` and starts a new baseline without writing a negative delta. Upward steps are checked against `_interval_step_allowance(gap)` over the elapsed monotonic gap (`CLOCK_BOOTTIME`): implausible jumps are dropped, logged, and rebaselined without adding to the accumulator. A failed history write does not advance the in-memory
 baseline: the same delta is retried on the next tick, and lands in the bucket
 for the hour that retry happens in.
 

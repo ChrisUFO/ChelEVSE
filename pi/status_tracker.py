@@ -7,6 +7,7 @@ calls. History deltas flow to the accumulator; writes to the tracker's
 dependencies.
 """
 
+import math
 import time
 from datetime import datetime, timedelta
 
@@ -70,6 +71,7 @@ class StatusTracker:
         # of a run's writes.
         self.counter = counter or WriteCounter()
         self.total_energy = None
+        self.history_seen_at = None
         self.state = None
         self.charger_online = None
         self.session_energy = None
@@ -491,8 +493,14 @@ class StatusTracker:
         baseline advances on observation; the accumulator holds the energy
         until a write lands, so a failed flush retries the same deltas
         instead of losing them.
+
+        Like ``_track_interval``, an upward step must fit within
+        ``_interval_step_allowance(gap)`` over the elapsed monotonic gap
+        since the last observation (``history_seen_at``) so a corrupt meter
+        jump cannot pollute daily history, while a transient ``0`` reading
+        when ``total_energy > 0`` is ignored without wiping the baseline.
         """
-        if not _is_number(total):
+        if not _is_number(total) or not math.isfinite(total):
             return
         total = float(total)
         if not self.seeded:
@@ -503,19 +511,42 @@ class StatusTracker:
                 log("history paused: status seed unavailable (retrying)")
                 self._history_paused_logged = True
             return
+        now = _interval_clock()
         previous = self.total_energy
         if previous is None:
             self.total_energy = total
+            self.history_seen_at = now
             return  # first observation is a baseline only
+        if total == 0 and previous > 0:
+            log(
+                f"history reading ignored: transient total_energy=0 "
+                f"(keeping baseline {previous:g} kWh)"
+            )
+            return
+        gap = None if self.history_seen_at is None else now - self.history_seen_at
         delta = total - previous
         if delta < 0:
             log("total_energy reset; rebaselining history")
             self.total_energy = total
+            self.history_seen_at = now
             return
-        if delta <= 0:
+        if delta == 0:
             self.total_energy = total
+            self.history_seen_at = now
+            return
+        allowed_wh = _interval_step_allowance(gap) if _is_number(gap) else None
+        delta_wh = delta * 1000.0
+        if allowed_wh is not None and delta_wh > allowed_wh:
+            log(
+                f"history step dropped: {delta:.3f} kWh ({delta_wh:.0f} Wh) in "
+                f"{_gap_seconds(gap)} exceeds the {allowed_wh:.0f} Wh the "
+                f"charger could deliver; rebaselining history"
+            )
+            self.total_energy = total
+            self.history_seen_at = now
             return
         self.total_energy = total
+        self.history_seen_at = now
         self.history.observe(delta, _localnow())
 
     def consider_history_flush(self):

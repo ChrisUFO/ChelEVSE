@@ -30,6 +30,8 @@ class HistoryBase(unittest.TestCase):
     def setUp(self):
         self.db = FakeDB()
         self.clock = _Clock()
+        self.boot = 1000.0
+        self._last_when = None
         self.tracker = self._build_tracker()
         self.tracker.seeded = True
 
@@ -43,7 +45,12 @@ class HistoryBase(unittest.TestCase):
 
     def record(self, total, when):
         """One observation at an exact wall-clock instant (the local clock)."""
-        with mock.patch.object(bridge, "_localnow", return_value=when):
+        if self._last_when is not None:
+            self.boot += max(0.0, (when - self._last_when).total_seconds())
+        self._last_when = when
+        with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
+            bridge.time, "clock_gettime", return_value=self.boot
+        ), mock.patch.object(bridge.time, "monotonic", return_value=self.boot):
             self.tracker.record_history(total)
 
     def history_writes(self):
@@ -59,39 +66,41 @@ class AttributionTests(HistoryBase):
         # Energy creeps through three local hours. No flush point fires
         # until each rollover, so each flush writes the buckets it holds.
         self.record(101.0, start + timedelta(minutes=11))  # 21:01 -> hours 21
-        self.record(103.5, start + timedelta(minutes=12))  # 21:02
-        self.record(104.5, start + timedelta(minutes=70))  # 22:00 -> rollover
+        self.record(101.3, start + timedelta(minutes=12))  # 21:02
+        self.record(102.3, start + timedelta(minutes=70))  # 22:00 -> rollover
         # One write spans both buckets: kwh plus every touched hours.<HH>.
         (first,) = self.history_writes()
         self.assertEqual(first[2], "2026-10-21")
         self.assertEqual(
             first[4], ["kwh", "hours.`21`", "hours.`22`", "updated_at"]
         )
-        self.assertEqual(first[3]["hours"]["21"]._value, 3.5)
-        self.assertEqual(first[3]["hours"]["22"]._value, 1.0)
-        self.assertEqual(first[3]["kwh"]._value, 4.5)
+        self.assertAlmostEqual(first[3]["hours"]["21"]._value, 1.3)
+        self.assertAlmostEqual(first[3]["hours"]["22"]._value, 1.0)
+        self.assertAlmostEqual(first[3]["kwh"]._value, 2.3)
         # The flush hour (22:00) did not steal the 21:xx energy.
-        self.assertEqual(self.db.data["history"]["2026-10-21"]["hours"]["21"], 3.5)
+        self.assertAlmostEqual(
+            self.db.data["history"]["2026-10-21"]["hours"]["21"], 1.3
+        )
         # More energy in 22, then the 23:00 rollover flushes again.
-        self.record(106.0, start + timedelta(minutes=71))
+        self.record(102.6, start + timedelta(minutes=71))
         self.record(
-            107.5, start + timedelta(minutes=130)
+            104.1, start + timedelta(minutes=130)
         )  # 23:00 -> rollover
         (first, second) = self.history_writes()
         self.assertEqual(
             second[4], ["kwh", "hours.`22`", "hours.`23`", "updated_at"]
         )
         doc = self.db.data["history"]["2026-10-21"]
-        self.assertAlmostEqual(doc["kwh"], 7.5)
-        self.assertAlmostEqual(doc["hours"]["21"], 3.5)
-        self.assertAlmostEqual(doc["hours"]["22"], 2.5)
+        self.assertAlmostEqual(doc["kwh"], 4.1)
+        self.assertAlmostEqual(doc["hours"]["21"], 1.3)
+        self.assertAlmostEqual(doc["hours"]["22"], 1.3)
         self.assertAlmostEqual(doc["hours"]["23"], 1.5)
 
     def test_a_flush_spanning_midnight_is_one_write_per_day_document(self):
         start = datetime(2026, 10, 21, 23, 58, tzinfo=UTC)
         self.record(100.0, start)
-        self.record(103.0, start + timedelta(seconds=110))  # 23:59:50, hour 23
-        self.record(105.0, start + timedelta(seconds=130))  # 00:00:10, hour 00
+        self.record(100.3, start + timedelta(seconds=110))  # 23:59:50, hour 23
+        self.record(100.4, start + timedelta(seconds=130))  # 00:00:10, hour 00
         # The midnight rollover flushed both days at once: one write per day
         # document, each carrying only its own day's deltas.
         self.assertEqual(
@@ -102,11 +111,11 @@ class AttributionTests(HistoryBase):
             ],
         )
         first = self.db.data["history"]["2026-10-21"]
-        self.assertAlmostEqual(first["kwh"], 3.0)
-        self.assertAlmostEqual(first["hours"]["23"], 3.0)
+        self.assertAlmostEqual(first["kwh"], 0.3)
+        self.assertAlmostEqual(first["hours"]["23"], 0.3)
         second = self.db.data["history"]["2026-10-22"]
-        self.assertAlmostEqual(second["kwh"], 2.0)
-        self.assertAlmostEqual(second["hours"]["00"], 2.0)
+        self.assertAlmostEqual(second["kwh"], 0.1)
+        self.assertAlmostEqual(second["hours"]["00"], 0.1)
 
     def test_a_session_spanning_midnight_attributes_to_both_days(self):
         # The session-close and midnight cases compose: energy observed
@@ -115,14 +124,14 @@ class AttributionTests(HistoryBase):
         start = datetime(2026, 10, 21, 23, 30, tzinfo=UTC)
         self.record(100.0, start)
         self.record(104.0, start + timedelta(minutes=29))  # 23:59, hour 23
-        self.record(106.0, start + timedelta(minutes=31))  # 00:01 -> rollover
-        self.record(107.0, start + timedelta(minutes=45))  # 00:15, still hour 00
+        self.record(104.5, start + timedelta(minutes=31))  # 00:01 -> rollover
+        self.record(105.5, start + timedelta(minutes=45))  # 00:15, still hour 00
         self.tracker.history.flush("session close")
         self.assertEqual(sorted(self.db.data["history"]), ["2026-10-21", "2026-10-22"])
         self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 4.0)
         self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["hours"]["23"], 4.0)
-        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["kwh"], 3.0)
-        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["hours"]["00"], 3.0)
+        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["kwh"], 1.5)
+        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["hours"]["00"], 1.5)
 
 
 class FailureRetentionTests(HistoryBase):
@@ -133,12 +142,12 @@ class FailureRetentionTests(HistoryBase):
         self.record(100.0, start)
         self.tracker.state = 3  # the interval trigger is charging-gated
         self.db.fail_writes = True
-        self.record(110.0, start + timedelta(minutes=10))  # +10, hour 21
+        self.record(102.0, start + timedelta(minutes=10))  # +2, hour 21
         self.clock.advance(self.FLUSH)
         self.tracker.consider_history_flush()  # the interval flush fails
-        self.assertEqual(self.tracker.history.pending_kwh, 10.0)
-        self.record(115.0, start + timedelta(minutes=65))  # 22:05 -> rollover fails
-        self.assertEqual(self.tracker.history.pending_kwh, 15.0)
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 2.0)
+        self.record(107.0, start + timedelta(minutes=65))  # 22:05 -> rollover fails
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 7.0)
         self.assertNotIn("history", self.db.data)
         self.db.fail_writes = False
         self.clock.advance(self.FLUSH)
@@ -147,18 +156,18 @@ class FailureRetentionTests(HistoryBase):
         self.assertEqual(
             write[4], ["kwh", "hours.`21`", "hours.`22`", "updated_at"]
         )
-        self.assertEqual(write[3]["hours"]["21"]._value, 10.0)
-        self.assertEqual(write[3]["hours"]["22"]._value, 5.0)
-        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
+        self.assertAlmostEqual(write[3]["hours"]["21"]._value, 2.0)
+        self.assertAlmostEqual(write[3]["hours"]["22"]._value, 5.0)
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 0.0)
         doc = self.db.data["history"]["2026-10-21"]
-        self.assertAlmostEqual(doc["kwh"], 15.0)
-        self.assertAlmostEqual(doc["hours"]["21"], 10.0)
+        self.assertAlmostEqual(doc["kwh"], 7.0)
+        self.assertAlmostEqual(doc["hours"]["21"], 2.0)
         self.assertAlmostEqual(doc["hours"]["22"], 5.0)
 
     def test_a_partial_midnight_failure_keeps_only_the_failed_day(self):
         start = datetime(2026, 10, 21, 23, 59, tzinfo=UTC)
         self.record(100.0, start)
-        self.record(102.0, start + timedelta(seconds=30))  # 23:59:30, hour 23
+        self.record(100.2, start + timedelta(seconds=30))  # 23:59:30, hour 23
         # Only the second day's document write fails.
         real_collection = self.db.collection
 
@@ -185,18 +194,18 @@ class FailureRetentionTests(HistoryBase):
             return collection
 
         self.db.collection = failing_second_day
-        self.record(104.0, start + timedelta(seconds=70))  # 00:00:10 -> rollover
+        self.record(100.4, start + timedelta(seconds=70))  # 00:00:10 -> rollover
         # Day one landed and was cleared; day two is still pending.
         self.assertEqual(list(self.db.data["history"]), ["2026-10-21"])
-        self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 2.0)
-        self.assertEqual(
-            self.tracker.history.pending_hours, {("2026-10-22", "00"): 2.0}
+        self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 0.2)
+        self.assertAlmostEqual(
+            self.tracker.history.pending_hours[("2026-10-22", "00")], 0.2
         )
-        self.assertEqual(self.tracker.history.pending_kwh, 2.0)
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 0.2)
         self.db.collection = real_collection
         self.assertTrue(self.tracker.history.flush("shutdown"))
-        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["kwh"], 2.0)
-        self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 2.0)
+        self.assertAlmostEqual(self.db.data["history"]["2026-10-22"]["kwh"], 0.2)
+        self.assertAlmostEqual(self.db.data["history"]["2026-10-21"]["kwh"], 0.2)
 
 
 class FlushLoggingTests(HistoryBase):
@@ -206,11 +215,11 @@ class FlushLoggingTests(HistoryBase):
         logs = []
         start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
         self.record(100.0, start)
-        self.record(103.5, start + timedelta(minutes=1))
+        self.record(100.3, start + timedelta(minutes=1))
         with mock.patch.object(bridge, "log", logs.append):
             self.assertTrue(self.tracker.history.flush("charging interval"))
         self.assertEqual(logs, ["history flush on charging interval: "
-                                "3.500 kWh across 1 bucket(s), 1 day doc(s)"])
+                                "0.300 kWh across 1 bucket(s), 1 day doc(s)"])
 
     def test_a_flush_with_nothing_pending_stays_silent(self):
         logs = []
@@ -223,7 +232,7 @@ class FlushLoggingTests(HistoryBase):
         start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
         self.record(100.0, start)
         self.db.fail_writes = True
-        self.record(102.0, start + timedelta(minutes=1))
+        self.record(100.3, start + timedelta(minutes=1))
         with mock.patch.object(bridge, "log", logs.append):
             self.assertFalse(self.tracker.history.flush("charging interval"))
         self.assertEqual(len(logs), 1)
@@ -323,7 +332,10 @@ class SinkIntervalTests(unittest.TestCase):
         self.sink = bridge.StatusSink(self.db, self.tracker, self.notifier)
 
     def apply(self, when, **overrides):
-        with mock.patch.object(bridge, "_localnow", return_value=when):
+        boot = self.clock()
+        with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
+            bridge.time, "clock_gettime", return_value=boot
+        ), mock.patch.object(bridge.time, "monotonic", return_value=boot):
             fields = bridge.parse_status(status_payload(**overrides))
             self.sink.apply_status(fields, "http")
 
@@ -337,29 +349,29 @@ class SinkIntervalTests(unittest.TestCase):
         # The interval is measured from the first pending delta, not from
         # the charging start: energy that just arrived is not due yet.
         self.clock.advance(290)
-        self.apply(start + timedelta(seconds=290), state=3, total_energy=105)
+        self.apply(start + timedelta(seconds=290), state=3, total_energy=101)
         self.assertEqual(self.history_writes(), [])
         self.clock.advance(290)
-        self.apply(start + timedelta(seconds=580), state=3, total_energy=108)
+        self.apply(start + timedelta(seconds=580), state=3, total_energy=102)
         self.assertEqual(self.history_writes(), [])  # 290 s of pending: not due
         self.clock.advance(10)
-        self.apply(start + timedelta(seconds=590), state=3, total_energy=110)
+        self.apply(start + timedelta(seconds=590), state=3, total_energy=102.1)
         (write,) = self.history_writes()
         self.assertEqual(write[2], "2026-10-21")
         self.assertEqual(write[4], ["kwh", "hours.`21`", "updated_at"])
-        self.assertEqual(write[3]["kwh"]._value, 10.0)
+        self.assertAlmostEqual(write[3]["kwh"]._value, 2.1)
 
     def test_the_scheduler_tick_flushes_without_a_new_apply(self):
         # A charger gone silent mid-charge: the pending energy still flushes
         # on schedule, from the status loop's tick.
         start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
         self.apply(start, state=3, session_energy=100, elapsed=600, total_energy=100)
-        self.apply(start, state=3, session_energy=200, elapsed=700, total_energy=105)
-        self.assertEqual(self.tracker.history.pending_kwh, 5.0)
+        self.apply(start, state=3, session_energy=140, elapsed=700, total_energy=100.04)
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 0.04)
         self.clock.advance(300)
         self.sink.consider_history_flush()
         (write,) = self.history_writes()
-        self.assertEqual(write[3]["kwh"]._value, 5.0)
+        self.assertAlmostEqual(write[3]["kwh"]._value, 0.04)
 
     def test_idle_energy_waits_for_a_non_interval_flush_point(self):
         # Standby creep while idle never triggers the interval (0 idle
@@ -378,6 +390,7 @@ class SinkIntervalTests(unittest.TestCase):
         start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
         self.apply(start, total_energy=100)
         self.apply(start, state=3, session_energy=0, elapsed=0, total_energy=100)
+        self.clock.advance(1800)
         self.apply(
             start + timedelta(minutes=30),
             state=3,
@@ -385,6 +398,7 @@ class SinkIntervalTests(unittest.TestCase):
             total_energy=105,
         )
         self.assertEqual(self.history_writes(), [])  # pending, no flush point yet
+        self.clock.advance(60)
         self.apply(
             start + timedelta(minutes=31),
             state=1,
@@ -393,6 +407,7 @@ class SinkIntervalTests(unittest.TestCase):
         )
         (write,) = self.history_writes()
         self.assertEqual(write[3]["kwh"]._value, 5.0)
+        self.clock.advance(60)
         self.apply(start + timedelta(minutes=32), state=1, total_energy=105)
         self.assertEqual(len(self.history_writes()), 1)
 
@@ -414,7 +429,7 @@ class ShutdownDrainTests(unittest.TestCase):
                 "http",
             )
             sink.apply_status(
-                bridge.parse_status(status_payload(state=3, total_energy=108)),
+                bridge.parse_status(status_payload(state=3, total_energy=100.04)),
                 "http",
             )
 
@@ -435,9 +450,9 @@ class ShutdownDrainTests(unittest.TestCase):
             )
         history = db.data.get("history", {})
         (day,) = history
-        self.assertAlmostEqual(history[day]["kwh"], 8.0)
+        self.assertAlmostEqual(history[day]["kwh"], 0.04)
         (hour,) = history[day]["hours"]
-        self.assertAlmostEqual(history[day]["hours"][hour], 8.0)
+        self.assertAlmostEqual(history[day]["hours"][hour], 0.04)
 
     def test_the_drain_waits_for_an_apply_holding_the_sink_lock(self):
         # The drain must serialize with the applies on the sink's lock, not
@@ -454,7 +469,7 @@ class ShutdownDrainTests(unittest.TestCase):
         start = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)
         with mock.patch.object(bridge, "_localnow", return_value=start):
             tracker.record_history(100.0)
-            tracker.record_history(104.0)
+            tracker.record_history(100.04)
         started = threading.Event()
         drained = threading.Event()
 
@@ -473,7 +488,7 @@ class ShutdownDrainTests(unittest.TestCase):
         thread.join(5)
         (write,) = [w for w in db.writes if w[1] == "history"]
         self.assertEqual(write[2], "2026-10-21")
-        self.assertEqual(write[3]["kwh"]._value, 4.0)
+        self.assertAlmostEqual(write[3]["kwh"]._value, 0.04)
 
 
 class HistoryEnvTests(unittest.TestCase):
@@ -537,6 +552,106 @@ class HistoryEnvTests(unittest.TestCase):
         for raw in ("-1", "0"):
             with self.subTest(raw=raw):
                 self.assert_bad_tunable_exits("HISTORY_FLUSH_SEC", raw)
+
+
+class HistoryPlausibilityTests(HistoryBase):
+    """record_history plausibility ceiling and transient-zero guard (#148)."""
+
+    def test_one_second_spike_from_zero_is_rejected_logged_and_rebaselined(self):
+        start = datetime(2026, 11, 8, 22, 32, 31, tzinfo=UTC)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.record(0.0, start)
+            self.record(385.284, start + timedelta(seconds=1))
+        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
+        self.assertEqual(self.history_writes(), [])
+        self.assertEqual(self.tracker.total_energy, 385.284)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("history step dropped", logs[0])
+        self.assertIn("385.284 kWh", logs[0])
+        self.assertIn("1 s", logs[0])
+        # Subsequent plausible step after rebaselining is attributed cleanly.
+        self.record(386.0, start + timedelta(minutes=10, seconds=1))
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 0.716)
+
+    def test_implausible_jump_from_nonzero_baseline_is_rejected(self):
+        start = datetime(2026, 11, 8, 22, 32, 31, tzinfo=UTC)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.record(385.284, start)
+            self.record(770.568, start + timedelta(seconds=1))
+        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
+        self.assertEqual(self.tracker.total_energy, 770.568)
+        self.assertTrue(any("history step dropped" in line for line in logs))
+
+    def test_transient_zero_does_not_wipe_baseline_or_cause_spike(self):
+        start = datetime(2026, 11, 8, 22, 32, 20, tzinfo=UTC)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.record(385.284, start)
+            self.record(0.0, start + timedelta(seconds=11))
+            self.assertEqual(self.tracker.total_energy, 385.284)
+            self.record(385.284, start + timedelta(seconds=12))
+        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
+        self.assertEqual(self.history_writes(), [])
+        self.assertEqual(self.tracker.total_energy, 385.284)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("transient total_energy=0", logs[0])
+
+    def test_transient_zero_preserves_outage_gap_for_legitimate_recovery(self):
+        start = datetime(2026, 11, 8, 20, 0, 0, tzinfo=UTC)
+        self.record(385.284, start)
+        # Charger goes offline for 2 hours, reconnects with transient 0, then
+        # reports +4.716 kWh 1 second later: gap must still measure from start.
+        self.record(0.0, start + timedelta(hours=2))
+        self.record(390.0, start + timedelta(hours=2, seconds=1))
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 4.716)
+        self.assertEqual(self.tracker.total_energy, 390.0)
+
+    def test_transient_zero_after_seed_preserves_seeded_baseline(self):
+        self.db.data["status"] = {"current": {"total_energy": 385.284, "state": 1}}
+        tracker = bridge.StatusTracker(
+            self.db,
+            history=bridge.HistoryAccumulator(
+                self.db, flush_sec=self.FLUSH, clock=self.clock
+            ),
+        )
+        self.assertTrue(tracker.seed())
+        now = datetime(2026, 11, 8, 22, 32, 31, tzinfo=UTC)
+        with mock.patch.object(bridge, "_localnow", return_value=now), mock.patch.object(
+            bridge.time, "clock_gettime", return_value=1000.0
+        ), mock.patch.object(bridge.time, "monotonic", return_value=1000.0):
+            tracker.record_history(0.0)
+            self.assertEqual(tracker.total_energy, 385.284)
+            tracker.record_history(385.5)
+        self.assertAlmostEqual(tracker.history.pending_kwh, 0.216)
+
+    def test_genuine_nonzero_reset_still_rebaselines(self):
+        start = datetime(2026, 11, 8, 21, 0, 0, tzinfo=UTC)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.record(100.0, start)
+            self.record(40.0, start + timedelta(seconds=10))
+        self.assertEqual(self.tracker.total_energy, 40.0)
+        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
+        self.assertEqual(logs, ["total_energy reset; rebaselining history"])
+        self.record(41.0, start + timedelta(minutes=10))
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 1.0)
+
+    def test_legitimate_multi_hour_outage_recovery_is_accepted(self):
+        start = datetime(2026, 11, 8, 18, 0, 0, tzinfo=UTC)
+        self.record(385.284, start)
+        self.record(395.284, start + timedelta(hours=2))
+        self.assertAlmostEqual(self.tracker.history.pending_kwh, 10.0)
+        self.assertEqual(self.tracker.total_energy, 395.284)
+
+    def test_non_finite_readings_are_ignored(self):
+        start = datetime(2026, 11, 8, 21, 0, 0, tzinfo=UTC)
+        self.record(100.0, start)
+        self.record(float("nan"), start + timedelta(seconds=10))
+        self.record(float("inf"), start + timedelta(seconds=20))
+        self.assertEqual(self.tracker.total_energy, 100.0)
+        self.assertEqual(self.tracker.history.pending_kwh, 0.0)
 
 
 if __name__ == "__main__":
