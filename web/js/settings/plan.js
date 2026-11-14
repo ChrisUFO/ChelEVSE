@@ -1224,6 +1224,85 @@ export function dayTypesForWeek(week) {
     }));
 }
 
+// The sample the coverage table is drawn from: a date season at its own
+// representative dates (reporting its lone date, so a one-day sample can be
+// named for what it is), any other season in its representative month.
+function coverageSample(period) {
+  const dated = Boolean(period && period.kind === 'dates');
+  const dates = dated ? representativeDates(period) : [];
+  const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
+  return { dated, dates, month, onlyDate: dated && dates.length === 1 ? dates[0] : null };
+}
+
+// The effective week for that sample: one entry per representative date for a
+// date season, seven consecutive days for a month season.
+function coverageWeek(rows, fallbackRate, sample, year) {
+  return sample.dated
+    ? rateWeekForDates(rows, fallbackRate, sample.dates, year)
+    : rateWeek(rows, fallbackRate, sample.month, year);
+}
+
+// The table is the effective sample, but every segment keeps its owner: own
+// rows are the period's rows, sibling rows are named in the band column
+// instead of being mislabelled as the base.
+function coverageOwnRowIds(period) {
+  return new Set(
+    (period && period.rows ? period.rows : [])
+      .map((entry) => entry.row && entry.row.id)
+      .filter(Boolean),
+  );
+}
+
+function coverageSiblingPeriods(period, periods, sample, year) {
+  const samples = sample.dated
+    ? sample.dates.map((entry) => sampleDate(entry.month, entry.day, year))
+    : [];
+  return (Array.isArray(periods) ? periods : []).filter(
+    (other) =>
+      other &&
+      other.key !== (period && period.key) &&
+      (sample.dated
+        ? samples.some((date) => periodAppliesOn(other, date))
+        : periodAppliesInMonth(other, sample.month)),
+  );
+}
+
+function coverageDayTypes(period, week, onlyDate) {
+  let types = dayTypesForWeek(week);
+  // A base-only season is one price for every day and hour of the season: it is
+  // shown as one Every day type and one 00:00–24:00 row, however short the
+  // representative sample is.
+  if (period && period.mode === 'base' && types.length > 0) {
+    types = [{ days: [0, 1, 2, 3, 4, 5, 6], label: 'Every day', segments: types[0].segments }];
+  }
+  // A one-date season is sampled on one weekday. Printing that weekday ("Mon")
+  // asserts a weekday scope on a date that moves every year, so the sample is
+  // named for what it is instead.
+  if (onlyDate && types.length === 1) {
+    types = [{ ...types[0], label: 'One day' }];
+  }
+  return types;
+}
+
+// The table caption names the sample: a date season its dates, an all-year
+// season "All year" (the January the week is sampled in is not a scope), and
+// a month season its month. A month season that spans several months is
+// sampled in the first of them, so the caption marks that month as the
+// example instead of reading as the season's whole scope. One date drops its
+// "(one day)" marker here because the row group is already labelled "One
+// day".
+function coverageCaption(period, month, dated, onlyDate) {
+  return dated
+    ? onlyDate
+      ? `${MONTH_SHORT[onlyDate.month - 1]} ${onlyDate.day}`
+      : period.dateText
+    : period && period.kind === 'all'
+      ? 'All year'
+      : Array.isArray(period && period.months) && period.months.length > 1
+        ? `${MONTH_NAMES[month - 1]} · example`
+        : MONTH_NAMES[month - 1];
+}
+
 // One period's own layer for a representative sample in its own scope. The table
 // is deliberately not the union: it shows this period's rows, prices an
 // uncovered hour at 0.00, and names the sibling periods that also apply in that
@@ -1238,62 +1317,15 @@ export function periodCoverage(
   periods,
   year = new Date().getFullYear(),
 ) {
-  const dated = Boolean(period && period.kind === 'dates');
-  const dates = dated ? representativeDates(period) : [];
-  const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
-  // The table is the effective sample, but every segment keeps its owner: own
-  // rows are the period's rows, sibling rows are named in the band column
-  // instead of being mislabelled as the base.
-  const week = dated
-    ? rateWeekForDates(rows, fallbackRate, dates, year)
-    : rateWeek(rows, fallbackRate, month, year);
-  const ownIds = new Set(
-    (period && period.rows ? period.rows : [])
-      .map((entry) => entry.row && entry.row.id)
-      .filter(Boolean),
-  );
-  const samples = dated ? dates.map((entry) => sampleDate(entry.month, entry.day, year)) : [];
-  const siblings = (Array.isArray(periods) ? periods : []).filter(
-    (other) =>
-      other &&
-      other.key !== (period && period.key) &&
-      (dated
-        ? samples.some((date) => periodAppliesOn(other, date))
-        : periodAppliesInMonth(other, month)),
-  );
-  // A base-only season is one price for every day and hour of the season: it is
-  // shown as one Every day type and one 00:00–24:00 row, however short the
-  // representative sample is.
-  let types = dayTypesForWeek(week);
-  if (period && period.mode === 'base' && types.length > 0) {
-    types = [{ days: [0, 1, 2, 3, 4, 5, 6], label: 'Every day', segments: types[0].segments }];
-  }
-  // A one-date season is sampled on one weekday. Printing that weekday ("Mon")
-  // asserts a weekday scope on a date that moves every year, so the sample is
-  // named for what it is instead.
-  const onlyDate = dated && dates.length === 1 ? dates[0] : null;
-  if (onlyDate && types.length === 1) {
-    types = [{ ...types[0], label: 'One day' }];
-  }
+  const { dated, dates, month, onlyDate } = coverageSample(period);
+  const week = coverageWeek(rows, fallbackRate, { dated, dates, month }, year);
+  const ownIds = coverageOwnRowIds(period);
+  const siblings = coverageSiblingPeriods(period, periods, { dated, dates, month }, year);
+  const types = coverageDayTypes(period, week, onlyDate);
   return {
     month,
     monthName: dated ? period.dateText : MONTH_NAMES[month - 1],
-    // The table caption names the sample: a date season its dates, an all-year
-    // season "All year" (the January the week is sampled in is not a scope), and
-    // a month season its month. A month season that spans several months is
-    // sampled in the first of them, so the caption marks that month as the
-    // example instead of reading as the season's whole scope. One date drops its
-    // "(one day)" marker here because the row group is already labelled "One
-    // day".
-    captionText: dated
-      ? onlyDate
-        ? `${MONTH_SHORT[onlyDate.month - 1]} ${onlyDate.day}`
-        : period.dateText
-      : period && period.kind === 'all'
-        ? 'All year'
-        : Array.isArray(period && period.months) && period.months.length > 1
-          ? `${MONTH_NAMES[month - 1]} · example`
-          : MONTH_NAMES[month - 1],
+    captionText: coverageCaption(period, month, dated, onlyDate),
     dateText: dated ? period.dateText : '',
     dates,
     week: Array.isArray(week) ? week : [],
@@ -1327,18 +1359,19 @@ export function segmentNote(segment) {
   return `continues to ${window.end} the next day`;
 }
 
-// The exact-date checker: the winning row for one local instant and why. A base
-// prices the season's ordinary hours, an override wins over it, and both
-// unmatched cases are 0: an uncovered date (no season) or an unpriced hour (a
-// season with neither a base nor a window for that time).
-export function previewRate(rows, fallbackRate, date) {
+// The row the checker would win for one local instant, or null when the
+// schedule resolves to nothing at all.
+function previewEntry(rows, fallbackRate, date) {
   const base = parseRateValue(fallbackRate);
-  const list = Array.isArray(rows) ? rows : [];
-  const entry = rateEntryAt(date, {
+  return rateEntryAt(date, {
     rate: Number.isFinite(base) ? base : null,
     rates: rows,
   });
-  if (!entry) return null;
+}
+
+// The period that owns the winning row and the base it is compared against;
+// both are null for an instant no period prices.
+function previewPeriod(list, entry) {
   const periods = ratePeriods(list);
   const winningPeriod = entry.window
     ? periods.find((period) =>
@@ -1346,18 +1379,35 @@ export function previewRate(rows, fallbackRate, date) {
       ) || null
     : null;
   const baseRate = winningPeriod ? periodBaseRate(winningPeriod) : null;
-  const referenceRates = winningPeriod
+  return { winningPeriod, baseRate };
+}
+
+// The prices a tier is relative to: the winning period's own rows, or the whole
+// schedule when the instant belongs to no period.
+function previewReferenceRates(winningPeriod, list) {
+  return winningPeriod
     ? winningPeriod.rows.map((row) => row.row && row.row.rate)
     : list.map((row) => row && row.rate);
+}
+
+function previewTier(entry, referenceRates, baseRate) {
+  return entry.source === 'base'
+    ? 'Base'
+    : entry.source === 'window'
+      ? baseRate != null
+        ? rateTierFor(entry.window.rate, referenceRates, baseRate) || 'Window'
+        : 'Window'
+      : '';
+}
+
+// A date season's dates name the row; a month row has none because its scope
+// text already carries the months.
+function previewDateText(entry) {
   const scope = entry.window ? rateScope(entry.window) : null;
-  const tier =
-    entry.source === 'base'
-      ? 'Base'
-      : entry.source === 'window'
-        ? baseRate != null
-          ? rateTierFor(entry.window.rate, referenceRates, baseRate) || 'Window'
-          : 'Window'
-        : '';
+  return entry.window && scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '';
+}
+
+function previewDisplay(entry, tier, baseRate) {
   return {
     rate: entry.rate,
     window: entry.window,
@@ -1368,10 +1418,23 @@ export function previewRate(rows, fallbackRate, date) {
     baseRate,
     summary: entry.window ? rateWindowSummary(entry.window) : '',
     monthsText: entry.window ? rateMonthsText(entry.window.months) : '',
-    dateText:
-      entry.window && scope && scope.kind === 'dates' ? dateRangeText(scope.from, scope.to) : '',
+    dateText: previewDateText(entry),
     scopeText: entry.window ? rateScopeText(entry.window) : '',
   };
+}
+
+// The exact-date checker: the winning row for one local instant and why. A base
+// prices the season's ordinary hours, an override wins over it, and both
+// unmatched cases are 0: an uncovered date (no season) or an unpriced hour (a
+// season with neither a base nor a window for that time).
+export function previewRate(rows, fallbackRate, date) {
+  const entry = previewEntry(rows, fallbackRate, date);
+  if (!entry) return null;
+  const list = Array.isArray(rows) ? rows : [];
+  const { winningPeriod, baseRate } = previewPeriod(list, entry);
+  const referenceRates = previewReferenceRates(winningPeriod, list);
+  const tier = previewTier(entry, referenceRates, baseRate);
+  return previewDisplay(entry, tier, baseRate);
 }
 
 // ---------- date and time fields ----------
