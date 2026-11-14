@@ -373,6 +373,70 @@ function monthStartFromId(id) {
   return date;
 }
 
+// The local-midnight window a bucket id names, `{start, end}` in ms: a day id
+// spans one local day, a month id one local calendar month. Null when the id is
+// neither, so the caller hides the bucket.
+function bucketWindow(id) {
+  const dayStart = dayStartFromId(id);
+  const monthStart = dayStart == null ? monthStartFromId(id) : null;
+  const start = dayStart != null ? dayStart : monthStart;
+  if (!start) return null;
+  const end =
+    dayStart != null
+      ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1).getTime()
+      : new Date(start.getFullYear(), start.getMonth() + 1, 1).getTime();
+  return { start: start.getTime(), end };
+}
+
+// One span's share of the bucket: the part falling inside the window, with the
+// span's energy pro-rated by that part's share of the span's real duration and
+// priced over its own wall-clock span by costForInterval. Returns `{cost, wh}`
+// for a contributing span, `undefined` when the span does not reach the window
+// (skip it), or null when the pricer cannot price the slice — unreachable under
+// a schedule (an uncovered slice prices 0.00), kept so a null from the engine
+// hides the bucket instead of half-pricing it.
+function bucketSlice(span, window, settings) {
+  const spanStart = valueMillis(span.started_at);
+  const spanEnd = valueMillis(span.ended_at);
+  if (spanStart == null || spanEnd == null || spanEnd <= spanStart) return undefined;
+  const from = Math.max(spanStart, window.start);
+  const to = Math.min(spanEnd, window.end);
+  if (to <= from) return undefined;
+  const sliceWh = (span.wh * (to - from)) / (spanEnd - spanStart);
+  const cost = costForInterval(sliceWh, from, to, settings);
+  if (cost == null) return null;
+  return { cost, wh: sliceWh };
+}
+
+// The bucket's totals across every span of every session: `{cost, wh}`, or null
+// as soon as one slice is unpriceable — the bucket then hides rather than
+// showing a figure that prices only part of its energy.
+function bucketTotals(sessions, window, settings) {
+  let cost = 0;
+  let wh = 0;
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const spans = sessionCostSpans(session);
+    if (!spans) continue;
+    for (const span of spans) {
+      const slice = bucketSlice(span, window, settings);
+      if (slice === null) return null;
+      if (!slice) continue;
+      cost += slice.cost;
+      wh += slice.wh;
+    }
+  }
+  return { cost, wh };
+}
+
+// Whether the attributed Wh cover the bucket's recorded kWh: covered within the
+// same max(250 Wh, 2%) tolerance the interval reconciliation uses, and covered
+// by definition when the reading is unusable or zero (there is nothing to cover).
+function bucketCovered(kwh, wh) {
+  const totalWh = toNumber(kwh) * 1000;
+  if (!Number.isFinite(totalWh) || totalWh <= 0) return true;
+  return wh >= totalWh - intervalEnergyTolerance(totalWh);
+}
+
 // One local day ('YYYY-MM-DD') or month ('YYYY-MM-DD'→day, 'YYYY-MM'→month)
 // bucket priced from the sessions that overlap it — the Week/Month/Year bars'
 // and the period summary's only pricing source. Each session's spans
@@ -392,42 +456,11 @@ function monthStartFromId(id) {
 export function sessionBucketCost(sessions, id, kwh, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return null;
-  const dayStart = dayStartFromId(id);
-  const monthStart = dayStart == null ? monthStartFromId(id) : null;
-  const start = dayStart != null ? dayStart : monthStart;
-  if (!start) return null;
-  const windowStart = start.getTime();
-  const windowEnd =
-    dayStart != null
-      ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1).getTime()
-      : new Date(start.getFullYear(), start.getMonth() + 1, 1).getTime();
-  let cost = 0;
-  let wh = 0;
-  for (const session of Array.isArray(sessions) ? sessions : []) {
-    const spans = sessionCostSpans(session);
-    if (!spans) continue;
-    for (const span of spans) {
-      const spanStart = valueMillis(span.started_at);
-      const spanEnd = valueMillis(span.ended_at);
-      if (spanStart == null || spanEnd == null || spanEnd <= spanStart) continue;
-      const from = Math.max(spanStart, windowStart);
-      const to = Math.min(spanEnd, windowEnd);
-      if (to <= from) continue;
-      const sliceWh = (span.wh * (to - from)) / (spanEnd - spanStart);
-      const part = costForInterval(sliceWh, from, to, normalized);
-      // Unreachable under a schedule (an uncovered slice prices 0.00); kept so
-      // a null from the engine hides the bucket instead of half-pricing it.
-      if (part == null) return null;
-      cost += part;
-      wh += sliceWh;
-    }
-  }
-  const totalWh = toNumber(kwh) * 1000;
-  const covered =
-    !Number.isFinite(totalWh) || totalWh <= 0
-      ? true
-      : wh >= totalWh - intervalEnergyTolerance(totalWh);
-  return { cost, wh, covered };
+  const window = bucketWindow(id);
+  if (!window) return null;
+  const totals = bucketTotals(sessions, window, normalized);
+  if (!totals) return null;
+  return { cost: totals.cost, wh: totals.wh, covered: bucketCovered(kwh, totals.wh) };
 }
 
 // ---------- the live session's period contribution (#126, residual #128) ----------
