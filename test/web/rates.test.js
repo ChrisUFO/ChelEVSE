@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 
 import {
   MAX_RATE_WINDOWS,
+  RATE_MAX,
+  RATE_MIN,
   costForInterval,
   costForIntervals,
   costForSession,
@@ -1026,6 +1028,65 @@ test('date validation requires both real bounds and ignores the months hint', ()
     rates: [windowRow({ id: 'bad-date', months: null, from: '02-30', to: '03-15' })],
   });
   assert.deepEqual(schedule.rates, []);
+});
+
+// The message text is the contract the settings editor shows, so it is asserted
+// through this module's own export: an edit to one branch here cannot pass
+// unnoticed just because another screen's validation shares the wording.
+test('validateWindow explains every field it rejects', () => {
+  const range = `between ${RATE_MIN} and ${RATE_MAX}`;
+  const cases = [
+    ['id missing', { id: undefined }, { id: 'This window is missing its id.' }],
+    ['id blank', { id: '   ' }, { id: 'This window is missing its id.' }],
+    ['rate unreadable', { rate: 'abc' }, { rate: `Enter a rate ${range}.` }],
+    ['rate below the minimum', { rate: RATE_MIN - 0.1 }, { rate: `Rate must be ${range}.` }],
+    ['rate above the maximum', { rate: RATE_MAX + 0.1 }, { rate: `Rate must be ${range}.` }],
+    ['no days', { days: [] }, { days: 'Pick at least one day.' }],
+    [
+      'day outside 0-6',
+      { days: [0, 7] },
+      { days: 'Days must be whole numbers from 0 (Monday) to 6 (Sunday).' },
+    ],
+    ['repeated day', { days: [1, 1] }, { days: 'Each weekday can only appear once.' }],
+    // The pair is validated together, so both keys carry the same message.
+    [
+      'a time is missing',
+      { start: '' },
+      { start: 'Set a start and end time.', end: 'Set a start and end time.' },
+    ],
+    [
+      'a time is not 24-hour',
+      { start: '9:00' },
+      { start: 'Use 24-hour times like 22:00.', end: 'Use 24-hour times like 22:00.' },
+    ],
+    // A missing bound and an unreal one are different messages, and both bounds
+    // are reported even when the first one fails.
+    ['one date bound missing', { from: '06-15' }, { to: 'Set a date like 06-15.' }],
+    [
+      'one date bound unreal',
+      { from: '02-30' },
+      { from: 'Use a real date like 06-15.', to: 'Set a date like 06-15.' },
+    ],
+    ['no months', { months: [] }, { months: 'Pick at least one month, or choose All year.' }],
+    [
+      'month outside 1-12',
+      { months: [0] },
+      { months: 'Months must be whole numbers from 1 to 12.' },
+    ],
+    ['repeated month', { months: [6, 6] }, { months: 'Each month can only appear once.' }],
+  ];
+  for (const [label, overrides, expected] of cases) {
+    assert.deepEqual(validateWindow(windowRow(overrides)), expected, label);
+  }
+
+  // A row that is not an object at all reports every field it can, all at once.
+  assert.deepEqual(validateWindow(null), {
+    id: 'This window is missing its id.',
+    rate: `Enter a rate ${range}.`,
+    days: 'Pick at least one day.',
+    start: 'Set a start and end time.',
+    end: 'Set a start and end time.',
+  });
 });
 
 test('scope matching is exact on the local calendar date, leap included', () => {
