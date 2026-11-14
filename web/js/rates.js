@@ -206,20 +206,25 @@ function dateError(value) {
   return 'Use a real date like 06-15.';
 }
 
-export function validateWindow(window) {
-  const errors = {};
-
+// Validation accumulates one message per field into `errors`; a valid field
+// leaves no key behind. No check returns early, so a row reports every problem
+// it has at once, and `validateWindow` calls them in field order.
+function checkId(window, errors) {
   if (!window || typeof window.id !== 'string' || window.id.trim() === '') {
     errors.id = 'This window is missing its id.';
   }
+}
 
+function checkRate(window, errors) {
   const rate = parseRateValue(window && window.rate);
   if (!Number.isFinite(rate)) {
     errors.rate = `Enter a rate between ${RATE_MIN} and ${RATE_MAX}.`;
   } else if (rate < RATE_MIN || rate > RATE_MAX) {
     errors.rate = `Rate must be between ${RATE_MIN} and ${RATE_MAX}.`;
   }
+}
 
+function checkDays(window, errors) {
   const days = window && window.days;
   if (!Array.isArray(days) || days.length === 0) {
     errors.days = 'Pick at least one day.';
@@ -228,38 +233,67 @@ export function validateWindow(window) {
   } else if (new Set(days).size !== days.length) {
     errors.days = 'Each weekday can only appear once.';
   }
+}
 
+function checkTimes(window, errors) {
   const start = window && window.start;
   const end = window && window.end;
   if (typeof start !== 'string' || start === '' || typeof end !== 'string' || end === '') {
     errors.start = 'Set a start and end time.';
     errors.end = 'Set a start and end time.';
-  } else if (!TIME_RE.test(start) || !TIME_RE.test(end)) {
+  } else {
+    checkTimeFormats(start, end, errors);
+  }
+}
+
+// Both keys carry the format message: the pair is validated together.
+function checkTimeFormats(start, end, errors) {
+  if (!TIME_RE.test(start) || !TIME_RE.test(end)) {
     errors.start = 'Use 24-hour times like 22:00.';
     errors.end = 'Use 24-hour times like 22:00.';
   }
+}
 
-  // Date mode is active only when both bounds are valid, so a row with one
-  // bound (or an unusable one) is invalid regardless of its months: the dates
-  // were meant to outrank the hint, and guessing would hide a typo.
+// Date mode is active only when both bounds are valid, so a row with one
+// bound (or an unusable one) is invalid regardless of its months: the dates
+// were meant to outrank the hint, and guessing would hide a typo.
+function checkSeasonScope(window, errors) {
   const from = dateBound(window && window.from);
   const to = dateBound(window && window.to);
   if (from != null || to != null) {
-    if (parseMonthDay(from) == null) errors.from = dateError(from);
-    if (parseMonthDay(to) == null) errors.to = dateError(to);
+    checkDateBounds(from, to, errors);
   } else {
     const months = window && window.months;
-    if (months !== null && months !== undefined) {
-      if (!Array.isArray(months) || months.length === 0) {
-        errors.months = 'Pick at least one month, or choose All year.';
-      } else if (months.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) {
-        errors.months = 'Months must be whole numbers from 1 to 12.';
-      } else if (new Set(months).size !== months.length) {
-        errors.months = 'Each month can only appear once.';
-      }
-    }
+    if (months !== null && months !== undefined) checkMonthList(months, errors);
   }
+}
 
+// Both bounds are checked even when the first one fails: a missing bound and an
+// unreal one are different messages.
+function checkDateBounds(from, to, errors) {
+  if (parseMonthDay(from) == null) errors.from = dateError(from);
+  if (parseMonthDay(to) == null) errors.to = dateError(to);
+}
+
+// A months list must be non-empty, whole numbers 1–12 and free of repeats;
+// `null` (all year) is gated out by the caller.
+function checkMonthList(months, errors) {
+  if (!Array.isArray(months) || months.length === 0) {
+    errors.months = 'Pick at least one month, or choose All year.';
+  } else if (months.some((m) => !Number.isInteger(m) || m < 1 || m > 12)) {
+    errors.months = 'Months must be whole numbers from 1 to 12.';
+  } else if (new Set(months).size !== months.length) {
+    errors.months = 'Each month can only appear once.';
+  }
+}
+
+export function validateWindow(window) {
+  const errors = {};
+  checkId(window, errors);
+  checkRate(window, errors);
+  checkDays(window, errors);
+  checkTimes(window, errors);
+  checkSeasonScope(window, errors);
   return errors;
 }
 
