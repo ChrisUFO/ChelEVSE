@@ -8,7 +8,7 @@
 // through the same draft/dirty/saved/waiting/error machine, and a failed write
 // still reconciles back to the last confirmed server state.
 
-import { $, el, setText } from '../ui.js';
+import { $, el, focusAfterRetry, setText } from '../ui.js';
 import {
   LOAD_FAILED_MESSAGE,
   OFFLINE_MESSAGE,
@@ -54,7 +54,7 @@ import {
   validationProblemCount,
 } from '../settings.js';
 import { MAX_RATE_WINDOWS, monthsCovering } from '../rates.js';
-import { saveSettings as persistSettings } from '../store.js';
+import { retryStore, saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 import {
   createPeriodCard,
@@ -88,6 +88,9 @@ let settingsLoaded = false;
 // hold on Save then has no natural end (a failed subscription does not retry),
 // so the card must say why instead of showing "Loading…" forever.
 let settingsLoadFailed = false;
+// Set by the Retry click: the paint that clears the failure moves focus off the
+// control that just left the tree (see paintFeedback).
+let settingsRetryRequested = false;
 // A snapshot that arrived while a write was in flight. The wrapper keeps "no
 // snapshot arrived" distinct from "the document is missing".
 let pendingSettings = null;
@@ -965,6 +968,7 @@ function announcePreview() {
 
 function paintFeedback() {
   const feedback = $('settings-feedback');
+  const loadFailed = !settingsLoaded && settingsLoadFailed;
   const view = settingsSaveState({
     draft: readFields(),
     confirmed: confirmedSettings,
@@ -972,7 +976,7 @@ function paintFeedback() {
     saving: settingsSaving,
     waiting: settingsWaiting,
     saved: settingsSaved,
-    error: settingsError || (!settingsLoaded && settingsLoadFailed ? LOAD_FAILED_MESSAGE : ''),
+    error: settingsError || (loadFailed ? LOAD_FAILED_MESSAGE : ''),
     offline: isOffline(),
   });
   // The value comparison is the only dirty rule; keep the flag in step.
@@ -991,6 +995,17 @@ function paintFeedback() {
   const capped = draftRates.length > MAX_RATE_WINDOWS;
   const problems = validationProblemCount(rateValidation, draftRates.length);
   setText(feedback, view.text || (capped && problems > 0 ? RATE_CAP_REMEDY : ''));
+  // The failed read's own control rides the same view that carries its copy: it
+  // appears with the failure and leaves with the first snapshot
+  // (settingsLoadFailed = false).
+  const retry = $('settings-retry');
+  retry.hidden = !loadFailed;
+  // Recovery lands where the user was, not at the top of the page. The settings
+  // card lives in the Config panel, which is the region the snapshot refilled.
+  if (!loadFailed && settingsRetryRequested) {
+    settingsRetryRequested = false;
+    focusAfterRetry(retry, 'panel-config');
+  }
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
   // saved: the same count as the save-row chip relabels the button and marks it
@@ -1439,6 +1454,16 @@ export function initSettings() {
   // exactly like the One-rate confirm.
   $('stay-settings').addEventListener('click', stayOnSettings);
   $('discard-settings').addEventListener('click', () => settleLeave(true));
+  // Retry re-subscribes through store.js's single startStore path (which stops
+  // first), so repeated taps cannot stack listeners. No busy state, no backoff,
+  // no budget. The copy goes with the click: a retry that fails again must
+  // re-write the live region, and an unchanged line is no mutation, so nothing
+  // would be announced.
+  $('settings-retry').addEventListener('click', () => {
+    settingsRetryRequested = true;
+    setText($('settings-feedback'), '');
+    retryStore();
+  });
   $('leave-settings-confirm').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') stayOnSettings();
   });
@@ -1482,6 +1507,7 @@ export function resetSettings() {
   confirmedSettings = null;
   settingsLoaded = false;
   settingsLoadFailed = false;
+  settingsRetryRequested = false;
   pendingSettings = null;
   settingsDirty = false;
   settingsSaving = false;

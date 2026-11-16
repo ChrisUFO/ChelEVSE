@@ -334,9 +334,10 @@ export const WAITING_MESSAGE = 'Waiting for the server — this change may not b
 // No settings document has been read yet, so the blank form is not a baseline:
 // the whole-document write would replace the stored plan with nothing.
 export const LOADING_MESSAGE = 'Loading your settings…';
-// The listener failed: the hold on Save has no natural end until the page is
-// reloaded (a failed subscription does not retry), so the copy says so.
-export const LOAD_FAILED_MESSAGE = 'Couldn’t read your settings. Reload the page to try again.';
+// The listener failed: the hold on Save has no natural end until a snapshot
+// lands, and Retry is the control that asks for one, so the copy says what
+// failed instead of naming a page reload.
+export const LOAD_FAILED_MESSAGE = 'Couldn’t load your settings.';
 export const SAVE_FAILED_MESSAGE =
   'Couldn’t save — the previous settings are back. Check your connection and try again.';
 // A first-ever save has no previous document to restore, so the generic copy

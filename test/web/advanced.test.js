@@ -51,12 +51,23 @@ test('validateRapi rejects everything else before it reaches Firestore', () => {
   assert.match(validateRapi('$ABC').error, /\$/);
 });
 
-test('rapiErrorMessage explains a building index and offline reads', () => {
-  assert.match(rapiErrorMessage({ code: 'failed-precondition' }), /index/);
-  assert.match(rapiErrorMessage({ code: 'failed-precondition' }), /built/);
-  assert.match(rapiErrorMessage({ code: 'unavailable' }), /connection/);
-  assert.match(rapiErrorMessage({ code: 'something-else' }), /Reload/);
-  assert.match(rapiErrorMessage(null), /Reload/);
+test('rapiErrorMessage explains all three branches without a reload', () => {
+  const index = rapiErrorMessage({ code: 'failed-precondition' });
+  assert.match(index, /index/);
+  assert.match(index, /building/);
+  assert.match(index, /Try again/);
+  assert.doesNotMatch(index, /reload/i);
+
+  const offline = rapiErrorMessage({ code: 'unavailable' });
+  assert.match(offline, /connection/);
+  assert.match(offline, /try again/);
+
+  // Unknown codes and a missing error get the plain failure line; recovery is
+  // the Retry control beside it, never a page reload.
+  for (const message of [rapiErrorMessage({ code: 'something-else' }), rapiErrorMessage(null)]) {
+    assert.equal(message, 'Couldn’t load recent commands.');
+    assert.doesNotMatch(message, /reload/i);
+  }
 });
 
 test('commandMillis reads Firestore timestamps, numbers, and seconds', () => {
@@ -189,8 +200,136 @@ test('the gate re-arms on every visit and cancel/edit dismiss it', () => {
   assert.equal(gateTransition(GATE_INITIAL, { type: 'confirm' }).action, 'idle');
 });
 
-test('the index error tells the operator a reload is required', () => {
+test('the index error points at Try again, not a page reload', () => {
   const message = rapiErrorMessage({ code: 'failed-precondition' });
   assert.match(message, /index/);
-  assert.match(message, /reload/i);
+  assert.match(message, /Try again/);
+  assert.doesNotMatch(message, /reload/i);
+});
+
+// ---------- the RAPI log's failure surface ----------
+
+// The same module-mock-free DOM stub the other screen tests use: one stub per
+// id, lookups deferred to render time, then a plain import of the real screen
+// module (no jsdom, no module mocks). `listeners` and `focusLog` are the only
+// observers an unstubbed DOM offers for the Retry wiring and the focus it
+// restores (status-error.test.js records the same way).
+const focusLog = [];
+
+function stubElement(tag = '') {
+  return {
+    tag,
+    className: '',
+    textContent: '',
+    hidden: false,
+    id: '',
+    focused: null,
+    children: [],
+    listeners: new Map(),
+    replaceChildren(...nodes) {
+      this.children = nodes;
+    },
+    append(...nodes) {
+      this.children.push(...nodes);
+    },
+    setAttribute() {},
+    removeAttribute() {},
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    },
+    focus(options) {
+      this.focused = options;
+      focusLog.push(this.id);
+    },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+}
+
+const elements = new Map();
+const element = (id) => {
+  let node = elements.get(id);
+  if (!node) {
+    node = stubElement();
+    node.id = id;
+    elements.set(id, node);
+  }
+  return node;
+};
+
+globalThis.document = {
+  getElementById: (id) => element(id),
+  createElement: (tag) => stubElement(tag),
+};
+
+const { initAdvanced, showRapiCommands, showRapiError } =
+  await import('../../web/js/screens/advanced.js');
+// The Retry case needs the listener initAdvanced itself registers.
+initAdvanced();
+
+test('a failed log read shows its copy beside a Retry, and a snapshot clears both', () => {
+  showRapiError({ code: 'unavailable' });
+  const state = element('rapi-log-state');
+  assert.equal(state.hidden, false);
+  assert.equal(state.className, 'section-state err');
+  assert.equal(state.textContent, rapiErrorMessage({ code: 'unavailable' }));
+  assert.equal(element('rapi-log-retry').hidden, false);
+
+  // The snapshot that lands owns the recovery, and an empty list is still a
+  // working read: the control goes with the failure.
+  showRapiCommands([]);
+  assert.equal(element('rapi-log-retry').hidden, true);
+  assert.equal(state.className, 'section-state');
+  assert.equal(state.textContent, 'No commands sent yet. Recent RAPI commands will appear here.');
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The click itself moves nothing while the retry is pending.
+  const retry = element('rapi-log-retry');
+  const listeners = retry.listeners.get('click') || [];
+  assert.equal(listeners.length, 1, 'initAdvanced wired #rapi-log-retry once');
+
+  showRapiError({ code: 'unavailable' });
+  focusLog.length = 0;
+  listeners[0]();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showRapiCommands([]);
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-advanced');
+  assert.deepEqual(element('panel-advanced').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  showRapiError({ code: 'unavailable' });
+  focusLog.length = 0;
+  showRapiCommands([]);
+  assert.deepEqual(focusLog, []);
+});
+
+test('index.html makes the log line a polite live region above its Retry', () => {
+  // The stub answers any id on demand, so the markup is pinned from source (the
+  // status-error/settings-screen convention). renderLog writes the failure copy
+  // into #rapi-log-state with setText: without a live region a screen-reader
+  // user gets nothing, while the other three screens all announce.
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  const tag = /<p\b[^>]*id="rapi-log-state"[^>]*>/.exec(source);
+  assert.ok(tag, 'web/index.html ships #rapi-log-state');
+  // Polite, not alert: the same node is the `Loading recent commands…` line, so
+  // an alert would interrupt for a line that is not an error.
+  assert.match(tag[0], /role="status"/);
+  assert.match(tag[0], /aria-live="polite"/);
+
+  const at = {
+    state: source.indexOf('id="rapi-log-state"'),
+    retry: source.indexOf('id="rapi-log-retry"'),
+    list: source.indexOf('id="rapi-log"'),
+  };
+  for (const [marker, position] of Object.entries(at)) {
+    assert.notEqual(position, -1, `${marker} is missing from web/index.html`);
+  }
+  assert.ok(at.state < at.retry && at.retry < at.list, 'the Retry sits under the log line');
 });

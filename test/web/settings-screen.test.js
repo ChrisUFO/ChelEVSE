@@ -101,7 +101,8 @@ function stubElement(tag = '') {
       listeners.get(type).push(listener);
     },
     removeEventListener() {},
-    focus() {
+    focus(options) {
+      this.focused = options;
       focusLog.push(this.id);
     },
     click() {},
@@ -144,9 +145,16 @@ globalThis.removeEventListener = (type, listener) => {
 globalThis.matchMedia ??= () => ({ matches: false });
 globalThis.requestAnimationFrame ??= () => {};
 
-const { initSettings, resetSettings, showSettingsData, confirmLeaveSettings, isSettingsDirty } =
-  await import('../../web/js/screens/settings.js');
-const { BLOCKED_SAVE_MESSAGE, OFFLINE_MESSAGE } = await import('../../web/js/settings.js');
+const {
+  initSettings,
+  resetSettings,
+  showSettingsData,
+  showSettingsError,
+  confirmLeaveSettings,
+  isSettingsDirty,
+} = await import('../../web/js/screens/settings.js');
+const { BLOCKED_SAVE_MESSAGE, LOAD_FAILED_MESSAGE, OFFLINE_MESSAGE } =
+  await import('../../web/js/settings.js');
 
 // One real wiring pass: the form/input listeners the save drive needs are the
 // ones initSettings itself registers.
@@ -707,6 +715,81 @@ test('a snapshot that un-dirties the form detaches beforeunload and settles an o
   await tick();
   assert.equal(answer(), true, 'the pending navigation completes — nothing is at stake now');
   assert.equal(dialogOpen(), false);
+});
+
+test('a failed settings read says so beside a Retry, and a snapshot clears both', () => {
+  resetSettings();
+  showSettingsError();
+  // The failure copy keeps the existing status live region (#settings-feedback):
+  // it is not repurposed into an alert.
+  assert.equal(feedbackText(), LOAD_FAILED_MESSAGE);
+  assert.doesNotMatch(LOAD_FAILED_MESSAGE, /reload/i);
+  assert.equal(element('settings-retry').hidden, false);
+  // No baseline was read, so the save gate stays closed; Retry is the control
+  // that asks for the snapshot that reopens it.
+  assert.equal(element('save-settings').disabled, true);
+
+  // The click clears the live region's copy before it asks store.js for a new
+  // read, so a retry that fails again is an announced mutation rather than a
+  // bare un-hide. No store was started in this harness, so retryStore() returns
+  // false and nothing re-renders: the click must not throw and the failure
+  // state stays on screen.
+  for (const listener of element('settings-retry').listeners.get('click') || []) listener();
+  assert.equal(feedbackText(), '');
+  assert.equal(element('settings-retry').hidden, false);
+
+  // The snapshot that lands owns the recovery: the control goes and the copy
+  // returns to what the freshly loaded draft warrants.
+  showSettingsData(storedDoc);
+  assert.equal(element('settings-retry').hidden, true);
+  assert.equal(feedbackText(), '');
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the Config panel (which owns the
+  // Settings card) takes it instead. The click itself moves nothing while the
+  // retry is pending.
+  resetSettings();
+  showSettingsError();
+  const retry = element('settings-retry');
+  focusLog.length = 0;
+
+  for (const listener of retry.listeners.get('click') || []) listener();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showSettingsData(storedDoc);
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-config');
+  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  // Recovery focus must not become a general "every snapshot jumps the caret"
+  // rule: the settings listener fires on every remote edit.
+  resetSettings();
+  showSettingsError();
+  focusLog.length = 0;
+  showSettingsData(storedDoc);
+  assert.deepEqual(focusLog, []);
+});
+
+test('a typed draft survives the retry snapshot that clears the failure', () => {
+  resetSettings();
+  showSettingsError();
+  type('setting-rate', '0.4');
+  assert.equal(element('settings-retry').hidden, false);
+  assert.equal(element('setting-rate').value, '0.4');
+
+  // The retry lands the first snapshot: it fills the blanks it needs from the
+  // document and keeps what the owner typed (firstLoadFields), so the draft is
+  // not lost to the recovery.
+  showSettingsData(storedDoc);
+  assert.equal(element('settings-retry').hidden, true);
+  assert.equal(element('setting-rate').value, '0.4');
+  assert.equal(element('setting-charger-host').value, '192.168.1.50');
+  assert.equal(feedbackText(), 'Unsaved changes.');
+  assert.equal(isSettingsDirty(), true);
 });
 
 test('index.html ships the leave dialog the screen wires', () => {

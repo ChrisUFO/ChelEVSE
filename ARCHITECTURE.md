@@ -222,16 +222,16 @@ Firestore bills per document written. Per-state table and rationale:
 
 **DOM / Firebase-facing:**
 
-| Module                         | Responsibility                                                                                                                                      |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app.js`                       | boot, auth wiring, screen fan-out, push toast                                                                                                       |
-| `js/firebase.js`               | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                                                                |
-| `js/auth.js`                   | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                                                           |
-| `js/store.js`                  | all Firestore subscriptions and writes                                                                                                              |
-| `js/ui.js`                     | `$`/`setText`/`el`, shared day-chip editors (`toggleDay`, `buildDayPicker`), network badge, tab router (route changes can be held for confirmation) |
-| `js/screens/*`                 | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes                                           |
-| `js/screens/settings-paint.js` | the Config rate-plan paint pipeline (period/window card builders and paint passes); imported only by the Settings screen                            |
-| `js/screens/history-chart.js`  | the History chart's SVG geometry and bar builder; imported only by the History screen                                                               |
+| Module                         | Responsibility                                                                                                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.js`                       | boot, auth wiring, screen fan-out, push toast                                                                                                                                                                  |
+| `js/firebase.js`               | SDK init and live bindings; persistent cache with multi-tab manager; `loadMessaging`                                                                                                                           |
+| `js/auth.js`                   | Google sign-in (popup, redirect fallback), redirect recovery, grant check                                                                                                                                      |
+| `js/store.js`                  | all Firestore subscriptions and writes                                                                                                                                                                         |
+| `js/ui.js`                     | `$`/`setText`/`el`, shared day-chip editors (`toggleDay`, `buildDayPicker`), the focus a successful Retry restores (`focusAfterRetry`), network badge, tab router (route changes can be held for confirmation) |
+| `js/screens/*`                 | one screen per tab plus settings/notifications panels; together with `app.js`/`ui.js` they own DOM writes                                                                                                      |
+| `js/screens/settings-paint.js` | the Config rate-plan paint pipeline (period/window card builders and paint passes); imported only by the Settings screen                                                                                       |
+| `js/screens/history-chart.js`  | the History chart's SVG geometry and bar builder; imported only by the History screen                                                                                                                          |
 
 Screens never contain business rules that belong in a pure module; pure modules never import DOM or Firebase. This is the main testability boundary.
 

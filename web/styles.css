@@ -915,6 +915,16 @@ input[type='range']::-moz-range-thumb {
   background: color-mix(in oklab, var(--err) 7%, transparent);
   color: var(--err);
 }
+/* The Retry that a failed read reveals directly under that box: with a 0 px
+   junction the box's 1 px border and rounded corner run into the pill's, and
+   two abutting bordered shapes read as a bolt-on. Status, the pattern's
+   reference, separates them. One rule keeps the three surfaces in step —
+   the inline styles in index.html are animation stagger only. */
+#schedule-retry,
+#config-retry,
+#rapi-log-retry {
+  margin-top: 8px;
+}
 
 /* ---------- history ---------- */
 .btn.refresh {
@@ -2978,10 +2988,18 @@ input[aria-invalid='true']:focus-visible {
   gap: 8px 10px;
   margin-top: 14px;
 }
+/* Save shares this row, so a full sentence beside it — the failed read's
+   explanation, say — wrapped to an 89 px column at 390 while the button kept
+   122 px: the explanation became the smallest item in the row. The savebar's
+   shape is the answer at every width: the copy owns its line, and an empty
+   region takes no space (the failed read's Retry still rides the row below). */
 .settings-actions .feedback {
-  flex: 1;
+  flex: 1 1 100%;
   min-width: 0;
   font-size: 12.5px;
+}
+.settings-actions .feedback:empty {
+  display: none;
 }
 #save-settings {
   flex: none;
@@ -3514,13 +3532,6 @@ input[aria-invalid='true']:focus-visible {
   }
   .settings-grid {
     grid-template-columns: 1fr;
-  }
-  /* At 320 the hint shares the row with the count chip and Save, leaving it a
-     ~45 px column that stacks one word per line. Give it the full width above
-     the chip and button instead. */
-  .settings-actions .feedback {
-    flex: 1 1 100%;
-    order: -1;
   }
   .config-group .config-list {
     padding: 3px 13px 9px;

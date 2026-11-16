@@ -12,8 +12,8 @@
 // Those repeats are guarded by transition, never applied as new data, and they
 // never erase a notice that explains the last real change.
 
-import { $, buildDayPicker, el, setText } from '../ui.js';
-import { readScheduleBaseline, saveSchedule } from '../store.js';
+import { $, buildDayPicker, el, focusAfterRetry, setText } from '../ui.js';
+import { readScheduleBaseline, retryStore, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
   MAX_AMPS,
@@ -41,6 +41,9 @@ import { settleWrite } from '../write.js';
 let active = false;
 let initialized = false;
 let loadError = false;
+// Set by the Retry click: the render that clears the failure moves focus off the
+// control that just left the tree (see renderLoadError).
+let retryRequested = false;
 let confirmed = defaultSchedule();
 let draft = defaultSchedule();
 let dirty = false;
@@ -62,6 +65,10 @@ let savingPayloadKey = null;
 // Latest snapshot received while the form is dirty or a save is in flight.
 // It never clobbers the draft; save settle decides whether to adopt it.
 let pendingRemote = null;
+// One line for every mode of a failed read: the pre-init surface
+// (#schedule-load-error) and the save bar's copy both take it, so the two never
+// disagree.
+const LOAD_FAILED = 'Couldn’t load the schedule.';
 // '' when hidden, otherwise the notice copy: a remote change the draft would
 // overwrite, or a queued change the server never accepted.
 const REMOTE_NOTICE = 'Remote schedule changed — saving will overwrite it.';
@@ -315,7 +322,7 @@ function renderFeedback() {
   let kind = '';
   let busy = false;
   if (feedbackMode === 'load-error' || loadError) {
-    text = "Couldn't load the schedule. Reload the page to try again.";
+    text = LOAD_FAILED;
     kind = 'err';
   } else {
     const state = saveState();
@@ -532,21 +539,50 @@ function renderToggle() {
   setText($('schedule-enabled-sub'), toggleNote(draft));
 }
 
+// The failed read's own line and its Retry. Reveal, then write — a live region
+// announces content inserted into a node it can already expose, not a static
+// line that was merely un-hidden — and the copy is written on every render, ''
+// included, so the next failure is a fresh mutation rather than a bare un-hide.
+function renderLoadError() {
+  const failed = loadError;
+  const error = $('schedule-load-error');
+  error.hidden = !failed;
+  setText(error, failed ? LOAD_FAILED : '');
+  const retry = $('schedule-retry');
+  retry.hidden = !failed;
+  // Recovery lands where the user was, not at the top of the page.
+  if (!failed && retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry, 'panel-schedule');
+  }
+}
+
+// A successful read owns the failure state: it goes without rebuilding the form
+// the owner may be editing. Returns whether anything changed, so the caller can
+// repaint the save bar's copy.
+function clearLoadError() {
+  if (!loadError) return false;
+  loadError = false;
+  if (feedbackMode === 'load-error') feedbackMode = 'derived';
+  renderLoadError();
+  return true;
+}
+
 function renderLoading() {
   $('schedule-loading').hidden = loadError;
-  $('schedule-load-error').hidden = !loadError;
+  renderLoadError();
   $('schedule-editor').hidden = !initialized;
   $('schedule-live').hidden = true;
   renderRemoteNotice();
   if (loadError) {
-    setText($('schedule-feedback'), "Couldn't load the schedule. Reload the page to try again.");
+    setText($('schedule-feedback'), LOAD_FAILED);
     $('schedule-feedback').className = 'feedback err';
   }
 }
 
 function renderAll() {
   $('schedule-loading').hidden = initialized || loadError;
-  $('schedule-load-error').hidden = !loadError;
+  renderLoadError();
   $('schedule-editor').hidden = !initialized;
   if (!initialized) {
     setText($('schedule-feedback'), '');
@@ -774,6 +810,17 @@ export function initSchedule() {
   });
   $('save-schedule').addEventListener('click', save);
   $('discard-schedule').addEventListener('click', discard);
+  // Retry re-subscribes through store.js's single startStore path (which stops
+  // first), so repeated taps cannot stack listeners. Deliberately no busy state,
+  // no backoff and no budget. The copy goes with the click: a retry that fails
+  // again must re-write the live line, and an unchanged line is no mutation, so
+  // nothing would be announced.
+  $('schedule-retry').addEventListener('click', () => {
+    retryRequested = true;
+    setText($('schedule-load-error'), '');
+    setText($('schedule-feedback'), '');
+    retryStore();
+  });
   addEventListener('offline', handleOffline);
   addEventListener('online', handleOnline);
   renderAll();
@@ -861,6 +908,12 @@ export function showSchedule(data, meta) {
     pendingWrites,
     payloadKey: savingPayloadKey,
   });
+  // Every branch below is a snapshot the listener delivered, which is the one
+  // thing the failure line contradicts: the read works, so its line, its Retry
+  // and the editor lock leave here, before the route decides what to do with the
+  // data. The routes that repaint themselves re-announce the save bar; the two
+  // that return without a full paint repaint what the clear changed.
+  const cleared = clearLoadError();
   switch (route.kind) {
     case 'initial':
       adopt(incoming);
@@ -881,10 +934,16 @@ export function showSchedule(data, meta) {
       validateAndPaint();
       return;
     case 'transition':
+      // The queued write was acknowledged or replaced: applyQueueTransition
+      // repaints the label it lands on.
       applyQueueTransition(route.transition, incoming);
       return;
     case 'queued-still':
-      // Still queued on the same payload (or metadata absent): nothing changed.
+      // Still queued on the same payload (or metadata absent): nothing about the
+      // data changed, and this route never painted. A retry that re-delivered it
+      // still proves the read works, so the clear above has to reach the screen:
+      // the save bar shows the queued label and the editor unlocks.
+      if (cleared) validateAndPaint();
       return;
     case 'dirty': {
       const result = route.reconcile;
@@ -903,6 +962,7 @@ export function showSchedule(data, meta) {
       // "Saved." and any notice about the last real change in place.
       confirmed = incoming;
       pendingRemote = null;
+      if (cleared) renderFeedback();
       return;
     default:
       // Clean form and a genuinely new server state: adopt it (and clear
@@ -938,6 +998,7 @@ export function resetSchedule() {
   active = false;
   initialized = false;
   loadError = false;
+  retryRequested = false;
   confirmed = defaultSchedule();
   draft = defaultSchedule();
   dirty = false;
@@ -967,6 +1028,8 @@ export function resetSchedule() {
     $('schedule-editor').hidden = true;
     $('schedule-loading').hidden = false;
     $('schedule-load-error').hidden = true;
+    setText($('schedule-load-error'), '');
+    $('schedule-retry').hidden = true;
     renderRemoteNotice();
     setText($('schedule-enabled-sub'), toggleNote(defaultSchedule()));
     $('schedule-enabled').checked = false;

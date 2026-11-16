@@ -522,9 +522,11 @@
             <span id="schedule-live-text">Window active now</span>
           </p>
           <p class="section-state" id="schedule-loading">Loading schedule…</p>
-          <p class="section-state err" id="schedule-load-error" hidden>
-            Couldn't load the schedule. Reload the page to try again.
-          </p>
+          <!-- A failed read, kept apart from the loading line above. The copy is
+               written in when the line is revealed, so it is announced, and
+               #schedule-retry re-subscribes through store.js — no reload. -->
+          <p class="section-state err" id="schedule-load-error" role="alert" hidden></p>
+          <button id="schedule-retry" class="btn small" type="button" hidden>Try again</button>
 
           <div id="schedule-editor" hidden>
             <section class="schedule-card" style="--i: 1" aria-label="Schedule state">
@@ -817,6 +819,12 @@
               </div>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+                <!-- Shown only while the failed read's copy is in the live
+                     region above: Retry re-subscribes through store.js — no
+                     reload. -->
+                <button id="settings-retry" class="btn small" type="button" hidden>
+                  Try again
+                </button>
                 <span class="save-blockers" id="save-blockers" hidden></span>
                 <button id="save-settings" class="btn solid" type="submit" disabled>
                   Save settings
@@ -867,9 +875,11 @@
             <p class="section-note lifetime-note" id="lifetime-note" hidden></p>
 
             <p class="section-state" id="config-loading">Loading configuration…</p>
-            <p class="section-state err" id="config-error" role="alert" hidden>
-              Couldn’t load the charger configuration. Reload the page to try again.
-            </p>
+            <!-- The copy is written in when the line is revealed, so it is
+                 announced, and #config-retry re-subscribes through store.js —
+                 no reload. -->
+            <p class="section-state err" id="config-error" role="alert" hidden></p>
+            <button id="config-retry" class="btn small" type="button" hidden>Try again</button>
             <div class="config-sections" id="config-sections"></div>
             <p class="section-state" id="config-empty" hidden></p>
 
@@ -975,7 +985,15 @@
               <h2 id="rapi-log-heading">Recent commands</h2>
               <span class="section-note advanced-note">Last 20</span>
             </div>
-            <p class="section-state" id="rapi-log-state">Loading recent commands…</p>
+            <!-- A polite live region, the Settings convention: the failure copy
+                 written in by renderLog is announced, and so is the loading
+                 line this same node carries. -->
+            <p class="section-state" id="rapi-log-state" role="status" aria-live="polite">
+              Loading recent commands…
+            </p>
+            <!-- Shown only while #rapi-log-state carries a failure. Retry
+                 re-subscribes through store.js — no reload. -->
+            <button id="rapi-log-retry" class="btn small" type="button" hidden>Try again</button>
             <ol class="rapi-log" id="rapi-log" hidden></ol>
           </section>
         </section>
