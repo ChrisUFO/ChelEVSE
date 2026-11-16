@@ -1647,10 +1647,10 @@ test('a repaint under a keyboard user focuses the bar the window selected', asyn
 //
 // The park half of the focus fix is pinned above; these pin the release half,
 // which needs a read that *succeeds* (a rejecting read draws no bar to hand the
-// focus to) and a read whose settling the test times (periodReads). Both orders in
-// which a read superseded by another one can settle are covered, because the
-// screen's rule is that only the newest read may repaint the chart or spend the
-// reservation.
+// focus to) and a read whose settling the test times (periodReads). Every order in
+// which a read superseded by another one can settle is covered — a paged read vs a
+// reload, both ways, and a paged read vs a paged read — because the screen's rule
+// is that only the newest read may repaint the chart or spend the reservation.
 
 test('a reload that lands as the newest read hands the focus to the bar its window drew', async () => {
   freezeClock();
@@ -1743,6 +1743,12 @@ test('a PageUp that supersedes a reload keeps the settle focus when the reload l
       await reload;
       await flushReads();
       assert.equal(document.activeElement, element('chart-prev'));
+      // The superseded reload's own control state still finishes: `loading` is
+      // cleared (so it never blocks the next reload for the session) and the
+      // refresh control is usable again.
+      assert.equal(element('history-refresh').disabled, false);
+      assert.equal(element('history-refresh').textContent, 'Refresh');
+      assert.equal(element('panel-history').attrs['aria-busy'], 'false');
       // The newest read then lands and hands the focus to the bar it drew, instead
       // of leaving it parked beside a fully drawn window.
       reads[1].settle({ docs: [{ id: '2026-10-09', kwh: 1 }], fromCache: false });
@@ -1787,11 +1793,61 @@ test('a reload that lands after its window was superseded leaves the drawn windo
       await reload;
       await flushReads();
       assert.equal(bars().length, 7);
+      // The superseded reload still finishes its own control state: nothing it
+      // set while it ran is left behind to block the next Refresh.
+      assert.equal(element('history-refresh').disabled, false);
+      assert.equal(element('history-refresh').textContent, 'Refresh');
+      assert.equal(element('panel-history').attrs['aria-busy'], 'false');
       assert.equal(bars().includes(document.activeElement), true);
       assert.equal(document.activeElement, selected);
       // The paging keys are still deliverable from it, without a re-Tab.
       assert.equal(pressFromFocus('PageUp'), true);
       assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a paged read that lands after a newer paged read paints neither its bars nor its focus', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const reads = controlPeriodReads();
+    try {
+      // Two presses inside one round trip — a held key's repeat, or a quick
+      // double press: read A names 5 – 11 Oct 2026, read B 28 Sep – 4 Oct 2026.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(reads.length, 2);
+      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      // The newest read lands first and owns the window: its bar is drawn, focused
+      // and priced.
+      reads[1].settle({ docs: [{ id: '2026-10-01', kwh: 1 }], fromCache: false });
+      await flushReads();
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(bars().length, 7);
+      const selected = bars().find((bar) => bar.classList.contains('selected'));
+      assert.ok(selected, 'the window selects a bar');
+      assert.equal(document.activeElement, selected);
+      assert.equal(element('history-total').textContent, '1.00');
+      // The superseded read then lands with a payload of its own. Painting it here
+      // would put read A's bars and total under read B's span label and rebuild the
+      // bars — dropping the focused one to <body>, where PageUp scrolls the page.
+      reads[0].settle({ docs: [{ id: '2026-10-09', kwh: 9 }], fromCache: false });
+      await flushReads();
+      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      assert.equal(element('history-total').textContent, '1.00');
+      assert.equal(bars().length, 7);
+      assert.equal(document.activeElement, selected);
+      // The paging keys are still deliverable from it, without a re-Tab.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(labelText(), '21 – 27 Sep 2026');
     } finally {
       periodReads.range = storePeriodRead;
     }

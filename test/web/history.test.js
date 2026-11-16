@@ -920,6 +920,16 @@ test('isCurrent is the clock, never the window anchor', () => {
   const legacy = periodSeries('week', [], pastDay);
   assert.equal(legacy[legacy.length - 1].isCurrent, true);
   assert.equal(hourSeries({}, pastDay)[12].isCurrent, true);
+
+  // The year is part of the identity. Every other fixture sits within a year of
+  // the clock, so a window a year back is the case that tells a date comparison
+  // from a month-day one: 18 Oct 2025 holds the same month-day as `now`, and
+  // nothing in it is current.
+  const lastYear = new Date(2025, 9, 18, 12, 40);
+  assert.equal(periodSeries('week', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
+  assert.equal(periodSeries('week', [], lastYear, now).at(-1).id, '2025-10-18');
+  assert.equal(periodSeries('month', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
+  assert.equal(hourSeries({}, lastYear, now).filter((p) => p.isCurrent).length, 0);
 });
 
 test('periodSeries renders the day period from its single document', () => {
@@ -1711,6 +1721,20 @@ test('both history read paths end with the midnight re-check', () => {
       name,
     );
   }
+  // Only the newest read repaints the chart or spends the focus reservation, so
+  // each path holds its paint and release behind its own sequence guard: the
+  // paged read returns at the guard, the reload wraps them in `if (seq ===
+  // historySeq)`. Deleting either guard re-opens the superseded-read repaint the
+  // history-screen harness drives from both sides (a read vs a reload, and a
+  // paged read vs a paged read).
+  assert.match(
+    body('readHistory'),
+    /if \(gen !== generation \|\| seq !== historySeq\) return;[\s\S]*?renderHistory\(\);[\s\S]*?releaseChartFocus\(\);/,
+  );
+  assert.match(
+    body('loadAll'),
+    /if \(seq === historySeq\) \{\s*applyHistory\([\s\S]*?renderHistory\(\);[\s\S]*?releaseChartFocus\(\);/,
+  );
   // The window build takes `now` for the bounds as well as the span: a paged
   // Year window is whole months only while the third argument is passed.
   assert.match(body('buildWindow'), /periodBounds\(descriptor, anchor, now\)/);
