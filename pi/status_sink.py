@@ -37,7 +37,10 @@ MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
 # Snapshot fields whose change is a discrete trigger: they publish at the next
 # scheduler opportunity. Everything else parse_status emits is continuous and
 # never triggers a write. ``updated_at`` is transport bookkeeping, never a
-# trigger; ``state_label`` follows ``state``.
+# trigger; ``state_label`` is derived from ``state`` and ``manual_override``, so
+# it is not covered by the ``state`` trigger: an override flip (Stop vs sleep)
+# at a constant state 254 changes the label alone, and that change publishes at
+# the next heartbeat rather than arming a write.
 TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
 class StatusSink:
     """The one status apply path, shared by the HTTP poll and MQTT snapshots.
