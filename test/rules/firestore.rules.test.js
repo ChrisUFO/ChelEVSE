@@ -432,3 +432,91 @@ test('an ungranted user still cannot create or update a token', async () => {
 test('fcm tokens cannot be read by clients', async () => {
   await assertFails(getDoc(doc(allowlisted().firestore(), 'fcmTokens', 'tok-read')));
 });
+
+// An `ack_notification` command carries one advisory id. The rules mirror the
+// firmware's rule-name grammar (a lowercase dotted path) and the bridge's
+// 64-char cap: a create the bridge would refuse must not be storable.
+function ackCommand(overrides = {}) {
+  return {
+    type: 'ack_notification',
+    status: 'pending',
+    notification_id: 'fault.no_ground',
+    ...overrides,
+  };
+}
+
+test('allowlisted user can create an ack_notification command', async () => {
+  await assertSucceeds(writeCommand(allowlisted(), 'ack-ok', ackCommand()));
+  await assertSucceeds(
+    writeCommand(allowlisted(), 'ack-single', ackCommand({ notification_id: 'thermal' })),
+  );
+  await assertSucceeds(
+    writeCommand(allowlisted(), 'ack-long', ackCommand({ notification_id: 'a' + 'b'.repeat(63) })),
+  );
+});
+
+test('an ack_notification without an advisory id is rejected', async () => {
+  const { notification_id: _omitted, ...withoutId } = ackCommand();
+  await assertFails(writeCommand(allowlisted(), 'ack-no-id', withoutId));
+  await assertFails(
+    writeCommand(allowlisted(), 'ack-null-id', ackCommand({ notification_id: null })),
+  );
+  await assertFails(
+    writeCommand(allowlisted(), 'ack-number-id', ackCommand({ notification_id: 7 })),
+  );
+});
+
+test('an ack_notification id must be 1 to 64 characters', async () => {
+  await assertFails(
+    writeCommand(allowlisted(), 'ack-empty-id', ackCommand({ notification_id: '' })),
+  );
+  await assertFails(
+    writeCommand(
+      allowlisted(),
+      'ack-too-long',
+      ackCommand({ notification_id: 'a' + 'b'.repeat(64) }),
+    ),
+  );
+});
+
+test('an ack_notification id with illegal characters is rejected', async () => {
+  for (const [id, notification_id] of [
+    ['uppercase', 'Fault.No_Ground'],
+    ['leading-digit', '1fault.no_ground'],
+    ['leading-dot', '.fault'],
+    ['trailing-dot', 'fault.'],
+    ['empty-segment', 'fault..no_ground'],
+    ['hyphen', 'fault.no-ground'],
+    ['space', 'fault. no_ground'],
+    ['slash', 'fault/no_ground'],
+  ]) {
+    await assertFails(
+      writeCommand(allowlisted(), `ack-bad-id-${id}`, ackCommand({ notification_id })),
+    );
+  }
+});
+
+test('an ack_notification create is still pinned to a pending status', async () => {
+  await assertFails(writeCommand(allowlisted(), 'ack-acked', ackCommand({ status: 'acked' })));
+});
+
+test('unauthenticated and ungranted users cannot create an ack_notification', async () => {
+  await assertFails(writeCommand(env.unauthenticatedContext(), 'ack-anon', ackCommand()));
+  await assertFails(writeCommand(ungranted(), 'ack-ungranted', ackCommand()));
+});
+
+// The health documents belong to the bridge: `status/notifications` (and the
+// `acks` map the ack command writes into it) must never be client-forgeable.
+test('a client cannot write the bridge-owned health document', async () => {
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'status', 'notifications'), {
+      reachable: true,
+      advisories: [],
+    }),
+  );
+  await assertFails(
+    setDoc(doc(allowlisted().firestore(), 'status', 'notifications'), {
+      acks: { 'fault.no_ground': 1794177153 },
+    }),
+  );
+});
