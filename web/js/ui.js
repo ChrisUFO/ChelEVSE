@@ -17,15 +17,29 @@ export function el(tag, className, text) {
   return node;
 }
 
-// Retry leaves with the failure it belonged to, and a focused node that leaves
-// the tree drops focus to <body> — the top of the document, with nothing said
-// about what just happened. Move it to the panel the snapshot refilled, but only
-// when the trigger is really gone and nothing else has taken focus since. The
-// shape is status.js's focusAfterRetry, for the same reason (#153).
+// The one retry-focus policy (#164). A Retry leaves with the failure it belonged
+// to, and the control that had focus goes with it: the browser then drops focus
+// to <body> — the top of the document, with nothing said about what just
+// happened — or, when it keeps the reference, leaves it on a node that is no
+// longer in the document. Both are "focus fell away", so the panel the snapshot
+// refilled takes it instead. Focus that still sits on a live element is where
+// the owner put it and is never stolen.
+//
+// This is the only implementation: every retry-carrying screen calls it (Status,
+// Config, Settings, Schedule, Advanced, and the notification card's Enable and
+// Retry), so the policy cannot drift per screen.
 export function focusAfterRetry(retry, panelId) {
   if (!retry || !retry.hidden) return;
   const active = document.activeElement;
-  if (active && active !== document.body && active !== document.documentElement) return;
+  const fellAway =
+    !active ||
+    active === document.body ||
+    active === document.documentElement ||
+    // A node the document no longer contains is not somewhere the owner chose to
+    // be. A DOM without `contains` cannot prove detachment, so there the
+    // narrower <body>/<html> rule stands.
+    (typeof document.contains === 'function' && !document.contains(active));
+  if (!fellAway) return;
   const panel = $(panelId);
   if (panel) panel.focus({ preventScroll: true });
 }
