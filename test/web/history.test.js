@@ -327,6 +327,9 @@ test('periodAnchor steps back one calendar unit per period', () => {
   assert.equal(dayId(periodAnchor('month', 1, now)), '2026-09-01');
   assert.equal(dayId(periodAnchor('month', 2, now)), '2026-08-01');
   assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 2, 31, 12))), '2026-02-01');
+  // January's previous month is the December before it, not a clamped January:
+  // the step crosses the year boundary in one unit.
+  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 0, 15, 12))), '2025-12-01');
   // Year steps one calendar year and lands on 1 January — a leap day included.
   assert.equal(dayId(periodAnchor('year', 1, now)), '2025-01-01');
   assert.equal(dayId(periodAnchor('year', 3, now)), '2023-01-01');
@@ -356,6 +359,8 @@ test('a completed month is its own calendar length, whatever the clock', () => {
     [2028, 1, 29, 'February 2028'],
     [2026, 3, 30, 'April 2026'],
     [2025, 9, 31, 'October 2025'],
+    // December is its own calendar month, the far side of January's step.
+    [2025, 11, 31, 'December 2025'],
   ];
   for (const [year, month, days, label] of cases) {
     const anchor = new Date(year, month, 1, 12);
@@ -572,6 +577,27 @@ test('the current year runs January to this month and a completed year all twelv
   assert.equal(summed[0].kwh, 31); // January
 });
 
+test('a completed leap year is 366 days across twelve months', () => {
+  const now = new Date(2029, 0, 5, 12);
+  const leap = new Date(2028, 0, 1, 12);
+  assert.deepEqual(periodBounds('year', leap, now), {
+    startId: '2028-01-01',
+    endId: '2028-12-31',
+  });
+  const docs = [];
+  const day = new Date(2028, 0, 1, 12);
+  while (day.getFullYear() === 2028) {
+    docs.push({ id: dayId(day), kwh: 1 });
+    day.setDate(day.getDate() + 1);
+  }
+  assert.equal(docs.length, 366);
+  const series = periodSeries('year', docs, leap, now);
+  assert.equal(series.length, 12);
+  assert.equal(sumSeries(series), 366);
+  assert.equal(series[1].kwh, 29); // February 2028
+  assert.equal(series[2].kwh, 31); // March proves 29 February did not shift a bar
+});
+
 test('periodSpan names the calendar unit each period stands for', () => {
   const now = new Date(2026, 9, 18, 12);
   // The title register the summary label paints: short months — the vocabulary
@@ -607,6 +633,9 @@ test('periodSpan names the calendar unit each period stands for', () => {
   assert.equal(title(month), 'September 2026');
   assert.equal(plain(month.phrase), 'September 2026');
   assert.equal(breakable(month), 0);
+  // Paged past January, the month is the December before it — named by its own
+  // year, so a step across the year end cannot be mistaken for a January window.
+  assert.equal(title(periodSpan('month', new Date(2025, 11, 5, 12), now)), 'December 2025');
   // Year: the year itself.
   const year = periodSpan('year', periodAnchor('year', 1, now), now);
   assert.equal(title(year), '2025');
@@ -620,6 +649,18 @@ test('periodSpan names the calendar unit each period stands for', () => {
   assert.equal(title(periodSpan('week', now, now)), 'Mon 12 – Sun 18 Oct 2026');
   const wednesday = new Date(2026, 9, 14, 12);
   assert.equal(title(periodSpan('week', wednesday, wednesday)), 'Mon 12 – Wed 14 Oct 2026');
+  // On its Monday the clipped week is one day, so it is named once: both ends
+  // would otherwise say the same date twice ("Mon 12 – Mon 12 Oct 2026").
+  const monday = new Date(2026, 9, 12, 12);
+  const oneDay = periodSpan('week', monday, monday);
+  assert.equal(title(oneDay), 'Mon 12 Oct 2026');
+  assert.equal(plain(oneDay.phrase), 'the week of Monday 12 October 2026');
+  assert.equal(breakable(oneDay), 0);
+  // A completed week is always seven days, so only the clipped one can collapse.
+  assert.equal(
+    title(periodSpan('week', periodAnchor('week', 1, monday), monday)),
+    'Mon 5 – Sun 11 Oct 2026',
+  );
 });
 
 test('paged copy names its span and never claims the window is now', () => {

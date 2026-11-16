@@ -1524,6 +1524,58 @@ test('switching period returns the chart to the default view', async () => {
   }
 });
 
+test('a clipped current week on its Monday is named by one date', async () => {
+  // Monday 12 October 2026: the current ISO week is that one day, so every string
+  // that names the window names it once — never "Mon 12 – Mon 12 Oct 2026".
+  freezeClock(new Date(2026, 9, 12, 12).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    await switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    assert.equal(labelText(), 'Mon 12 Oct 2026');
+    assert.equal(plain(element('history-summary').attrs['aria-label']), 'Mon 12 Oct 2026 summary');
+    assert.equal(
+      plain(element('history-chart').attrs['aria-label']),
+      'Daily energy for the week of Monday 12 October 2026. Use the left and right arrow keys to move between days.',
+    );
+    // A one-day week is still the present window: Next stays disabled.
+    assert.equal(element('chart-next').disabled, true);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('Year pages one calendar year each way across the year boundary', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    await switchTo({ target: { closest: () => ({ dataset: { period: 'year' } }) } });
+    await readFailed();
+    assert.equal(labelText(), '2026');
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous year');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next year');
+    // Previous steps one whole calendar year: the completed 2025.
+    await fire('chart-prev', 'click');
+    await readFailed();
+    assert.equal(labelText(), '2025');
+    assert.equal(element('chart-next').disabled, false);
+    // Next steps forward one calendar year, back across the January boundary.
+    await fire('chart-next', 'click');
+    await readFailed();
+    assert.equal(labelText(), '2026');
+    assert.equal(element('chart-next').disabled, true);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test('PageUp and PageDown page the window while the arrows move the selection', async () => {
   freezeClock();
   try {
@@ -2202,6 +2254,12 @@ test('a paged Day read targets the date its window names', async () => {
       await flushReads();
       assert.deepEqual(days, ['2026-10-18']);
       assert.equal(labelText(), 'Sun 18 Oct 2026');
+      // The Day readout names the hour in progress and nothing else: its bucket
+      // is `hour`, so the "Today · " prefix (a day-bucket register) can never
+      // appear here — the summary label above it names the date. Pinned so a
+      // copy change cannot silently promise the prefix H.11 used to claim.
+      assert.equal(element('chart-day').textContent, '12:00–13:00');
+      assert.doesNotMatch(element('chart-day').textContent, /Today/);
       // One day back: the read targets the day the window names, and the bars and
       // summary are that document's.
       await fire('chart-prev', 'click');

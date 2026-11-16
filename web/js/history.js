@@ -339,7 +339,12 @@ function dateSpan(id, weekdays, months) {
 // month collapsed when the week sits inside one and both years named when it
 // crosses a year end. A single shared month is what most weeks look like, so it
 // is the shape that must stay shortest.
+//
+// The one-day exception is the clipped current week on its Monday: both bounds
+// are that Monday, so naming both ends would say the same date twice
+// ("Mon 12 – Mon 12 Oct 2026"). It is a single date and reads as one.
 function weekSpan(startId, endId, weekdays, months) {
+  if (startId === endId) return dateSpan(startId, weekdays, months);
   const first = dayStartFromId(startId);
   const last = dayStartFromId(endId);
   if (!first || !last) return `${startId} – ${endId}`;
