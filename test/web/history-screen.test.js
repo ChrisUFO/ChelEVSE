@@ -69,6 +69,14 @@ function stubElement() {
       this.children.push(...nodes);
     },
     replaceChildren(...nodes) {
+      // A browser moves the focus to <body> when the element holding it leaves the
+      // document. The screen's focus continuity exists because of exactly that, so
+      // the harness models it: otherwise a read that repaints under a keyboard
+      // user looks free of the failure it has to prevent.
+      const focused = globalThis.document.activeElement;
+      if (focused && this.children.includes(focused) && !nodes.includes(focused)) {
+        globalThis.document.activeElement = globalThis.document.body;
+      }
       this.children = nodes;
     },
     remove() {},
@@ -111,6 +119,8 @@ function element(id) {
 
 globalThis.document = {
   documentElement: { style: { setProperty() {} } },
+  // The focus target a removal leaves behind (see replaceChildren above).
+  body: stubElement(),
   activeElement: null,
   getElementById: (id) => element(id),
   createElement: () => stubElement(),
@@ -1080,6 +1090,65 @@ function keydown(target, key, mods = {}) {
   return prevented;
 }
 
+// Model the one nesting the screen's focus checks ask about: a bar lives in
+// #chart-bars, which lives in the SVG. (#chart-card is the stub's boundary, so
+// the tests ask about it directly — see inCard.)
+function modelChartContainment() {
+  element('history-chart').contains = (node) =>
+    node === element('history-chart') || element('chart-bars').children.includes(node);
+}
+
+// Everything a press can reach from inside the chart card: the pager buttons, the
+// SVG and its bars. <body> is in nothing, so a press that arrives after the focus
+// was dropped reaches no listener and is the browser's key — the scroll this
+// screen's focus continuity exists to prevent.
+function inCard(node) {
+  return (
+    node === element('chart-card') ||
+    node === element('chart-prev') ||
+    node === element('chart-next') ||
+    node === element('history-chart') ||
+    element('chart-bars').children.includes(node)
+  );
+}
+
+// Fire a key from wherever the focus actually is, the way the document does: the
+// focused element receives it, then its ancestors. Returns whether the screen
+// consumed it — `false` means no listener ran, which for a paging key is a page
+// scroll.
+function pressFromFocus(key) {
+  const at = document.activeElement;
+  if (at === element('chart-prev')) return keydown('chart-prev', key);
+  if (at === element('chart-next')) return keydown('chart-next', key);
+  if (at === element('chart-card')) return keydown('chart-card', key);
+  if (at === element('history-chart') || element('chart-bars').children.includes(at)) {
+    return keydown('history-chart', key);
+  }
+  return false;
+}
+
+// A settled Week at the default view with its bars drawn: the state a keyboard
+// pager starts from. (The read paths themselves always reject in Node, so the
+// drawn window is applied through the fetch→apply seam.)
+async function showDrawnWeek() {
+  resetHistory();
+  enterHistory();
+  element('period-switch').contains = () => true;
+  const click = element('period-switch').listeners.get('click')[0];
+  await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+  await readFailed();
+  const now = new Date(PAGED_NOW);
+  applyHistory(
+    periodById('week'),
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    now,
+    [],
+    now,
+  );
+  showHistorySettings({ rate: 0.25, currency: 'GBP' });
+}
+
 // Date spans glue their runs with hard spaces, leaving one breakable space after
 // the dash; compare painted copy as plain text.
 function plain(text) {
@@ -1409,10 +1478,7 @@ test('PageUp and PageDown page the window while the arrows move the selection', 
 
 test('PageUp pages twice in a row from inside the chart, keeping its focus', async () => {
   freezeClock();
-  // The stub has no DOM tree, so model the one relationship the screen's focus
-  // checks ask about: a bar lives in #chart-bars, which lives in the SVG.
-  element('history-chart').contains = (node) =>
-    node === element('history-chart') || element('chart-bars').children.includes(node);
+  modelChartContainment();
   try {
     resetHistory();
     enterHistory();
@@ -1453,6 +1519,89 @@ test('PageUp pages twice in a row from inside the chart, keeping its focus', asy
     await readFailed();
     assert.equal(document.activeElement, element('chart-prev'));
     assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a press during a paged read keeps the focus in the card and pages again', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    // A keyboard user arrives on the roving bar.
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    assert.equal(inCard(document.activeElement), true);
+
+    // First press: the read starts, and its loading paint removes the focused bar
+    // before the fetch has settled.
+    assert.equal(pressFromFocus('PageUp'), true);
+    assert.equal(labelText(), '5 – 11 Oct 2026');
+    // The focus is already on a control inside the card, so a press arriving
+    // mid-read reaches the paging keys instead of scrolling the viewport.
+    assert.notEqual(document.activeElement, document.body);
+    assert.equal(inCard(document.activeElement), true);
+
+    // A second press, typed before the first read settles, pages a second window.
+    assert.equal(pressFromFocus('PageUp'), true);
+    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+
+    // The read that lands is the newest one and it owns the settle focus. This
+    // window drew no bars, so the focus rests on the pager — the documented
+    // fallback — rather than being left on <body>.
+    await readFailed();
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    assert.notEqual(document.activeElement, document.body);
+    assert.equal(document.activeElement, element('chart-prev'));
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a Refresh during a paged read hands the focus back inside the card', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    // Start a paged read from the keyboard…
+    assert.equal(pressFromFocus('PageUp'), true);
+    assert.equal(inCard(document.activeElement), true);
+    // …and supersede it with a Refresh. The paged read returns without painting,
+    // so the reload's repaint is the one that has to hand the focus back.
+    const refreshed = fire('history-refresh', 'click');
+    await refreshed;
+    await readFailed();
+    for (let i = 0; i < 5; i++) await settle();
+    assert.notEqual(document.activeElement, document.body);
+    assert.equal(document.activeElement, element('chart-prev'));
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a repaint under a keyboard user focuses the bar the window selected', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    const bars = () => element('chart-bars').children.slice(1);
+    assert.equal(bars().length, 7);
+    // Land on a bar, then let a settings push repaint the chart beneath it: the
+    // branch the failed-read tests cannot reach, because they draw no bars.
+    bars()[3].focus();
+    assert.equal(bars().includes(document.activeElement), true);
+    showHistorySettings(nightly());
+    const selected = bars().find((bar) => bar.classList.contains('selected'));
+    assert.ok(selected, 'the window selects a bar');
+    // The focus returns to that bar — not to the pager, and not to a neighbour an
+    // off-by-one would pick.
+    assert.equal(document.activeElement, selected);
+    assert.notEqual(document.activeElement, element('chart-prev'));
   } finally {
     element('history-chart').contains = () => false;
     mock.timers.reset();

@@ -393,11 +393,11 @@ function selectIndex(index, { focus = false } = {}) {
   if (focus && target) target.focus({ preventScroll: true });
 }
 
-// Focus continuity across a repaint: a rebuild replaces the bars, so the bar that
-// held the focus is gone by the time the new window is drawn. A caller that
-// repaints under a keyboard user restores it here — to the bar the new window
-// selected, or to the pager when it drew none — so the paging keys stay
-// deliverable and the focus never falls to <body>, where PageUp/PageDown would
+// Focus continuity across a read: the loading paint removes the bars, so the bar
+// that held the focus is gone long before the new window is drawn. A caller that
+// repaints under a keyboard user hands the focus back here — to the bar the new
+// window selected, or to the pager when it drew none — so the paging keys stay
+// deliverable and the focus never comes to rest on <body>, where PageUp/PageDown
 // scroll the page instead of paging.
 function chartHasFocus() {
   return $('history-chart').contains(document.activeElement);
@@ -407,6 +407,38 @@ function focusChart() {
   const index = series.findIndex((point) => point.id === selectedId);
   const target = barEls[index] || $('chart-prev');
   if (target) target.focus({ preventScroll: true });
+}
+
+// True from the moment a read parks the focus on the pager until the repaint that
+// hands it back. It is screen state, not a per-read snapshot: a read superseded
+// before it settles must not lose the reservation (the read that supersedes it
+// starts with the bars already gone, so it would capture nothing), and only the
+// repaint that lands may consume it. The newest read is always the one that
+// repaints, so it always owns the settle focus however many reads it superseded.
+let chartFocusReserved = false;
+
+// Reserve the chart's focus before a paint that removes the focused bar: the bar
+// is about to leave the document, so the focus moves to Previous first — a control
+// the always-visible head renders, that is never disabled, and that lives inside
+// #chart-card where the paging keys are bound. A press arriving *during* the read
+// (a double tap, or every key-repeat event of a held key) therefore still pages
+// instead of scrolling the viewport from <body>.
+function parkChartFocus() {
+  const prev = $('chart-prev');
+  if (!prev || !chartHasFocus()) return;
+  chartFocusReserved = true;
+  prev.focus({ preventScroll: true });
+}
+
+// Hand the reserved focus to the window that just landed. Skipped when the reader
+// has since tabbed or clicked elsewhere: the reservation only starts from the
+// pager this interaction parked the focus on, so nobody is yanked back into the
+// chart from a control they moved to themselves.
+function releaseChartFocus() {
+  if (!chartFocusReserved) return;
+  chartFocusReserved = false;
+  const at = document.activeElement;
+  if (at === $('chart-prev') || chartHasFocus()) focusChart();
 }
 
 const OFFLINE_TITLE = "You're offline — history isn't available.";
@@ -762,9 +794,10 @@ async function readHistory() {
   const readWindow = buildWindow(descriptor, now);
   chartWindow = readWindow;
   const { bounds } = readWindow;
-  // A paging keystroke arrives with the focus on a bar, and clearing the chart
-  // below removes it; the settled window hands the focus back (see focusChart).
-  const keepFocus = chartHasFocus();
+  // A paging keystroke arrives with the focus on a bar, and the loading paint
+  // below removes it; the pager holds the focus until the settled window hands it
+  // back (see releaseChartFocus).
+  parkChartFocus();
   series = [];
   selectedId = null;
   dayTotal = null;
@@ -788,7 +821,7 @@ async function readHistory() {
     now,
   );
   renderHistory();
-  if (keepFocus) focusChart();
+  releaseChartFocus();
   reloadIfWindowStale();
 }
 
@@ -871,7 +904,7 @@ async function loadAll() {
   // The same focus continuity a paged read keeps: this reload can land under a
   // keyboard user (the midnight re-entry a paged read triggers), and its repaint
   // must not leave the focus on <body>.
-  const keepFocus = chartHasFocus();
+  parkChartFocus();
   const first = historyState === 'idle' && sessionsView.state === 'idle';
   if (first) {
     historyState = 'loading';
@@ -928,7 +961,7 @@ async function loadAll() {
     });
   }
   renderHistory();
-  if (keepFocus) focusChart();
+  releaseChartFocus();
   renderSessions();
   renderLoadFeedback();
 
@@ -1189,6 +1222,7 @@ export function resetHistory() {
   liveStatus = null;
   settlePending = false;
   settleVerify = false;
+  chartFocusReserved = false;
   sessionsView = emptySessionsView();
   sessionsBusy = false;
   historyState = 'idle';

@@ -290,10 +290,22 @@ test('periodAnchor keeps the local calendar across month ends and leap years', (
   // A 30-day month step is day arithmetic, so it crosses months and years.
   assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 0, 5, 12))), '2025-12-06');
   assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 2, 1, 12))), '2026-01-30');
-  // The window a paged anchor draws is the period's own range around it.
-  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, new Date(2028, 1, 29, 12))), {
+  // The window a paged anchor draws is the period's own range around it, read
+  // whole-month at a past anchor. 28 February 2027 is that month's last day, so
+  // this probe alone cannot tell the whole-month range from one that stops on the
+  // anchor — the leap-year probe below is the one that separates them.
+  const leap = new Date(2028, 1, 29, 12);
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, leap), leap), {
     startId: '2026-03-01',
     endId: '2027-02-28',
+  });
+  // 28 February 2028 is *not* that month's last day: a range that stopped on the
+  // anchor would orphan 29 February between two windows, so the paged range runs
+  // to the month's real end.
+  const short = new Date(2029, 1, 28, 12);
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, short), short), {
+    startId: '2027-03-01',
+    endId: '2028-02-29',
   });
 });
 
