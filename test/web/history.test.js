@@ -1733,7 +1733,7 @@ test('both history read paths end with the midnight re-check', () => {
   );
   assert.match(
     body('loadAll'),
-    /if \(seq === historySeq\) \{\s*applyHistory\([\s\S]*?renderHistory\(\);[\s\S]*?releaseChartFocus\(\);/,
+    /if \(seq === historySeq\) \{\n\s+applyHistory\([\s\S]*?\n\s+renderHistory\(\);\n\s+releaseChartFocus\(\);\n {2}\}/,
   );
   // The window build takes `now` for the bounds as well as the span: a paged
   // Year window is whole months only while the third argument is passed.
@@ -1744,4 +1744,20 @@ test('both history read paths end with the midnight re-check', () => {
   assert.match(body('applyHistory'), /periodSessions = Array\.isArray\(sessions\)/);
   // One mechanism for both: the shared guard owns the staleness check.
   assert.match(body('reloadIfWindowStale'), /windowStale\(\)/);
+});
+
+test('the span and its bounds default their clock alike', () => {
+  // `periodSpan`'s two clock-ish arguments must default to one moment, as
+  // `periodBounds`'s and the series builders' already do: two independent
+  // `new Date()` defaults let a default-argument call describe a window that
+  // straddles midnight, which the screen's own `currentSpan()` exists to avoid.
+  // Neither live caller leans on it (both pass `now`), so only the shape pins it.
+  const source = readFileSync(new URL('../../web/js/history.js', import.meta.url), 'utf8');
+  for (const name of ['periodBounds', 'periodSpan']) {
+    assert.match(
+      source,
+      new RegExp(`export function ${name}\\(period, anchor = new Date\\(\\), now = anchor\\)`),
+      name,
+    );
+  }
 });

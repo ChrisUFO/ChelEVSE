@@ -1643,6 +1643,39 @@ test('a repaint under a keyboard user focuses the bar the window selected', asyn
   }
 });
 
+test("the selected bar is the window's single tab stop and current", async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    const bars = () => element('chart-bars').children.slice(1);
+    const stop = () => bars().find((bar) => bar.getAttribute('tabindex') === '0');
+    const currentBar = () => bars().filter((bar) => bar.getAttribute('aria-current') === 'true');
+    assert.equal(bars().length, 7);
+    // H.10/H.17: the selected bucket carries aria-current and is the single tab
+    // stop; every other bar is neither focusable nor current.
+    assert.ok(stop(), 'one bar is the tab stop');
+    assert.equal(bars().filter((bar) => bar.getAttribute('tabindex') === '0').length, 1);
+    assert.equal(currentBar().length, 1);
+    assert.equal(currentBar()[0], stop());
+    assert.ok(stop().classList.contains('selected'));
+    for (const bar of bars()) {
+      const selected = bar === stop();
+      assert.equal(bar.getAttribute('tabindex'), selected ? '0' : '-1');
+      assert.equal(bar.getAttribute('aria-current'), selected ? 'true' : null);
+    }
+    // Moving the selection moves the stop with it and leaves no second one behind.
+    keydown('history-chart', 'ArrowRight');
+    assert.equal(bars().filter((bar) => bar.getAttribute('tabindex') === '0').length, 1);
+    assert.equal(currentBar().length, 1);
+    assert.equal(currentBar()[0], stop());
+    assert.ok(stop().classList.contains('selected'));
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
 // ---------- the settle focus handoff (#154) ----------
 //
 // The park half of the focus fix is pinned above; these pin the release half,
@@ -1912,6 +1945,7 @@ test('a paged read that settles after local midnight reloads exactly once', asyn
     for (let i = 0; i < 5; i++) await settle();
     assert.equal(reloads.length - before, 1);
   } finally {
+    reloadLimit = Infinity;
     mock.timers.reset();
   }
 });
@@ -1933,6 +1967,7 @@ test('the default read that settles after local midnight reloads exactly once', 
     for (let i = 0; i < 5; i++) await settle();
     assert.equal(reloads.length - before, 2);
   } finally {
+    reloadLimit = Infinity;
     mock.timers.reset();
   }
 });

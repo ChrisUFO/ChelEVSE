@@ -336,7 +336,7 @@ function monthSpan(startId, endId, months) {
 // uses, and `isDefault` marks offset 0 — the one register that keeps today's
 // wording ("Today", "the last 30 days"). A past window is named by the dates
 // actually drawn.
-export function periodSpan(period, anchor = new Date(), now = new Date()) {
+export function periodSpan(period, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
   if (dayId(anchor) === dayId(now)) {
     return { label: descriptor.span.label, phrase: descriptor.span.phrase, isDefault: true };
