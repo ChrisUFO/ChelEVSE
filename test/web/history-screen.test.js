@@ -1,5 +1,6 @@
-import { mock, test } from 'node:test';
+import { beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   dayLabel,
   periodAnchor,
@@ -1404,6 +1405,15 @@ test('the hint names only what the state on screen offers', async () => {
     } finally {
       periodReads.range = storePeriodRead;
     }
+    // The markup's hint is the pre-paint copy (and the SVG's aria-describedby
+    // target); the first paint overwrites its textContent, so drift between the
+    // shipped literal and the offset-0 paging register would be invisible to
+    // every assertion above. The static copy is the present register, so pin it
+    // at the same constant the behavioural half just drove.
+    const markup = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+    const shipped = /<p\b[^>]*id="chart-hint"[^>]*>([^<]*)<\/p>/.exec(markup);
+    assert.ok(shipped, 'web/index.html ships #chart-hint');
+    assert.equal(shipped[1], presentPaging);
   } finally {
     mock.timers.reset();
   }
@@ -1910,9 +1920,17 @@ test('a paged read that lands after a newer paged read paints neither its bars n
 // once; the screen's other reads do not. The stub's textContent is a plain
 // property, so a setter counts them without touching the module under test. A
 // guard that never rests reloads in a microtask chain that starves the timers, so
-// passing `reloadLimit` fails the run instead of hanging it.
+// the cap below turns that into a failing test instead of a hang. It is armed for
+// every test, not only the two midnight ones: a regression in the guard reached
+// from any paging test otherwise hangs the whole file with no failing test name,
+// and the per-test reset keeps the count from drifting as the file grows.
+const RELOAD_CAP = 40;
 const reloads = [];
-let reloadLimit = Infinity;
+let reloadLimit = RELOAD_CAP;
+beforeEach(() => {
+  reloads.length = 0;
+  reloadLimit = RELOAD_CAP;
+});
 {
   const button = element('history-refresh');
   let value = button.textContent;
@@ -1944,7 +1962,7 @@ test('a paged read that settles after local midnight reloads exactly once', asyn
     await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
     await readFailed();
     const before = reloads.length;
-    reloadLimit = before + 20;
+    reloadLimit = 20;
     // Build the paged window on the 18th…
     const paging = fire('chart-prev', 'click');
     assert.equal(labelText(), '5 – 11 Oct 2026');
@@ -1961,7 +1979,6 @@ test('a paged read that settles after local midnight reloads exactly once', asyn
     for (let i = 0; i < 5; i++) await settle();
     assert.equal(reloads.length - before, 1);
   } finally {
-    reloadLimit = Infinity;
     mock.timers.reset();
   }
 });
@@ -1972,7 +1989,7 @@ test('the default read that settles after local midnight reloads exactly once', 
     resetHistory();
     enterHistory();
     const before = reloads.length;
-    reloadLimit = before + 20;
+    reloadLimit = 20;
     const first = fire('history-refresh', 'click');
     mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
     await first;
@@ -1983,7 +2000,6 @@ test('the default read that settles after local midnight reloads exactly once', 
     for (let i = 0; i < 5; i++) await settle();
     assert.equal(reloads.length - before, 2);
   } finally {
-    reloadLimit = Infinity;
     mock.timers.reset();
   }
 });
@@ -2048,6 +2064,58 @@ test('a failed reload at a paged offset keeps the bars under the window they wer
       await readFailed();
       assert.equal(labelText(), '29 Sep – 5 Oct 2026');
       assert.equal(bars().length, 0);
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// (#154) The empty half of the same rule: a window the server answered with
+// nothing draws no bars, so a failed re-entry over it has no drawn window to
+// defend — its offline panel must name the window the next Refresh will read,
+// not the superseded window the retained empty series still names.
+test('a failed re-entry over an empty paged window names the window Refresh will load', async () => {
+  freezeClock(new Date(2026, 9, 18, 23, 59, 40).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    const reads = controlPeriodReads();
+    try {
+      // Week, one window back, answered by the server with no documents: the
+      // empty panel for 5 – 11 Oct, with the pager still on screen.
+      switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+      reads[0].settle({ docs: [], fromCache: false });
+      await flushReads();
+      const paging = fire('chart-prev', 'click');
+      reads[1].settle({ docs: [], fromCache: false });
+      await paging;
+      await flushReads();
+      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(element('history-total').textContent, '0.00');
+
+      // Midnight, then a re-entry whose read is a cache miss: there are no bars
+      // to keep, so the panel speaks for the window the re-entry reads.
+      mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
+      const reload = fire('history-refresh', 'click');
+      reads[2].settle({ docs: [], fromCache: true });
+      await reload;
+      for (let i = 0; i < 5; i++) await settle();
+      assert.equal(
+        element('chart-empty-title').textContent,
+        "You're offline — history isn't available.",
+      );
+      assert.equal(
+        plain(element('chart-empty-line').textContent),
+        'Reconnect, then tap Refresh to load the energy for 6 – 12 October 2026.',
+      );
+      // The label still names the read that produced the (empty) series: there
+      // is no bar to mislabel, and Refresh is the only thing moving forward.
+      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(element('history-state').hidden, true);
     } finally {
       periodReads.range = storePeriodRead;
     }

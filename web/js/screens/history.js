@@ -324,11 +324,10 @@ function showChartEmpty(title, line) {
   // With no bars there is nothing to tap or arrow through: the hint keeps the
   // pager it does offer and drops the selection clause.
   paintChartHint(false);
-  // The head stays visible: the paging controls live in it, and an empty window
+  // The head is never hidden: the paging controls live in it, and an empty window
   // is still a window the owner has to be able to page out of. Its readout
   // describes a bar that is no longer drawn, so it returns to its initial
   // "nothing selected" state instead of naming the previous window.
-  $('chart-head').hidden = false;
   setText($('chart-day'), '—');
   setText($('chart-kwh'), '—');
   $('chart-cost').hidden = true;
@@ -374,7 +373,6 @@ function renderChart() {
     return group;
   });
   svg.removeAttribute('hidden');
-  $('chart-head').hidden = false;
   $('chart-empty').hidden = true;
   paintChartHint(true);
   const index = Math.max(
@@ -515,9 +513,17 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
+    // The rescue line names the window the next Refresh will load, which is the
+    // one this render is reporting: a series the server answered with nothing
+    // draws no bars, so a failed re-entry over it has no drawn window to defend
+    // and must not send the owner back to the superseded dates (see currentSpan
+    // for the label, which still names what that read covered).
+    const offlineLine = chartWindow
+      ? descriptor.copy(chartWindow.span).offlineLine
+      : copy.offlineLine;
     const message =
       historyState === 'offline'
-        ? { title: OFFLINE_TITLE, line: copy.offlineLine }
+        ? { title: OFFLINE_TITLE, line: offlineLine }
         : historyState === 'error'
           ? {
               title: `Couldn't load ${descriptor.noun}.`,
