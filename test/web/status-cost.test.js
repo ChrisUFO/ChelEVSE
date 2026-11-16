@@ -6,8 +6,11 @@ import assert from 'node:assert/strict';
 // import the module afterwards; every lookup is deferred to render time.
 function stubElement() {
   const classes = new Set();
+  const attrs = new Map();
+  const listeners = new Map();
   return {
     classes,
+    attrs,
     classList: {
       toggle(name, on) {
         if (on) classes.add(name);
@@ -20,6 +23,7 @@ function stubElement() {
     hidden: false,
     value: '',
     children: [],
+    focusCalls: 0,
     replaceChildren(...nodes) {
       this.children = nodes;
       this.textContent = nodes.map((node) => node.textContent || '').join('');
@@ -28,9 +32,21 @@ function stubElement() {
       this.children.push(...nodes);
       this.textContent += nodes.map((node) => node.textContent || '').join('');
     },
-    setAttribute() {},
-    addEventListener() {},
-    focus() {},
+    setAttribute(name, value) {
+      attrs.set(name, String(value));
+    },
+    getAttribute(name) {
+      return attrs.has(name) ? attrs.get(name) : null;
+    },
+    addEventListener(type, fn) {
+      listeners.set(type, [...(listeners.get(type) || []), fn]);
+    },
+    dispatch(type) {
+      for (const fn of listeners.get(type) || []) fn({ type });
+    },
+    focus() {
+      this.focusCalls += 1;
+    },
   };
 }
 
@@ -56,7 +72,7 @@ globalThis.document = {
 // fixtures mean the same thing here as in cost.test.js.
 process.env.TZ = 'America/Denver';
 
-const { showStatus, showSettings, showConfig, leaveStatus } = await import(
+const { showStatus, showSettings, showConfig, leaveStatus, initStatus } = await import(
   '../../web/js/screens/status.js'
 );
 
@@ -546,4 +562,64 @@ test('flat pricing is unaffected by the stop stamp', () => {
     }),
   );
   assert.equal(cost(), 'GBP 0.25');
+});
+
+// ---------- Hold closes when Auto/Stop takes the mode ----------
+
+// The click handlers live in initStatus; the stub records them so a test can
+// dispatch the same click the screen wires.
+initStatus();
+
+// A real click focuses its button before the handler runs, so the stub models
+// that — the closing panel must not move focus off the button just pressed.
+function click(id) {
+  const el = element(id);
+  el.focus();
+  el.dispatch('click');
+}
+
+// A verified charger with the panel open, seeded from a 12 A pilot.
+function openHold() {
+  leaveStatus();
+  showStatus(snapshot({ pilot: 12 }));
+  showConfig({ hostname: 'x', max_current_soft: 16, max_current_hard: 24 });
+  click('hold');
+  assert.equal(element('hold-panel').hidden, false);
+  assert.equal(element('hold').getAttribute('aria-expanded'), 'true');
+}
+
+for (const [id, type] of [
+  ['resume', 'auto'],
+  ['pause', 'stop'],
+]) {
+  test(`${type} closes the hold panel, without stealing focus`, () => {
+    openHold();
+    const holdFocus = element('hold').focusCalls;
+    const ampsFocus = element('amps').focusCalls;
+    const pressFocus = element(id).focusCalls;
+    click(id);
+    assert.equal(element('hold-panel').hidden, true);
+    assert.equal(element('hold').getAttribute('aria-expanded'), 'false');
+    assert.equal(element('hold').focusCalls, holdFocus, 'the close must not focus Hold');
+    assert.equal(element('amps').focusCalls, ampsFocus, 'the close must not focus the slider');
+    assert.equal(element(id).focusCalls, pressFocus + 1, 'the pressed button keeps focus');
+  });
+}
+
+test('set_current leaves the hold panel open', () => {
+  openHold();
+  click('apply');
+  assert.equal(element('hold-panel').hidden, false);
+  assert.equal(element('hold').getAttribute('aria-expanded'), 'true');
+});
+
+test('auto re-seeds the slider from the pilot on the next config render', () => {
+  openHold();
+  // The owner drags the panel's slider, then sends Auto: the drag must not be
+  // the value the panel reopens with.
+  element('amps').value = '20';
+  element('amps').dispatch('input');
+  click('resume');
+  showConfig({ max_current_soft: 16, max_current_hard: 24, pilot: 12, hostname: 'x' });
+  assert.equal(element('amps').value, 12, 'the pilot re-seeds, not the dragged value');
 });
