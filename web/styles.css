@@ -1033,12 +1033,43 @@ input[type='range']::-moz-range-thumb {
 }
 .chart-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px 10px;
 }
 .chart-readout {
+  flex: 1 1 100%;
   min-width: 0;
+}
+/* The two paging controls (#154): the readout keeps its own row, and the
+   controls share the next one with the hint. Button tokens, not a new language —
+   no new custom properties, no wrapper element. */
+.chart-page {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.chart-page:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
+}
+.chart-page:disabled {
+  opacity: 0.45;
+}
+/* The hint keeps the far right of the controls' row. */
+.chart-page + .chart-page {
+  margin-right: auto;
 }
 .chart-day {
   margin: 0;
