@@ -1973,6 +1973,8 @@ class RunWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "command_loop", spy("command_loop")
         ), mock.patch.object(
+            bridge, "notifications_loop", spy("notifications_loop")
+        ), mock.patch.object(
             bridge, "mqtt_status_loop", spy("mqtt_status_loop")
         ), mock.patch.object(
             bridge, "MqttSource", return_value=source
@@ -1987,7 +1989,7 @@ class RunWiringTests(unittest.TestCase):
                 FakeDB(),
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5, 60),
+                (10, 60, 60, 300, 5, 60, 300),
                 transport,
                 bridge.WatchdogConfig(),
                 config,
@@ -2013,6 +2015,7 @@ class RunWiringTests(unittest.TestCase):
                 "config_loop",
                 "settings_loop",
                 "schedule_loop",
+                "notifications_loop",
                 "mqtt_status_loop",
             ],
         )
@@ -2040,7 +2043,7 @@ class RunWiringTests(unittest.TestCase):
                 FakeDB(),
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5, 60),
+                (10, 60, 60, 300, 5, 60, 300),
                 transport,
                 bridge.WatchdogConfig(),
                 bridge.MqttConfig(enabled=False),
@@ -2052,6 +2055,7 @@ class RunWiringTests(unittest.TestCase):
                 bridge.config_loop,
                 bridge.settings_loop,
                 bridge.schedule_loop,
+                bridge.notifications_loop,
             ],
         )
 

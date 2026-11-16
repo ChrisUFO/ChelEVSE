@@ -1849,6 +1849,8 @@ class LoopWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "settings_loop", settings_spy
         ), mock.patch.object(
+            bridge, "notifications_loop", spy("notifications")
+        ), mock.patch.object(
             bridge.threading, "Thread", _ThreadSpy
         ), mock.patch.object(
             bridge, "StatusTracker"
@@ -1859,13 +1861,14 @@ class LoopWiringTests(unittest.TestCase):
                 FakeDB(),
                 host,
                 None,
-                (10, 60, 60, 300, 5, 60),
+                (10, 60, 60, 300, 5, 60, 300),
                 transport,
                 bridge.WatchdogConfig(),
             )
 
         self.assertEqual(
-            set(calls), {"status", "config", "schedule", "command", "settings"}
+            set(calls),
+            {"status", "config", "schedule", "command", "settings", "notifications"},
         )
         for name, args in calls.items():
             self.assertIs(args[1], host, f"{name} loop got another charger host")
@@ -1875,12 +1878,15 @@ class LoopWiringTests(unittest.TestCase):
         # schedules writes through -- one write policy, one document owner.
         self.assertIs(calls["schedule"][6], calls["status"][10])
         self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
-        self.assertEqual(len(threads), 4)
+        self.assertEqual(len(threads), 5)
         for thread in threads:
             self.assertIs(thread.args[1], host)
             self.assertTrue(thread.daemon)
             if thread.target is not settings_spy:
                 self.assertIs(thread.args[3], transport)
+        # The health poll classifies against the observations the status and
+        # config loops feed it (D6).
+        self.assertIsInstance(calls["notifications"][5], bridge.LiveObservations)
         tracker.return_value.seed.assert_called_once_with()
 
     def test_run_leaves_shutdown_logging_to_main(self):
@@ -1889,6 +1895,8 @@ class LoopWiringTests(unittest.TestCase):
         with mock.patch.object(bridge, "status_loop"), mock.patch.object(
             bridge, "config_loop"
         ), mock.patch.object(bridge, "schedule_loop"), mock.patch.object(
+            bridge, "notifications_loop"
+        ), mock.patch.object(
             bridge, "command_loop"
         ), mock.patch.object(
             bridge.threading, "Thread"
@@ -1903,7 +1911,7 @@ class LoopWiringTests(unittest.TestCase):
                 FakeDB(),
                 _host(),
                 None,
-                (10, 60, 60, 300, 5, 60),
+                (10, 60, 60, 300, 5, 60, 300),
                 transport,
                 bridge.WatchdogConfig(),
             )
@@ -3506,6 +3514,16 @@ class MainSeedingTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[3][5], 15)
         self.assertIn("settings 15s", " ".join(logs))
 
+    def test_the_notifications_interval_defaults_to_five_minutes(self):
+        run, logs = self.run_main()
+        self.assertEqual(run.call_args.args[3][6], 300)
+        self.assertIn("notifications 300s", " ".join(logs))
+
+    def test_the_notifications_interval_is_env_overridable(self):
+        run, logs = self.run_main(env={"NOTIFICATIONS_INTERVAL": "120"})
+        self.assertEqual(run.call_args.args[3][6], 120)
+        self.assertIn("notifications 120s", " ".join(logs))
+
     def test_a_bad_settings_interval_fails_loudly(self):
         with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
             os.environ, {"SETTINGS_INTERVAL": "soon"}, clear=True
@@ -3525,8 +3543,8 @@ class MainExitTests(unittest.TestCase):
 
     MESSAGE = (
         "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
-        "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
-        "must be numbers."
+        "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL, SETTINGS_INTERVAL and "
+        "NOTIFICATIONS_INTERVAL must be numbers."
     )
 
     def exit_main(self, env=None, init_raises=None):
@@ -3549,6 +3567,7 @@ class MainExitTests(unittest.TestCase):
             "SCHEDULE_RECONCILE_INTERVAL",
             "COMMAND_INTERVAL",
             "SETTINGS_INTERVAL",
+            "NOTIFICATIONS_INTERVAL",
         ):
             with self.subTest(variable=name):
                 code, init, run = self.exit_main(env={name: "not-a-number"})

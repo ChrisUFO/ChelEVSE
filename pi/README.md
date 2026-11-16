@@ -58,6 +58,7 @@ real environment variables take precedence.
 | `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged                         |
 | `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                                                 |
 | `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)                                   |
+| `NOTIFICATIONS_INTERVAL`          | `300`                 | Seconds between charger health polls (`GET /notifications`; see [Charger health](#charger-health-issue-158))  |
 | `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)                         |
 | `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                                    |
 | `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                                                  |
@@ -136,9 +137,10 @@ longer than that value, so there is no strict total-duration bound. Another
 loop's charger call — including a command — waits for the lock rather than
 failing; the command still applies when it lands, only its arrival is late.
 Accepted because polls are low-rate. Firestore work and the notifier run
-outside the lock. The config and schedule pollers start 3 s and 7 s late so
-`/status`, `/config` and `/schedule/plan` do not hit the charger together.
-Polling intervals, timeouts, auth, payloads and failure logging are unchanged.
+outside the lock. The config, schedule and health pollers start 3 s, 7 s and
+15 s late so `/status`, `/config`, `/schedule/plan` and `/notifications` do not
+hit the charger together. Polling intervals, timeouts, auth, payloads and
+failure logging are unchanged.
 
 ### MQTT status source (issue #44)
 
@@ -433,18 +435,19 @@ unaffected.
 Each loop is failure-isolated: a charger or Firestore error is logged as one
 timestamped line and the loop carries on at its next interval.
 
-| Loop     | Firestore document | Content                                                                                                                                                        |
-| -------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status   | `status/current`   | Curated `/status` fields on the write policy's cadence (see below)                                                                                             |
-| Status   | `history/<date>`   | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence |
-| Status   | `sessions/{id}`    | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                |
-| Schedule | `status/current`   | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                          |
-| Status   | `status/health`    | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                        |
-| Status   | `status/health`    | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                             |
-| Config   | `status/config`    | `/config` object with credential fields redacted, plus `updated_at`                                                                                            |
-| Schedule | firmware           | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                     |
-| Status   | `fcmTokens/{id}`   | Deleted when FCM reports the token unregistered/invalid                                                                                                        |
-| Commands | `commands/{id}`    | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                           |
+| Loop          | Firestore document     | Content                                                                                                                                                          |
+| ------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status        | `status/current`       | Curated `/status` fields on the write policy's cadence (see below)                                                                                               |
+| Status        | `history/<date>`       | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence   |
+| Status        | `sessions/{id}`        | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                  |
+| Schedule      | `status/current`       | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                            |
+| Status        | `status/health`        | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                          |
+| Status        | `status/health`        | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                               |
+| Config        | `status/config`        | `/config` object with credential fields redacted, plus `updated_at`                                                                                              |
+| Notifications | `status/notifications` | The gateway's live advisory ring projected into the three-fact model; written only when the projection changes (see [Charger health](#charger-health-issue-158)) |
+| Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                       |
+| Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                          |
+| Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                             |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -532,10 +535,10 @@ history.
 The bridge counts every successful Firestore write, by kind, in a
 process-local counter over a rolling 24 h window: `status` (`status/current`),
 `history` (`history/<day>`), `session` (`sessions/<id>`), `config`
-(`status/config`), `command` (`commands/<id>`), `health` (`status/health`)
-and `fcm` (token-prune deletes — Firestore bills a delete as a write). The
-status loop logs the summary once an hour (the first line right after
-start, proving the counter is alive):
+(`status/config`), `command` (`commands/<id>`), `health` (`status/health` and
+`status/notifications`) and `fcm` (token-prune deletes — Firestore bills a
+delete as a write). The status loop logs the summary once an hour (the first
+line right after start, proving the counter is alive):
 
 ```
 firestore writes: 318 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 fcm=0)
@@ -586,6 +589,12 @@ Two notes on why nothing else was tuned:
   only lever is writing less often, which is what the policy does. A
   separate heartbeat document would be the same: one more write plus a
   listener, for nothing.
+- **The health poll adds no steady-state writes.** `status/notifications`
+  (#158) is written only when its projection changes — zero on an unchanged
+  charger — plus one write when the process starts and the first poll lands.
+  Its 300 s `GET /notifications` costs 288 charger reads/day (a GET to the
+  gateway, not a Firestore read) and one Firestore read of the stored document
+  at start-up.
 
 One deployment caveat the counter makes visible: with `MQTT_ENABLED=false`
 the config loop resyncs `status/config` unconditionally every
@@ -606,6 +615,106 @@ Two Tesla config fields report an absent value as `18446744073709551615`
 (2^64 − 1), outside Firestore's signed 64-bit integer range; those values (and
 non-finite floats) are coerced to float/`null` before the write, so a config
 sync never fails on them.
+
+### Charger health (issue #158)
+
+The bridge polls the gateway's advisory ring every `NOTIFICATIONS_INTERVAL`
+(300 s) and projects it into the sibling document `status/notifications`. The
+gateway's own view cannot be stored as-is: `GET /notifications` returns every
+live advisory (acked ones included), but `sticky` is a literal per-rule
+constant — every counter-derived advisory (`fault.*`, `wear.*`) ships
+`sticky:false` — so the bridge classifies each entry itself (`pi/health.py`):
+
+- **`acknowledged`** — the owner muted it (`acked: true`). Wins over the other two.
+- **`active`** — a live signal the bridge already polls corroborates the rule's
+  own raise predicate.
+- **`historical`** — a record: a counter or lifetime value, a rule with no
+  exposed live signal, or a rule family whose firmware gate is still closed.
+
+`severity` is copied from the firmware verbatim and never merged with liveness:
+a cleared ground fault stays `critical` while reading as `historical`. The
+firmware's `sticky` is stored as `firmware_sticky` and used for nothing else.
+`first_seen`/`last_seen` are the gateway's own epoch seconds; the ring is
+RAM-only (they restart at gateway boot), which is why the counter — not
+`first_seen` — is the firmware's ack token for counter-backed advisories.
+
+Corroboration (`active`) comes from observations other loops already fetch — no
+extra charger GET:
+
+| Advisories                                                     | Live proof                                                                                                                                                    | Ack token (`counter_token`)                                  |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `safety.*`                                                     | the matching `/config` boolean is `false` (`ground_check`, `relay_check`, `diode_check`, `vent_check`, `temp_check`) — never `/status.flags`, which is VFLAGS | the five booleans together, `1`/`0` in that order            |
+| `fault.gfci_tripped` / `fault.no_ground` / `fault.stuck_relay` | controller `state` is 6 / 7 / 8                                                                                                                               | `gfcicount` / `nogndcount` / `stuckcount`                    |
+| `thermal.high_temp`                                            | a valid sensor at or above `over_temp_shutdown − 5` (default panic 72 °C)                                                                                     | `first_seen`                                                 |
+| `thermal.relay_thermal`                                        | `relay_thermal_warning_level` 1 (watch) or 2 (warn)                                                                                                           | the level                                                    |
+| `thermal.throttling`                                           | none exposed → always historical                                                                                                                              | `first_seen`                                                 |
+| `wear.*`                                                       | lifetime records → always historical                                                                                                                          | the wear counter, or the severity step for `wear.relay_life` |
+
+The counters come from the status loop's latest `/status` reply and the config
+view from the config loop's last `status/config` write, handed over through one
+small locked holder. `status/current` is untouched — counters are a health
+concern, not a display field.
+
+**Gates.** The gateway evaluates its rules from caches that can still be unknown
+and stays silent while they are: no `$GE` answer means no `safety.*` rules at
+all, no `$GL` answer means no `wear.*` / `thermal.relay_thermal` rules (and
+`/config` omits the relay block). The document therefore carries
+`gates: {settings_known, relay_health_known}`; a closed gate means **health
+incomplete**, never "no faults".
+
+**Document.** Merge writes only, and only when the projected content changes:
+
+```json
+{
+  "reachable": true,
+  "checked_at": 1794870706,
+  "source": "http",
+  "gates": { "settings_known": true, "relay_health_known": false },
+  "counters": { "nogndcount": 7, "gfcicount": 0, "stuckcount": 0 },
+  "advisories": [
+    {
+      "id": "fault.no_ground",
+      "category": "fault",
+      "severity": "critical",
+      "firmware_sticky": false,
+      "acked": true,
+      "first_seen": 1794177153,
+      "last_seen": 1794870706,
+      "classification": "acknowledged",
+      "corroborated": false,
+      "counter_token": 7,
+      "first_observed": 1794870000
+    }
+  ],
+  "alerted": {},
+  "updated_at": "<server timestamp>"
+}
+```
+
+- `checked_at` is the epoch second of the observation that produced the last
+  write, `updated_at` the server timestamp of that write. `checked_at` is not a
+  heartbeat: the document is written only on change, so the app treats a
+  missing/stale document as "health unknown" and takes bridge liveness from
+  `status/current`'s freshness banner instead.
+- `first_observed` is a bridge-local watermark: the first time this bridge saw
+  this `(id, counter_token)`. It is seeded from the stored document at start-up,
+  so a restart neither re-stamps an observation nor re-alerts on one.
+- `alerted` is reserved for the health alert's dedupe watermark and is carried
+  across every write; the ingest does not populate it.
+- The advisory list mirrors the gateway's live ring exactly — an entry that
+  leaves the ring disappears (no synthetic history), and an acknowledged entry
+  stays listed while the gateway still holds it.
+
+**Failure paths.** A non-2xx or unreachable poll projects
+`{reachable: false, checked_at, source}` and writes it **only on the
+transition**; a 404 (endpoint absent, an older gateway) or a 200 that is not the
+notification contract records `source: "unsupported"`. The merge leaves the last
+known gates/counters/advisories in place under `reachable: false` — a failed
+poll never looks like an empty advisory ring.
+
+**Cost.** One charger GET per poll: 288/day at 300 s, beside the status and
+config polls. Firestore writes are the real changes only (zero in steady state)
+plus one read of the stored document at process start.
 
 ### Access allowlist (`pi/acl.py`)
 

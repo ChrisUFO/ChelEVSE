@@ -292,7 +292,9 @@ class ThermalTests(unittest.TestCase):
         self.assertEqual(entry["classification"], "historical")
 
     def test_high_temp_uses_the_firmware_default_panic_without_one(self):
-        config = {key: value for key, value in CONFIG.items() if key != "over_temp_shutdown"}
+        config = {
+            key: value for key, value in CONFIG.items() if key != "over_temp_shutdown"
+        }
         entry, _ = one(
             [advisory("thermal.high_temp", category="thermal", severity="warning")],
             facts(temps=(67.0, None, None), config=config),
@@ -342,7 +344,9 @@ class ThermalTests(unittest.TestCase):
             advisory("wear.relay_cold_open", category="wear", severity="warning"),
             advisory("wear.stuck_relay_recovery", category="wear", severity="info"),
         ]
-        content, _ = project(entries, facts(state=3, temps=(70.0, None, None), config=config))
+        content, _ = project(
+            entries, facts(state=3, temps=(70.0, None, None), config=config)
+        )
 
         for entry in content["advisories"]:
             with self.subTest(advisory_id=entry["id"]):
@@ -509,7 +513,9 @@ class LiveObservationsTests(unittest.TestCase):
             {"state": None, "temps": (None, None, None), "counters": {}, "config": None},
         )
 
-        live.note_status({"state": 3, "temp1": 41.5, "temp2": None, "temp3": None}, COUNTERS)
+        live.note_status(
+            {"state": 3, "temp1": 41.5, "temp2": None, "temp3": None}, COUNTERS
+        )
         live.note_config(CONFIG)
         snapshot = live.snapshot()
 
