@@ -193,8 +193,11 @@ function paintPeriodCopy() {
   const copy = descriptor.copy(span);
   setText($('chart-heading'), periodHeading(descriptor));
   setText($('history-total-label'), span.label);
-  // Both registers are nouns or dates, so the same sentence works for each.
-  $('history-summary').setAttribute('aria-label', `${span.label} summary`);
+  // One sentence for every unit and every offset, in the span's prose register —
+  // the same register the SVG label beside it reads. A bare label plus "summary"
+  // would glue a hard-spaced date range ("Mon 5 – Sun 11 Oct 2026 summary") where
+  // only a month or year noun reads.
+  $('history-summary').setAttribute('aria-label', `Energy summary for ${span.phrase}`);
   $('history-chart').setAttribute('aria-label', copy.chartLabel);
   paintPagingControls(descriptor);
 }

@@ -13,6 +13,7 @@ import {
   dayId,
   dayIdsInRange,
   dayLabel,
+  dayStartFromId,
   historyReadState,
   historySeries,
   hourId,
@@ -43,6 +44,13 @@ import { sessionCostLabel } from '../../web/js/cost.js';
 test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 0, 5, 12)), '2026-01-05');
   assert.equal(dayId(new Date(2026, 11, 31, 23)), '2026-12-31');
+  // The id is the parser's format at every year: four digits, so a deep-paged
+  // year round-trips through dayStartFromId and the window's lexicographic
+  // comparisons still order it instead of reading '826-01-01' as a bad id.
+  assert.equal(dayId(new Date(826, 0, 1, 12)), '0826-01-01');
+  assert.deepEqual(dayStartFromId(dayId(new Date(826, 0, 1, 12))), new Date(826, 0, 1));
+  assert.equal(monthId(new Date(826, 0, 1, 12)), '0826-01');
+  assert.equal(monthLabel(monthId(new Date(826, 0, 1, 12))), 'Jan 0826');
 });
 
 test('dayIdsInRange walks the inclusive calendar between two day ids', () => {
@@ -71,38 +79,70 @@ test('dayIdsInRange walks the inclusive calendar between two day ids', () => {
 });
 
 test('calendar ranges stay on local calendar days across a DST change (fixed America/Denver)', () => {
-  // Run in a child with a fixed TZ so the spring-forward boundary is exercised
-  // on every host (a UTC runner would otherwise pass without a DST transition).
+  // Run in a child with a fixed TZ so both 2026 shifts are exercised on every
+  // host (a UTC runner would otherwise pass without a DST transition): Denver
+  // springs forward at 02:00 on Sunday 8 March (420 → 360) and falls back at
+  // 02:00 on Sunday 1 November (360 → 420).
   const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
   const script = `
-    import { dayIdsInRange, periodBounds } from ${JSON.stringify(moduleUrl)};
-    // Guard against a host whose tzdata lacks America/Denver.
-    if (new Date(2026, 2, 8, 12).getTimezoneOffset() !== 360) {
-      console.error('unexpected offset', new Date(2026, 2, 8, 12).getTimezoneOffset());
+    import { dayIdsInRange, hourSeries, periodBounds, periodSeries, sumSeries } from ${JSON.stringify(moduleUrl)};
+    const fail = (what, got) => {
+      console.error(what, JSON.stringify(got));
       process.exit(1);
+    };
+    // Guard against a host whose tzdata lacks America/Denver.
+    for (const [month, day, offset] of [[3, 7, 420], [3, 8, 360], [10, 31, 360], [11, 1, 420]]) {
+      const got = new Date(2026, month - 1, day, 12).getTimezoneOffset();
+      if (got !== offset) fail('unexpected offset ' + month + '/' + day, got);
     }
     // A midnight fixture also catches millisecond arithmetic across the shift.
     const now = new Date(2026, 2, 9, 0, 30);
     const week = periodBounds('week', now, now);
     if (JSON.stringify(week) !== JSON.stringify({ startId: '2026-03-09', endId: '2026-03-09' })) {
-      console.error('week bounds', JSON.stringify(week));
-      process.exit(1);
+      fail('week bounds', week);
     }
-    // The whole ISO week that contains the shift is seven consecutive dates.
-    const whole = dayIdsInRange('2026-03-09', '2026-03-15');
-    const expected = [
-      '2026-03-09', '2026-03-10', '2026-03-11', '2026-03-12',
-      '2026-03-13', '2026-03-14', '2026-03-15',
+    // The ISO week containing each shift is seven consecutive local dates — one
+    // per local day: an epoch or millisecond step would repeat 1 November (the
+    // 25-hour day) or drop 8 March (the 23-hour one).
+    const spring = dayIdsInRange('2026-03-02', '2026-03-08');
+    const springExpected = [
+      '2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05',
+      '2026-03-06', '2026-03-07', '2026-03-08',
     ];
-    if (JSON.stringify(whole) !== JSON.stringify(expected)) {
-      console.error(JSON.stringify(whole));
-      process.exit(1);
+    if (JSON.stringify(spring) !== JSON.stringify(springExpected)) fail('spring week', spring);
+    const fall = dayIdsInRange('2026-10-26', '2026-11-01');
+    const fallExpected = [
+      '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29',
+      '2026-10-30', '2026-10-31', '2026-11-01',
+    ];
+    if (JSON.stringify(fall) !== JSON.stringify(fallExpected)) fail('fall week', fall);
+    // The same walk drives the Week chart's bars: the 25-hour day is one bar, and
+    // it carries its own document rather than a neighbour's.
+    const anchor = new Date(2026, 10, 1, 12);
+    const bars = periodSeries('week', [{ id: '2026-10-26', kwh: 1 }, { id: '2026-11-01', kwh: 2 }], anchor, new Date(2026, 10, 1, 23));
+    if (JSON.stringify(bars.map((point) => point.id)) !== JSON.stringify(fallExpected)) {
+      fail('fall week bars', bars.map((point) => point.id));
+    }
+    if (JSON.stringify(bars.map((point) => point.kwh)) !== JSON.stringify([1, 0, 0, 0, 0, 0, 2])) {
+      fail('fall week kwh', bars.map((point) => point.kwh));
+    }
+    // Hour buckets are keyed by the local hour, so the repeated 01:00 of a
+    // fall-back day lands in the same '01' bucket (it collapses rather than
+    // adding a 25th bar) and the missing 02:00 of a spring-forward day is still
+    // one bucket (nothing is dropped). Either way the Day chart is 24 bars and
+    // no energy is counted twice.
+    for (const [what, day] of [['fall back', new Date(2026, 10, 1, 12)], ['spring forward', new Date(2026, 2, 8, 12)]]) {
+      const hours = hourSeries({ '01': 1, '02': 2 }, day, day);
+      const ids = hours.map((point) => point.id);
+      if (ids.length !== 24 || new Set(ids).size !== 24 || ids[0] !== '00' || ids[23] !== '23') {
+        fail('hour buckets ' + what, ids);
+      }
+      if (sumSeries(hours) !== 3) fail('hour bucket total ' + what, sumSeries(hours));
     }
     // A month range is its own calendar length, whichever side of the shift.
     const month = periodBounds('month', new Date(2026, 2, 1, 12), new Date(2026, 3, 2, 12));
     if (JSON.stringify(month) !== JSON.stringify({ startId: '2026-03-01', endId: '2026-03-31' })) {
-      console.error('month bounds', JSON.stringify(month));
-      process.exit(1);
+      fail('month bounds', month);
     }
   `;
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
@@ -263,7 +303,10 @@ test('the current calendar unit is the only copy register', () => {
   for (const period of PERIODS) {
     const want = DEFAULT_COPY[period.id];
     const span = periodSpan(period.id, periodAnchor(period.id, 0, now), now);
-    // No `isDefault`: the default view is named as the calendar unit it is.
+    // No `isDefault`: the default view is named as the calendar unit it is. The
+    // key set is the contract on this side too — a second register flag would be
+    // a second naming source the screen could read.
+    assert.deepEqual(Object.keys(span).sort(), ['label', 'phrase'], period.id);
     assert.deepEqual(
       { label: plain(span.label), phrase: plain(span.phrase) },
       { label: want.label, phrase: want.phrase },

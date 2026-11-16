@@ -1223,7 +1223,10 @@ test('the default view names the current calendar month', async () => {
     // One register: offset 0 is October 2026, named as the calendar month it is
     // on the summary label, its aria-label, the SVG label and the heading.
     assert.equal(labelText(), 'October 2026');
-    assert.equal(plain(element('history-summary').attrs['aria-label']), 'October 2026 summary');
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for October 2026',
+    );
     assert.equal(
       plain(element('history-chart').attrs['aria-label']),
       'Daily energy for October 2026. Use the left and right arrow keys to move between days.',
@@ -1250,7 +1253,10 @@ test('Previous pages one window back and Next returns to the default view', asyn
     // the paged loading copy are painted synchronously.
     assert.equal(element('chart-next').disabled, false);
     assert.equal(labelText(), 'September 2026');
-    assert.equal(plain(element('history-summary').attrs['aria-label']), 'September 2026 summary');
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for September 2026',
+    );
     assert.equal(
       plain(element('history-chart').attrs['aria-label']),
       'Daily energy for September 2026. Use the left and right arrow keys to move between days.',
@@ -1536,7 +1542,10 @@ test('a clipped current week on its Monday is named by one date', async () => {
     await switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
     await readFailed();
     assert.equal(labelText(), 'Mon 12 Oct 2026');
-    assert.equal(plain(element('history-summary').attrs['aria-label']), 'Mon 12 Oct 2026 summary');
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for the week of Monday 12 October 2026',
+    );
     assert.equal(
       plain(element('history-chart').attrs['aria-label']),
       'Daily energy for the week of Monday 12 October 2026. Use the left and right arrow keys to move between days.',
@@ -1613,6 +1622,13 @@ test('PageUp and PageDown page the window while the arrows move the selection', 
     assert.equal(keydown('history-chart', 'PageUp'), true);
     assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     await readFailed();
+    // A two-ended week is announced in the prose register of the same span, months
+    // spelled out — the clipped one-day week pinned above is the only title-form
+    // exception.
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for the week of Monday 5 – Sunday 11 October 2026',
+    );
     // PageDown pages toward the present, and stops at it.
     assert.equal(keydown('history-chart', 'PageDown'), true);
     assert.equal(labelText(), 'Mon 12 – Sun 18 Oct 2026');

@@ -30,7 +30,10 @@ const MONTHS_LONG = [
 ];
 
 export function dayId(date) {
-  const y = date.getFullYear();
+  // Zero-padded to four digits so the id is dayStartFromId's format at every
+  // year — the parser requires `^\d{4}` and the window's order comparisons are
+  // lexicographic, so a deep-paged year must not emit '826-01-01'.
+  const y = String(date.getFullYear()).padStart(4, '0');
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
@@ -122,9 +125,12 @@ export function monthIdsInRange(startId, endId) {
 }
 
 // Local calendar month, e.g. 2026-10. The year series buckets a day document by
-// this prefix; no UTC conversion, matching dayId's local-date convention.
+// this prefix; no UTC conversion, matching dayId's local-date convention, and the
+// year is padded the same way so a document's prefix and its bucket id stay the
+// same format at any depth of paging.
 export function monthId(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const y = String(date.getFullYear()).padStart(4, '0');
+  return `${y}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
 // Stable "Oct 2026" label; a malformed id is returned unchanged.
