@@ -22,9 +22,11 @@ import {
   maxSeries,
   monthId,
   monthLabel,
+  periodAnchor,
   periodBounds,
   periodById,
   periodSeries,
+  periodSpan,
   sectionView,
   sessionsRange,
   sumSeries,
@@ -129,34 +131,377 @@ test('PERIODS describes every chart range as data', () => {
     month: 'range',
     year: 'range',
   });
+  // Paging's arithmetic is data too: one step in the period's own unit, so the
+  // screen never decides what a period means.
+  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.step])), {
+    day: { unit: 'day', size: 1 },
+    week: { unit: 'day', size: 7 },
+    month: { unit: 'day', size: 30 },
+    year: { unit: 'month', size: 12 },
+  });
   for (const period of PERIODS) {
+    // The key set is the contract: every field has a consumer and a field that
+    // has none — a descriptor `label`, say — would be a second naming source the
+    // suite could not see being re-added.
+    assert.deepEqual(
+      Object.keys(period).sort(),
+      ['bucket', 'copy', 'id', 'noun', 'prefixToday', 'slots', 'source', 'span', 'step'],
+      period.id,
+    );
     assert.ok(['hour', 'day', 'month'].includes(period.bucket), period.id);
-    for (const key of [
-      'label',
-      'summaryLabel',
-      'noun',
-      'chartLabel',
-      'emptyTitle',
-      'emptyLine',
-      'loadingLine',
-      'offlineLine',
-    ]) {
-      assert.equal(typeof period[key], 'string', `${period.id}.${key}`);
-      assert.ok(period[key].length > 0, `${period.id}.${key}`);
+    assert.equal(typeof period.noun, 'string', `${period.id}.noun`);
+    assert.ok(period.noun.length > 0, `${period.id}.noun`);
+    assert.equal(typeof period.span.label, 'string', `${period.id}.span.label`);
+    assert.equal(typeof period.span.phrase, 'string', `${period.id}.span.phrase`);
+    // One copy(span) per period is the single source of every string that names
+    // the window — the descriptors hold no second copy table.
+    assert.equal(typeof period.copy, 'function', `${period.id}.copy`);
+    const copy = period.copy(periodSpan(period.id));
+    for (const key of ['chartLabel', 'emptyTitle', 'emptyLine', 'loadingLine', 'offlineLine']) {
+      assert.equal(typeof copy[key], 'string', `${period.id}.${key}`);
+      assert.ok(copy[key].length > 0, `${period.id}.${key}`);
+      // A template that forgot the span would leak this into the UI.
+      assert.doesNotMatch(copy[key], /undefined|\[object Object\]/, `${period.id}.${key}`);
     }
   }
   // Only a day without hourly buckets uses the "no intraday detail" copy.
   const day = periodById('day');
   for (const key of ['noIntradayTitle', 'noIntradayLine']) {
-    assert.equal(typeof day[key], 'string', `day.${key}`);
-    assert.ok(day[key].length > 0, `day.${key}`);
+    assert.equal(typeof day.copy(periodSpan('day'))[key], 'string', `day.${key}`);
+    assert.ok(day.copy(periodSpan('day'))[key].length > 0, `day.${key}`);
   }
   for (const period of PERIODS.filter((candidate) => candidate.source !== 'day')) {
-    assert.equal(period.noIntradayTitle, undefined, period.id);
+    assert.equal(period.copy(periodSpan(period.id)).noIntradayTitle, undefined, period.id);
   }
   assert.equal(periodById('year'), PERIODS[3]);
   // Unknown ids fall back to today's default, never to an unrelated range.
   assert.equal(periodById('nope').id, DEFAULT_PERIOD);
+});
+
+// The default view's wording, byte for byte. #154 keeps offset 0 identical to
+// the shipped screen, so every string is pinned as a literal here rather than
+// compared with the implementation.
+// Date spans glue their runs with hard spaces; compare painted copy as text.
+const plain = (text) => text.replace(/\u00a0/g, ' ');
+
+const DEFAULT_COPY = {
+  day: {
+    label: 'Today',
+    phrase: 'today',
+    chartLabel: 'Hourly energy for today. Use the left and right arrow keys to move between hours.',
+    emptyTitle: 'No energy recorded today.',
+    emptyLine: 'Hours appear as charging is recorded.',
+    noIntradayTitle: 'No hourly detail for today.',
+    noIntradayLine: 'Hourly capture began recently, so today has a total but no hours behind it.',
+    loadingLine: 'Reading today.',
+    offlineLine: "Reconnect, then tap Refresh to load today's hours.",
+  },
+  week: {
+    label: 'Last 7 days',
+    phrase: 'the last 7 days',
+    chartLabel:
+      'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in the last 7 days.',
+    emptyLine: 'Days without charging count as zero.',
+    loadingLine: 'Reading the last 7 days.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
+  },
+  month: {
+    label: 'Last 30 days',
+    phrase: 'the last 30 days',
+    chartLabel:
+      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in the last 30 days.',
+    emptyLine: 'Days without charging count as zero.',
+    loadingLine: 'Reading the last 30 days.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
+  },
+  year: {
+    label: 'Last 12 months',
+    phrase: 'the last 12 months',
+    chartLabel:
+      'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
+    emptyTitle: 'No energy recorded in the last 12 months.',
+    emptyLine: 'Months without charging count as zero.',
+    loadingLine: 'Reading the last 12 months.',
+    offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
+  },
+};
+
+test('offset 0 keeps the default view byte for byte', () => {
+  const now = new Date(2026, 9, 18, 12);
+  for (const period of PERIODS) {
+    const want = DEFAULT_COPY[period.id];
+    const span = periodSpan(period.id, periodAnchor(period.id, 0, now), now);
+    assert.deepEqual(span, { label: want.label, phrase: want.phrase, isDefault: true }, period.id);
+    const { chartLabel, emptyTitle, emptyLine, loadingLine, offlineLine, ...rest } =
+      period.copy(span);
+    assert.deepEqual(
+      { chartLabel, emptyTitle, emptyLine, loadingLine, offlineLine },
+      {
+        chartLabel: want.chartLabel,
+        emptyTitle: want.emptyTitle,
+        emptyLine: want.emptyLine,
+        loadingLine: want.loadingLine,
+        offlineLine: want.offlineLine,
+      },
+      period.id,
+    );
+    if (period.source === 'day') {
+      assert.deepEqual(rest, {
+        noIntradayTitle: want.noIntradayTitle,
+        noIntradayLine: want.noIntradayLine,
+      });
+    } else {
+      assert.deepEqual(rest, {}, period.id);
+    }
+  }
+  // The default span is a function of the clock alone: any anchor on today's
+  // local date is the default register, whatever the hour.
+  assert.equal(periodSpan('month', new Date(2026, 9, 18, 0, 5), now).isDefault, true);
+  assert.equal(periodSpan('month', new Date(2026, 9, 18, 23, 55), now).isDefault, true);
+  assert.equal(periodSpan('month', new Date(2026, 9, 17, 23, 55), now).isDefault, false);
+});
+
+test('periodAnchor steps back one period in that period own unit', () => {
+  const now = new Date(2026, 9, 18, 12);
+  assert.equal(dayId(periodAnchor('day', 0, now)), '2026-10-18');
+  assert.equal(dayId(periodAnchor('day', 1, now)), '2026-10-17');
+  assert.equal(dayId(periodAnchor('day', 3, now)), '2026-10-15');
+  assert.equal(dayId(periodAnchor('week', 1, now)), '2026-10-11');
+  assert.equal(dayId(periodAnchor('week', 2, now)), '2026-10-04');
+  assert.equal(dayId(periodAnchor('month', 1, now)), '2026-09-18');
+  assert.equal(dayId(periodAnchor('month', 2, now)), '2026-08-19');
+  // A year steps twelve calendar months, not 365 days: the date is preserved.
+  assert.equal(dayId(periodAnchor('year', 1, now)), '2025-10-18');
+  assert.equal(dayId(periodAnchor('year', 3, now)), '2023-10-18');
+  // Offset 0 is a copy of the clock, never the caller's Date object.
+  const zero = periodAnchor('month', 0, now);
+  assert.equal(zero.getTime(), now.getTime());
+  assert.notEqual(zero, now);
+  // A negative or garbage offset is the present, never a future window.
+  assert.equal(dayId(periodAnchor('month', -1, now)), '2026-10-18');
+  assert.equal(dayId(periodAnchor('month', Number.NaN, now)), '2026-10-18');
+  // A descriptor works as well as an id — the screen passes the descriptor.
+  assert.equal(
+    periodAnchor(periodById('week'), 1, now).getTime(),
+    periodAnchor('week', 1, now).getTime(),
+  );
+});
+
+test('periodAnchor keeps the local calendar across month ends and leap years', () => {
+  // A year step off 29 February lands on 28 February of the common year.
+  assert.equal(dayId(periodAnchor('year', 1, new Date(2028, 1, 29, 12))), '2027-02-28');
+  // …and back into a leap year keeps 28 February, not a rolled-over 1 March.
+  assert.equal(dayId(periodAnchor('year', 1, new Date(2027, 1, 28, 12))), '2026-02-28');
+  assert.equal(dayId(periodAnchor('year', 1, new Date(2026, 2, 31, 12))), '2025-03-31');
+  // A 30-day month step is day arithmetic, so it crosses months and years.
+  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 0, 5, 12))), '2025-12-06');
+  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 2, 1, 12))), '2026-01-30');
+  // The window a paged anchor draws is the period's own range around it, read
+  // whole-month at a past anchor. 28 February 2027 is that month's last day, so
+  // this probe alone cannot tell the whole-month range from one that stops on the
+  // anchor — the leap-year probe below is the one that separates them.
+  const leap = new Date(2028, 1, 29, 12);
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, leap), leap), {
+    startId: '2026-03-01',
+    endId: '2027-02-28',
+  });
+  // 28 February 2028 is *not* that month's last day: a range that stopped on the
+  // anchor would orphan 29 February between two windows, so the paged range runs
+  // to the month's real end.
+  const short = new Date(2029, 1, 28, 12);
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, short), short), {
+    startId: '2027-03-01',
+    endId: '2028-02-29',
+  });
+});
+
+test('periodAnchor stays on local calendar days across a DST change (fixed America/Denver)', () => {
+  // Same child-process pattern as lastDayIds: a UTC runner must still exercise
+  // the spring-forward boundary, and a 00:30 fixture catches midnight arithmetic.
+  const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
+  const script = `
+    import { dayId, periodAnchor, periodBounds } from ${JSON.stringify(moduleUrl)};
+    if (new Date(2026, 2, 9, 12).getTimezoneOffset() !== 360) {
+      console.error('unexpected offset', new Date(2026, 2, 9, 12).getTimezoneOffset());
+      process.exit(1);
+    }
+    const now = new Date(2026, 2, 9, 0, 30);
+    const week = periodAnchor('week', 1, now);
+    if (dayId(week) !== '2026-03-02') {
+      console.error('week anchor', dayId(week));
+      process.exit(1);
+    }
+    const bounds = periodBounds('week', week);
+    if (JSON.stringify(bounds) !== JSON.stringify({ startId: '2026-02-24', endId: '2026-03-02' })) {
+      console.error('week bounds', JSON.stringify(bounds));
+      process.exit(1);
+    }
+    if (dayId(periodAnchor('day', 1, now)) !== '2026-03-08') {
+      console.error('day anchor', dayId(periodAnchor('day', 1, now)));
+      process.exit(1);
+    }
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    env: { ...process.env, TZ: 'America/Denver' },
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('consecutive windows neither overlap nor leave a gap', () => {
+  const now = new Date(2026, 9, 18, 12);
+  const before = (window) => {
+    const date = new Date(`${window.startId}T12:00:00`);
+    date.setDate(date.getDate() - 1);
+    return dayId(date);
+  };
+  // Every period is a contiguous day-id range, Year included: the earlier
+  // window's last day is the day before the later window's first day. Year is
+  // the one month-bucketed period, so this is the assertion that its paged
+  // window covers whole months instead of stopping on the anchor's day.
+  for (const period of ['day', 'week', 'month', 'year']) {
+    for (const offset of [0, 1, 2, 3]) {
+      const later = periodBounds(period, periodAnchor(period, offset, now), now);
+      const earlier = periodBounds(period, periodAnchor(period, offset + 1, now), now);
+      assert.equal(
+        earlier.endId,
+        before(later),
+        `${period} offset ${offset + 1} ends where offset ${offset} begins`,
+      );
+      // The full slot count, and no id is drawn twice: a paged window that lost
+      // its newest slot would still pass adjacency, so the length is pinned here.
+      const ids = periodSeries(period, [], periodAnchor(period, offset, now), now).map(
+        (point) => point.id,
+      );
+      assert.equal(ids.length, periodById(period).slots, `${period} offset ${offset}`);
+      assert.equal(new Set(ids).size, ids.length, `${period} offset ${offset}`);
+    }
+  }
+});
+
+test('a paged Year window reads whole months', () => {
+  const now = new Date(2026, 10, 16, 12);
+  // Offset 1 is the 12 months before the newest month drawn, so its last day is
+  // 30 November — not the anchor's 16 November, which left 17–30 November owned
+  // by no window and the Nov 2025 bar reading 16 kWh instead of 30.
+  const anchor = periodAnchor('year', 1, now);
+  assert.deepEqual(periodBounds('year', anchor, now), {
+    startId: '2024-12-01',
+    endId: '2025-11-30',
+  });
+  // The label names exactly the months that range reads.
+  assert.equal(plain(periodSpan('year', anchor, now).label), 'Dec 2024 – Nov 2025');
+  // The default window is unchanged: its newest month is in progress, so it
+  // still stops at today's date.
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 0, now), now), {
+    startId: '2025-12-01',
+    endId: '2026-11-16',
+  });
+  // A fully recorded year sums every day of its months: the partial-month hole
+  // would have made the newest bar 16 and the total 351.
+  const docs = [];
+  for (const day = new Date(2024, 11, 1, 12); day <= new Date(2025, 11, 30, 12);) {
+    docs.push({ id: dayId(day), kwh: 1 });
+    day.setDate(day.getDate() + 1);
+  }
+  const series = periodSeries('year', docs, anchor, now);
+  assert.equal(series.length, 12);
+  assert.equal(series[11].kwh, 30);
+  assert.equal(sumSeries(series), 365);
+});
+
+test('periodSpan names a past window by the dates it draws', () => {
+  const now = new Date(2026, 9, 18, 12);
+  // The title register the summary label paints: short months — the vocabulary
+  // the chart's own bar labels use — with the year kept.
+  const title = (span) => plain(span.label);
+  // Every date run is glued, so a range has exactly one break opportunity —
+  // the space after the dash — and a single date has none. A year never lands
+  // on a line of its own.
+  const breakable = (span) => span.label.split(' ').length - 1;
+  const day = periodSpan('day', periodAnchor('day', 1, now), now);
+  assert.equal(title(day), '17 Oct 2026');
+  assert.equal(breakable(day), 0);
+  // The prose register the sentences use spells the months out.
+  assert.equal(plain(day.phrase), '17 October 2026');
+  assert.equal(day.isDefault, false);
+  // Week/Month: a day range, collapsing the month when both ends share it.
+  const week = periodSpan('week', periodAnchor('week', 1, now), now);
+  assert.equal(title(week), '5 – 11 Oct 2026');
+  assert.equal(plain(week.phrase), '5 – 11 October 2026');
+  assert.equal(breakable(week), 1);
+  assert.equal(title(periodSpan('week', periodAnchor('week', 2, now), now)), '28 Sep – 4 Oct 2026');
+  const month = periodSpan('month', periodAnchor('month', 1, now), now);
+  assert.equal(title(month), '20 Aug – 18 Sep 2026');
+  assert.equal(plain(month.phrase), '20 August – 18 September 2026');
+  // A range that crosses a year boundary names both years.
+  assert.equal(
+    title(periodSpan('week', new Date(2026, 0, 2, 12), now)),
+    '27 Dec 2025 – 2 Jan 2026',
+  );
+  // Year: the whole months its bars draw, not the partial day its read ends on.
+  const year = periodSpan('year', periodAnchor('year', 1, now), now);
+  assert.equal(title(year), 'Nov 2024 – Oct 2025');
+  assert.equal(plain(year.phrase), 'November 2024 – October 2025');
+  assert.equal(breakable(year), 1);
+});
+
+test('paged copy names its span and never claims the window is now', () => {
+  const now = new Date(2026, 9, 18, 12);
+  // Every word that names the default window, and must not describe another —
+  // including the partial-bucket wording the Year bars would otherwise borrow
+  // from the current month.
+  const banned = [
+    /today/i,
+    /last 7 days/i,
+    /last 30 days/i,
+    /last 12 months/i,
+    /(this|current) month/i,
+    /\byesterday\b/i,
+  ];
+  // `emptyLine` names no window at all ("Days without charging count as zero"),
+  // so it is held to the banned-word rule only; every other string describes
+  // the window and must name this one.
+  const describesWindow = ['chartLabel', 'emptyTitle', 'loadingLine', 'offlineLine'];
+  for (const period of PERIODS) {
+    for (const offset of [1, 2, 3]) {
+      const span = periodSpan(period.id, periodAnchor(period.id, offset, now), now);
+      const copy = period.copy(span);
+      for (const [key, text] of Object.entries(copy)) {
+        for (const pattern of banned) {
+          assert.doesNotMatch(text, pattern, `${period.id} offset ${offset} ${key}`);
+        }
+      }
+      for (const key of [
+        ...describesWindow,
+        ...(period.source === 'day' ? ['noIntradayTitle', 'noIntradayLine'] : []),
+      ]) {
+        assert.ok(
+          copy[key].includes(span.phrase),
+          `${period.id} offset ${offset} ${key} names the span: ${copy[key]}`,
+        );
+      }
+    }
+  }
+  // A past Day says which date it is empty for.
+  const daySpan = periodSpan('day', periodAnchor('day', 1, now), now);
+  assert.equal(
+    plain(periodById('day').copy(daySpan).emptyTitle),
+    'No energy recorded on 17 October 2026.',
+  );
+  // The Month window's offline copy names its dates too.
+  const monthSpan = periodSpan('month', periodAnchor('month', 1, now), now);
+  assert.equal(
+    plain(periodById('month').copy(monthSpan).offlineLine),
+    'Reconnect, then tap Refresh to load the energy for 20 August – 18 September 2026.',
+  );
+  assert.equal(
+    plain(periodById('month').copy(monthSpan).emptyTitle),
+    'No energy recorded for 20 August – 18 September 2026.',
+  );
 });
 
 test('periodBounds returns one contiguous local range for each period', () => {
@@ -526,6 +871,65 @@ test('hour points carry the day their buckets price', () => {
   assert.equal(points[5].dayId, '2026-10-18');
   assert.equal(points[0].dayId, '2026-10-18');
   assert.equal(points[23].dayId, '2026-10-18');
+});
+
+test('isCurrent is the clock, never the window anchor', () => {
+  // #154's first latent defect: a paged window's newest bucket would otherwise
+  // be flagged current (a past Day's same clock hour). Nothing in the readout
+  // says "Today" for Day (prefixToday is false), so the damage was concrete
+  // elsewhere: the live-pricing gate opened over a past bucket, the bar's
+  // accessible name gained "(this hour so far)", and the selection jumped to that
+  // bucket instead of the newest one.
+  const now = new Date(2026, 9, 18, 12, 40);
+  const pastDay = periodAnchor('day', 1, now);
+  assert.equal(dayId(pastDay), '2026-10-17');
+
+  // The same hour id exists on both days; only today's is in progress.
+  const past = hourSeries({ 12: 1 }, pastDay, now);
+  assert.equal(past.filter((point) => point.isCurrent).length, 0);
+  assert.deepEqual(past[12].dayId, '2026-10-17');
+  assert.deepEqual(
+    hourSeries({ 12: 1 }, now, now)
+      .filter((point) => point.isCurrent)
+      .map((point) => point.id),
+    ['12'],
+  );
+  // The Day period reaches them through periodSeries too.
+  const pastDaySeries = periodSeries('day', { kwh: 1, hours: { 12: 1 } }, pastDay, now);
+  assert.equal(
+    pastDaySeries.some((point) => point.isCurrent),
+    false,
+  );
+  assert.equal(periodSeries('day', { kwh: 1, hours: { 12: 1 } }, now, now)[12].isCurrent, true);
+
+  // Every range period: a paged window marks nothing current, the default one
+  // marks exactly its own bucket.
+  for (const period of ['week', 'month', 'year']) {
+    const paged = periodSeries(period, [], periodAnchor(period, 1, now), now);
+    assert.equal(
+      paged.some((point) => point.isCurrent),
+      false,
+      period,
+    );
+    const current = periodSeries(period, [], now, now).filter((point) => point.isCurrent);
+    assert.equal(current.length, 1, period);
+  }
+
+  // `now` defaults to the anchor, so every pre-paging caller and test is
+  // unchanged: the newest bucket of the window given is the current one.
+  const legacy = periodSeries('week', [], pastDay);
+  assert.equal(legacy[legacy.length - 1].isCurrent, true);
+  assert.equal(hourSeries({}, pastDay)[12].isCurrent, true);
+
+  // The year is part of the identity. Every other fixture sits within a year of
+  // the clock, so a window a year back is the case that tells a date comparison
+  // from a month-day one: 18 Oct 2025 holds the same month-day as `now`, and
+  // nothing in it is current.
+  const lastYear = new Date(2025, 9, 18, 12, 40);
+  assert.equal(periodSeries('week', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
+  assert.equal(periodSeries('week', [], lastYear, now).at(-1).id, '2025-10-18');
+  assert.equal(periodSeries('month', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
+  assert.equal(hourSeries({}, lastYear, now).filter((p) => p.isCurrent).length, 0);
 });
 
 test('periodSeries renders the day period from its single document', () => {
@@ -1129,23 +1533,28 @@ test('an all-unpriceable bar hides its figure instead of pricing it free', () =>
 // window mid-flight — none of which source text or the pure layer can prove.
 
 test('a read that straddles local midnight leaves a stale window to re-check', () => {
-  // The screen captures `today` once per read and stores its day as `todayId`,
-  // so its midnight check is exactly `dayId(new Date()) !== bounds.endId`. Pin
-  // the clock either side of midnight and assert what the guard must answer:
-  // true once the day has moved (re-enter the read), false while it has not (so
-  // the re-read cannot fire, or loop, without a day change).
+  // The window record stores the day it was anchored to — `anchorDay`,
+  // captured from `now` — and the guard compares that with dayId(new Date()),
+  // never with the window's end. Pin the clock either side of midnight and
+  // assert what the guard must answer: stale once the day has moved (re-enter
+  // the read), fresh while it has not (so the re-read cannot fire, or loop,
+  // without a day change).
   const before = new Date(2026, 9, 18, 23, 59, 30).getTime();
   mock.timers.enable({ apis: ['Date'], now: before });
   try {
     for (const period of PERIODS) {
       mock.timers.setTime(before);
-      const bounds = periodBounds(period);
+      const now = new Date();
+      const anchor = periodAnchor(period, 0, now);
+      const bounds = periodBounds(period, anchor, now);
+      const anchorDay = dayId(now);
       const data = period.source === 'day' ? {} : [];
-      const points = periodSeries(period, data);
+      const points = periodSeries(period, data, anchor, now);
       // The window and its current-slot flag come from the captured date: at
       // 23:59:30 on 18 Oct the last point is the current one, built for that day
       // (the year's last point is its month, Oct 2026; the day period's last
       // point is the hour in progress, 23).
+      assert.equal(anchorDay, '2026-10-18', period.id);
       assert.equal(bounds.endId, '2026-10-18', period.id);
       const last = points[points.length - 1];
       assert.equal(last.isCurrent, true, period.id);
@@ -1156,15 +1565,15 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
       );
       // Settled 20 s later, still on 18 Oct: the window is current, no re-read.
       mock.timers.setTime(before + 20_000);
-      assert.equal(bounds.endId, dayId(new Date()), period.id);
-      // Settled after midnight: the same window now ends yesterday, so the
-      // guard must fire rather than leave yesterday's bars under a "Today" label.
+      assert.equal(anchorDay, dayId(new Date()), period.id);
+      // Settled after midnight: the anchored day is yesterday, so the guard
+      // must fire rather than leave yesterday's bars under a "Today" label.
       mock.timers.setTime(before + 60_000);
       assert.equal(dayId(new Date()), '2026-10-19', period.id);
-      assert.notEqual(bounds.endId, dayId(new Date()), period.id);
+      assert.notEqual(anchorDay, dayId(new Date()), period.id);
       // A series rebuilt for the new day starts at its own current slot: the
       // hour period restarts at 00, every range period ends on the new day.
-      const rebuilt = periodSeries(period, data);
+      const rebuilt = periodSeries(period, data, periodAnchor(period, 0, new Date()), new Date());
       const current = rebuilt.findIndex((point) => point.isCurrent);
       assert.equal(current, period.bucket === 'hour' ? 0 : rebuilt.length - 1, period.id);
     }
@@ -1173,23 +1582,61 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
   }
 });
 
-test('the day period keeps its captured day until local midnight', () => {
-  // Day is the one period read from a single document rather than a day-id
-  // range, so its captured window is both the query and the guard: the screen
-  // stores `bounds.endId` as `todayId` and compares it with dayId(new Date()).
-  // Exercise that for Day explicitly (the loop above covers all four periods
-  // generically): the window and the current hour slot survive a clock advance
-  // within the captured day, and the window is stale once local midnight passes.
+test('a paged window is guarded on the day it was anchored to, not its end', () => {
   const captured = new Date(2026, 9, 18, 23, 59, 30).getTime();
   mock.timers.enable({ apis: ['Date'], now: captured });
   try {
-    const bounds = periodBounds('day');
+    // The window record buildWindow hands to windowStale(), built the way the
+    // screen builds it: the anchor and its bounds belong to the paged offset,
+    // the guard's day to `now`.
+    const now = new Date();
+    const anchor = periodAnchor('month', 1, now);
+    const record = {
+      anchor,
+      bounds: periodBounds('month', anchor, now),
+      anchorDay: dayId(now),
+    };
+    assert.equal(record.bounds.endId, '2026-09-18');
+    // The paged end is a past date: comparing it with today would make every
+    // read of this window stale and re-enter it forever.
+    assert.notEqual(record.bounds.endId, dayId(new Date()));
+    assert.equal(record.anchorDay, dayId(new Date()));
+    // Same day, later clock: still fresh, so no re-read.
+    mock.timers.setTime(captured + 20_000);
+    assert.equal(record.anchorDay, dayId(new Date()));
+    // Past local midnight the paged window is stale exactly once — the re-read
+    // captures a fresh record, so this cannot fire again until the next day.
+    mock.timers.setTime(captured + 60_000);
+    assert.equal(dayId(new Date()), '2026-10-19');
+    assert.notEqual(record.anchorDay, dayId(new Date()));
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the day period keeps its captured day until local midnight', () => {
+  // Day is the one period read from a single document rather than a day-id
+  // range, so its captured window is both the query and the guard's input: the
+  // screen stores `anchorDay = dayId(now)` beside the window and compares it
+  // with dayId(new Date()). Exercise that for Day explicitly (the loop above
+  // covers all four periods generically): the window and the current hour slot
+  // survive a clock advance within the captured day, and the window is stale
+  // once local midnight passes.
+  const captured = new Date(2026, 9, 18, 23, 59, 30).getTime();
+  mock.timers.enable({ apis: ['Date'], now: captured });
+  try {
+    const now = new Date();
+    const anchor = periodAnchor('day', 0, now);
+    const bounds = periodBounds('day', anchor, now);
+    const anchorDay = dayId(now);
     // The captured day is the whole window, and it is the document the read
-    // targets: startId and endId are the same day.
+    // targets: startId and endId are the same day — and the guard stores that
+    // day as `anchorDay`, captured from the same clock.
     assert.deepEqual(bounds, { startId: '2026-10-18', endId: '2026-10-18' });
     assert.equal(bounds.startId, bounds.endId);
+    assert.equal(anchorDay, bounds.startId);
     // The painted series belongs to that day: hour 23 is in progress.
-    const points = periodSeries('day', {});
+    const points = periodSeries('day', {}, anchor, now);
     assert.equal(points.length, 24);
     assert.equal(points[23].id, '23');
     assert.equal(points[23].isCurrent, true);
@@ -1201,15 +1648,15 @@ test('the day period keeps its captured day until local midnight', () => {
     // Settled 20 s later, still 18 Oct: the captured day is current, so the
     // guard must not fire and the painted slot stays today's.
     mock.timers.setTime(captured + 20_000);
+    assert.equal(anchorDay, dayId(new Date()));
     assert.equal(dayId(new Date()), bounds.startId);
-    assert.equal(dayId(new Date()), bounds.endId);
     assert.equal(points[23].isCurrent, true);
 
-    // Settled after local midnight: the same window now ends yesterday, so the
-    // guard must fire instead of leaving yesterday's hours under "Today".
+    // Settled after local midnight: the anchored day is yesterday, so the guard
+    // must fire instead of leaving yesterday's hours under "Today".
     mock.timers.setTime(captured + 60_000);
     assert.equal(dayId(new Date()), '2026-10-19');
-    assert.notEqual(bounds.endId, dayId(new Date()));
+    assert.notEqual(anchorDay, dayId(new Date()));
     // A re-read captures the new day, and a series built for it starts at hour 0.
     assert.deepEqual(periodBounds('day'), { startId: '2026-10-19', endId: '2026-10-19' });
     const rebuilt = periodSeries('day', {});
@@ -1246,19 +1693,74 @@ test('both history read paths end with the midnight re-check', () => {
     assert.match(body(name), /fetchPeriodSessions\(descriptor, bounds\)/, name);
   }
   // One read chooser, branching on the descriptor's source rather than a period
-  // id: the Day document read cannot acquire a tail of its own.
+  // id: the Day document read cannot acquire a tail of its own. The arguments are
+  // pinned to the window's bounds, not just the call: the Day period's whole claim
+  // is that it reads the day its window names, and `dayId(new Date())` there would
+  // read today's document for every paged day with nothing else failing.
   assert.match(body('fetchPeriod'), /descriptor\.source === 'day'/);
-  assert.match(body('fetchPeriod'), /fetchHistoryDay\(/);
-  assert.match(body('fetchPeriod'), /fetchHistory\(/);
+  assert.match(body('fetchPeriod'), /periodReads\.day\(bounds\.endId\)/);
+  assert.match(body('fetchPeriod'), /periodReads\.range\(bounds\.startId, bounds\.endId\)/);
+  // The read it chooses between is indirected (the harness substitutes it to drive
+  // a read it controls), so the object must hold both of the store's reads: an
+  // indirected read that stopped being the store's would fail no other test.
+  assert.match(
+    source,
+    /export const periodReads = \{\s*day: \(day\) => fetchHistoryDay\(day\),\s*range: \(startId, endId\) => fetchHistory\(startId, endId\),\s*\};/,
+  );
   // The sessions read is the $ counterpart: Day resolves empty, a range pages
   // the widened started_at window (sessionsRange), and only Firestore can
   // reject it — the unwrap of the paged read's envelope into its docs is
   // executed by the history-screen harness, not pinned here.
   assert.match(body('fetchPeriodSessions'), /descriptor\.source === 'day'/);
   assert.match(body('fetchPeriodSessions'), /readRange\(range\)\.then\(\(read\) => read\.docs\)/);
+  // `now` is the clock the window was captured at, passed as applyHistory's 6th
+  // argument: dropping it makes the series mark a past bucket current again.
+  // The pure tests prove periodSeries honours `now`; only this pin proves the
+  // read paths pass it.
+  for (const name of ['readHistory', 'loadAll']) {
+    assert.match(
+      body(name),
+      /applyHistory\(\s*descriptor,[\s\S]*?readWindow\.anchor,[\s\S]*?\bnow,\s*\)/,
+      name,
+    );
+  }
+  // Only the newest read repaints the chart or spends the focus reservation, so
+  // each path holds its paint and release behind its own sequence guard: the
+  // paged read returns at the guard, the reload wraps them in `if (seq ===
+  // historySeq)`. Deleting either guard re-opens the superseded-read repaint the
+  // history-screen harness drives from both sides (a read vs a reload, and a
+  // paged read vs a paged read).
+  assert.match(
+    body('readHistory'),
+    /if \(gen !== generation \|\| seq !== historySeq\) return;[\s\S]*?renderHistory\(\);[\s\S]*?releaseChartFocus\(\);/,
+  );
+  assert.match(
+    body('loadAll'),
+    /if \(seq === historySeq\) \{\n\s+applyHistory\([\s\S]*?\n\s+renderHistory\(\);\n\s+releaseChartFocus\(\);\n {2}\}/,
+  );
+  // The window build takes `now` for the bounds as well as the span: a paged
+  // Year window is whole months only while the third argument is passed.
+  assert.match(body('buildWindow'), /periodBounds\(descriptor, anchor, now\)/);
+  assert.match(body('buildWindow'), /anchorDay: dayId\(now\)/);
   // The payload is applied with the points it prices — never painted beside
   // another range's sessions.
   assert.match(body('applyHistory'), /periodSessions = Array\.isArray\(sessions\)/);
   // One mechanism for both: the shared guard owns the staleness check.
   assert.match(body('reloadIfWindowStale'), /windowStale\(\)/);
+});
+
+test('the span and its bounds default their clock alike', () => {
+  // `periodSpan`'s two clock-ish arguments must default to one moment, as
+  // `periodBounds`'s and the series builders' already do: two independent
+  // `new Date()` defaults let a default-argument call describe a window that
+  // straddles midnight, which the screen's own `currentSpan()` exists to avoid.
+  // Neither live caller leans on it (both pass `now`), so only the shape pins it.
+  const source = readFileSync(new URL('../../web/js/history.js', import.meta.url), 'utf8');
+  for (const name of ['periodBounds', 'periodSpan']) {
+    assert.match(
+      source,
+      new RegExp(`export function ${name}\\(period, anchor = new Date\\(\\), now = anchor\\)`),
+      name,
+    );
+  }
 });

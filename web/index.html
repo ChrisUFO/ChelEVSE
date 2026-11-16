@@ -392,10 +392,10 @@
             class="history-summary solo"
             id="history-summary"
             style="--i: 1"
-            aria-label="Last 30 days summary"
+            aria-label="Energy summary"
           >
             <div class="summary-cell">
-              <span class="summary-label" id="history-total-label">Last 30 days</span>
+              <span class="summary-label" id="history-total-label">Energy</span>
               <span class="summary-value"><span id="history-total">—</span><em>kWh</em></span>
             </div>
             <div class="summary-cell" id="history-cost-cell" hidden>
@@ -409,8 +409,13 @@
             <a href="#config">Open settings</a>
           </p>
 
-          <section class="chart-card" style="--i: 2" aria-labelledby="chart-heading">
-            <h2 class="sr-only" id="chart-heading">Daily energy</h2>
+          <section
+            class="chart-card"
+            id="chart-card"
+            style="--i: 2"
+            aria-labelledby="chart-heading"
+          >
+            <h2 class="sr-only" id="chart-heading">Energy chart</h2>
             <div
               class="period-switch"
               id="period-switch"
@@ -466,7 +471,44 @@
                   ><span class="chart-cost" id="chart-cost" hidden></span>
                 </p>
               </div>
-              <p class="chart-hint">Tap or use ← →</p>
+              <button
+                class="chart-page"
+                id="chart-prev"
+                type="button"
+                aria-label="Previous 30 days"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M15 5l-7 7 7 7" />
+                </svg>
+              </button>
+              <button
+                class="chart-page"
+                id="chart-next"
+                type="button"
+                aria-label="Next 30 days"
+                disabled
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+              <p class="chart-hint" id="chart-hint">Use ‹ or PageUp to page back</p>
             </div>
             <div class="chart-frame">
               <svg
@@ -474,7 +516,8 @@
                 class="chart"
                 viewBox="0 0 300 132"
                 role="group"
-                aria-label="Daily energy for the last 30 days. Use the left and right arrow keys to move between days."
+                aria-label="Energy chart. Use the left and right arrow keys to move between bars."
+                aria-describedby="chart-hint"
               >
                 <g id="chart-bars"></g>
               </svg>
