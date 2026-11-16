@@ -1,7 +1,8 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   CHART_VIEW_W,
@@ -1980,5 +1981,36 @@ test('the span and its bounds default their clock alike', () => {
       new RegExp(`export function ${name}\\(period, anchor = new Date\\(\\), now = anchor\\)`),
       name,
     );
+  }
+});
+
+test('no web source or README still calls a chart period a rolling window', () => {
+  // #155's copy guard, pinned where the repo's other source pins live. A calendar
+  // unit is named as the unit it is, so no shipped string may describe the chart
+  // as "the last 7 days", "the last 30 days" or "the last 12 months" — the words
+  // the rolling-window code needed. Scanning the files (rather than asserting on
+  // copy(span)) also catches a static markup default, a second copy table, or a
+  // comment-shaped string that would reach the UI without the pure tests seeing
+  // it. docs/VALIDATION.md is deliberately outside the sweep: its checks quote
+  // these words as things the screen must not say.
+  const webRoot = new URL('../../web/', import.meta.url);
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(js|html|css)$/.test(entry.name)) files.push(path);
+    }
+  };
+  walk(webRoot.pathname);
+  assert.ok(files.length > 0, 'the sweep found the web sources');
+  const shipped = [
+    ['README.md', readFileSync(new URL('../../README.md', import.meta.url), 'utf8')],
+    ...files.map((path) => [path, readFileSync(path, 'utf8')]),
+  ];
+  for (const [path, text] of shipped) {
+    for (const banned of [/last 7 days/i, /last 30 days/i, /last 12 months/i]) {
+      assert.doesNotMatch(text, banned, path);
+    }
   }
 });
