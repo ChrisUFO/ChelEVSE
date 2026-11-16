@@ -34,7 +34,23 @@ before(async () => {
     await setDoc(doc(db, 'fcmTokens/tok-del-foreign'), { uid: 'u2', created_at: new Date() });
     await setDoc(doc(db, 'fcmTokens/tok-read'), { uid: 'u1', created_at: new Date() });
   });
+
+  await seedConfig();
 });
+
+// The charger's capability snapshot, in the shape the bridge writes it
+// (pi/bridge.py _write_config_doc: redact, then firestore_safe, then set — so
+// integers stay Firestore integers). The set_current rule reads its soft
+// ceiling from here, so every command test depends on it.
+function configDoc() {
+  return { max_current_soft: 16, max_current_hard: 24, hostname: 'x' };
+}
+
+function seedConfig() {
+  return env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'status', 'config'), configDoc());
+  });
+}
 
 after(async () => {
   await env.cleanup();
@@ -91,6 +107,59 @@ test('unauthenticated user cannot create a rapi command', async () => {
 
 test('authenticated user without a grant cannot create a rapi command', async () => {
   await assertFails(writeCommand(ungranted(), 'rapi-ungranted', rapi('$OK')));
+});
+
+function setCurrent(amps) {
+  return { type: 'set_current', status: 'pending', amps };
+}
+
+// The rule enforces the charger's configured soft ceiling (seeded at 16 A), not
+// the app's 6–48 A setting range. 48 A is inside that range and must still be
+// rejected here; the bridge re-checks the ceiling, the hard maximum's coherence
+// and rejects before contacting the charger.
+test('allowlisted user can create a set_current at the soft ceiling', async () => {
+  await assertSucceeds(writeCommand(allowlisted(), 'current-soft', setCurrent(16)));
+});
+
+test('allowlisted user can create a set_current at the 6 A minimum', async () => {
+  await assertSucceeds(writeCommand(allowlisted(), 'current-min', setCurrent(6)));
+});
+
+test('set_current one amp above the soft ceiling is rejected', async () => {
+  await assertFails(writeCommand(allowlisted(), 'current-above-soft', setCurrent(17)));
+});
+
+test('set_current at 48 A is rejected when the soft ceiling is 16 A', async () => {
+  // 48 A is the old hard-coded ceiling and the app's setting range; it is not
+  // the device's limit.
+  await assertFails(writeCommand(allowlisted(), 'current-48', setCurrent(48)));
+});
+
+test('set_current with a fractional amp value is rejected', async () => {
+  await assertFails(writeCommand(allowlisted(), 'current-fractional', setCurrent(16.5)));
+});
+
+test('pause and resume are unaffected by the current ceiling', async () => {
+  await assertSucceeds(
+    writeCommand(allowlisted(), 'pause-under-ceiling', { type: 'pause', status: 'pending' }),
+  );
+  await assertSucceeds(
+    writeCommand(allowlisted(), 'resume-under-ceiling', { type: 'resume', status: 'pending' }),
+  );
+});
+
+// An absent status/config makes get() null, so .data errors and the create is
+// denied — fail-closed, never a fallback ceiling. The bridge is equally
+// unwilling to set current without verified capabilities.
+test('set_current is denied when status/config is absent', async () => {
+  await env.withSecurityRulesDisabled(async (context) => {
+    await deleteDoc(doc(context.firestore(), 'status', 'config'));
+  });
+  try {
+    await assertFails(writeCommand(allowlisted(), 'current-no-config', setCurrent(16)));
+  } finally {
+    await seedConfig();
+  }
 });
 
 function scheduleRule(overrides = {}) {
