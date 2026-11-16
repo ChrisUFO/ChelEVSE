@@ -819,6 +819,12 @@
               </div>
               <div class="settings-actions">
                 <p class="feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+                <!-- Shown only while the failed read's copy is in the live
+                     region above: Retry re-subscribes through store.js — no
+                     reload. -->
+                <button id="settings-retry" class="btn small" type="button" hidden>
+                  Try again
+                </button>
                 <span class="save-blockers" id="save-blockers" hidden></span>
                 <button id="save-settings" class="btn solid" type="submit" disabled>
                   Save settings

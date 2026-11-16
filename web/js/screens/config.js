@@ -6,6 +6,9 @@
 import { $, el, setText } from '../ui.js';
 import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
 import { fmtK, toNumber } from '../format.js';
+import { retryStore } from '../store.js';
+
+const CONFIG_FAILED = 'Couldn’t load the charger configuration.';
 
 let config = null;
 let configLoaded = false;
@@ -43,7 +46,13 @@ function render() {
   const rawDetails = $('config-raw-details');
 
   loading.hidden = configLoaded || configFailed;
+  // Reveal, then write: a live region announces content inserted into a node it
+  // can already expose, not a static line that was merely un-hidden — and the
+  // copy is written on every render, '' included, so the next failure is a fresh
+  // mutation rather than a bare un-hide.
   error.hidden = !configFailed;
+  setText(error, configFailed ? CONFIG_FAILED : '');
+  $('config-retry').hidden = !configFailed;
   setText($('config-updated'), config ? syncedLabel(config) : '');
 
   if (configFailed || !configLoaded) {
@@ -150,6 +159,14 @@ export function initConfig() {
     // Stay snap-back would rewrite that pushed entry, stranding a dead Back
     // press (the defect the tab handler's ordering exists to avoid).
     document.querySelector('.tab[data-route="advanced"]').click();
+  });
+  // Retry re-subscribes through store.js's single startStore path (which stops
+  // first), so repeated taps cannot stack listeners. No busy state, no backoff,
+  // no budget. The copy goes with the click so a retry that fails again re-writes
+  // the live line and is announced.
+  $('config-retry').addEventListener('click', () => {
+    setText($('config-error'), '');
+    retryStore();
   });
   render();
 }

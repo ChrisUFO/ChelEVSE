@@ -227,7 +227,7 @@ globalThis.document = {
   createElement: () => stubElement(),
 };
 
-const { showConfigData } = await import('../../web/js/screens/config.js');
+const { showConfigData, showConfigError } = await import('../../web/js/screens/config.js');
 
 const clock = (iso) => ({ toDate: () => new Date(iso) });
 const heading = () => element('config-updated').textContent;
@@ -261,6 +261,24 @@ test('a replace that only moves updated_at refreshes the heading, not the panel'
 
   showConfigData({ hostname: 'driveway', updated_at: clock('2026-10-22T18:02:00') });
   assert.notEqual(panelNodes(), built, 'a changed value must rebuild the panel');
+});
+
+test('a failed read says so, without a reload instruction', () => {
+  showConfigError();
+  const error = element('config-error');
+  assert.equal(error.hidden, false);
+  assert.equal(error.textContent, 'Couldn’t load the charger configuration.');
+  assert.doesNotMatch(error.textContent, /reload/i);
+  // The Retry control is the recovery path, so the copy must not name a reload.
+  assert.equal(element('config-retry').hidden, false);
+  assert.equal(element('config-loading').hidden, true);
+
+  // The snapshot that lands owns the recovery: line and control both go, and the
+  // live copy is cleared so a second failure is a fresh mutation.
+  showConfigData({ hostname: 'garage' });
+  assert.equal(error.hidden, true);
+  assert.equal(error.textContent, '');
+  assert.equal(element('config-retry').hidden, true);
 });
 
 test('each curated group is a collapsed disclosure with its heading in the summary', () => {
