@@ -56,7 +56,7 @@ def _state_label(state, manual_override):
     string) leaves the state sleeping rather than guessing: the override field
     is the only signal, so its absence means "no evidence of a Stop".
     """
-    if state == 254 and _as_int(manual_override) == 1:
+    if state == 254 and as_int(manual_override) == 1:
         return "stopped"
     return STATE_LABELS.get(state, "unknown")
 
@@ -135,13 +135,12 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _as_int(value):
+def as_int(value):
     """int(value) for numeric-ish input, else None (never raises).
 
-    Mirrors ``transport._as_int``; ``transport`` imports this module, so
-    ``parsing`` cannot import it back — the idiom is repeated here rather than
-    inverting the dependency (the raw ``/status`` ``manual_override`` may be a
-    string, and a bool is not a number).
+    The one numeric coercion in ``pi/``: ``transport`` imports it from here.
+    The raw ``/status`` reply may carry a number as a string, and a bool is not
+    a number.
     """
     if isinstance(value, bool):
         return None

@@ -116,7 +116,7 @@ class ParseStatusTests(unittest.TestCase):
     def test_state_254_with_manual_override_is_stopped(self):
         # Firmware 8.2.3 realises a user Stop (pause) as 254 + manual_override 1.
         # The override may arrive as a string in the raw reply (the coercion
-        # idiom is transport's ``_as_int``).
+        # idiom is ``parsing.as_int``).
         for override in (1, "1"):
             with self.subTest(manual_override=override):
                 fields = bridge.parse_status({"state": 254, "manual_override": override})
