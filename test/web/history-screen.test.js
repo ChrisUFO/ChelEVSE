@@ -1,6 +1,12 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { periodById, periodBounds, sessionsRange } from '../../web/js/history.js';
+import {
+  dayLabel,
+  periodAnchor,
+  periodById,
+  periodBounds,
+  sessionsRange,
+} from '../../web/js/history.js';
 import { statusCostLabel } from '../../web/js/cost.js';
 import { fmtMoney } from '../../web/js/format.js';
 
@@ -30,9 +36,11 @@ process.env.TZ = 'America/Denver';
 function stubElement() {
   const classes = new Set();
   const listeners = new Map();
+  const attrs = {};
   return {
     classes,
     listeners,
+    attrs,
     classList: {
       add: (name) => classes.add(name),
       remove: (name) => classes.delete(name),
@@ -67,9 +75,13 @@ function stubElement() {
     contains: () => false,
     querySelector: () => null,
     querySelectorAll: () => [],
-    setAttribute() {},
-    removeAttribute() {},
-    getAttribute: () => null,
+    setAttribute(name, value) {
+      attrs[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete attrs[name];
+    },
+    getAttribute: (name) => (name in attrs ? attrs[name] : null),
     toggleAttribute() {},
     addEventListener(type, listener) {
       if (!listeners.has(type)) listeners.set(type, []);
@@ -1016,4 +1028,298 @@ test('a settle that lands while the tab is hidden is caught up on the return vis
   activateHistory();
   assert.equal(element('history-total').textContent, '1.00');
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
+});
+
+// ---------- paging the window (#154) ----------
+//
+// The window arithmetic and the copy registers are pure (history.test.js); this
+// section drives the screen's wiring through the same DOM stub: the controls'
+// disabled rule, the offset reset on a period switch, both key behaviours, and
+// the copy the paged window paints. The read itself still genuinely rejects (no
+// Firestore bindings), so the paged wording is asserted on the registers that
+// are reachable — the loading panel and the empty panel — which come from the
+// same `copy(span)` the offline line does; the offline line's paged wording is
+// pinned at the pure layer.
+//
+// The clock is frozen for these tests because the read paths build their window
+// from the real `new Date()`: a fixed clock makes the paged spans exact.
+
+const PAGED_NOW = new Date(2026, 9, 18, 12).getTime();
+
+function freezeClock(at = PAGED_NOW) {
+  mock.timers.enable({ apis: ['Date'], now: at });
+}
+
+// Fire one keydown through the chart's real listener; the return value reports
+// whether the screen consumed the key.
+function keydown(target, key, mods = {}) {
+  let prevented = false;
+  const event = {
+    key,
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    preventDefault() {
+      prevented = true;
+    },
+    ...mods,
+  };
+  for (const listener of element(target).listeners.get('keydown') || []) listener(event);
+  return prevented;
+}
+
+test('the default view paints exactly the strings it always has', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    // Byte-identical to the pre-paging screen: summary label, its aria-label,
+    // the SVG label and the heading.
+    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(element('history-summary').attrs['aria-label'], 'Last 30 days summary');
+    assert.equal(
+      element('history-chart').attrs['aria-label'],
+      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
+    );
+    assert.equal(element('chart-heading').textContent, 'Daily energy');
+    // Next cannot reach the future; Previous pages back from the present.
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(element('chart-prev').disabled, false);
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous 30 days');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next 30 days');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('Previous pages one window back and Next returns to the default view', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    const back = fire('chart-prev', 'click');
+    // The window is built before the read is awaited, so the control state and
+    // the paged loading copy are painted synchronously.
+    assert.equal(element('chart-next').disabled, false);
+    assert.equal(element('history-total-label').textContent, '20 August – 18 September 2026');
+    assert.equal(
+      element('history-summary').attrs['aria-label'],
+      '20 August – 18 September 2026 summary',
+    );
+    assert.equal(
+      element('history-chart').attrs['aria-label'],
+      'Daily energy for 20 August – 18 September 2026. Use the left and right arrow keys to move between days.',
+    );
+    assert.equal(element('chart-empty-line').textContent, 'Reading 20 August – 18 September 2026.');
+    await back;
+    await readFailed();
+    // One more window back: the 30 days ending 30 days before the previous one.
+    await fire('chart-prev', 'click');
+    await readFailed();
+    assert.equal(element('history-total-label').textContent, '21 July – 19 August 2026');
+    // Next walks back toward the present one window at a time.
+    await fire('chart-next', 'click');
+    await readFailed();
+    assert.equal(element('history-total-label').textContent, '20 August – 18 September 2026');
+    assert.equal(element('chart-next').disabled, false);
+    await fire('chart-next', 'click');
+    await readFailed();
+    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(element('chart-next').disabled, true);
+    // Next at the present is inert: no window beyond it, and no re-read.
+    await fire('chart-next', 'click');
+    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.doesNotMatch(element('chart-empty-title').textContent, /Loading/);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('a paged window names its dates everywhere and never says today', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    await fire('chart-prev', 'click');
+    await readFailed();
+    const label = element('history-total-label').textContent;
+    assert.equal(label, '20 August – 18 September 2026');
+    // Chart, summary, SVG label and heading — none may claim a window they are
+    // not drawing.
+    for (const [what, text] of Object.entries({
+      'summary label': label,
+      'summary aria-label': element('history-summary').attrs['aria-label'],
+      'chart aria-label': element('history-chart').attrs['aria-label'],
+      heading: element('chart-heading').textContent,
+      'loading line': element('chart-empty-line').textContent,
+    })) {
+      assert.ok(text, what);
+      assert.doesNotMatch(text, /today|last 7 days|last 30 days|last 12 months/i, what);
+    }
+    for (const text of Object.values({
+      'summary aria-label': element('history-summary').attrs['aria-label'],
+      'chart aria-label': element('history-chart').attrs['aria-label'],
+    })) {
+      assert.ok(text.includes(label), text);
+    }
+
+    // The empty panel names the same window — the offline line is the same
+    // copy(span) source (its paged wording is pinned in history.test.js).
+    const now = new Date(PAGED_NOW);
+    const anchor = periodAnchor('month', 1, now);
+    const descriptor = periodById('month');
+    applyHistory(descriptor, { docs: [], fromCache: false }, null, anchor, [], now);
+    showHistorySettings(nightly());
+    assert.equal(
+      element('chart-empty-title').textContent,
+      'No energy recorded in 20 August – 18 September 2026.',
+    );
+
+    // A paged window's readout names its own newest bucket (no bucket in it is
+    // current, so the newest is selected) and still prices its $.
+    applyHistory(
+      descriptor,
+      { docs: [{ id: '2026-09-18', kwh: 2 }], fromCache: false },
+      null,
+      anchor,
+      [],
+      now,
+    );
+    showHistorySettings({ rate: 0.25, currency: 'GBP' });
+    assert.equal(element('chart-day').textContent, dayLabel('2026-09-18'));
+    assert.doesNotMatch(element('chart-day').textContent, /Today/);
+    assert.equal(element('history-total').textContent, '2.00');
+    assert.equal(element('history-cost').textContent, fmtMoney(0.5, 'GBP'));
+
+    // The live contribution's gate stays closed: no bucket of a past window is
+    // current, so a charging push cannot price it — under a schedule the window
+    // has no covering session and no live figure, where the same push on the
+    // default view shows one (the #126 tests above).
+    showHistorySettings(nightly());
+    assert.equal(element('history-cost-cell').hidden, true);
+    showHistoryStatus(statusAt(3, PAGED_NOW, 7200, 1000));
+    assert.equal(element('history-cost-cell').hidden, true);
+    assert.equal(element('chart-cost').textContent, '');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('switching period returns the chart to the default view', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    await fire('chart-prev', 'click');
+    await readFailed();
+    await fire('chart-prev', 'click');
+    await readFailed();
+    assert.equal(element('history-total-label').textContent, '21 July – 19 August 2026');
+
+    // The real segment listener: a Week switch resets the offset and renames the
+    // paging controls for the unit it now pages in.
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous 7 days');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next 7 days');
+    await readFailed();
+
+    // Back to Month: offset 0 again, not the offset it was left on.
+    await click({ target: { closest: () => ({ dataset: { period: 'month' } }) } });
+    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(element('chart-next').disabled, true);
+    await readFailed();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('PageUp and PageDown page the window while the arrows move the selection', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    // The real segment listener puts the screen on Week: paging is the
+    // selected period's own unit.
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    const now = new Date(PAGED_NOW);
+    const descriptor = periodById('week');
+    applyHistory(
+      descriptor,
+      { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+      null,
+      now,
+      [],
+      now,
+    );
+    showHistorySettings({ rate: 0.25, currency: 'GBP' });
+    // Today's bucket is selected and prefixed; ←/→ still move the selection
+    // inside the rendered window, exactly as H.10/H.17 require.
+    assert.equal(element('chart-day').textContent, 'Today · Sun 18 Oct');
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    assert.equal(element('chart-day').textContent, 'Sat 17 Oct');
+    assert.equal(keydown('history-chart', 'ArrowRight'), true);
+    assert.equal(element('chart-day').textContent, 'Today · Sun 18 Oct');
+    // A modified arrow is the browser's, never the screen's.
+    assert.equal(keydown('history-chart', 'ArrowLeft', { shiftKey: true }), false);
+    assert.equal(element('chart-day').textContent, 'Today · Sun 18 Oct');
+
+    // PageUp pages the window back one week; the new window names its dates.
+    assert.equal(keydown('history-chart', 'PageUp'), true);
+    assert.equal(element('history-total-label').textContent, '5 – 11 October 2026');
+    await readFailed();
+    // PageDown pages toward the present, and stops at it.
+    assert.equal(keydown('history-chart', 'PageDown'), true);
+    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+    await readFailed();
+    assert.equal(keydown('history-chart', 'PageDown'), true);
+    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('paging clears the previous window before the new read settles', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    const now = new Date(PAGED_NOW);
+    const descriptor = periodById('week');
+    applyHistory(
+      descriptor,
+      { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+      null,
+      now,
+      [],
+      now,
+    );
+    showHistorySettings({ rate: 0.25, currency: 'GBP' });
+    // Seven bars plus the base line.
+    assert.equal(element('chart-bars').children.length, 8);
+    const page = fire('chart-prev', 'click');
+    // The previous window's bars are gone before the read is awaited, so an
+    // offline cache miss cannot leave them on screen under the new labels.
+    assert.equal(element('chart-bars').children.length, 0);
+    assert.equal(element('history-total').textContent, '—');
+    await page;
+    await readFailed();
+  } finally {
+    mock.timers.reset();
+  }
 });
