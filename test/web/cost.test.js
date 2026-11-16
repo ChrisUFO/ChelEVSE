@@ -218,6 +218,12 @@ test('a paused or ready snapshot hides the scheduled live cost', () => {
   for (const state of [0, 1, 2, 4, 254, null, undefined, '3.5']) {
     assert.equal(statusCostLabel(liveStatus(state, at, 3600), nightly()), null);
   }
+  // The bridge's derived labels cover the same ground: a user Stop (`stopped`,
+  // state 254 + manual_override 1 bridge-side) is not a charging write, and a
+  // real sleep stays hidden too.
+  for (const state_label of ['stopped', 'sleeping', 'disabled', 'ready', 'connected']) {
+    assert.equal(statusCostLabel(liveStatus(3, at, 3600, 1000, { state_label }), nightly()), null);
+  }
   // The bridge's label is the single source of truth, shared with the session
   // clock and the badge pulse: a charging write prices even when a hand-edited
   // state code disagrees, and a non-charging label hides even with state 3.

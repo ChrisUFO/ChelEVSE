@@ -5,6 +5,7 @@ import {
   CHARGING_STALE_AFTER_MS,
   IDLE_STALE_AFTER_MS,
   STALE_AFTER_MS,
+  STATES,
   displayElapsed,
   elapsedClock,
   fmtCost,
@@ -77,6 +78,17 @@ test('stateFor falls back to the unknown state', () => {
   assert.equal(stateFor('disabled').label, 'Disabled');
   assert.equal(stateFor('nonsense').label, 'Unknown');
   assert.equal(stateFor(undefined).label, 'Unknown');
+});
+
+test('every state has a distinct label and colour', () => {
+  // The bridge derives `stopped` for a user Stop (254 + manual_override 1) and
+  // `sleeping` for a real sleep — the two must not render alike.
+  assert.equal(stateFor('stopped').label, 'Stopped');
+  assert.equal(stateFor('stopped').color, '#e0b45c');
+  const labels = Object.values(STATES).map((state) => state.label);
+  const colors = Object.values(STATES).map((state) => state.color);
+  assert.equal(new Set(labels).size, labels.length);
+  assert.equal(new Set(colors).size, colors.length);
 });
 
 test('formatElapsed renders a stable HH:MM:SS clock', () => {
