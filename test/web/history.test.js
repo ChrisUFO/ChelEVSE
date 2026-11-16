@@ -10,6 +10,7 @@ import {
   SESSIONS_LOOKBACK_DAYS,
   chartIndexAt,
   dayId,
+  dayIdsInRange,
   dayLabel,
   historyReadState,
   historySeries,
@@ -18,9 +19,9 @@ import {
   hourReadFailure,
   hourReadState,
   hourSeries,
-  lastDayIds,
   maxSeries,
   monthId,
+  monthIdsInRange,
   monthLabel,
   periodAnchor,
   periodBounds,
@@ -43,38 +44,63 @@ test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 11, 31, 23)), '2026-12-31');
 });
 
-test('lastDayIds returns the last 30 local days oldest first', () => {
-  const ids = lastDayIds(30, new Date(2026, 9, 18, 12));
+test('dayIdsInRange walks the inclusive calendar between two day ids', () => {
+  const ids = dayIdsInRange('2026-09-19', '2026-10-18');
   assert.equal(ids.length, 30);
   assert.equal(ids[0], '2026-09-19');
   assert.equal(ids[29], '2026-10-18');
-  assert.deepEqual(lastDayIds(3, new Date(2026, 9, 18, 12)), [
+  assert.deepEqual(dayIdsInRange('2026-10-16', '2026-10-18'), [
     '2026-10-16',
     '2026-10-17',
     '2026-10-18',
   ]);
   assert.equal(new Set(ids).size, 30);
+  // One day is one id; a reversed range is no days; a malformed id is no range
+  // rather than an unparsable walk.
+  assert.deepEqual(dayIdsInRange('2026-10-18', '2026-10-18'), ['2026-10-18']);
+  assert.deepEqual(dayIdsInRange('2026-10-18', '2026-10-17'), []);
+  assert.deepEqual(dayIdsInRange('nope', '2026-10-18'), []);
+  assert.deepEqual(dayIdsInRange('2026-02-31', '2026-03-02'), []);
+  // A month bucket range is the months the days touch, oldest first.
+  assert.deepEqual(monthIdsInRange('2026-01-01', '2026-03-31'), ['2026-01', '2026-02', '2026-03']);
+  assert.deepEqual(monthIdsInRange('2026-10-01', '2026-10-18'), ['2026-10']);
+  assert.deepEqual(monthIdsInRange('2025-12-31', '2026-01-01'), ['2025-12', '2026-01']);
+  assert.deepEqual(monthIdsInRange('2026-10-18', '2026-10-17'), []);
+  assert.deepEqual(monthIdsInRange('nope', '2026-10-18'), []);
 });
 
-test('lastDayIds stays contiguous across a DST change (fixed America/Denver)', () => {
+test('calendar ranges stay on local calendar days across a DST change (fixed America/Denver)', () => {
   // Run in a child with a fixed TZ so the spring-forward boundary is exercised
   // on every host (a UTC runner would otherwise pass without a DST transition).
   const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
   const script = `
-    import { lastDayIds } from ${JSON.stringify(moduleUrl)};
+    import { dayIdsInRange, periodBounds } from ${JSON.stringify(moduleUrl)};
     // Guard against a host whose tzdata lacks America/Denver.
     if (new Date(2026, 2, 8, 12).getTimezoneOffset() !== 360) {
       console.error('unexpected offset', new Date(2026, 2, 8, 12).getTimezoneOffset());
       process.exit(1);
     }
     // A midnight fixture also catches millisecond arithmetic across the shift.
-    const ids = lastDayIds(7, new Date(2026, 2, 9, 0, 30));
+    const now = new Date(2026, 2, 9, 0, 30);
+    const week = periodBounds('week', now, now);
+    if (JSON.stringify(week) !== JSON.stringify({ startId: '2026-03-09', endId: '2026-03-09' })) {
+      console.error('week bounds', JSON.stringify(week));
+      process.exit(1);
+    }
+    // The whole ISO week that contains the shift is seven consecutive dates.
+    const whole = dayIdsInRange('2026-03-09', '2026-03-15');
     const expected = [
-      '2026-03-03', '2026-03-04', '2026-03-05', '2026-03-06',
-      '2026-03-07', '2026-03-08', '2026-03-09',
+      '2026-03-09', '2026-03-10', '2026-03-11', '2026-03-12',
+      '2026-03-13', '2026-03-14', '2026-03-15',
     ];
-    if (JSON.stringify(ids) !== JSON.stringify(expected)) {
-      console.error(JSON.stringify(ids));
+    if (JSON.stringify(whole) !== JSON.stringify(expected)) {
+      console.error(JSON.stringify(whole));
+      process.exit(1);
+    }
+    // A month range is its own calendar length, whichever side of the shift.
+    const month = periodBounds('month', new Date(2026, 2, 1, 12), new Date(2026, 3, 2, 12));
+    if (JSON.stringify(month) !== JSON.stringify({ startId: '2026-03-01', endId: '2026-03-31' })) {
+      console.error('month bounds', JSON.stringify(month));
       process.exit(1);
     }
   `;
@@ -110,18 +136,22 @@ test('dayId uses local calendar components under UTC+14', () => {
 });
 
 test('PERIODS describes every chart range as data', () => {
-  // The contract #61 extends: one descriptor per range, and the chart reads the
-  // series length rather than any period-specific slot constant.
+  // The contract #61 extends and #155 re-baselines: one descriptor per range, and
+  // the chart reads the series length rather than any period-specific slots.
   assert.deepEqual(
     PERIODS.map((period) => period.id),
     ['day', 'week', 'month', 'year'],
   );
   assert.equal(DEFAULT_PERIOD, 'month');
-  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.slots])), {
-    day: 24,
-    week: 7,
-    month: 30,
-    year: 12,
+  // `unit` is the calendar unit the window covers and pages by. A window's length
+  // is not data: it comes from the calendar (28–31 days in a month, January..this
+  // month in the current year), so a descriptor that carried a slot count would
+  // be the rolling window coming back.
+  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.unit])), {
+    day: 'day',
+    week: 'week',
+    month: 'month',
+    year: 'year',
   });
   // `source` decides the read (one day document or a day-id range) and `bucket`
   // the series derivation; both are data, so the screen has no period-id branch.
@@ -131,28 +161,23 @@ test('PERIODS describes every chart range as data', () => {
     month: 'range',
     year: 'range',
   });
-  // Paging's arithmetic is data too: one step in the period's own unit, so the
-  // screen never decides what a period means.
-  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.step])), {
-    day: { unit: 'day', size: 1 },
-    week: { unit: 'day', size: 7 },
-    month: { unit: 'day', size: 30 },
-    year: { unit: 'month', size: 12 },
+  assert.deepEqual(Object.fromEntries(PERIODS.map((period) => [period.id, period.bucket])), {
+    day: 'hour',
+    week: 'day',
+    month: 'day',
+    year: 'month',
   });
   for (const period of PERIODS) {
     // The key set is the contract: every field has a consumer and a field that
-    // has none — a descriptor `label`, say — would be a second naming source the
-    // suite could not see being re-added.
+    // has none — a descriptor `slots`, `span` or `step` — would be a second
+    // naming or arithmetic source the suite could not see being re-added.
     assert.deepEqual(
       Object.keys(period).sort(),
-      ['bucket', 'copy', 'id', 'noun', 'prefixToday', 'slots', 'source', 'span', 'step'],
+      ['bucket', 'copy', 'id', 'noun', 'source', 'unit'],
       period.id,
     );
-    assert.ok(['hour', 'day', 'month'].includes(period.bucket), period.id);
     assert.equal(typeof period.noun, 'string', `${period.id}.noun`);
     assert.ok(period.noun.length > 0, `${period.id}.noun`);
-    assert.equal(typeof period.span.label, 'string', `${period.id}.span.label`);
-    assert.equal(typeof period.span.phrase, 'string', `${period.id}.span.phrase`);
     // One copy(span) per period is the single source of every string that names
     // the window — the descriptors hold no second copy table.
     assert.equal(typeof period.copy, 'function', `${period.id}.copy`);
@@ -178,66 +203,79 @@ test('PERIODS describes every chart range as data', () => {
   assert.equal(periodById('nope').id, DEFAULT_PERIOD);
 });
 
-// The default view's wording, byte for byte. #154 keeps offset 0 identical to
-// the shipped screen, so every string is pinned as a literal here rather than
-// compared with the implementation.
+// The current calendar unit's wording, byte for byte, with the clock frozen on
+// Sunday 18 October 2026. One register per period: offset 0 is named as the unit
+// it is, so these strings are pinned as literals here rather than compared with
+// the implementation.
 // Date spans glue their runs with hard spaces; compare painted copy as text.
 const plain = (text) => text.replace(/\u00a0/g, ' ');
 
 const DEFAULT_COPY = {
   day: {
-    label: 'Today',
-    phrase: 'today',
-    chartLabel: 'Hourly energy for today. Use the left and right arrow keys to move between hours.',
-    emptyTitle: 'No energy recorded today.',
+    label: 'Sun 18 Oct 2026',
+    phrase: 'Sunday 18 October 2026',
+    chartLabel:
+      'Hourly energy for Sunday 18 October 2026. Use the left and right arrow keys to move between hours.',
+    emptyTitle: 'No energy recorded on Sunday 18 October 2026.',
     emptyLine: 'Hours appear as charging is recorded.',
-    noIntradayTitle: 'No hourly detail for today.',
-    noIntradayLine: 'Hourly capture began recently, so today has a total but no hours behind it.',
-    loadingLine: 'Reading today.',
-    offlineLine: "Reconnect, then tap Refresh to load today's hours.",
+    noIntradayTitle: 'No hourly detail for Sunday 18 October 2026.',
+    noIntradayLine:
+      'Hourly capture began recently, so Sunday 18 October 2026 has a total but no hours behind it.',
+    loadingLine: 'Reading Sunday 18 October 2026.',
+    offlineLine: 'Reconnect, then tap Refresh to load the hours for Sunday 18 October 2026.',
   },
   week: {
-    label: 'Last 7 days',
-    phrase: 'the last 7 days',
+    label: 'Mon 12 – Sun 18 Oct 2026',
+    phrase: 'the week of Monday 12 – Sunday 18 October 2026',
     chartLabel:
-      'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
-    emptyTitle: 'No energy recorded in the last 7 days.',
+      'Daily energy for the week of Monday 12 – Sunday 18 October 2026. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in the week of Monday 12 – Sunday 18 October 2026.',
     emptyLine: 'Days without charging count as zero.',
-    loadingLine: 'Reading the last 7 days.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
+    loadingLine: 'Reading the week of Monday 12 – Sunday 18 October 2026.',
+    offlineLine:
+      'Reconnect, then tap Refresh to load the energy for the week of Monday 12 – Sunday 18 October 2026.',
   },
   month: {
-    label: 'Last 30 days',
-    phrase: 'the last 30 days',
+    label: 'October 2026',
+    phrase: 'October 2026',
     chartLabel:
-      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
-    emptyTitle: 'No energy recorded in the last 30 days.',
+      'Daily energy for October 2026. Use the left and right arrow keys to move between days.',
+    emptyTitle: 'No energy recorded in October 2026.',
     emptyLine: 'Days without charging count as zero.',
-    loadingLine: 'Reading the last 30 days.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
+    loadingLine: 'Reading October 2026.',
+    offlineLine: 'Reconnect, then tap Refresh to load the energy for October 2026.',
   },
   year: {
-    label: 'Last 12 months',
-    phrase: 'the last 12 months',
+    label: '2026',
+    phrase: '2026',
     chartLabel:
-      'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
-    emptyTitle: 'No energy recorded in the last 12 months.',
+      'Monthly energy for 2026. Use the left and right arrow keys to move between months.',
+    emptyTitle: 'No energy recorded in 2026.',
     emptyLine: 'Months without charging count as zero.',
-    loadingLine: 'Reading the last 12 months.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
+    loadingLine: 'Reading 2026.',
+    offlineLine: 'Reconnect, then tap Refresh to load the energy for 2026.',
   },
 };
 
-test('offset 0 keeps the default view byte for byte', () => {
+test('the current calendar unit is the only copy register', () => {
   const now = new Date(2026, 9, 18, 12);
   for (const period of PERIODS) {
     const want = DEFAULT_COPY[period.id];
     const span = periodSpan(period.id, periodAnchor(period.id, 0, now), now);
-    assert.deepEqual(span, { label: want.label, phrase: want.phrase, isDefault: true }, period.id);
+    // No `isDefault`: the default view is named as the calendar unit it is.
+    assert.deepEqual(
+      { label: plain(span.label), phrase: plain(span.phrase) },
+      { label: want.label, phrase: want.phrase },
+      period.id,
+    );
     const { chartLabel, emptyTitle, emptyLine, loadingLine, offlineLine, ...rest } =
       period.copy(span);
     assert.deepEqual(
-      { chartLabel, emptyTitle, emptyLine, loadingLine, offlineLine },
+      Object.fromEntries(
+        Object.entries({ chartLabel, emptyTitle, emptyLine, loadingLine, offlineLine }).map(
+          ([key, text]) => [key, plain(text)],
+        ),
+      ),
       {
         chartLabel: want.chartLabel,
         emptyTitle: want.emptyTitle,
@@ -248,33 +286,50 @@ test('offset 0 keeps the default view byte for byte', () => {
       period.id,
     );
     if (period.source === 'day') {
-      assert.deepEqual(rest, {
-        noIntradayTitle: want.noIntradayTitle,
-        noIntradayLine: want.noIntradayLine,
-      });
+      assert.deepEqual(
+        Object.fromEntries(Object.entries(rest).map(([key, text]) => [key, plain(text)])),
+        {
+          noIntradayTitle: want.noIntradayTitle,
+          noIntradayLine: want.noIntradayLine,
+        },
+      );
     } else {
       assert.deepEqual(rest, {}, period.id);
     }
   }
-  // The default span is a function of the clock alone: any anchor on today's
-  // local date is the default register, whatever the hour.
-  assert.equal(periodSpan('month', new Date(2026, 9, 18, 0, 5), now).isDefault, true);
-  assert.equal(periodSpan('month', new Date(2026, 9, 18, 23, 55), now).isDefault, true);
-  assert.equal(periodSpan('month', new Date(2026, 9, 17, 23, 55), now).isDefault, false);
+  // A unit's name is a function of the unit alone: any hour of the clock's own
+  // date names the same month, and yesterday's month is a different unit.
+  assert.equal(plain(periodSpan('month', new Date(2026, 9, 18, 0, 5), now).label), 'October 2026');
+  assert.equal(
+    plain(periodSpan('month', new Date(2026, 9, 18, 23, 55), now).label),
+    'October 2026',
+  );
+  assert.equal(
+    plain(periodSpan('month', new Date(2026, 8, 17, 23, 55), now).label),
+    'September 2026',
+  );
+  // The same for a whole year: a date inside it names it, whatever the month.
+  assert.equal(periodSpan('year', new Date(2026, 0, 5, 12), now).label, '2026');
 });
 
-test('periodAnchor steps back one period in that period own unit', () => {
+test('periodAnchor steps back one calendar unit per period', () => {
   const now = new Date(2026, 9, 18, 12);
   assert.equal(dayId(periodAnchor('day', 0, now)), '2026-10-18');
   assert.equal(dayId(periodAnchor('day', 1, now)), '2026-10-17');
   assert.equal(dayId(periodAnchor('day', 3, now)), '2026-10-15');
-  assert.equal(dayId(periodAnchor('week', 1, now)), '2026-10-11');
-  assert.equal(dayId(periodAnchor('week', 2, now)), '2026-10-04');
-  assert.equal(dayId(periodAnchor('month', 1, now)), '2026-09-18');
-  assert.equal(dayId(periodAnchor('month', 2, now)), '2026-08-19');
-  // A year steps twelve calendar months, not 365 days: the date is preserved.
-  assert.equal(dayId(periodAnchor('year', 1, now)), '2025-10-18');
-  assert.equal(dayId(periodAnchor('year', 3, now)), '2023-10-18');
+  // Week steps a whole ISO week and lands on its Monday, so paging cannot skip a
+  // day: offset 1 is the Monday before this week's.
+  assert.equal(dayId(periodAnchor('week', 1, now)), '2026-10-05');
+  assert.equal(dayId(periodAnchor('week', 2, now)), '2026-09-28');
+  // Month steps one calendar month and lands on its 1st, so a 31st anchor can
+  // never be carried into a shorter month.
+  assert.equal(dayId(periodAnchor('month', 1, now)), '2026-09-01');
+  assert.equal(dayId(periodAnchor('month', 2, now)), '2026-08-01');
+  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 2, 31, 12))), '2026-02-01');
+  // Year steps one calendar year and lands on 1 January — a leap day included.
+  assert.equal(dayId(periodAnchor('year', 1, now)), '2025-01-01');
+  assert.equal(dayId(periodAnchor('year', 3, now)), '2023-01-01');
+  assert.equal(dayId(periodAnchor('year', 1, new Date(2028, 1, 29, 12))), '2027-01-01');
   // Offset 0 is a copy of the clock, never the caller's Date object.
   const zero = periodAnchor('month', 0, now);
   assert.equal(zero.getTime(), now.getTime());
@@ -289,37 +344,90 @@ test('periodAnchor steps back one period in that period own unit', () => {
   );
 });
 
+test('a completed month is its own calendar length, whatever the clock', () => {
+  // Every case below is behind this clock, so each is a completed month.
+  const now = new Date(2029, 0, 15, 12);
+  // 28, 29, 30 and 31: a February in a common and in a leap year, an April and a
+  // past October. The series length *is* the calendar length — that is what
+  // "one bar per day 1..end" means, and no slot constant decides it.
+  const cases = [
+    [2026, 1, 28, 'February 2026'],
+    [2028, 1, 29, 'February 2028'],
+    [2026, 3, 30, 'April 2026'],
+    [2025, 9, 31, 'October 2025'],
+  ];
+  for (const [year, month, days, label] of cases) {
+    const anchor = new Date(year, month, 1, 12);
+    const pad = (value) => String(value).padStart(2, '0');
+    const firstId = `${year}-${pad(month + 1)}-01`;
+    const lastId = `${year}-${pad(month + 1)}-${pad(days)}`;
+    assert.deepEqual(
+      periodBounds('month', anchor, now),
+      { startId: firstId, endId: lastId },
+      label,
+    );
+    assert.equal(dayIdsInRange(firstId, lastId).length, days, label);
+    const points = periodSeries('month', [], anchor, now);
+    assert.equal(points.length, days, label);
+    assert.equal(points[0].id, firstId, label);
+    assert.equal(points[days - 1].id, lastId, label);
+    assert.equal(
+      points.some((point) => point.isCurrent),
+      false,
+      label,
+    );
+    assert.equal(plain(periodSpan('month', anchor, now).label), label);
+  }
+  // The month that holds the clock is clipped at today instead: 1..18 here.
+  const today = new Date(2026, 9, 18, 12);
+  assert.deepEqual(periodBounds('month', today, today), {
+    startId: '2026-10-01',
+    endId: '2026-10-18',
+  });
+  assert.equal(periodSeries('month', [], today, today).length, 18);
+});
+
 test('periodAnchor keeps the local calendar across month ends and leap years', () => {
-  // A year step off 29 February lands on 28 February of the common year.
-  assert.equal(dayId(periodAnchor('year', 1, new Date(2028, 1, 29, 12))), '2027-02-28');
-  // …and back into a leap year keeps 28 February, not a rolled-over 1 March.
-  assert.equal(dayId(periodAnchor('year', 1, new Date(2027, 1, 28, 12))), '2026-02-28');
-  assert.equal(dayId(periodAnchor('year', 1, new Date(2026, 2, 31, 12))), '2025-03-31');
-  // A 30-day month step is day arithmetic, so it crosses months and years.
-  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 0, 5, 12))), '2025-12-06');
-  assert.equal(dayId(periodAnchor('month', 1, new Date(2026, 2, 1, 12))), '2026-01-30');
-  // The window a paged anchor draws is the period's own range around it, read
-  // whole-month at a past anchor. 28 February 2027 is that month's last day, so
-  // this probe alone cannot tell the whole-month range from one that stops on the
-  // anchor — the leap-year probe below is the one that separates them.
+  // A month step lands on the 1st of the month it names, so a 31st can never be
+  // carried into a shorter month: 31 March back one month is 1 February, and the
+  // window that follows is February's own 28 days.
+  const march31 = new Date(2026, 2, 31, 12);
+  assert.equal(dayId(periodAnchor('month', 1, march31)), '2026-02-01');
+  assert.deepEqual(periodBounds('month', periodAnchor('month', 1, march31), march31), {
+    startId: '2026-02-01',
+    endId: '2026-02-28',
+  });
+  // …and in a leap year that window is 29 days.
   const leap = new Date(2028, 1, 29, 12);
+  assert.deepEqual(periodBounds('month', periodAnchor('month', 1, leap), leap), {
+    startId: '2028-01-01',
+    endId: '2028-01-31',
+  });
+  // A year step off 29 February is the previous calendar year, whole — 29
+  // February can never orphan a day between two year windows.
   assert.deepEqual(periodBounds('year', periodAnchor('year', 1, leap), leap), {
-    startId: '2026-03-01',
-    endId: '2027-02-28',
+    startId: '2027-01-01',
+    endId: '2027-12-31',
   });
-  // 28 February 2028 is *not* that month's last day: a range that stopped on the
-  // anchor would orphan 29 February between two windows, so the paged range runs
-  // to the month's real end.
-  const short = new Date(2029, 1, 28, 12);
-  assert.deepEqual(periodBounds('year', periodAnchor('year', 1, short), short), {
-    startId: '2027-03-01',
-    endId: '2028-02-29',
-  });
+  // Consecutive year windows share no day and skip none: 2026 ends 31 December
+  // and 2027 begins 1 January.
+  assert.deepEqual(
+    periodBounds(
+      'year',
+      periodAnchor('year', 1, new Date(2027, 5, 4, 12)),
+      new Date(2027, 5, 4, 12),
+    ),
+    {
+      startId: '2026-01-01',
+      endId: '2026-12-31',
+    },
+  );
 });
 
 test('periodAnchor stays on local calendar days across a DST change (fixed America/Denver)', () => {
-  // Same child-process pattern as lastDayIds: a UTC runner must still exercise
-  // the spring-forward boundary, and a 00:30 fixture catches midnight arithmetic.
+  // Same child-process pattern as the range test: a UTC runner must still
+  // exercise the spring-forward boundary, and a 00:30 fixture catches midnight
+  // arithmetic.
   const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
   const script = `
     import { dayId, periodAnchor, periodBounds } from ${JSON.stringify(moduleUrl)};
@@ -328,18 +436,26 @@ test('periodAnchor stays on local calendar days across a DST change (fixed Ameri
       process.exit(1);
     }
     const now = new Date(2026, 2, 9, 0, 30);
+    // The clock is on the Monday after the shift; one week back is the whole
+    // Monday–Sunday week that contains the transition.
     const week = periodAnchor('week', 1, now);
     if (dayId(week) !== '2026-03-02') {
       console.error('week anchor', dayId(week));
       process.exit(1);
     }
-    const bounds = periodBounds('week', week);
-    if (JSON.stringify(bounds) !== JSON.stringify({ startId: '2026-02-24', endId: '2026-03-02' })) {
+    const bounds = periodBounds('week', week, now);
+    if (JSON.stringify(bounds) !== JSON.stringify({ startId: '2026-03-02', endId: '2026-03-08' })) {
       console.error('week bounds', JSON.stringify(bounds));
       process.exit(1);
     }
+    // A day step off the clock is the local date before it, 23 hours long.
     if (dayId(periodAnchor('day', 1, now)) !== '2026-03-08') {
       console.error('day anchor', dayId(periodAnchor('day', 1, now)));
+      process.exit(1);
+    }
+    // A month step is the calendar month, whose 31 days include the 23-hour day.
+    if (dayId(periodAnchor('month', 1, now)) !== '2026-02-01') {
+      console.error('month anchor', dayId(periodAnchor('month', 1, now)));
       process.exit(1);
     }
   `;
@@ -358,10 +474,10 @@ test('consecutive windows neither overlap nor leave a gap', () => {
     date.setDate(date.getDate() - 1);
     return dayId(date);
   };
-  // Every period is a contiguous day-id range, Year included: the earlier
-  // window's last day is the day before the later window's first day. Year is
-  // the one month-bucketed period, so this is the assertion that its paged
-  // window covers whole months instead of stopping on the anchor's day.
+  // Every period is a contiguous day-id range: the earlier window's last day is
+  // the day before the later window's first day. That is the whole calendar
+  // claim — October is followed by 1 September, 2026 by 2025, this week by the
+  // Monday before it.
   for (const period of ['day', 'week', 'month', 'year']) {
     for (const offset of [0, 1, 2, 3]) {
       const later = periodBounds(period, periodAnchor(period, offset, now), now);
@@ -371,89 +487,145 @@ test('consecutive windows neither overlap nor leave a gap', () => {
         before(later),
         `${period} offset ${offset + 1} ends where offset ${offset} begins`,
       );
-      // The full slot count, and no id is drawn twice: a paged window that lost
-      // its newest slot would still pass adjacency, so the length is pinned here.
+      // No id is drawn twice, and a window that lost its newest bucket would
+      // still pass adjacency, so the last bucket is pinned against the bounds.
       const ids = periodSeries(period, [], periodAnchor(period, offset, now), now).map(
         (point) => point.id,
       );
-      assert.equal(ids.length, periodById(period).slots, `${period} offset ${offset}`);
+      const descriptor = periodById(period);
       assert.equal(new Set(ids).size, ids.length, `${period} offset ${offset}`);
+      assert.ok(ids.length > 0, `${period} offset ${offset}`);
+      if (descriptor.bucket === 'month') {
+        assert.equal(ids.at(-1), later.endId.slice(0, 7), `${period} offset ${offset}`);
+      } else if (descriptor.bucket === 'day') {
+        assert.equal(ids.at(-1), later.endId, `${period} offset ${offset}`);
+      } else {
+        // The Day period's slots are hours: 00–23 for its one date.
+        assert.equal(ids.length, 24, `${period} offset ${offset}`);
+      }
     }
   }
 });
 
-test('a paged Year window reads whole months', () => {
-  const now = new Date(2026, 10, 16, 12);
-  // Offset 1 is the 12 months before the newest month drawn, so its last day is
-  // 30 November — not the anchor's 16 November, which left 17–30 November owned
-  // by no window and the Nov 2025 bar reading 16 kWh instead of 30.
-  const anchor = periodAnchor('year', 1, now);
-  assert.deepEqual(periodBounds('year', anchor, now), {
-    startId: '2024-12-01',
-    endId: '2025-11-30',
-  });
-  // The label names exactly the months that range reads.
-  assert.equal(plain(periodSpan('year', anchor, now).label), 'Dec 2024 – Nov 2025');
-  // The default window is unchanged: its newest month is in progress, so it
-  // still stops at today's date.
-  assert.deepEqual(periodBounds('year', periodAnchor('year', 0, now), now), {
-    startId: '2025-12-01',
+test('the current year runs January to this month and a completed year all twelve', () => {
+  const now = new Date(2026, 10, 16, 12); // November 2026
+  // Current year: no December, no zero-padded tail — the window ends where the
+  // present is.
+  assert.deepEqual(periodBounds('year', now, now), {
+    startId: '2026-01-01',
     endId: '2026-11-16',
   });
-  // A fully recorded year sums every day of its months: the partial-month hole
-  // would have made the newest bar 16 and the total 351.
+  const current = periodSeries('year', [], now, now);
+  assert.deepEqual(
+    current.map((point) => point.id),
+    [
+      '2026-01',
+      '2026-02',
+      '2026-03',
+      '2026-04',
+      '2026-05',
+      '2026-06',
+      '2026-07',
+      '2026-08',
+      '2026-09',
+      '2026-10',
+      '2026-11',
+    ],
+  );
+  assert.equal(
+    current.some((point) => point.id === '2026-12'),
+    false,
+  );
+  // The newest bucket is the partial current month, marked as it always was.
+  assert.deepEqual(
+    current.filter((point) => point.isCurrent).map((point) => point.id),
+    ['2026-11'],
+  );
+  assert.equal(periodSpan('year', now, now).label, '2026');
+
+  // A completed year is all twelve months, whatever month the clock is in.
+  const past = new Date(2025, 0, 1, 12);
+  assert.deepEqual(periodBounds('year', past, now), {
+    startId: '2025-01-01',
+    endId: '2025-12-31',
+  });
+  const completed = periodSeries('year', [], past, now);
+  assert.equal(completed.length, 12);
+  assert.equal(completed[0].id, '2025-01');
+  assert.equal(completed[11].id, '2025-12');
+  assert.equal(
+    completed.some((point) => point.isCurrent),
+    false,
+  );
+  // A fully recorded completed year sums every day of its months: 365 daily
+  // documents across twelve bars, each bar its own month's length.
   const docs = [];
-  for (const day = new Date(2024, 11, 1, 12); day <= new Date(2025, 11, 30, 12);) {
+  const day = new Date(2025, 0, 1, 12);
+  while (day.getFullYear() === 2025) {
     docs.push({ id: dayId(day), kwh: 1 });
     day.setDate(day.getDate() + 1);
   }
-  const series = periodSeries('year', docs, anchor, now);
-  assert.equal(series.length, 12);
-  assert.equal(series[11].kwh, 30);
-  assert.equal(sumSeries(series), 365);
+  const summed = periodSeries('year', docs, past, now);
+  assert.equal(sumSeries(summed), 365);
+  assert.equal(summed[1].kwh, 28); // February 2025
+  assert.equal(summed[0].kwh, 31); // January
 });
 
-test('periodSpan names a past window by the dates it draws', () => {
+test('periodSpan names the calendar unit each period stands for', () => {
   const now = new Date(2026, 9, 18, 12);
   // The title register the summary label paints: short months — the vocabulary
   // the chart's own bar labels use — with the year kept.
   const title = (span) => plain(span.label);
-  // Every date run is glued, so a range has exactly one break opportunity —
-  // the space after the dash — and a single date has none. A year never lands
-  // on a line of its own.
+  // Every date run is glued, so only a week has one break opportunity — the
+  // space after the dash — and a single date has none. A year never lands on a
+  // line of its own.
   const breakable = (span) => span.label.split(' ').length - 1;
+  // Day: one calendar date, named like the bar it draws.
   const day = periodSpan('day', periodAnchor('day', 1, now), now);
-  assert.equal(title(day), '17 Oct 2026');
+  assert.equal(title(day), 'Sat 17 Oct 2026');
   assert.equal(breakable(day), 0);
-  // The prose register the sentences use spells the months out.
-  assert.equal(plain(day.phrase), '17 October 2026');
-  assert.equal(day.isDefault, false);
-  // Week/Month: a day range, collapsing the month when both ends share it.
+  // The prose register the sentences use spells the weekday and month out.
+  assert.equal(plain(day.phrase), 'Saturday 17 October 2026');
+  // Week: both ends of the ISO week, with the month collapsed when they share it.
   const week = periodSpan('week', periodAnchor('week', 1, now), now);
-  assert.equal(title(week), '5 – 11 Oct 2026');
-  assert.equal(plain(week.phrase), '5 – 11 October 2026');
+  assert.equal(title(week), 'Mon 5 – Sun 11 Oct 2026');
+  assert.equal(plain(week.phrase), 'the week of Monday 5 – Sunday 11 October 2026');
   assert.equal(breakable(week), 1);
-  assert.equal(title(periodSpan('week', periodAnchor('week', 2, now), now)), '28 Sep – 4 Oct 2026');
-  const month = periodSpan('month', periodAnchor('month', 1, now), now);
-  assert.equal(title(month), '20 Aug – 18 Sep 2026');
-  assert.equal(plain(month.phrase), '20 August – 18 September 2026');
-  // A range that crosses a year boundary names both years.
+  // A week that crosses a month end names both months…
+  assert.equal(
+    title(periodSpan('week', new Date(2026, 8, 28, 12), now)),
+    'Mon 28 Sep – Sun 4 Oct 2026',
+  );
+  // …and one that crosses a year end names both years, still as one week.
   assert.equal(
     title(periodSpan('week', new Date(2026, 0, 2, 12), now)),
-    '27 Dec 2025 – 2 Jan 2026',
+    'Mon 29 Dec 2025 – Sun 4 Jan 2026',
   );
-  // Year: the whole months its bars draw, not the partial day its read ends on.
+  // Month: the month itself, spelled out — the issue's "October 2026".
+  const month = periodSpan('month', periodAnchor('month', 1, now), now);
+  assert.equal(title(month), 'September 2026');
+  assert.equal(plain(month.phrase), 'September 2026');
+  assert.equal(breakable(month), 0);
+  // Year: the year itself.
   const year = periodSpan('year', periodAnchor('year', 1, now), now);
-  assert.equal(title(year), 'Nov 2024 – Oct 2025');
-  assert.equal(plain(year.phrase), 'November 2024 – October 2025');
-  assert.equal(breakable(year), 1);
+  assert.equal(title(year), '2025');
+  assert.equal(plain(year.phrase), '2025');
+  assert.equal(breakable(year), 0);
+  // The unit holding the clock is named as the current unit, not by a second
+  // register.
+  assert.equal(title(periodSpan('month', now, now)), 'October 2026');
+  assert.equal(title(periodSpan('year', now, now)), '2026');
+  // A clipped current week is named by the days it actually draws.
+  assert.equal(title(periodSpan('week', now, now)), 'Mon 12 – Sun 18 Oct 2026');
+  const wednesday = new Date(2026, 9, 14, 12);
+  assert.equal(title(periodSpan('week', wednesday, wednesday)), 'Mon 12 – Wed 14 Oct 2026');
 });
 
 test('paged copy names its span and never claims the window is now', () => {
   const now = new Date(2026, 9, 18, 12);
-  // Every word that names the default window, and must not describe another —
-  // including the partial-bucket wording the Year bars would otherwise borrow
-  // from the current month.
+  // Every rolling-window word #155 removes, plus the words that would claim a
+  // paged window is the present one. A calendar unit's own name is the only way
+  // to describe it.
   const banned = [
     /today/i,
     /last 7 days/i,
@@ -490,17 +662,30 @@ test('paged copy names its span and never claims the window is now', () => {
   const daySpan = periodSpan('day', periodAnchor('day', 1, now), now);
   assert.equal(
     plain(periodById('day').copy(daySpan).emptyTitle),
-    'No energy recorded on 17 October 2026.',
+    'No energy recorded on Saturday 17 October 2026.',
   );
-  // The Month window's offline copy names its dates too.
+  // A past month names the month and reuses none of the rolling-window copy.
   const monthSpan = periodSpan('month', periodAnchor('month', 1, now), now);
   assert.equal(
     plain(periodById('month').copy(monthSpan).offlineLine),
-    'Reconnect, then tap Refresh to load the energy for 20 August – 18 September 2026.',
+    'Reconnect, then tap Refresh to load the energy for September 2026.',
   );
   assert.equal(
     plain(periodById('month').copy(monthSpan).emptyTitle),
-    'No energy recorded for 20 August – 18 September 2026.',
+    'No energy recorded in September 2026.',
+  );
+  // A past year names the year; an empty one reports zero in its own words.
+  const yearSpan = periodSpan('year', periodAnchor('year', 1, now), now);
+  assert.equal(plain(periodById('year').copy(yearSpan).emptyTitle), 'No energy recorded in 2025.');
+  assert.equal(
+    plain(periodById('year').copy(yearSpan).offlineLine),
+    'Reconnect, then tap Refresh to load the energy for 2025.',
+  );
+  // A past week names both of its ends, one week — not seven days.
+  const weekSpan = periodSpan('week', periodAnchor('week', 1, now), now);
+  assert.equal(
+    plain(periodById('week').copy(weekSpan).emptyTitle),
+    'No energy recorded in the week of Monday 5 – Sunday 11 October 2026.',
   );
 });
 
@@ -512,16 +697,18 @@ test('periodBounds returns one contiguous local range for each period', () => {
     startId: '2026-10-18',
     endId: '2026-10-18',
   });
+  // Week is the ISO Monday–Sunday week, Month the calendar month, Year the
+  // calendar year — each clipped at today, which is Sunday 18 October here.
   assert.deepEqual(periodBounds('week', today), {
     startId: '2026-10-12',
     endId: '2026-10-18',
   });
   assert.deepEqual(periodBounds('month', today), {
-    startId: '2026-09-19',
+    startId: '2026-10-01',
     endId: '2026-10-18',
   });
   assert.deepEqual(periodBounds('year', today), {
-    startId: '2025-11-01',
+    startId: '2026-01-01',
     endId: '2026-10-18',
   });
   // A descriptor works as well as an id — the screen passes the descriptor.
@@ -529,41 +716,57 @@ test('periodBounds returns one contiguous local range for each period', () => {
 });
 
 test('periodBounds crosses month and year boundaries', () => {
-  // A month boundary: the 30-day window still reads as one day-id range, and
-  // the day period never leaves its own calendar day.
+  // 1 March 2026 is a Sunday: its ISO week began on 23 February, and the month
+  // it belongs to is March alone.
   assert.deepEqual(periodBounds('day', new Date(2026, 2, 1, 12)), {
     startId: '2026-03-01',
     endId: '2026-03-01',
   });
   assert.deepEqual(periodBounds('month', new Date(2026, 2, 1, 12)), {
-    startId: '2026-01-31',
+    startId: '2026-03-01',
     endId: '2026-03-01',
   });
   assert.deepEqual(periodBounds('week', new Date(2026, 2, 1, 12)), {
     startId: '2026-02-23',
     endId: '2026-03-01',
   });
-  // A year rollover: twelve months ending with January 2026 start in February.
+  // A week that spans a month end is still one week, and so is one that spans a
+  // year end: five daily bars in each month, no split, no gap.
+  assert.deepEqual(periodBounds('week', new Date(2025, 11, 31, 12)), {
+    startId: '2025-12-29',
+    endId: '2025-12-31',
+  });
+  const spanned = dayIdsInRange('2025-12-29', '2026-01-04');
+  assert.equal(spanned.length, 7);
+  assert.deepEqual(spanned.slice(0, 3), ['2025-12-29', '2025-12-30', '2025-12-31']);
+  // A year rollover: the year window is that year, never twelve months back.
   assert.deepEqual(periodBounds('year', new Date(2026, 0, 3, 12)), {
-    startId: '2025-02-01',
+    startId: '2026-01-01',
     endId: '2026-01-03',
   });
 });
 
 test('periodBounds keeps 29 February inside a leap-year range', () => {
   const today = new Date(2028, 2, 1, 12);
-  // The day period is the leap day itself when it is today.
+  // The day period is the leap day itself when it is that day.
   assert.deepEqual(periodBounds('day', new Date(2028, 1, 29, 8)), {
     startId: '2028-02-29',
     endId: '2028-02-29',
   });
-  // The 30-day window that ends on 1 March covers all 29 February days.
-  assert.deepEqual(periodBounds('month', today), {
+  // The February that holds the leap day is 29 days long, and its ISO week
+  // starts on Monday 28 February.
+  assert.deepEqual(periodBounds('month', new Date(2028, 1, 1, 12), today), {
     startId: '2028-02-01',
-    endId: '2028-03-01',
+    endId: '2028-02-29',
   });
+  assert.deepEqual(periodBounds('week', new Date(2028, 1, 29, 12), new Date(2028, 1, 29, 12)), {
+    startId: '2028-02-28',
+    endId: '2028-02-29',
+  });
+  // The current year starts in January and stops at today; the leap day is
+  // inside it.
   assert.deepEqual(periodBounds('year', today), {
-    startId: '2027-04-01',
+    startId: '2028-01-01',
     endId: '2028-03-01',
   });
 });
@@ -575,8 +778,10 @@ test('sessionsRange bounds the period sessions read half-open with a plug-in loo
   const week = sessionsRange(periodBounds('week', new Date(2026, 9, 18, 12)));
   assert.equal(week.start.getTime(), new Date(2026, 9, 5).getTime());
   assert.equal(week.end.getTime(), new Date(2026, 9, 19).getTime());
+  // The year's range starts a lookback before 1 January, not before a rolling
+  // twelve-month window.
   const year = sessionsRange(periodBounds('year', new Date(2026, 9, 18, 12)));
-  assert.equal(year.start.getTime(), new Date(2025, 9, 25).getTime());
+  assert.equal(year.start.getTime(), new Date(2025, 11, 25).getTime());
   assert.equal(year.end.getTime(), new Date(2026, 9, 19).getTime());
   assert.equal(SESSIONS_LOOKBACK_DAYS, 7);
   // Malformed bounds read nothing rather than querying garbage.
@@ -585,8 +790,9 @@ test('sessionsRange bounds the period sessions read half-open with a plug-in loo
 });
 
 test('periodBounds stays on local calendar days across a DST change (fixed America/Denver)', () => {
-  // Same child-process pattern as lastDayIds: a UTC runner must still exercise
-  // the spring-forward boundary, and a 00:30 fixture catches midnight arithmetic.
+  // Same child-process pattern as the range test: a UTC runner must still
+  // exercise the spring-forward boundary, and a 00:30 fixture catches midnight
+  // arithmetic.
   const moduleUrl = new URL('../../web/js/history.js', import.meta.url).href;
   const script = `
     import { periodBounds } from ${JSON.stringify(moduleUrl)};
@@ -595,11 +801,13 @@ test('periodBounds stays on local calendar days across a DST change (fixed Ameri
       process.exit(1);
     }
     const today = new Date(2026, 2, 9, 0, 30);
+    // 9 March 2026 is the Monday after the spring-forward day, so the current
+    // week is that one date and March is a whole calendar month so far.
     const expected = {
       day: { startId: '2026-03-09', endId: '2026-03-09' },
-      week: { startId: '2026-03-03', endId: '2026-03-09' },
-      month: { startId: '2026-02-08', endId: '2026-03-09' },
-      year: { startId: '2025-04-01', endId: '2026-03-09' },
+      week: { startId: '2026-03-09', endId: '2026-03-09' },
+      month: { startId: '2026-03-01', endId: '2026-03-09' },
+      year: { startId: '2026-01-01', endId: '2026-03-09' },
     };
     for (const [period, want] of Object.entries(expected)) {
       const got = periodBounds(period, today);
@@ -626,7 +834,7 @@ test('monthId and monthLabel use the local calendar month', () => {
   assert.equal(monthLabel('nope'), 'nope');
 });
 
-test('periodSeries renders one point per slot for a week, with gaps as zero bars', () => {
+test('periodSeries renders one point per day of the ISO week, with gaps as zero bars', () => {
   const today = new Date(2026, 9, 18, 12);
   const points = periodSeries(
     'week',
@@ -662,39 +870,41 @@ test('periodSeries renders one point per slot for a week, with gaps as zero bars
   );
 });
 
-test('periodSeries keeps the 30-day month window and marks today', () => {
+test('periodSeries draws the current calendar month and marks today', () => {
   const today = new Date(2026, 9, 18, 12);
   const points = periodSeries(
     'month',
     [
-      { id: '2026-09-19', kwh: 2 },
+      { id: '2026-09-30', kwh: 9 }, // the month before: outside the window
+      { id: '2026-10-01', kwh: 2 },
       { id: '2026-10-18', kwh: 4 },
     ],
     today,
   );
-  assert.equal(points.length, 30);
-  assert.equal(points[0].id, '2026-09-19');
-  assert.equal(points[0].label, 'Sat 19 Sep');
+  // 1..today: the month holding the clock is clipped, so October is 18 bars on
+  // the 18th — never a future bucket padded to 31.
+  assert.equal(points.length, 18);
+  assert.equal(points[0].id, '2026-10-01');
+  assert.equal(points[0].label, 'Thu 1 Oct');
   assert.equal(points[0].kwh, 2);
-  assert.equal(points[29].id, '2026-10-18');
-  assert.equal(points[29].kwh, 4);
-  assert.equal(points.filter((point) => point.isCurrent).length, 1);
-  assert.equal(points[29].isCurrent, true);
-  // Month is the default, so these are identically the old 30-day ids.
+  assert.equal(points[17].id, '2026-10-18');
+  assert.equal(points[17].kwh, 4);
   assert.deepEqual(
-    points.map((point) => point.id),
-    lastDayIds(30, today),
+    points.filter((point) => point.isCurrent).map((point) => point.id),
+    ['2026-10-18'],
   );
+  // No recorded document is a zero bar inside the month, not a shorter chart.
+  assert.equal(points.filter((point) => point.kwh === 0).length, 16);
+  assert.equal(sumSeries(points), 6);
 });
 
-test('periodSeries sums a year into 12 monthly points ending with the current month', () => {
+test('periodSeries sums the current year into January..this month', () => {
   const today = new Date(2026, 9, 18, 12);
   const points = periodSeries(
     'year',
     [
-      { id: '2025-10-31', kwh: 99 },
-      { id: '2025-11-01', kwh: 1 },
-      { id: '2025-11-30', kwh: 2 },
+      { id: '2025-10-31', kwh: 99 }, // the year before: outside the window
+      { id: '2026-01-01', kwh: 1 },
       { id: '2026-02-28', kwh: 3 },
       { id: '2026-02-01', kwh: 4 },
       { id: '2026-10-02', kwh: 5 },
@@ -702,20 +912,23 @@ test('periodSeries sums a year into 12 monthly points ending with the current mo
     ],
     today,
   );
-  assert.equal(points.length, 12);
-  assert.equal(points[0].id, '2025-11');
-  assert.equal(points[0].label, 'Nov 2025');
-  assert.equal(points[11].id, '2026-10');
-  assert.equal(points[0].kwh, 3);
+  // Ten buckets: January to October. No November, no December, no zero tail.
+  assert.equal(points.length, 10);
+  assert.equal(points[0].id, '2026-01');
+  assert.equal(points[0].label, 'Jan 2026');
+  assert.equal(points[0].kwh, 1);
+  assert.equal(points[9].id, '2026-10');
+  assert.equal(points[9].label, 'Oct 2026');
   assert.equal(points.find((point) => point.id === '2026-02').kwh, 7);
   // The current month is the partial sum of the days recorded so far; the
-  // series stops with it (no zero-padded next month).
-  assert.equal(points[11].kwh, 11);
-  assert.equal(points[11].label, 'Oct 2026');
-  assert.deepEqual(points.map((point) => point.isCurrent).filter(Boolean), [true]);
-  assert.equal(points[11].isCurrent, true);
-  // Twelve months is the whole window, including the one before the range.
-  assert.equal(sumSeries(points), 21);
+  // series stops with it.
+  assert.equal(points[9].kwh, 11);
+  assert.deepEqual(
+    points.filter((point) => point.isCurrent).map((point) => point.id),
+    ['2026-10'],
+  );
+  // Twelve months is no longer the window: only the months the year has.
+  assert.equal(sumSeries(points), 19);
 });
 
 test('periodSeries folds 29 February into its month', () => {
@@ -736,10 +949,12 @@ test('periodSeries folds 29 February into its month', () => {
 
 test('periodSeries without documents is a full run of zero points, not an empty list', () => {
   const today = new Date(2026, 9, 18, 12);
+  // The counts are the calendar's: this week's seven days, October's eighteen
+  // days so far, and the ten months the year has reached.
   for (const [period, count] of [
     ['week', 7],
-    ['month', 30],
-    ['year', 12],
+    ['month', 18],
+    ['year', 10],
   ]) {
     const points = periodSeries(period, [], today);
     assert.equal(points.length, count, period);
@@ -875,11 +1090,10 @@ test('hour points carry the day their buckets price', () => {
 
 test('isCurrent is the clock, never the window anchor', () => {
   // #154's first latent defect: a paged window's newest bucket would otherwise
-  // be flagged current (a past Day's same clock hour). Nothing in the readout
-  // says "Today" for Day (prefixToday is false), so the damage was concrete
-  // elsewhere: the live-pricing gate opened over a past bucket, the bar's
-  // accessible name gained "(this hour so far)", and the selection jumped to that
-  // bucket instead of the newest one.
+  // be flagged current (a past Day's same clock hour). The damage was concrete:
+  // the live-pricing gate opened over a past bucket, the bar's accessible name
+  // gained "(this hour so far)", and the selection jumped to that bucket instead
+  // of the newest one.
   const now = new Date(2026, 9, 18, 12, 40);
   const pastDay = periodAnchor('day', 1, now);
   assert.equal(dayId(pastDay), '2026-10-17');
@@ -924,11 +1138,13 @@ test('isCurrent is the clock, never the window anchor', () => {
   // The year is part of the identity. Every other fixture sits within a year of
   // the clock, so a window a year back is the case that tells a date comparison
   // from a month-day one: 18 Oct 2025 holds the same month-day as `now`, and
-  // nothing in it is current.
+  // nothing in its week or month is current.
   const lastYear = new Date(2025, 9, 18, 12, 40);
   assert.equal(periodSeries('week', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
-  assert.equal(periodSeries('week', [], lastYear, now).at(-1).id, '2025-10-18');
+  assert.equal(periodSeries('week', [], lastYear, now).at(-1).id, '2025-10-19');
   assert.equal(periodSeries('month', [], lastYear, now).filter((p) => p.isCurrent).length, 0);
+  // A whole calendar month a year back is 31 bars, all of them past.
+  assert.equal(periodSeries('month', [], lastYear, now).length, 31);
   assert.equal(hourSeries({}, lastYear, now).filter((p) => p.isCurrent).length, 0);
 });
 
@@ -1379,14 +1595,16 @@ test('the live archive week prices every day, including its pre-hourly days', ()
   assert.ok(Math.abs(list - 4.73) < 1e-9);
   assert.ok(Math.abs(summary.cost - 4.73337093) < 1e-6);
   // An old bar shows its span-attributed day $, matching its contribution to
-  // the summary — the acceptance scenario verbatim.
-  const oct19 = pointCostSummary(points[3], 'day', OCTOBER, sessions);
+  // the summary — the acceptance scenario verbatim. The window is the ISO week
+  // clipped at Thursday 22 October, so its bars are 19–22 and index 0 is the
+  // 19th; under a rolling window the same bar sat at index 3.
+  const oct19 = pointCostSummary(points[0], 'day', OCTOBER, sessions);
   assert.ok(Math.abs(oct19.cost - ((11461 * 20520) / 22380 / 1000) * 0.15303) < 1e-9);
   assert.equal(oct19.pricedEnergy, true);
   assert.equal(oct19.unpricedEnergy, false);
   // And the day whose session spans midnight keeps its other half on the
   // next day, exactly once.
-  const oct20 = pointCostSummary(points[4], 'day', OCTOBER, sessions);
+  const oct20 = pointCostSummary(points[1], 'day', OCTOBER, sessions);
   assert.ok(
     Math.abs(oct20.cost - (((11461 * 1860) / 22380 + (6841 * 19320) / 22920) / 1000) * 0.15303) <
       1e-9,
@@ -1596,7 +1814,7 @@ test('a paged window is guarded on the day it was anchored to, not its end', () 
       bounds: periodBounds('month', anchor, now),
       anchorDay: dayId(now),
     };
-    assert.equal(record.bounds.endId, '2026-09-18');
+    assert.equal(record.bounds.endId, '2026-09-30');
     // The paged end is a past date: comparing it with today would make every
     // read of this window stale and re-enter it forever.
     assert.notEqual(record.bounds.endId, dayId(new Date()));
