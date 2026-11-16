@@ -438,13 +438,15 @@ class ShutdownDrainTests(unittest.TestCase):
         ), mock.patch.object(bridge, "settings_loop"), mock.patch.object(
             bridge, "schedule_loop"
         ), mock.patch.object(
+            bridge, "notifications_loop"
+        ), mock.patch.object(
             bridge, "command_loop", side_effect=stopped_charging
         ):
             bridge.run(
                 db,
                 bridge.ChargerHost("charger"),
                 None,
-                (10, 60, 60, 300, 5, 60),
+                (10, 60, 60, 300, 5, 60, 300),
                 object(),  # every consumer is mocked
                 bridge.WatchdogConfig(enabled=False),
             )

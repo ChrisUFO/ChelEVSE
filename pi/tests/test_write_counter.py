@@ -605,7 +605,7 @@ def capture_run_wiring():
             FakeDB(),
             bridge.ChargerHost("charger"),
             None,
-            (10, 60, 60, 300, 5, 60),
+            (10, 60, 60, 300, 5, 60, 300),
             object(),
             bridge.WatchdogConfig(enabled=False),
         )
@@ -630,10 +630,16 @@ class RunWiringTests(unittest.TestCase):
     def shared_counter(self):
         return self.loops()["status_loop"]["sink"].counter
 
-    def test_run_starts_exactly_the_four_poller_threads(self):
+    def test_run_starts_exactly_the_five_poller_threads(self):
         self.assertEqual(
             set(self.loops()),
-            {"status_loop", "config_loop", "settings_loop", "schedule_loop"},
+            {
+                "status_loop",
+                "config_loop",
+                "settings_loop",
+                "schedule_loop",
+                "notifications_loop",
+            },
         )
         self.assertEqual(self.command.arguments["interval"], 5)
 
@@ -652,6 +658,7 @@ class RunWiringTests(unittest.TestCase):
         self.assertIs(status["notifier"].counter, shared)
         self.assertIs(status["watchdog"].counter, shared)
         self.assertIs(self.loops()["config_loop"]["counter"], shared)
+        self.assertIs(self.loops()["notifications_loop"]["counter"], shared)
         self.assertIs(self.command.arguments["counter"], shared)
         self.assertIs(self.command.arguments["sink"], status["sink"])
 
@@ -663,8 +670,9 @@ class RunWiringTests(unittest.TestCase):
                 loops["config_loop"]["interval"],
                 loops["schedule_loop"]["interval"],
                 loops["settings_loop"]["interval"],
+                loops["notifications_loop"]["interval"],
             ),
-            (10, 60, 60, 60),
+            (10, 60, 60, 60, 300),
         )
         self.assertEqual(
             loops["config_loop"]["initial_delay"], bridge.CONFIG_INITIAL_DELAY
@@ -678,6 +686,10 @@ class RunWiringTests(unittest.TestCase):
         self.assertIs(loops["schedule_loop"]["sink"], loops["status_loop"]["sink"])
         self.assertEqual(
             loops["settings_loop"]["bootstrap"], bridge.DEFAULT_CHARGER_HOST
+        )
+        self.assertEqual(
+            loops["notifications_loop"]["initial_delay"],
+            bridge.NOTIFICATIONS_INITIAL_DELAY,
         )
         self.assertIsNone(self.command.arguments["source"])
 

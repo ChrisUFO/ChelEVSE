@@ -6,6 +6,9 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   config every CONFIG_INTERVAL: GET /config -> replace status/config
   schedule every SCHEDULE_INTERVAL: schedule/current -> firmware scheduler,
     GET /schedule/plan -> the active window published on change (issue #95)
+  notifications every NOTIFICATIONS_INTERVAL: GET /notifications -> the live
+    advisory ring projected into status/notifications, written on change only
+    (issue #158; see health.py)
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
@@ -79,8 +82,16 @@ from parsing import (  # noqa: E402
     CommandError,
     _interval_step_allowance,
     _is_number,
+    parse_fault_counters,
+    parse_notifications,
     parse_snapshot,
     parse_status,
+)
+from health import (  # noqa: E402
+    CONTENT_FIELDS,
+    LiveObservations,
+    comparable,
+    project,
 )
 from schedule import (  # noqa: E402
     _normalize_rule,
@@ -124,6 +135,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # together against the gateway.
 CONFIG_INITIAL_DELAY = 3
 SCHEDULE_INITIAL_DELAY = 7
+# The health poll starts after the first config sync and a status observation, so
+# its first projection carries known gates where the charger allows them instead
+# of a transient "gates closed" document that would be rewritten seconds later.
+NOTIFICATIONS_INITIAL_DELAY = 15
 # Retry a failed /config sync with this bounded backoff while MQTT is healthy
 # (the periodic poll is skipped then, so a failure would otherwise strand the
 # config until the charger's next setting change).
@@ -1101,6 +1116,7 @@ def status_loop(
     mqtt=None,
     reconcile_interval=MQTT_RECONCILE_SEC,
     sink=None,
+    observations=None,
 ):
     """Poll /status and apply it; with MQTT, poll only to reconcile.
 
@@ -1117,6 +1133,11 @@ def status_loop(
     fresh HTTP observation (ahead of the reconcile cadence in MQTT mode) before
     publishing the full curated payload. Without MQTT every tick already polls,
     so the heartbeat just publishes what the poll applied.
+
+    ``observations`` is the run's :class:`health.LiveObservations`: every applied
+    HTTP observation hands the health projection the controller state, the sensor
+    temperatures and the ``$GF`` fault counters from the reply it already has --
+    no second charger GET, and no new field on ``status/current`` (D6).
     """
     sink = sink or StatusSink(
         db,
@@ -1205,6 +1226,10 @@ def status_loop(
                     if mqtt is not None:
                         mqtt_snapshots = mqtt.snapshots
                     reconcile_failures = 0
+                    if observations is not None:
+                        observations.note_status(
+                            fields, parse_fault_counters(payload)
+                        )
                 watchdog.record_success(payload)
         _publish_due_heartbeat(sink, heartbeat, watermark)
         _status_scheduler_tick(sink)
@@ -1339,10 +1364,16 @@ def _fetch_config(transport, host, auth):
 
 
 def _write_config_doc(config_doc, data):
-    """Replace-write ``status/config``: redact, then coerce, then set."""
+    """Replace-write ``status/config``: redact, then coerce, then set.
+
+    Returns the view that was written, which the health holder keeps: the gates
+    and safety corroboration read exactly what the document says, redaction and
+    Firestore coercion included.
+    """
     redacted = redact_config(data)
     safe_data = firestore_safe(redacted)
     config_doc.set({**safe_data, "updated_at": firestore.SERVER_TIMESTAMP})
+    return safe_data
 
 
 def _consume_config_version_trigger(mqtt, config_event, mqtt_mode, version):
@@ -1385,6 +1416,7 @@ def config_loop(
     config_event=None,
     tick=MQTT_TICK_SEC,
     counter=None,
+    observations=None,
 ):
     """Sync /config; with MQTT, only when ``config_version`` changed.
 
@@ -1407,6 +1439,11 @@ def config_loop(
     after a good fetch is the same failure as a failed fetch: the document is
     equally stale. A version change that arrives meanwhile (the retained value
     republished on a reconnect is one) retries immediately.
+
+    ``observations`` is the run's :class:`health.LiveObservations`: the view this
+    loop writes is what the health projection reads for its gates and the
+    ``safety.*`` corroboration, so it is the written view (redacted and coerced),
+    noted only after a successful write.
     """
     config_doc = db.collection("status").document("config")
     # Successful config writes are counted here (issue #96).
@@ -1494,7 +1531,7 @@ def config_loop(
                 log(f"config sync failed ({exc.__class__.__name__})")
         else:
             try:
-                _write_config_doc(config_doc, data)
+                view = _write_config_doc(config_doc, data)
             except Exception as exc:
                 counter.note_failure(exc)
                 if not mqtt_mode:
@@ -1506,6 +1543,10 @@ def config_loop(
                 # escaping with the trigger still set (a hot loop).
                 retry(exc)
             else:
+                if observations is not None:
+                    # The health projection reads the view that is now in
+                    # status/config -- one config poll, two consumers (D6).
+                    observations.note_config(view)
                 counter.record("config")
                 _consume_config_version_trigger(
                     mqtt, config_event, mqtt_mode, version
@@ -1826,6 +1867,153 @@ def schedule_loop(
     run_loop("schedule", one_tick, lambda: _stop.wait(interval))
 
 
+def _seed_notifications(doc):
+    """Read the stored projection once: content, alert watermark, first observations.
+
+    Returns ``(content, alerted, first_observed)``. ``content`` is None for an
+    absent or unreadable document, so the first poll writes the whole projection;
+    ``alerted`` (PR-7's watermark) and each advisory's ``first_observed`` survive
+    a restart because they are seeded here, before the first poll. A read failure
+    is a log line, never a crash: the loop must outlive a Firestore blip, and the
+    first successful poll rewrites the document anyway.
+    """
+    try:
+        snapshot = doc.get()
+        data = snapshot.to_dict() if snapshot.exists else None
+    except Exception as exc:
+        log(f"notifications seed read failed ({exc.__class__.__name__}: {exc})")
+        return None, {}, {}
+    if not isinstance(data, dict):
+        return None, {}, {}
+    alerted = data.get("alerted")
+    alerted = dict(alerted) if isinstance(alerted, dict) else {}
+    first_observed = {}
+    entries = data.get("advisories")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        token = entry.get("counter_token")
+        stamp = entry.get("first_observed")
+        # Tolerate a hand-edited or older document: only a real epoch second and
+        # a scalar token can key the watermark.
+        if not isinstance(stamp, int) or isinstance(stamp, bool):
+            continue
+        if token is not None and not isinstance(token, (str, int, float)):
+            continue
+        first_observed[(entry.get("id"), token)] = stamp
+    return {key: data.get(key) for key in CONTENT_FIELDS}, alerted, first_observed
+
+
+def notifications_loop(
+    db,
+    host,
+    auth,
+    transport,
+    interval,
+    observations,
+    initial_delay=0,
+    counter=None,
+    clock=time.time,
+):
+    """Poll the gateway's advisory ring; project ``status/notifications``.
+
+    One tick is one ``GET /notifications``. The projection is compared with the
+    last one written and only a content change reaches Firestore, so a steady
+    state adds **zero** writes: ``checked_at`` records the observation that
+    produced the last write, it is not a heartbeat (D8 -- bridge liveness stays
+    ``status/current``'s freshness banner). The comparison is
+    :func:`health.comparable` of the content, which drops each entry's moving
+    ``last_seen`` (the gateway re-stamps it every ~5 s for every live advisory,
+    so the raw content differs on every poll); the written document still
+    carries the fresh ``last_seen`` whenever it is written.
+
+    ``observations`` (:class:`health.LiveObservations`) supplies the live signals
+    the classifier corroborates with: the counters, state and temperatures the
+    status loop already fetched and the config view the config loop wrote. This
+    loop never polls the charger for anything but the ring.
+
+    A failed poll projects ``reachable: false`` and is written on its transition
+    only. The merge write leaves the last known gates/counters/advisories in the
+    document under that flag: a poll that failed must never look like "no
+    faults". A 404 (endpoint absent) is recorded as ``source: "unsupported"``,
+    and a 200 that is not the notification contract the same way.
+
+    ``alerted`` (PR-7's alert watermark) and each advisory's ``first_observed``
+    are seeded from the stored document before the first poll, so a restart
+    neither forgets a watermark nor re-stamps an observation.
+    """
+    doc = db.collection("status").document("notifications")
+    counter = counter or WriteCounter()
+    stored, alerted, first_observed = _seed_notifications(doc)
+    last_stable = comparable(stored)
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
+
+    def one_tick():
+        nonlocal last_stable, first_observed
+
+        checked_at = int(clock())
+        try:
+            resp = transport.get(
+                f"{host.base}/notifications", auth=auth, timeout=HTTP_TIMEOUT
+            )
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # 404: the firmware has no such endpoint (an older gateway build).
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            log(f"notifications poll failed ({_offline_reason(exc)})")
+            content = {
+                "reachable": False,
+                "source": "unsupported" if code == 404 else "http",
+            }
+        except requests.RequestException as exc:
+            log(f"notifications poll failed ({_offline_reason(exc)})")
+            content = {"reachable": False, "source": "http"}
+        else:
+            try:
+                payload = resp.json()
+            except ValueError:
+                # The charger answered, so this is not a transport failure: the
+                # body is not the notification contract (a proxy or captive
+                # portal in front of an older gateway, say).
+                payload = None
+            parsed = parse_notifications(payload)
+            if parsed is None:
+                log(
+                    "notifications poll unsupported "
+                    "(payload is not the notification contract)"
+                )
+                content = {"reachable": False, "source": "unsupported"}
+            else:
+                content, first_observed = project(
+                    parsed,
+                    observations.snapshot(),
+                    first_observed,
+                    checked_at,
+                    alerted,
+                )
+        stable = comparable(content)
+        if stable == last_stable:
+            return
+        write = {
+            **content,
+            "checked_at": checked_at,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        try:
+            counter.counted("health", doc.set, write, merge=True)
+        except Exception as exc:
+            # Keep the projection unwritten so the next poll retries it; the
+            # loop already read the charger, so this is a stale write, not a
+            # stale observation.
+            log(f"notifications write failed ({exc.__class__.__name__}: {exc})")
+        else:
+            last_stable = stable
+
+    run_loop("notifications", one_tick, lambda: _stop.wait(interval))
+
+
 def run(
     db,
     host,
@@ -1863,12 +2051,17 @@ def run(
         reconcile_interval,
         command_interval,
         settings_interval,
+        notifications_interval,
     ) = intervals
     # The process's one write counter (issue #96): every write site records
     # here, ``status/health``'s transition writes expose the rolling count,
     # and the status loop logs the hourly summary. Built once, threaded
     # everywhere, so the totals are the process's.
     counter = WriteCounter()
+    # The live observations the health poll classifies against (D6): fed by the
+    # status and config loops, read by the notifications loop -- no extra charger
+    # GET and no new ``status/current`` field.
+    observations = LiveObservations()
     tracker = StatusTracker(
         db,
         history=HistoryAccumulator(
@@ -1936,7 +2129,12 @@ def run(
         mqtt.reconcile_sec if source is not None else MQTT_RECONCILE_SEC,
         sink,
     )
-    threading.Thread(target=status_loop, args=status_args, daemon=True).start()
+    threading.Thread(
+        target=status_loop,
+        args=status_args,
+        kwargs={"observations": observations},
+        daemon=True,
+    ).start()
     config_args = (
         db,
         host,
@@ -1951,7 +2149,10 @@ def run(
     # among them), and the positional form once landed it in ``tick`` — a
     # WriteCounter where seconds belong, fatal to the MQTT-mode tail wait.
     threading.Thread(
-        target=config_loop, args=config_args, kwargs={"counter": counter}, daemon=True
+        target=config_loop,
+        args=config_args,
+        kwargs={"counter": counter, "observations": observations},
+        daemon=True,
     ).start()
     settings_args = (db, host, bootstrap, settings_interval)
     threading.Thread(target=settings_loop, args=settings_args, daemon=True).start()
@@ -1966,6 +2167,20 @@ def run(
         SCHEDULE_INITIAL_DELAY,
     )
     threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
+    notifications_args = (
+        db,
+        host,
+        auth,
+        transport,
+        notifications_interval,
+        observations,
+    )
+    threading.Thread(
+        target=notifications_loop,
+        args=notifications_args,
+        kwargs={"initial_delay": NOTIFICATIONS_INITIAL_DELAY, "counter": counter},
+        daemon=True,
+    ).start()
     if mqtt_status_args is not None:
         threading.Thread(
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
@@ -1994,11 +2209,12 @@ def main():
         reconcile_interval = float(cfg("SCHEDULE_RECONCILE_INTERVAL") or 300)
         command_interval = float(cfg("COMMAND_INTERVAL") or 5)
         settings_interval = float(cfg("SETTINGS_INTERVAL") or 60)
+        notifications_interval = float(cfg("NOTIFICATIONS_INTERVAL") or 300)
     except ValueError:
         sys.exit(
             "STATUS_INTERVAL, CONFIG_INTERVAL, SCHEDULE_INTERVAL, "
-            "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL and SETTINGS_INTERVAL "
-            "must be numbers."
+            "SCHEDULE_RECONCILE_INTERVAL, COMMAND_INTERVAL, SETTINGS_INTERVAL and "
+            "NOTIFICATIONS_INTERVAL must be numbers."
         )
     write_policy = write_policy_config_or_exit()
     history = history_config_or_exit()
@@ -2029,6 +2245,7 @@ def main():
         f"{config_interval:g}s/{schedule_interval:g}s/{command_interval:g}s, "
         f"schedule reconcile {reconcile_interval:g}s, "
         f"settings {settings_interval:g}s, "
+        f"notifications {notifications_interval:g}s, "
         f"status writes gap >={write_policy.min_gap:g}s, "
         f"heartbeats {write_policy.charging_heartbeat:g}s charging/"
         f"{write_policy.idle_heartbeat:g}s idle, "
@@ -2056,6 +2273,7 @@ def main():
         reconcile_interval,
         command_interval,
         settings_interval,
+        notifications_interval,
     )
     run(
         db,
