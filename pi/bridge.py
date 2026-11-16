@@ -101,6 +101,7 @@ from transport import (  # noqa: E402
     _override_confirms,
     _require_ok,
     apply_command,
+    enforce_current_policy,
     mqtt_command_ready,
 )
 from status_tracker import (  # noqa: E402
@@ -1598,6 +1599,8 @@ def _fail_stale_command(doc, counter):
 def _command_outcome(transport, host, auth, cmd, source):
     """Apply one command; the status fields to settle it with, either way."""
     try:
+        if cmd.get("type") == "set_current":
+            cmd = enforce_current_policy(cmd, _fetch_config(transport, host, auth))
         extra = apply_command(transport, host, auth, cmd, source=source)
     except CommandError as exc:
         # `transport` names the path that carried the request;
@@ -1749,14 +1752,13 @@ def schedule_loop(
     last_sync = None
     missing_logged = False
     malformed_logged = False
-    amps_logged_hash = None
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
 
     def one_tick():
         nonlocal last_hash, synced_event_rules, last_sync
-        nonlocal missing_logged, malformed_logged, amps_logged_hash
+        nonlocal missing_logged, malformed_logged
 
         snapshot = db.collection("schedule").document("current").get()
         if not snapshot.exists:
@@ -1791,12 +1793,6 @@ def schedule_loop(
                     or now - last_sync >= reconcile_interval
                 )
                 if due:
-                    if rules and digest != amps_logged_hash:
-                        log(
-                            "schedule: firmware v5.1.5 has no per-event "
-                            "current; amps not applied"
-                        )
-                        amps_logged_hash = digest
                     try:
                         sync_schedule(transport, host, auth, events)
                     except (

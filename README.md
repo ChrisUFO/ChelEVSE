@@ -7,7 +7,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 ## What it does
 
 - **Monitor**: live charger status (state, current draw, power, session/total energy, temperatures, setpoint) from anywhere — not just the home LAN.
-- **Control**: stop, return to auto, or hold at a chosen current (6–48 A) from your phone.
+- **Control**: stop, return to auto, or hold at a current up to the charger's verified soft maximum from your phone.
 - **History**: Day / Week / Month / Year energy chart (24 hourly bars for today, 7 daily, 30 daily or 12 monthly bars) and the 20 most recent charging sessions, with cost at your electricity rate. A day recorded before hourly capture began shows its total and says the hours are missing, never 24 empty bars; on the deploy day itself Day counts only the hours recorded after it, while Month and Year use the day's total — expected, and gone the next day.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: push notifications when charging starts/stops or the charger goes offline — background notifications with the app closed, one in-app toast when it is open.

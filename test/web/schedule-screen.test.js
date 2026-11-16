@@ -124,7 +124,7 @@ const { initSchedule, enterSchedule, resetSchedule, showSchedule, showScheduleEr
 initSchedule();
 
 // A schedule document as store.js delivers it: one everyday overnight window.
-const nightRule = { id: 'rule-1', days: [0, 1, 2, 3, 4], start: '22:00', end: '06:00', amps: 32 };
+const nightRule = { id: 'rule-1', days: [0, 1, 2, 3, 4], start: '22:00', end: '06:00' };
 const document_ = { enabled: true, rules: [nightRule] };
 
 const fire = (node, type) => {
@@ -156,7 +156,7 @@ test('createCard builds the documented window-card shape', () => {
   assert.equal(card.dataset.id, 'rule-1');
 
   // head: title, live badge, remove
-  const [head, days, times, ampsRow, errorEl] = card.children;
+  const [head, days, times, errorEl] = card.children;
   assert.equal(head.tag, 'div');
   assert.equal(head.className, 'rule-head');
   const [title, live, remove] = head.children;
@@ -207,25 +207,6 @@ test('createCard builds the documented window-card shape', () => {
   assert.equal(endField.children[1].type, 'time');
   assert.equal(endField.children[1].value, '06:00');
 
-  // current: a minus/number/plus stepper
-  assert.equal(ampsRow.tag, 'div');
-  assert.equal(ampsRow.className, 'amps-row');
-  const [currentLabel, stepper] = ampsRow.children;
-  assert.equal(currentLabel.textContent, 'Current');
-  assert.equal(stepper.tag, 'div');
-  assert.equal(stepper.className, 'stepper');
-  const [minus, ampsInput, unit, plus] = stepper.children;
-  assert.equal(minus.textContent, '−');
-  assert.equal(minus.attrs.get('aria-label'), 'Decrease current for window 1');
-  assert.equal(ampsInput.tag, 'input');
-  assert.equal(ampsInput.className, 'amps-input');
-  assert.equal(ampsInput.type, 'number');
-  assert.equal(ampsInput.value, '32');
-  assert.equal(ampsInput.attrs.get('aria-label'), 'Current for window 1');
-  assert.equal(unit.textContent, 'A');
-  assert.equal(plus.textContent, '+');
-  assert.equal(plus.attrs.get('aria-label'), 'Increase current for window 1');
-
   // error line: present, identified, hidden while the rule is valid
   assert.equal(errorEl.tag, 'p');
   assert.equal(errorEl.className, 'rule-error');
@@ -267,7 +248,7 @@ test('an empty day set toggles aria-invalid and the invalid class on the days gr
   assert.equal(days.attrs.get('aria-invalid'), 'true');
   assert.equal(days.classes.has('invalid'), true);
   assert.equal(card.classes.has('invalid'), true);
-  const errorEl = card.children[4];
+  const errorEl = card.children[3];
   assert.equal(errorEl.hidden, false);
   assert.equal(errorEl.textContent, 'Pick at least one day.');
 
@@ -284,7 +265,7 @@ test('a missing time toggles aria-invalid on the time inputs', () => {
   const times = card.children[2];
   const startInput = times.children[0].children[1];
   const endInput = times.children[2].children[1];
-  const errorEl = card.children[4];
+  const errorEl = card.children[3];
 
   startInput.value = '';
   fire(startInput, 'input');

@@ -265,7 +265,6 @@ export function saveSchedule(schedule) {
       days: rule.days,
       start: rule.start,
       end: rule.end,
-      amps: rule.amps,
     })),
   });
 }

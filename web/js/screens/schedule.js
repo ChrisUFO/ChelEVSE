@@ -16,9 +16,7 @@ import { $, buildDayPicker, el, focusAfterRetry, setText } from '../ui.js';
 import { readScheduleBaseline, retryStore, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
-  MAX_AMPS,
   MAX_RULES,
-  MIN_AMPS,
   defaultRule,
   defaultSchedule,
   discardBaselineReadApplies,
@@ -386,8 +384,6 @@ function validateAndPaint() {
     setText(card.errorEl, messages.join(' '));
     card.startInput.setAttribute('aria-invalid', String(Boolean(errors.start)));
     card.endInput.setAttribute('aria-invalid', String(Boolean(errors.end)));
-    card.ampsInput.setAttribute('aria-invalid', String(Boolean(errors.amps)));
-    card.stepper.classList.toggle('invalid', Boolean(errors.amps));
     card.daysEl.setAttribute('aria-invalid', String(Boolean(errors.days)));
     card.daysEl.classList.toggle('invalid', Boolean(errors.days));
     card.node.classList.toggle('invalid', messages.length > 0);
@@ -460,44 +456,12 @@ function createCard(rule, index) {
   startInput.addEventListener('input', onTime);
   endInput.addEventListener('input', onTime);
 
-  const ampsRow = el('div', 'amps-row');
-  const ampsInput = el('input', 'amps-input');
-  ampsInput.type = 'number';
-  ampsInput.min = String(MIN_AMPS);
-  ampsInput.max = String(MAX_AMPS);
-  ampsInput.step = '1';
-  ampsInput.inputMode = 'numeric';
-  ampsInput.value = Number.isFinite(rule.amps) ? String(rule.amps) : '';
-  ampsInput.setAttribute('aria-label', `Current for window ${index + 1}`);
-  ampsInput.setAttribute('aria-describedby', errorId);
-  const step = (delta) => {
-    const base = Number.isFinite(rule.amps) ? rule.amps : 32;
-    rule.amps = Math.min(MAX_AMPS, Math.max(MIN_AMPS, Math.round(base) + delta));
-    ampsInput.value = String(rule.amps);
-    markDirty();
-  };
-  const minus = el('button', 'step', '−');
-  minus.type = 'button';
-  minus.setAttribute('aria-label', `Decrease current for window ${index + 1}`);
-  minus.addEventListener('click', () => step(-1));
-  const plus = el('button', 'step', '+');
-  plus.type = 'button';
-  plus.setAttribute('aria-label', `Increase current for window ${index + 1}`);
-  plus.addEventListener('click', () => step(1));
-  ampsInput.addEventListener('input', () => {
-    rule.amps = ampsInput.value === '' ? Number.NaN : Number(ampsInput.value);
-    markDirty();
-  });
-  const stepper = el('div', 'stepper');
-  stepper.append(minus, ampsInput, el('span', 'stepper-unit', 'A'), plus);
-  ampsRow.append(el('span', 'field-label', 'Current'), stepper);
-
   const errorEl = el('p', 'rule-error');
   errorEl.id = errorId;
   errorEl.hidden = true;
 
-  node.append(head, days, times, ampsRow, errorEl);
-  return { rule, node, daysEl: days, startInput, endInput, ampsInput, stepper, errorEl };
+  node.append(head, days, times, errorEl);
+  return { rule, node, daysEl: days, startInput, endInput, errorEl };
 }
 
 function renderRules() {
@@ -626,7 +590,6 @@ function payloadFrom(schedule) {
       days: rule.days,
       start: rule.start,
       end: rule.end,
-      amps: rule.amps,
     })),
   };
 }

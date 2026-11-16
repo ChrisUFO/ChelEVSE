@@ -11,7 +11,6 @@ owns the charger HTTP session); this module imports ``_require_ok`` from there.
 
 import hashlib
 import json
-import math
 import re
 
 from charger_host import HTTP_TIMEOUT
@@ -56,16 +55,14 @@ def _normalize_rule(raw):
     if start == end:
         log(f"schedule: skipped rule {rule_id} (start equals end)")
         return None
-    amps = raw.get("amps")
-    if not _is_number(amps) or not math.isfinite(amps):
-        log(f"schedule: skipped rule {rule_id} (amps must be a number)")
-        return None
+    # Legacy ``amps`` and firmware ``feature``/``feature_value`` fields are
+    # tolerated but ignored. This bridge's schedule contract controls only the
+    # active/disabled state; per-event current was never applied.
     return {
         "id": rule_id,
         "days": sorted(clean_days),
         "start": start,
         "end": end,
-        "amps": amps,
     }
 
 

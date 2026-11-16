@@ -8,9 +8,7 @@ import {
   DISCARD_FAILED_REASON,
   DISCARD_OFFLINE_REASON,
   DISCARD_RETRY_DELAYS_MS,
-  MAX_AMPS,
   MAX_RULES,
-  MIN_AMPS,
   defaultRule,
   defaultSchedule,
   discardBaselineReadApplies,
@@ -35,7 +33,6 @@ const rule = (overrides = {}) => ({
   days: [0, 2],
   start: '22:00',
   end: '06:00',
-  amps: 32,
   ...overrides,
 });
 
@@ -52,11 +49,8 @@ test('defaults are an empty disabled schedule and a weekday window', () => {
     days: [0, 1, 2, 3, 4],
     start: '22:00',
     end: '06:00',
-    amps: 32,
   });
   assert.deepEqual(DAY_NAMES, ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']);
-  assert.equal(MIN_AMPS, 6);
-  assert.equal(MAX_AMPS, 48);
   assert.equal(MAX_RULES, 20);
 });
 
@@ -120,17 +114,6 @@ test('validateSchedule rejects non-HH:MM times and equal ends', () => {
   assert.match(equal.ruleErrors[0].end, /different/);
 });
 
-test('validateSchedule enforces integer amps from 6 to 48', () => {
-  for (const amps of [6, 32, 48]) {
-    assert.equal(validateSchedule(schedule({ rules: [rule({ amps })] })).valid, true, String(amps));
-  }
-  for (const amps of [5, 49, 32.5, '32', null, Number.NaN]) {
-    const result = validateSchedule(schedule({ rules: [rule({ amps })] }));
-    assert.equal(result.valid, false, String(amps));
-    assert.match(result.ruleErrors[0].amps, /whole number from 6 to 48/);
-  }
-});
-
 test('validateSchedule rejects empty ids, non-boolean enabled, and non-list rules', () => {
   assert.match(validateSchedule(schedule({ rules: [rule({ id: '' })] })).ruleErrors[0].id, /id/);
   assert.match(validateSchedule(schedule({ rules: [rule({ id: 5 })] })).ruleErrors[0].id, /id/);
@@ -162,21 +145,22 @@ test('normalizeSchedule keeps malformed server values visible for validation', (
         start: '22:00',
         end: '06:00',
         amps: '32',
+        feature: 'current',
+        feature_value: 32,
       },
     ],
   });
   assert.deepEqual(normalized, {
     enabled: true,
-    rules: [{ id: 'r', days: [2, 0, 2, 7, 1.5], start: '22:00', end: '06:00', amps: '32' }],
+    rules: [{ id: 'r', days: [2, 0, 2, 7, 1.5], start: '22:00', end: '06:00' }],
   });
   const result = validateSchedule(normalized);
   assert.equal(result.valid, false);
   assert.match(result.ruleErrors[0].days, /0 to 6/);
-  assert.match(result.ruleErrors[0].amps, /whole number/);
   // Non-object rules keep the editable shape without inventing values.
   assert.deepEqual(normalizeSchedule({ enabled: true, rules: [null, 5] }).rules, [
-    { id: '', days: [], start: '', end: '', amps: 0 },
-    { id: '', days: [], start: '', end: '', amps: 0 },
+    { id: '', days: [], start: '', end: '' },
+    { id: '', days: [], start: '', end: '' },
   ]);
 });
 
@@ -211,7 +195,6 @@ test('scheduleSaveValid lets a disable through invalid rules but not container e
   assert.equal(scheduleSaveValid(invalidDisabled), true);
   // Enabled schedules still need every rule to pass.
   assert.equal(scheduleSaveValid(schedule({ rules: [rule({ days: [] })] })), false);
-  assert.equal(scheduleSaveValid(schedule({ rules: [rule({ amps: 10.5 })] })), false);
   // Container errors block every save, including a disable.
   const tooMany = {
     enabled: false,
@@ -221,7 +204,7 @@ test('scheduleSaveValid lets a disable through invalid rules but not container e
   assert.equal(scheduleSaveValid({ enabled: false, rules: 'nope' }), false);
 });
 
-const payload = schedule({ rules: [rule({ amps: 40 })] });
+const payload = schedule({ rules: [rule({ start: '21:00' })] });
 
 test('reconcileAfterSave succeeds on the echo, a remote snapshot, or the payload', () => {
   const echo = reconcileAfterSave({
@@ -369,7 +352,7 @@ test('scheduleKey ignores day order but notices any real change', () => {
   assert.equal(scheduleKey(a), scheduleKey(b));
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ enabled: false })));
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ start: '23:00' })] })));
-  assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ amps: 16 })] })));
+  assert.equal(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ amps: 16 })] })));
   assert.notEqual(scheduleKey(a), scheduleKey(schedule({ rules: [rule({ id: 'other' })] })));
   // Clearing a malformed-container flag is a real change: it is the user
   // explicitly replacing the stored shape.
@@ -377,14 +360,14 @@ test('scheduleKey ignores day order but notices any real change', () => {
 });
 
 test('reconcileDirtyRemote tracks server truth without touching the draft', () => {
-  const draft = schedule({ rules: [rule({ amps: 40 })] });
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const draft = schedule({ rules: [rule({ start: '21:00' })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
   const result = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: remote });
   assert.equal(scheduleKey(result.confirmed), scheduleKey(remote));
   assert.equal(result.dirty, true);
   assert.equal(result.remoteNotice, true);
   // The draft object itself is untouched (the editor owns it).
-  assert.equal(draft.rules[0].amps, 40);
+  assert.equal(draft.rules[0].start, '21:00');
 
   // The server is still on the snapshot the draft was based on: no notice.
   const same = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: schedule() });
@@ -398,8 +381,8 @@ test('reconcileDirtyRemote tracks server truth without touching the draft', () =
 });
 
 test('reconcileDirtyRemote marks a metadata-only repeat so notices stay sticky', () => {
-  const draft = schedule({ rules: [rule({ amps: 40 })] });
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const draft = schedule({ rules: [rule({ start: '21:00' })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
   const changed = reconcileDirtyRemote({ confirmed: schedule(), draft, incoming: remote });
   assert.equal(changed.metadataOnly, false);
   assert.equal(changed.remoteNotice, true);
@@ -428,7 +411,7 @@ test('reloadQueuedState labels a pending snapshot with no local save in flight',
   assert.deepEqual(same, { queued: true, payloadKey: key, outcome: 'none', adopt: false });
 
   // A different pending payload (a newer queued write) becomes the baseline.
-  const newerKey = scheduleKey(schedule({ rules: [rule({ amps: 24 })] }));
+  const newerKey = scheduleKey(schedule({ rules: [rule({ start: '23:00' })] }));
   const newer = reloadQueuedState({
     pendingWrites: true,
     queued: true,
@@ -491,7 +474,7 @@ test('reloadQueuedState clears the queued state when the payload is acknowledged
 });
 
 test('reloadDiscardBaseline enables Discard only with a trustworthy server copy', () => {
-  const server = schedule({ rules: [rule({ amps: 24 })] });
+  const server = schedule({ rules: [rule({ start: '23:00' })] });
   const payloadKey = scheduleKey(payload);
 
   const ready = reloadDiscardBaseline({ baseline: server, baselineKey: payloadKey, payloadKey });
@@ -552,7 +535,7 @@ test('reloadDiscardBaseline enables Discard only with a trustworthy server copy'
 
 test('reloadQueuedState reports a changed acknowledged snapshot as reverted', () => {
   const key = scheduleKey(payload);
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
   const remoteKey = scheduleKey(remote);
   // Clean draft (still the queued payload): the screen may adopt server truth.
   const clean = reloadQueuedState({
@@ -574,7 +557,7 @@ test('reloadQueuedState reports a changed acknowledged snapshot as reverted', ()
     queued: true,
     dataKey: remoteKey,
     payloadKey: key,
-    draftKey: scheduleKey(schedule({ rules: [rule({ amps: 16 })] })),
+    draftKey: scheduleKey(schedule({ rules: [rule({ start: '20:00' })] })),
   });
   assert.equal(dirty.outcome, 'reverted');
   assert.equal(dirty.adopt, false);
@@ -611,7 +594,7 @@ test('reloadQueuedState leaves the state alone when snapshot metadata is absent'
 
 test('routeScheduleSnapshot keeps an in-session write ahead of the queued branches', () => {
   const key = scheduleKey(payload);
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
   // A metadata repeat while the write is in flight changes no notice: the
   // snapshot belongs to the promise, even when it carries pending metadata.
   assert.deepEqual(
@@ -676,7 +659,7 @@ test('routeScheduleSnapshot leaves a metadata repeat of a reload-queued write in
   assert.equal(acked.kind, 'transition');
   assert.equal(acked.transition.outcome, 'acked');
   // A newer pending payload re-baselines instead of being ignored.
-  const newer = schedule({ rules: [rule({ amps: 24 })] });
+  const newer = schedule({ rules: [rule({ start: '23:00' })] });
   const next = routeScheduleSnapshot({ ...still, incoming: newer, pendingWrites: true });
   assert.equal(next.kind, 'transition');
   assert.equal(next.transition.outcome, 'queued');
@@ -685,8 +668,8 @@ test('routeScheduleSnapshot leaves a metadata repeat of a reload-queued write in
 
 test('routeScheduleSnapshot resolves a queued write before the dirty-draft branch', () => {
   const key = scheduleKey(payload);
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
-  const dirtyDraft = schedule({ rules: [rule({ amps: 16 })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
+  const dirtyDraft = schedule({ rules: [rule({ start: '20:00' })] });
   const base = {
     initialized: true,
     queued: true,
@@ -713,9 +696,9 @@ test('routeScheduleSnapshot resolves a queued write before the dirty-draft branc
 });
 
 test('routeScheduleSnapshot keeps the notice on a metadata-only repeat while dirty', () => {
-  const remote = schedule({ rules: [rule({ amps: 24 })] });
-  const changed = schedule({ rules: [rule({ amps: 20 })] });
-  const draft = schedule({ rules: [rule({ amps: 16 })] });
+  const remote = schedule({ rules: [rule({ start: '23:00' })] });
+  const changed = schedule({ rules: [rule({ start: '20:00' })] });
+  const draft = schedule({ rules: [rule({ start: '21:00' })] });
   const repeat = routeScheduleSnapshot({
     initialized: true,
     dirty: true,
@@ -765,7 +748,7 @@ test('routeScheduleSnapshot keeps "Saved." on a data-identical clean repeat', ()
     initialized: true,
     confirmed: payload,
     draft: payload,
-    incoming: schedule({ rules: [rule({ amps: 24 })] }),
+    incoming: schedule({ rules: [rule({ start: '23:00' })] }),
   });
   assert.equal(adopt.kind, 'adopt');
   // First snapshot: the screen adopts it and only applies the queue transition.
@@ -780,7 +763,7 @@ test('routeScheduleSnapshot keeps "Saved." on a data-identical clean repeat', ()
 });
 
 test('discardTarget writes only a baseline the state can justify', () => {
-  const server = schedule({ rules: [rule({ amps: 24 })] });
+  const server = schedule({ rules: [rule({ start: '23:00' })] });
   const key = scheduleKey(payload);
   const ready = reloadDiscardBaseline({ baseline: server, baselineKey: key, payloadKey: key });
   assert.equal(
@@ -843,9 +826,9 @@ test('discardRetry retries only a failed online read, within a bounded budget', 
 });
 
 test('a discard baseline is only usable for the payload it was read for', () => {
-  const server = schedule({ rules: [rule({ amps: 24 })] });
+  const server = schedule({ rules: [rule({ start: '23:00' })] });
   const keyP1 = scheduleKey(payload);
-  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ start: '18:00' })] }));
   assert.notEqual(keyP1, keyP2);
 
   const current = reloadDiscardBaseline({
@@ -874,7 +857,7 @@ test('a discard baseline is only usable for the payload it was read for', () => 
 
 test('a new queued payload invalidates the old baseline and starts a fresh read', () => {
   const keyP1 = scheduleKey(payload);
-  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ start: '18:00' })] }));
 
   // A ready copy for the previous payload: dropped, and a new read started.
   assert.deepEqual(
@@ -920,7 +903,7 @@ test('a new queued payload invalidates the old baseline and starts a fresh read'
 
 test('a baseline read for a superseded payload cannot land', () => {
   const keyP1 = scheduleKey(payload);
-  const keyP2 = scheduleKey(schedule({ rules: [rule({ amps: 48 })] }));
+  const keyP2 = scheduleKey(schedule({ rules: [rule({ start: '18:00' })] }));
   const read = { readGeneration: 3, readToken: 7, readKey: keyP1 };
   const current = { generation: 3, token: 7, payloadKey: keyP1 };
 
