@@ -440,6 +440,13 @@ with `must sign in once first` until it does (DEPLOY.md §9).
 | 7.4 | History — offline miss | Offline on a fresh app with no cached rows: "You're offline — history isn't available." / "You're offline — sessions aren't available."                                                                                                                                                                  | Screenshot                         |
 | 7.5 | History — empty        | A deployment with no `history` docs yet: "No history yet — Daily totals appear once the charger logs a day."; the sessions section shows its empty state.                                                                                                                                                | Screenshot                         |
 | 7.6 | Cold start offline     | Reload while offline: the boot card explains the app could not load (config/SDK are network-only). This is the documented limitation from §1.5.                                                                                                                                                          | Screenshot                         |
+| 7.7 | Status failed read     | A non-`permission-denied` status listener error before any snapshot shows "Couldn't load the charger status." as an alert plus **Try again**; no "waiting for data", blank figures, no banner. Retry restores the live screen in place.                                                                  | Screenshot (320/390 px)            |
+
+7.7 needs a listener error, not an offline browser: block
+`firestore.googleapis.com` in DevTools' Network panel, or take the network down
+until the status listener gives up, then open the app. Restore it and press
+**Try again** — recovery must not need a page reload. Verified at 320 px and
+390 px.
 
 ## 8. Security
 
