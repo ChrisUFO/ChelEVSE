@@ -272,7 +272,15 @@ function renderSummary() {
 
 function showChartEmpty(title, line) {
   $('history-chart').setAttribute('hidden', '');
-  $('chart-head').hidden = true;
+  // The head stays visible: the paging controls live in it, and an empty window
+  // is still a window the owner has to be able to page out of. Its readout
+  // describes a bar that is no longer drawn, so it returns to its initial
+  // "nothing selected" state instead of naming the previous window.
+  $('chart-head').hidden = false;
+  setText($('chart-day'), '—');
+  setText($('chart-kwh'), '—');
+  $('chart-cost').hidden = true;
+  setText($('chart-cost'), '');
   $('chart-empty').hidden = false;
   // A hidden chart must not keep another period's points in the DOM; the next
   // paint rebuilds them from the selected range.

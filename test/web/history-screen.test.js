@@ -1178,6 +1178,14 @@ test('a paged window names its dates everywhere and never says today', async () 
       element('chart-empty-title').textContent,
       'No energy recorded in 20 August – 18 September 2026.',
     );
+    // An empty window is still a window: the paging controls stay on screen, so
+    // the owner can page back out of it.
+    assert.equal(element('chart-head').hidden, false);
+    assert.equal(element('chart-next').disabled, false);
+    assert.equal(element('chart-prev').disabled, false);
+    // Its readout names no bar from the window that was on screen before.
+    assert.equal(element('chart-day').textContent, '—');
+    assert.equal(element('chart-kwh').textContent, '—');
 
     // A paged window's readout names its own newest bucket (no bucket in it is
     // current, so the newest is selected) and still prices its $.
