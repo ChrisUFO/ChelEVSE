@@ -190,6 +190,9 @@ test('configSignature reports no signature for unusable documents', () => {
 // The Config screen renders into the live DOM. Give it the smallest document it
 // needs — one stub element per id — and import the module afterwards; every
 // lookup is deferred to render time (same pattern as status-pulse.test.js).
+// `listeners` and `focusLog` are the only observers an unstubbed DOM offers: the
+// Retry wiring and the focus it restores are recorded, not executed
+// (status-error.test.js records the same way).
 function stubElement() {
   return {
     hidden: false,
@@ -197,6 +200,8 @@ function stubElement() {
     dataset: {},
     attrs: {},
     children: [],
+    id: '',
+    listeners: new Map(),
     replaceChildren(...nodes) {
       this.children = nodes;
       this.textContent = nodes.map((node) => node.textContent || '').join('');
@@ -208,15 +213,25 @@ function stubElement() {
     setAttribute(name, value) {
       this.attrs[name] = value;
     },
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    },
+    focus(options) {
+      this.focused = options;
+      focusLog.push(this.id);
+    },
   };
 }
+
+const focusLog = [];
 
 const elements = new Map();
 const element = (id) => {
   let node = elements.get(id);
   if (!node) {
     node = stubElement();
+    node.id = id;
     elements.set(id, node);
   }
   return node;
@@ -227,7 +242,9 @@ globalThis.document = {
   createElement: () => stubElement(),
 };
 
-const { showConfigData, showConfigError } = await import('../../web/js/screens/config.js');
+const { initConfig, showConfigData, showConfigError } =
+  await import('../../web/js/screens/config.js');
+initConfig();
 
 const clock = (iso) => ({ toDate: () => new Date(iso) });
 const heading = () => element('config-updated').textContent;
@@ -279,6 +296,32 @@ test('a failed read says so, without a reload instruction', () => {
   assert.equal(error.hidden, true);
   assert.equal(error.textContent, '');
   assert.equal(element('config-retry').hidden, true);
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The click itself moves nothing while the retry is pending.
+  const retry = element('config-retry');
+  const listeners = retry.listeners.get('click') || [];
+  assert.equal(listeners.length, 1, 'initConfig wired #config-retry once');
+
+  showConfigError();
+  focusLog.length = 0;
+  listeners[0]();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showConfigData({ hostname: 'garage' });
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-config');
+  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  showConfigError();
+  focusLog.length = 0;
+  showConfigData({ hostname: 'garage' });
+  assert.deepEqual(focusLog, []);
 });
 
 test('each curated group is a collapsed disclosure with its heading in the summary', () => {

@@ -449,8 +449,20 @@ with `must sign in once first` until it does (DEPLOY.md §9).
 7.7–7.11 need a listener error, not an offline browser: block
 `firestore.googleapis.com` in DevTools' Network panel, or take the network down
 until the listener gives up, then open the app. Restore it and press
-**Try again** — recovery must not need a page reload. Verified at 320 px and
-390 px.
+**Try again** — recovery must not need a page reload.
+
+What was actually measured, and what was not: the failure row of the four screens
+this unit adds (Schedule, Config, the Settings card in the same `#panel-config`,
+and the RAPI log) was rendered from the shipped `web/index.html` + `web/styles.css`
+in headless Chromium at 320×720 and 390×780, one capture per screen per width
+(`/tmp/opencode/retry-four-recheck/`, `shoot.cjs` + `metrics.json`; each capture
+asserts its own panel id and the harness fails on duplicate images). At both
+widths: the copy sits 8 px above its Retry (the Settings card's row gap is that
+8 px; the other three carry `margin-top`), the Retry measures 83.1 × 44 px, the
+document has 0 px horizontal overflow, the failure copy contrasts 5.97–6.56:1
+against its composited card, and neither the copy nor the control is under the
+fixed tab bar. 7.7 (Status) was not part of that pass, and no measurement here
+covers the screen-reader announcement — that still needs the manual error above.
 
 ## 8. Security
 

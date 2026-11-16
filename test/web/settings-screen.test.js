@@ -101,7 +101,8 @@ function stubElement(tag = '') {
       listeners.get(type).push(listener);
     },
     removeEventListener() {},
-    focus() {
+    focus(options) {
+      this.focused = options;
       focusLog.push(this.id);
     },
     click() {},
@@ -742,6 +743,35 @@ test('a failed settings read says so beside a Retry, and a snapshot clears both'
   showSettingsData(storedDoc);
   assert.equal(element('settings-retry').hidden, true);
   assert.equal(feedbackText(), '');
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the Config panel (which owns the
+  // Settings card) takes it instead. The click itself moves nothing while the
+  // retry is pending.
+  resetSettings();
+  showSettingsError();
+  const retry = element('settings-retry');
+  focusLog.length = 0;
+
+  for (const listener of retry.listeners.get('click') || []) listener();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showSettingsData(storedDoc);
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-config');
+  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  // Recovery focus must not become a general "every snapshot jumps the caret"
+  // rule: the settings listener fires on every remote edit.
+  resetSettings();
+  showSettingsError();
+  focusLog.length = 0;
+  showSettingsData(storedDoc);
+  assert.deepEqual(focusLog, []);
 });
 
 test('a typed draft survives the retry snapshot that clears the failure', () => {

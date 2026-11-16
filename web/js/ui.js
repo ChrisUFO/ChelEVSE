@@ -17,6 +17,19 @@ export function el(tag, className, text) {
   return node;
 }
 
+// Retry leaves with the failure it belonged to, and a focused node that leaves
+// the tree drops focus to <body> — the top of the document, with nothing said
+// about what just happened. Move it to the panel the snapshot refilled, but only
+// when the trigger is really gone and nothing else has taken focus since. The
+// shape is status.js's focusAfterRetry, for the same reason (#153).
+export function focusAfterRetry(retry, panelId) {
+  if (!retry || !retry.hidden) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) return;
+  const panel = $(panelId);
+  if (panel) panel.focus({ preventScroll: true });
+}
+
 // Toggle one weekday in an editor's `days` array: the result keeps the array
 // sorted and unique, the shared edit idiom of both day-chip editors.
 export function toggleDay(days, day) {

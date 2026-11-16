@@ -3,7 +3,7 @@
 // leaving the tab re-arms it. The scrollback is the realtime RAPI history the
 // store subscribes to (type == 'rapi', newest first, 20 entries).
 
-import { $, el, setText } from '../ui.js';
+import { $, el, focusAfterRetry, setText } from '../ui.js';
 import {
   GATE_INITIAL,
   commandMillis,
@@ -26,6 +26,9 @@ const STATUS_LABEL = {
 let commands = [];
 let logLoaded = false;
 let logError = '';
+// Set by the Retry click: the render that clears the failure moves focus off the
+// control that just left the tree (see renderLog).
+let retryRequested = false;
 let renderedLogSignature = null;
 let sendGeneration = 0;
 let gate = { ...GATE_INITIAL };
@@ -57,6 +60,11 @@ function renderLog() {
     return;
   }
   retry.hidden = true;
+  // Recovery lands where the user was, not at the top of the page.
+  if (retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry, 'panel-advanced');
+  }
   if (!logLoaded) {
     state.hidden = false;
     state.className = 'section-state';
@@ -290,6 +298,7 @@ export function initAdvanced() {
   // no budget. The copy goes with the click so a retry that fails again re-writes
   // the line and is announced.
   $('rapi-log-retry').addEventListener('click', () => {
+    retryRequested = true;
     setText($('rapi-log-state'), '');
     retryStore();
   });
@@ -338,6 +347,7 @@ export function resetAdvanced() {
   commands = [];
   logLoaded = false;
   logError = '';
+  retryRequested = false;
   sendGeneration += 1;
   gate = { ...GATE_INITIAL };
   stopTicker();

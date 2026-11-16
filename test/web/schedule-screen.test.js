@@ -76,13 +76,20 @@ function stubElement(tag = '') {
       listeners.get(type).push(listener);
     },
     removeEventListener() {},
-    focus() {},
+    focus(options) {
+      this.focused = options;
+      focusLog.push(this.id);
+    },
     click() {},
     scrollIntoView() {},
   };
 }
 
 const elements = new Map();
+
+// What the screen moved focus to, in order (status-error.test.js records the
+// same way: the stub's focus() is the only observer an unstubbed DOM offers).
+const focusLog = [];
 
 function element(id) {
   let node = elements.get(id);
@@ -369,6 +376,113 @@ test('a retry that re-delivers the same schedule clears the failure', () => {
   assert.equal(error.textContent, '');
   assert.equal(element('schedule-retry').hidden, true);
   assert.deepEqual(feedback(), { text: '', className: 'feedback' });
+});
+
+// The reload-queued state: the cached document carries the write, so a
+// re-delivery of the same payload is the `queued-still` route and the same
+// payload with `pendingWrites: false` is the `transition`/`acked` one.
+function queuedFromSnapshot() {
+  resetSchedule();
+  enterSchedule();
+  showSchedule(document_, { pendingWrites: true });
+}
+
+test('a retry that re-delivers a still-queued write clears the failure', () => {
+  // Regression: `queued-still` returned before clearing, so a retry that
+  // re-delivered the same queued snapshot left the failure line, its Retry and
+  // the editor lock on screen over a read that had demonstrably worked.
+  queuedFromSnapshot();
+  showScheduleError();
+  const error = element('schedule-load-error');
+  assert.equal(error.hidden, false);
+  assert.equal(element('schedule-retry').hidden, false);
+
+  // An edit made while the line is up is what applies the lock (syncControls
+  // reads `loadError`); it is the real sequence this route strands.
+  const editor = element('schedule-editor');
+  const controls = [element('save-schedule'), element('add-rule'), element('discard-schedule')];
+  const originalQuerySelectorAll = editor.querySelectorAll;
+  editor.querySelectorAll = (selector) => (selector === 'input, button' ? controls : []);
+  try {
+    const card = element('rule-list').children[0];
+    const ampsInput = card.children[3].children[1].children[1];
+    ampsInput.value = '30';
+    fire(ampsInput, 'input');
+    assert.equal(element('save-schedule').disabled, true, 'a failed read locks the editor');
+
+    showSchedule(document_, { pendingWrites: true });
+    assert.equal(error.hidden, true, 'the re-delivered snapshot proves the read works');
+    assert.equal(error.textContent, '');
+    assert.equal(element('schedule-retry').hidden, true);
+    assert.equal(element('save-schedule').disabled, false, 'the lock leaves with the failure');
+    assert.deepEqual(feedback(), {
+      text: 'Queued — will save when online. Newer edits are not saved yet.',
+      className: 'feedback warn',
+    });
+  } finally {
+    editor.querySelectorAll = originalQuerySelectorAll;
+  }
+  resetSchedule();
+});
+
+test('a retry after the queued write acks clears the failure', () => {
+  // The other half of the same defect: an ack takes the `transition` route and
+  // only its reverted sub-case cleared the failure (through adopt), so the err
+  // copy sat over the "Saved." label with Try again beside it.
+  queuedFromSnapshot();
+  showScheduleError();
+  const error = element('schedule-load-error');
+  assert.equal(error.hidden, false);
+
+  showSchedule(document_, { pendingWrites: false });
+  assert.equal(error.hidden, true);
+  assert.equal(error.textContent, '');
+  assert.equal(element('schedule-retry').hidden, true);
+  assert.deepEqual(feedback(), { text: 'Saved.', className: 'feedback ok' });
+  resetSchedule();
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The click itself moves nothing while the retry is pending.
+  adoptOneRule();
+  showScheduleError();
+  const retry = element('schedule-retry');
+  focusLog.length = 0;
+
+  fire(retry, 'click');
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showSchedule(document_);
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-schedule');
+  assert.deepEqual(element('panel-schedule').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  // Recovery focus must not become a general "every snapshot jumps the caret"
+  // rule: nothing was asked for, so nothing moves.
+  adoptOneRule();
+  showScheduleError();
+  focusLog.length = 0;
+  showSchedule(document_);
+  assert.deepEqual(focusLog, []);
+});
+
+test('a retry does not take focus from where the user put it', () => {
+  adoptOneRule();
+  showScheduleError();
+  fire(element('schedule-retry'), 'click');
+  // The user tabbed into the editor before the answer landed.
+  globalThis.document.activeElement = element('schedule-enabled');
+  focusLog.length = 0;
+  try {
+    showSchedule(document_);
+    assert.deepEqual(focusLog, [], 'a focused user control keeps its focus');
+  } finally {
+    delete globalThis.document.activeElement;
+  }
 });
 
 test('the plan count and empty state follow the rendered rules', () => {

@@ -211,7 +211,11 @@ test('the index error points at Try again, not a page reload', () => {
 
 // The same module-mock-free DOM stub the other screen tests use: one stub per
 // id, lookups deferred to render time, then a plain import of the real screen
-// module (no jsdom, no module mocks).
+// module (no jsdom, no module mocks). `listeners` and `focusLog` are the only
+// observers an unstubbed DOM offers for the Retry wiring and the focus it
+// restores (status-error.test.js records the same way).
+const focusLog = [];
+
 function stubElement(tag = '') {
   return {
     tag,
@@ -219,7 +223,9 @@ function stubElement(tag = '') {
     textContent: '',
     hidden: false,
     id: '',
+    focused: null,
     children: [],
+    listeners: new Map(),
     replaceChildren(...nodes) {
       this.children = nodes;
     },
@@ -228,7 +234,14 @@ function stubElement(tag = '') {
     },
     setAttribute() {},
     removeAttribute() {},
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(listener);
+    },
+    focus(options) {
+      this.focused = options;
+      focusLog.push(this.id);
+    },
     querySelector: () => null,
     querySelectorAll: () => [],
   };
@@ -250,7 +263,10 @@ globalThis.document = {
   createElement: (tag) => stubElement(tag),
 };
 
-const { showRapiCommands, showRapiError } = await import('../../web/js/screens/advanced.js');
+const { initAdvanced, showRapiCommands, showRapiError } =
+  await import('../../web/js/screens/advanced.js');
+// The Retry case needs the listener initAdvanced itself registers.
+initAdvanced();
 
 test('a failed log read shows its copy beside a Retry, and a snapshot clears both', () => {
   showRapiError({ code: 'unavailable' });
@@ -266,6 +282,32 @@ test('a failed log read shows its copy beside a Retry, and a snapshot clears bot
   assert.equal(element('rapi-log-retry').hidden, true);
   assert.equal(state.className, 'section-state');
   assert.equal(state.textContent, 'No commands sent yet. Recent RAPI commands will appear here.');
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The click itself moves nothing while the retry is pending.
+  const retry = element('rapi-log-retry');
+  const listeners = retry.listeners.get('click') || [];
+  assert.equal(listeners.length, 1, 'initAdvanced wired #rapi-log-retry once');
+
+  showRapiError({ code: 'unavailable' });
+  focusLog.length = 0;
+  listeners[0]();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showRapiCommands([]);
+  assert.equal(retry.hidden, true);
+  assert.equal(focusLog.at(-1), 'panel-advanced');
+  assert.deepEqual(element('panel-advanced').focused, { preventScroll: true });
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  showRapiError({ code: 'unavailable' });
+  focusLog.length = 0;
+  showRapiCommands([]);
+  assert.deepEqual(focusLog, []);
 });
 
 test('index.html makes the log line a polite live region above its Retry', () => {

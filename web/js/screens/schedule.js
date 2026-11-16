@@ -12,7 +12,7 @@
 // Those repeats are guarded by transition, never applied as new data, and they
 // never erase a notice that explains the last real change.
 
-import { $, buildDayPicker, el, setText } from '../ui.js';
+import { $, buildDayPicker, el, focusAfterRetry, setText } from '../ui.js';
 import { readScheduleBaseline, retryStore, saveSchedule } from '../store.js';
 import {
   DAY_NAMES,
@@ -41,6 +41,9 @@ import { settleWrite } from '../write.js';
 let active = false;
 let initialized = false;
 let loadError = false;
+// Set by the Retry click: the render that clears the failure moves focus off the
+// control that just left the tree (see renderLoadError).
+let retryRequested = false;
 let confirmed = defaultSchedule();
 let draft = defaultSchedule();
 let dirty = false;
@@ -545,7 +548,13 @@ function renderLoadError() {
   const error = $('schedule-load-error');
   error.hidden = !failed;
   setText(error, failed ? LOAD_FAILED : '');
-  $('schedule-retry').hidden = !failed;
+  const retry = $('schedule-retry');
+  retry.hidden = !failed;
+  // Recovery lands where the user was, not at the top of the page.
+  if (!failed && retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry, 'panel-schedule');
+  }
 }
 
 // A successful read owns the failure state: it goes without rebuilding the form
@@ -807,6 +816,7 @@ export function initSchedule() {
   // again must re-write the live line, and an unchanged line is no mutation, so
   // nothing would be announced.
   $('schedule-retry').addEventListener('click', () => {
+    retryRequested = true;
     setText($('schedule-load-error'), '');
     setText($('schedule-feedback'), '');
     retryStore();
@@ -898,6 +908,12 @@ export function showSchedule(data, meta) {
     pendingWrites,
     payloadKey: savingPayloadKey,
   });
+  // Every branch below is a snapshot the listener delivered, which is the one
+  // thing the failure line contradicts: the read works, so its line, its Retry
+  // and the editor lock leave here, before the route decides what to do with the
+  // data. The routes that repaint themselves re-announce the save bar; the two
+  // that return without a full paint repaint what the clear changed.
+  const cleared = clearLoadError();
   switch (route.kind) {
     case 'initial':
       adopt(incoming);
@@ -915,15 +931,19 @@ export function showSchedule(data, meta) {
       if (route.remoteChange !== null) {
         remoteNotice = route.remoteChange ? REMOTE_NOTICE : '';
       }
-      // A snapshot arriving is a working read, whatever it does to the draft.
-      clearLoadError();
       validateAndPaint();
       return;
     case 'transition':
+      // The queued write was acknowledged or replaced: applyQueueTransition
+      // repaints the label it lands on.
       applyQueueTransition(route.transition, incoming);
       return;
     case 'queued-still':
-      // Still queued on the same payload (or metadata absent): nothing changed.
+      // Still queued on the same payload (or metadata absent): nothing about the
+      // data changed, and this route never painted. A retry that re-delivered it
+      // still proves the read works, so the clear above has to reach the screen:
+      // the save bar shows the queued label and the editor unlocks.
+      if (cleared) validateAndPaint();
       return;
     case 'dirty': {
       const result = route.reconcile;
@@ -933,9 +953,6 @@ export function showSchedule(data, meta) {
       // notice explaining the last real change.
       if (!result.metadataOnly) remoteNotice = result.remoteNotice ? REMOTE_NOTICE : '';
       pendingRemote = null;
-      // The draft is kept, but the read itself succeeded, so the failure line
-      // and its Retry leave with it.
-      clearLoadError();
       validateAndPaint();
       return;
     }
@@ -945,10 +962,7 @@ export function showSchedule(data, meta) {
       // "Saved." and any notice about the last real change in place.
       confirmed = incoming;
       pendingRemote = null;
-      // This is exactly the post-retry case: an unchanged snapshot after a
-      // listener failure still proves the read works, so the failure state must
-      // not outlive it.
-      if (clearLoadError()) renderFeedback();
+      if (cleared) renderFeedback();
       return;
     default:
       // Clean form and a genuinely new server state: adopt it (and clear
@@ -984,6 +998,7 @@ export function resetSchedule() {
   active = false;
   initialized = false;
   loadError = false;
+  retryRequested = false;
   confirmed = defaultSchedule();
   draft = defaultSchedule();
   dirty = false;

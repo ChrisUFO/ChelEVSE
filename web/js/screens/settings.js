@@ -8,7 +8,7 @@
 // through the same draft/dirty/saved/waiting/error machine, and a failed write
 // still reconciles back to the last confirmed server state.
 
-import { $, el, setText } from '../ui.js';
+import { $, el, focusAfterRetry, setText } from '../ui.js';
 import {
   LOAD_FAILED_MESSAGE,
   OFFLINE_MESSAGE,
@@ -88,6 +88,9 @@ let settingsLoaded = false;
 // hold on Save then has no natural end (a failed subscription does not retry),
 // so the card must say why instead of showing "Loading…" forever.
 let settingsLoadFailed = false;
+// Set by the Retry click: the paint that clears the failure moves focus off the
+// control that just left the tree (see paintFeedback).
+let settingsRetryRequested = false;
 // A snapshot that arrived while a write was in flight. The wrapper keeps "no
 // snapshot arrived" distinct from "the document is missing".
 let pendingSettings = null;
@@ -995,7 +998,14 @@ function paintFeedback() {
   // The failed read's own control rides the same view that carries its copy: it
   // appears with the failure and leaves with the first snapshot
   // (settingsLoadFailed = false).
-  $('settings-retry').hidden = !loadFailed;
+  const retry = $('settings-retry');
+  retry.hidden = !loadFailed;
+  // Recovery lands where the user was, not at the top of the page. The settings
+  // card lives in the Config panel, which is the region the snapshot refilled.
+  if (!loadFailed && settingsRetryRequested) {
+    settingsRetryRequested = false;
+    focusAfterRetry(retry, 'panel-config');
+  }
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
   // saved: the same count as the save-row chip relabels the button and marks it
@@ -1450,6 +1460,7 @@ export function initSettings() {
   // re-write the live region, and an unchanged line is no mutation, so nothing
   // would be announced.
   $('settings-retry').addEventListener('click', () => {
+    settingsRetryRequested = true;
     setText($('settings-feedback'), '');
     retryStore();
   });
@@ -1496,6 +1507,7 @@ export function resetSettings() {
   confirmedSettings = null;
   settingsLoaded = false;
   settingsLoadFailed = false;
+  settingsRetryRequested = false;
   pendingSettings = null;
   settingsDirty = false;
   settingsSaving = false;

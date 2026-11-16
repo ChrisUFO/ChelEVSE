@@ -3,7 +3,7 @@
 // disclosure at the end of the same card. Changes go through the Advanced
 // console; the data layer keeps this screen a pure renderer.
 
-import { $, el, setText } from '../ui.js';
+import { $, el, focusAfterRetry, setText } from '../ui.js';
 import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
 import { fmtK, toNumber } from '../format.js';
 import { retryStore } from '../store.js';
@@ -13,6 +13,9 @@ const CONFIG_FAILED = 'Couldn’t load the charger configuration.';
 let config = null;
 let configLoaded = false;
 let configFailed = false;
+// Set by the Retry click: the render that clears the failure moves focus off the
+// control that just left the tree (see render()).
+let retryRequested = false;
 // Signature of the snapshot currently on screen, so a replace that only bumps
 // `updated_at` refreshes the heading instead of rebuilding the panel (which
 // would collapse a text selection the user is copying).
@@ -52,7 +55,13 @@ function render() {
   // mutation rather than a bare un-hide.
   error.hidden = !configFailed;
   setText(error, configFailed ? CONFIG_FAILED : '');
-  $('config-retry').hidden = !configFailed;
+  const retry = $('config-retry');
+  retry.hidden = !configFailed;
+  // Recovery lands where the user was, not at the top of the page.
+  if (!configFailed && retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry, 'panel-config');
+  }
   setText($('config-updated'), config ? syncedLabel(config) : '');
 
   if (configFailed || !configLoaded) {
@@ -165,6 +174,7 @@ export function initConfig() {
   // no budget. The copy goes with the click so a retry that fails again re-writes
   // the live line and is announced.
   $('config-retry').addEventListener('click', () => {
+    retryRequested = true;
     setText($('config-error'), '');
     retryStore();
   });
@@ -175,6 +185,7 @@ export function resetConfig() {
   config = null;
   configLoaded = false;
   configFailed = false;
+  retryRequested = false;
   lifetime = null;
   renderLifetime();
   if (!$('config-sections')) return;
