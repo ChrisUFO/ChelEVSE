@@ -150,13 +150,37 @@ test('pause and resume are unaffected by the current ceiling', async () => {
 
 // An absent status/config makes get() null, so .data errors and the create is
 // denied — fail-closed, never a fallback ceiling. The bridge is equally
-// unwilling to set current without verified capabilities.
-test('set_current is denied when status/config is absent', async () => {
+// unwilling to set current without verified capabilities. The lookup sits
+// inside the set_current branch, so the commands that never read it must keep
+// working: hoisting get() above the type dispatch would strand pause/resume on
+// a device whose config has not been written yet.
+test('set_current is denied when status/config is absent, pause and resume are not', async () => {
   await env.withSecurityRulesDisabled(async (context) => {
     await deleteDoc(doc(context.firestore(), 'status', 'config'));
   });
   try {
     await assertFails(writeCommand(allowlisted(), 'current-no-config', setCurrent(16)));
+    await assertSucceeds(
+      writeCommand(allowlisted(), 'pause-no-config', { type: 'pause', status: 'pending' }),
+    );
+    await assertSucceeds(
+      writeCommand(allowlisted(), 'resume-no-config', { type: 'resume', status: 'pending' }),
+    );
+  } finally {
+    await seedConfig();
+  }
+});
+
+// A present config without the soft ceiling is not a licence to fall back to
+// another limit: the rule requires the field to be a number, so the create
+// fails. A tolerant lookup (.get('max_current_soft', 48)) would pass here and
+// silently reintroduce the hard-coded ceiling.
+test('set_current is denied when status/config omits max_current_soft', async () => {
+  await env.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'status', 'config'), { hostname: 'x' });
+  });
+  try {
+    await assertFails(writeCommand(allowlisted(), 'current-no-soft', setCurrent(16)));
   } finally {
     await seedConfig();
   }
