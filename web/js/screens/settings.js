@@ -54,7 +54,7 @@ import {
   validationProblemCount,
 } from '../settings.js';
 import { MAX_RATE_WINDOWS, monthsCovering } from '../rates.js';
-import { saveSettings as persistSettings } from '../store.js';
+import { retryStore, saveSettings as persistSettings } from '../store.js';
 import { settleWrite } from '../write.js';
 import {
   createPeriodCard,
@@ -965,6 +965,7 @@ function announcePreview() {
 
 function paintFeedback() {
   const feedback = $('settings-feedback');
+  const loadFailed = !settingsLoaded && settingsLoadFailed;
   const view = settingsSaveState({
     draft: readFields(),
     confirmed: confirmedSettings,
@@ -972,7 +973,7 @@ function paintFeedback() {
     saving: settingsSaving,
     waiting: settingsWaiting,
     saved: settingsSaved,
-    error: settingsError || (!settingsLoaded && settingsLoadFailed ? LOAD_FAILED_MESSAGE : ''),
+    error: settingsError || (loadFailed ? LOAD_FAILED_MESSAGE : ''),
     offline: isOffline(),
   });
   // The value comparison is the only dirty rule; keep the flag in step.
@@ -991,6 +992,10 @@ function paintFeedback() {
   const capped = draftRates.length > MAX_RATE_WINDOWS;
   const problems = validationProblemCount(rateValidation, draftRates.length);
   setText(feedback, view.text || (capped && problems > 0 ? RATE_CAP_REMEDY : ''));
+  // The failed read's own control rides the same view that carries its copy: it
+  // appears with the failure and leaves with the first snapshot
+  // (settingsLoadFailed = false).
+  $('settings-retry').hidden = !loadFailed;
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
   // saved: the same count as the save-row chip relabels the button and marks it
@@ -1439,6 +1444,15 @@ export function initSettings() {
   // exactly like the One-rate confirm.
   $('stay-settings').addEventListener('click', stayOnSettings);
   $('discard-settings').addEventListener('click', () => settleLeave(true));
+  // Retry re-subscribes through store.js's single startStore path (which stops
+  // first), so repeated taps cannot stack listeners. No busy state, no backoff,
+  // no budget. The copy goes with the click: a retry that fails again must
+  // re-write the live region, and an unchanged line is no mutation, so nothing
+  // would be announced.
+  $('settings-retry').addEventListener('click', () => {
+    setText($('settings-feedback'), '');
+    retryStore();
+  });
   $('leave-settings-confirm').addEventListener('keydown', (event) => {
     if (event.key === 'Escape') stayOnSettings();
   });
