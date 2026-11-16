@@ -169,9 +169,9 @@ inside the free tier's 20,000/day. The health poll (`status/notifications`,
 changes — a re-stamped `last_seen` is not a change — plus one at start-up) and
 exactly 288 charger `GET /notifications`/day
 — charger reads, not Firestore reads — plus one Firestore read of the stored
-document per process start. An acknowledgement command adds exactly one
-`health` write (the `acks` merge) and nothing else — no extra poll, no
-steady-state cost. The #122 stop stamp adds none: it rides
+document per process start. An acknowledgement command adds one `health` write for
+its `acks` merge (plus the forced `status/current` write every acked command
+already pays); no extra poll, no steady-state cost. The #122 stop stamp adds none: it rides
 the stop transition's own state write, published sooner rather than
 additionally. Reads are not the binding constraint (the
 5 s command poll's 17,280 reads/day fits the 50,000 free, and slower polls
