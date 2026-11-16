@@ -1,0 +1,3 @@
+# Normalise all text files to LF in the repository and on checkout, so the
+# same bytes are tested, formatted and reviewed on Windows, Linux and the Pi.
+* text=auto eol=lf
