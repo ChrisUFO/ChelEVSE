@@ -1,11 +1,18 @@
 // Pure formatting helpers — no DOM, no Firebase. Covered by test/web.
 
 // Charger state → label + accent colour (consumed by the status screen and the
-// document-level --state custom property).
+// document-level --state custom property). `stopped` is the bridge's derived
+// label for a user Stop: firmware 8.2.3 realises a pause as EVSE state 254 with
+// `manual_override 1`, while a genuinely sleeping charger is the same 254 with
+// `manual_override 0` — the bridge separates them so the web never has to guess.
+// The amber is a deliberate pause lamp: distinct from the grey sleep hue and
+// from the disabled red (a fault-style stop), and outside the accent family that
+// would read as interactive.
 export const STATES = {
   charging: { label: 'Charging', color: '#38d996' },
   ready: { label: 'Ready', color: '#58a6ff' },
   connected: { label: 'Connected', color: '#46c6d8' },
+  stopped: { label: 'Stopped', color: '#e0b45c' },
   sleeping: { label: 'Sleeping', color: '#93a0b4' },
   disabled: { label: 'Disabled', color: '#f26d5f' },
   unknown: { label: 'Unknown', color: '#98a1b0' },

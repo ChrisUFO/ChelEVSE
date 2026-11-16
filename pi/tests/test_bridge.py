@@ -113,6 +113,43 @@ class ParseStatusTests(unittest.TestCase):
         self.assertEqual(fields["state_label"], "unknown")
         self.assertIsNone(fields["temp_c"])
 
+    def test_state_254_with_manual_override_is_stopped(self):
+        # Firmware 8.2.3 realises a user Stop (pause) as 254 + manual_override 1.
+        # The override may arrive as a string in the raw reply (the coercion
+        # idiom is ``parsing.as_int``).
+        for override in (1, "1"):
+            with self.subTest(manual_override=override):
+                fields = bridge.parse_status({"state": 254, "manual_override": override})
+                self.assertEqual(fields["state_label"], "stopped")
+                # The code itself is passed through untouched.
+                self.assertEqual(fields["state"], 254)
+
+    def test_state_254_without_override_is_sleeping(self):
+        # A genuinely sleeping charger reports the same 254 with no override.
+        for override in (0, "0", None, "", "unknown", True):
+            with self.subTest(manual_override=override):
+                fields = bridge.parse_status({"state": 254, "manual_override": override})
+                self.assertEqual(fields["state_label"], "sleeping")
+
+    def test_state_254_with_manual_override_absent_is_sleeping(self):
+        fields = bridge.parse_status({"state": 254})
+        self.assertEqual(fields["state_label"], "sleeping")
+
+    def test_other_states_are_unchanged(self):
+        # The 254 disambiguation does not touch the plain mapping, even though
+        # manual_override would be 1 for a held current.
+        for state, label in (
+            (1, "ready"),
+            (2, "connected"),
+            (3, "charging"),
+            (255, "disabled"),
+        ):
+            with self.subTest(state=state):
+                fields = bridge.parse_status({"state": state, "manual_override": 1})
+                self.assertEqual(fields["state_label"], label)
+        self.assertEqual(bridge.parse_status({"state": 4})["state_label"], "unknown")
+        self.assertEqual(bridge.parse_status({})["state_label"], "unknown")
+
 
 class ApplyCommandTests(unittest.TestCase):
     def test_pause_posts_disabled_override(self):

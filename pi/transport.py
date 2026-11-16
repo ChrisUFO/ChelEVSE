@@ -17,7 +17,7 @@ import requests
 
 from charger_host import HTTP_TIMEOUT
 from mqtt_source import MqttPublishError
-from parsing import CommandError
+from parsing import CommandError, as_int
 
 
 def log(message):
@@ -113,7 +113,7 @@ def _command_amps(cmd):
 def validate_current_request(cmd):
     """Return a set-current command with a verified whole-number value."""
     raw = cmd.get("amps")
-    requested = _as_int(raw)
+    requested = as_int(raw)
     if isinstance(raw, bool) or requested is None or requested != raw:
         raise CommandError("current must be a whole number")
     return {**cmd, "amps": requested}
@@ -226,16 +226,6 @@ def _apply_command_http(transport, host, auth, cmd):
     raise CommandError("unsupported type")
 
 
-def _as_int(value):
-    """int(value) for numeric-ish input, else None (never raises)."""
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _paused(status):
     """Does this status view show a paused (disabled) charger?
 
@@ -252,8 +242,8 @@ def _paused(status):
     if status.get("status") == "disabled":
         return True
     return (
-        _as_int(status.get("manual_override")) == 1
-        and _as_int(status.get("state")) in PAUSED_STATES
+        as_int(status.get("manual_override")) == 1
+        and as_int(status.get("state")) in PAUSED_STATES
     )
 
 
@@ -268,12 +258,12 @@ def _setpoint_matches(status, amps):
     ``/config`` spells the pair ``max_current_soft``/``max_current_hard`` and
     never a bare ``max_current``.
     """
-    if _as_int(status.get("manual_override")) != 1:
+    if as_int(status.get("manual_override")) != 1:
         return False
-    pilot = _as_int(status.get("pilot"))
+    pilot = as_int(status.get("pilot"))
     if pilot == amps:
         return True
-    cap = _as_int(status.get("max_current"))
+    cap = as_int(status.get("max_current"))
     return cap is not None and pilot == cap and amps > cap
 
 
@@ -300,7 +290,7 @@ def _override_confirms(ctype, amps, view):
         # "null" is the firmware's auto state (observed on 8.2.3).
         if state in ("null", "auto", "clear"):
             return True
-        return state is None and _as_int(status.get("manual_override")) == 0
+        return state is None and as_int(status.get("manual_override")) == 0
     # set_current: confirm from the commanded field, not `max_current`, so a
     # firmware that normalises the latter cannot make every hold time out.
     # A document that names no current at all confirms nothing: it cannot tell
@@ -308,7 +298,7 @@ def _override_confirms(ctype, amps, view):
     # `_apply_override_mqtt` is the second opinion for that shape.
     if state == "active":
         current = override.get("charge_current", override.get("max_current"))
-        return current is not None and _as_int(current) == amps
+        return current is not None and as_int(current) == amps
     return state is None and _setpoint_matches(status, amps)
 
 
@@ -319,7 +309,7 @@ def _status_confirms(ctype, amps, status):
     if ctype == "pause":
         return _paused(status)
     if ctype == "resume":
-        return _as_int(status.get("manual_override")) == 0
+        return as_int(status.get("manual_override")) == 0
     return _setpoint_matches(status, amps)
 
 

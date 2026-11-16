@@ -42,6 +42,25 @@ class CommandError(ValueError):
         self.transport = transport
 
 
+def _state_label(state, manual_override):
+    """Raw EVSE state code -> the label the web renders.
+
+    ``STATE_LABELS`` carries the plain mapping; the one state it cannot express
+    alone is 254. Firmware 8.2.3 realises a user Stop (``pause``) as ``state
+    254`` **with** ``manual_override 1``, while a genuinely sleeping charger is
+    the same ``254`` with ``manual_override 0``. ``manual_override`` exists in
+    the raw ``/status`` reply but never in the curated document, so the label is
+    derived here — the web has no second source to disambiguate with.
+
+    A ``manual_override`` that is not the integer 1 (absent, 0, a non-numeric
+    string) leaves the state sleeping rather than guessing: the override field
+    is the only signal, so its absence means "no evidence of a Stop".
+    """
+    if state == 254 and as_int(manual_override) == 1:
+        return "stopped"
+    return STATE_LABELS.get(state, "unknown")
+
+
 def parse_status(data):
     """OpenEVSE /status JSON -> fields for the status/current document."""
     state = data.get("state")
@@ -50,7 +69,7 @@ def parse_status(data):
     temps = [t for t in raw_temps if isinstance(t, (int, float)) and t > 0]
     return {
         "state": state,
-        "state_label": STATE_LABELS.get(state, "unknown"),
+        "state_label": _state_label(state, data.get("manual_override")),
         "amp": _amps(data.get("amp")),
         "voltage": data.get("voltage"),
         "power": data.get("power"),
@@ -114,6 +133,21 @@ def parse_snapshot(data):
 def _is_number(value):
     """True for int/float but not bool (bool is a subclass of int)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def as_int(value):
+    """int(value) for numeric-ish input, else None (never raises).
+
+    The one numeric coercion in ``pi/``: ``transport`` imports it from here.
+    The raw ``/status`` reply may carry a number as a string, and a bool is not
+    a number.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _sensor_temp(value):
