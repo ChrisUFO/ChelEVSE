@@ -708,14 +708,15 @@ test('periodSpan names the calendar unit each period stands for', () => {
 
 test('paged copy names its span and never claims the window is now', () => {
   const now = new Date(2026, 9, 18, 12);
-  // Every rolling-window word #155 removes, plus the words that would claim a
-  // paged window is the present one. A calendar unit's own name is the only way
-  // to describe it.
+  // Every rolling-window word #155 removes — including the phrase itself, which
+  // this guard is named for — plus the words that would claim a paged window is
+  // the present one. A calendar unit's own name is the only way to describe it.
   const banned = [
     /today/i,
     /last 7 days/i,
     /last 30 days/i,
     /last 12 months/i,
+    /\brolling\b/i,
     /(this|current) month/i,
     /\byesterday\b/i,
   ];
@@ -2070,13 +2071,15 @@ test('the span and its bounds default their clock alike', () => {
 
 test('no web source or README still calls a chart period a rolling window', () => {
   // #155's copy guard, pinned where the repo's other source pins live. A calendar
-  // unit is named as the unit it is, so no shipped string may describe the chart
-  // as "the last 7 days", "the last 30 days" or "the last 12 months" — the words
-  // the rolling-window code needed. Scanning the files (rather than asserting on
+  // unit is named as the unit it is, so no shipped string may call the period a
+  // "rolling window" or describe it as "the last 7 days", "the last 30 days" or
+  // "the last 12 months". Scanning the files (rather than asserting on
   // copy(span)) also catches a static markup default, a second copy table, or a
   // comment-shaped string that would reach the UI without the pure tests seeing
-  // it. docs/VALIDATION.md is deliberately outside the sweep: its checks quote
-  // these words as things the screen must not say.
+  // it; the phrase is banned rather than the bare word, which a comment about
+  // any other rolling construct may still use. docs/VALIDATION.md is
+  // deliberately outside the sweep: its checks quote these words as things the
+  // screen must not say.
   const webRoot = new URL('../../web/', import.meta.url);
   const files = [];
   const walk = (dir) => {
@@ -2093,7 +2096,12 @@ test('no web source or README still calls a chart period a rolling window', () =
     ...files.map((path) => [path, readFileSync(path, 'utf8')]),
   ];
   for (const [path, text] of shipped) {
-    for (const banned of [/last 7 days/i, /last 30 days/i, /last 12 months/i]) {
+    for (const banned of [
+      /rolling[ -]window/i,
+      /last 7 days/i,
+      /last 30 days/i,
+      /last 12 months/i,
+    ]) {
       assert.doesNotMatch(text, banned, path);
     }
   }
