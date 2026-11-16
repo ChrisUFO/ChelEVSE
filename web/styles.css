@@ -952,6 +952,16 @@ input[type='range']::-moz-range-thumb {
   padding: 15px 16px;
   min-width: 0;
 }
+/* A paged window's date-span label wraps to two lines while "Estimated cost"
+   does not, and the cells stretch to the same height. Pin each label to the top
+   and each figure to the bottom so the two figures still share a baseline. At
+   320 the 22 px figure needs a second line in the narrow cell, so the cells
+   keep their natural top-first flow instead. */
+@media (min-width: 361px) {
+  .summary-cell {
+    align-content: space-between;
+  }
+}
 .summary-cell + .summary-cell {
   border-left: 1px solid var(--line);
 }
@@ -975,6 +985,9 @@ input[type='range']::-moz-range-thumb {
   font-size: 12px;
   margin-left: 3px;
   color: var(--muted);
+  /* The unit is one token: a narrow cell wraps it to its own line whole rather
+     than splitting it after "kW". */
+  white-space: nowrap;
 }
 .plan-banner {
   margin: 8px 2px 0;
@@ -1034,42 +1047,70 @@ input[type='range']::-moz-range-thumb {
 .chart-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px 10px;
+  align-items: center;
+  gap: 8px 12px;
 }
+/* The readout keeps its own row: the value is what the card is about, and the
+   44 px pair beside it would squeeze the figure at phone widths. */
 .chart-readout {
   flex: 1 1 100%;
   min-width: 0;
 }
-/* The two paging controls (#154): the readout keeps its own row, and the
-   controls share the next one with the hint. Button tokens, not a new language —
-   no new custom properties, no wrapper element. */
+/* The paging controls (#154): one pair of 44 px buttons drawn in the sprite's
+   stroke language — a wider gap than a segmented control's, so they read as two
+   moves of the same window rather than as a second period switch. */
 .chart-page {
   flex: 0 0 auto;
-  min-height: 34px;
-  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
   border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--surface);
+  border-radius: 12px;
+  background: var(--surface-2);
   color: var(--muted);
-  font-size: 15px;
-  font-weight: 650;
   line-height: 1;
   transition:
     background 0.15s ease,
-    color 0.15s ease;
+    color 0.15s ease,
+    transform 0.1s ease;
+}
+.chart-page svg {
+  width: 20px;
+  height: 20px;
 }
 .chart-page:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--surface-2) 55%, var(--line));
   color: var(--text);
-  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
 }
+.chart-page:active:not(:disabled) {
+  transform: translateY(1px);
+}
+/* The disabled half stays a button — the pair keeps its shape — but drops to
+   the faint register, because a whole-box fade on a surface this close to the
+   card's erases the tile. */
 .chart-page:disabled {
-  opacity: 0.45;
+  background: var(--surface);
+  color: var(--faint);
+  cursor: default;
 }
-/* The hint keeps the far right of the controls' row. */
-.chart-page + .chart-page {
-  margin-right: auto;
+/* The hint is the row's footnote: pinned right, the one item that may drop to
+   a line of its own when the phone is too narrow for it beside the buttons. */
+.chart-hint {
+  margin: 0 0 0 auto;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+/* Wide enough for the pager to sit beside the readout: the readout stops
+   claiming a full row and the hint becomes the pager's caption. */
+@media (min-width: 440px) {
+  .chart-readout {
+    flex: 1 1 auto;
+  }
 }
 .chart-day {
   margin: 0;
@@ -1096,13 +1137,6 @@ input[type='range']::-moz-range-thumb {
   margin-left: 10px;
   font-size: 14px;
   color: var(--ok);
-}
-.chart-hint {
-  margin: 3px 0 0;
-  font-size: 10.5px;
-  color: var(--muted);
-  text-align: right;
-  white-space: nowrap;
 }
 .chart-frame {
   position: relative;

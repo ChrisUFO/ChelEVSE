@@ -195,10 +195,10 @@ export const PERIODS = [
           }
         : {
             chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
-            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyTitle: `No energy recorded for ${span.phrase}.`,
             emptyLine: 'Days without charging count as zero.',
             loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
           },
   },
   {
@@ -223,10 +223,10 @@ export const PERIODS = [
           }
         : {
             chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
-            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyTitle: `No energy recorded for ${span.phrase}.`,
             emptyLine: 'Days without charging count as zero.',
             loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
           },
   },
   {
@@ -251,10 +251,10 @@ export const PERIODS = [
           }
         : {
             chartLabel: `Monthly energy for ${span.phrase}. Use the left and right arrow keys to move between months.`,
-            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyTitle: `No energy recorded for ${span.phrase}.`,
             emptyLine: 'Months without charging count as zero.',
             loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
           },
   },
 ];
@@ -294,49 +294,64 @@ export function periodAnchor(period, offset, now = new Date()) {
   return target;
 }
 
-// "18 October 2026", "12 – 18 October 2026" inside one month, "17 September –
-// 16 October 2026" inside one year, both years across a year boundary.
-function daySpanLabel(startId, endId) {
+// A date span reads in two registers, both built here from the same ids.
+//
+// The title register (`label`) is what the summary's label has room for: short
+// months — the chart's own bar-label vocabulary ("Fri 18 Sep"). The prose
+// register (`phrase`) spells the months out for the sentences ("No energy
+// recorded for 20 August – 18 September 2026"), where short month names would
+// read like a table.
+//
+// Both registers glue each date run with a hard space and glue the dash to the
+// date it follows, so the only place a span may wrap is the space after the
+// dash. A year never lands on a line of its own, and a sentence never breaks
+// between a day and its month.
+const HARD_SPACE = '\u00a0';
+
+// "18 Oct 2026" in the title register, "18 October 2026" in the prose one; a
+// range inside one month collapses its month ("5 – 11 Oct 2026"), and a range
+// across a year boundary names both years ("27 Dec 2025 – 2 Jan 2026").
+function daySpan(startId, endId, months) {
   const first = dayStartFromId(startId);
   const last = dayStartFromId(endId);
   if (!first || !last) return `${startId} – ${endId}`;
-  if (startId === endId) {
-    return `${last.getDate()} ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
-  }
+  const date = (value, withYear) =>
+    `${value.getDate()}${HARD_SPACE}${months[value.getMonth()]}` +
+    (withYear ? `${HARD_SPACE}${value.getFullYear()}` : '');
+  if (startId === endId) return date(last, true);
   const sameYear = first.getFullYear() === last.getFullYear();
   const sameMonth = sameYear && first.getMonth() === last.getMonth();
-  const left = sameMonth
-    ? String(first.getDate())
-    : `${first.getDate()} ${MONTHS_LONG[first.getMonth()]}${sameYear ? '' : ` ${first.getFullYear()}`}`;
-  return `${left} – ${last.getDate()} ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
+  const left = sameMonth ? String(first.getDate()) : date(first, !sameYear);
+  return `${left}${HARD_SPACE}– ${date(last, true)}`;
 }
 
 // The Year period's window as its month buckets name it: the first and last
 // month of the day range the chart sums, never a partial-day phrasing its bars
 // do not draw.
-function monthSpanLabel(startId, endId) {
+function monthSpan(startId, endId, months) {
   const first = dayStartFromId(startId);
   const last = dayStartFromId(endId);
   if (!first || !last) return `${startId} – ${endId}`;
-  return `${MONTHS_LONG[first.getMonth()]} ${first.getFullYear()} – ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
+  return `${months[first.getMonth()]}${HARD_SPACE}${first.getFullYear()}${HARD_SPACE}– ${months[last.getMonth()]}${HARD_SPACE}${last.getFullYear()}`;
 }
 
 // The window one chart paints, described once for every string that names it:
-// `label` titles it (summary label and its aria-label), `phrase` is the
-// mid-sentence form the copy uses, and `isDefault` marks offset 0 — the one
-// register that keeps today's wording ("Today", "the last 30 days"). A past
-// window is named by the dates actually drawn.
+// `label` titles it (summary label), `phrase` is the mid-sentence form the copy
+// uses, and `isDefault` marks offset 0 — the one register that keeps today's
+// wording ("Today", "the last 30 days"). A past window is named by the dates
+// actually drawn.
 export function periodSpan(period, anchor = new Date(), now = new Date()) {
   const descriptor = periodFor(period);
   if (dayId(anchor) === dayId(now)) {
     return { label: descriptor.span.label, phrase: descriptor.span.phrase, isDefault: true };
   }
   const bounds = periodBounds(descriptor, anchor);
-  const label =
-    descriptor.bucket === 'month'
-      ? monthSpanLabel(bounds.startId, bounds.endId)
-      : daySpanLabel(bounds.startId, bounds.endId);
-  return { label, phrase: label, isDefault: false };
+  const span = descriptor.bucket === 'month' ? monthSpan : daySpan;
+  return {
+    label: span(bounds.startId, bounds.endId, MONTHS),
+    phrase: span(bounds.startId, bounds.endId, MONTHS_LONG),
+    isDefault: false,
+  };
 }
 
 // Inclusive document-id range for one period, oldest first. Week, Month and

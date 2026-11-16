@@ -184,7 +184,12 @@ function paintPeriodCopy() {
   const copy = descriptor.copy(span);
   setText($('chart-heading'), periodHeading(descriptor));
   setText($('history-total-label'), span.label);
-  $('history-summary').setAttribute('aria-label', `${span.label} summary`);
+  // The default view keeps the name it always had; a date span does not read as
+  // a noun before the word "summary", so a paged window gets a sentence.
+  $('history-summary').setAttribute(
+    'aria-label',
+    span.isDefault ? `${span.label} summary` : `Energy summary for ${span.phrase}`,
+  );
   $('history-chart').setAttribute('aria-label', copy.chartLabel);
   paintPagingControls(descriptor);
 }
@@ -365,7 +370,7 @@ function selectIndex(index, { focus = false } = {}) {
 const OFFLINE_TITLE = "You're offline — history isn't available.";
 const NO_HISTORY_COPY = {
   title: 'No history yet',
-  line: 'Totals appear once the charger logs a day.',
+  line: 'Daily totals appear once the charger logs a day.',
 };
 
 function setHistoryNote(text) {
@@ -1140,7 +1145,7 @@ export function resetHistory() {
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);
-    showChartEmpty('No history yet', 'Daily totals appear once the charger logs a day.');
+    showChartEmpty(NO_HISTORY_COPY.title, NO_HISTORY_COPY.line);
     const note = $('history-state');
     if (note) {
       note.hidden = true;

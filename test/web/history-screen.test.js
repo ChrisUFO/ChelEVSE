@@ -1069,6 +1069,16 @@ function keydown(target, key, mods = {}) {
   return prevented;
 }
 
+// Date spans glue their runs with hard spaces, leaving one breakable space after
+// the dash; compare painted copy as plain text.
+function plain(text) {
+  return String(text).replace(/\u00a0/g, ' ');
+}
+
+function labelText() {
+  return plain(element('history-total-label').textContent);
+}
+
 test('the default view paints exactly the strings it always has', async () => {
   freezeClock();
   try {
@@ -1104,26 +1114,29 @@ test('Previous pages one window back and Next returns to the default view', asyn
     // The window is built before the read is awaited, so the control state and
     // the paged loading copy are painted synchronously.
     assert.equal(element('chart-next').disabled, false);
-    assert.equal(element('history-total-label').textContent, '20 August – 18 September 2026');
+    assert.equal(labelText(), '20 Aug – 18 Sep 2026');
     assert.equal(
-      element('history-summary').attrs['aria-label'],
-      '20 August – 18 September 2026 summary',
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for 20 August – 18 September 2026',
     );
     assert.equal(
-      element('history-chart').attrs['aria-label'],
+      plain(element('history-chart').attrs['aria-label']),
       'Daily energy for 20 August – 18 September 2026. Use the left and right arrow keys to move between days.',
     );
-    assert.equal(element('chart-empty-line').textContent, 'Reading 20 August – 18 September 2026.');
+    assert.equal(
+      plain(element('chart-empty-line').textContent),
+      'Reading 20 August – 18 September 2026.',
+    );
     await back;
     await readFailed();
     // One more window back: the 30 days ending 30 days before the previous one.
     await fire('chart-prev', 'click');
     await readFailed();
-    assert.equal(element('history-total-label').textContent, '21 July – 19 August 2026');
+    assert.equal(labelText(), '21 Jul – 19 Aug 2026');
     // Next walks back toward the present one window at a time.
     await fire('chart-next', 'click');
     await readFailed();
-    assert.equal(element('history-total-label').textContent, '20 August – 18 September 2026');
+    assert.equal(labelText(), '20 Aug – 18 Sep 2026');
     assert.equal(element('chart-next').disabled, false);
     await fire('chart-next', 'click');
     await readFailed();
@@ -1146,8 +1159,8 @@ test('a paged window names its dates everywhere and never says today', async () 
     await fire('history-refresh', 'click');
     await fire('chart-prev', 'click');
     await readFailed();
-    const label = element('history-total-label').textContent;
-    assert.equal(label, '20 August – 18 September 2026');
+    const label = labelText();
+    assert.equal(label, '20 Aug – 18 Sep 2026');
     // Chart, summary, SVG label and heading — none may claim a window they are
     // not drawing.
     for (const [what, text] of Object.entries({
@@ -1160,11 +1173,13 @@ test('a paged window names its dates everywhere and never says today', async () 
       assert.ok(text, what);
       assert.doesNotMatch(text, /today|last 7 days|last 30 days|last 12 months/i, what);
     }
+    // Accessible names use the prose register of the same span, so a screen
+    // reader hears the months spelled out.
     for (const text of Object.values({
       'summary aria-label': element('history-summary').attrs['aria-label'],
       'chart aria-label': element('history-chart').attrs['aria-label'],
     })) {
-      assert.ok(text.includes(label), text);
+      assert.ok(plain(text).includes('20 August – 18 September 2026'), text);
     }
 
     // The empty panel names the same window — the offline line is the same
@@ -1175,8 +1190,8 @@ test('a paged window names its dates everywhere and never says today', async () 
     applyHistory(descriptor, { docs: [], fromCache: false }, null, anchor, [], now);
     showHistorySettings(nightly());
     assert.equal(
-      element('chart-empty-title').textContent,
-      'No energy recorded in 20 August – 18 September 2026.',
+      plain(element('chart-empty-title').textContent),
+      'No energy recorded for 20 August – 18 September 2026.',
     );
     // An empty window is still a window: the paging controls stay on screen, so
     // the owner can page back out of it.
@@ -1227,7 +1242,7 @@ test('switching period returns the chart to the default view', async () => {
     await readFailed();
     await fire('chart-prev', 'click');
     await readFailed();
-    assert.equal(element('history-total-label').textContent, '21 July – 19 August 2026');
+    assert.equal(labelText(), '21 Jul – 19 Aug 2026');
 
     // The real segment listener: a Week switch resets the offset and renames the
     // paging controls for the unit it now pages in.
@@ -1285,7 +1300,7 @@ test('PageUp and PageDown page the window while the arrows move the selection', 
 
     // PageUp pages the window back one week; the new window names its dates.
     assert.equal(keydown('history-chart', 'PageUp'), true);
-    assert.equal(element('history-total-label').textContent, '5 – 11 October 2026');
+    assert.equal(labelText(), '5 – 11 Oct 2026');
     await readFailed();
     // PageDown pages toward the present, and stops at it.
     assert.equal(keydown('history-chart', 'PageDown'), true);

@@ -173,6 +173,9 @@ test('PERIODS describes every chart range as data', () => {
 // The default view's wording, byte for byte. #154 keeps offset 0 identical to
 // the shipped screen, so every string is pinned as a literal here rather than
 // compared with the implementation.
+// Date spans glue their runs with hard spaces; compare painted copy as text.
+const plain = (text) => text.replace(/\u00a0/g, ' ');
+
 const DEFAULT_COPY = {
   day: {
     label: 'Today',
@@ -376,35 +379,38 @@ test('consecutive windows neither overlap nor leave a gap', () => {
 
 test('periodSpan names a past window by the dates it draws', () => {
   const now = new Date(2026, 9, 18, 12);
-  // Day: the date itself, so the empty state can say "on 17 October 2026".
-  assert.deepEqual(periodSpan('day', periodAnchor('day', 1, now), now), {
-    label: '17 October 2026',
-    phrase: '17 October 2026',
-    isDefault: false,
-  });
+  // The title register the summary label paints: short months — the vocabulary
+  // the chart's own bar labels use — with the year kept.
+  const title = (span) => plain(span.label);
+  // Every date run is glued, so a range has exactly one break opportunity —
+  // the space after the dash — and a single date has none. A year never lands
+  // on a line of its own.
+  const breakable = (span) => span.label.split(' ').length - 1;
+  const day = periodSpan('day', periodAnchor('day', 1, now), now);
+  assert.equal(title(day), '17 Oct 2026');
+  assert.equal(breakable(day), 0);
+  // The prose register the sentences use spells the months out.
+  assert.equal(plain(day.phrase), '17 October 2026');
+  assert.equal(day.isDefault, false);
   // Week/Month: a day range, collapsing the month when both ends share it.
-  assert.equal(periodSpan('week', periodAnchor('week', 1, now), now).label, '5 – 11 October 2026');
-  assert.equal(
-    periodSpan('week', periodAnchor('week', 2, now), now).label,
-    '28 September – 4 October 2026',
-  );
-  assert.equal(
-    periodSpan('month', periodAnchor('month', 1, now), now).label,
-    '20 August – 18 September 2026',
-  );
+  const week = periodSpan('week', periodAnchor('week', 1, now), now);
+  assert.equal(title(week), '5 – 11 Oct 2026');
+  assert.equal(plain(week.phrase), '5 – 11 October 2026');
+  assert.equal(breakable(week), 1);
+  assert.equal(title(periodSpan('week', periodAnchor('week', 2, now), now)), '28 Sep – 4 Oct 2026');
+  const month = periodSpan('month', periodAnchor('month', 1, now), now);
+  assert.equal(title(month), '20 Aug – 18 Sep 2026');
+  assert.equal(plain(month.phrase), '20 August – 18 September 2026');
   // A range that crosses a year boundary names both years.
   assert.equal(
-    periodSpan('week', new Date(2026, 0, 2, 12), now).label,
-    '27 December 2025 – 2 January 2026',
+    title(periodSpan('week', new Date(2026, 0, 2, 12), now)),
+    '27 Dec 2025 – 2 Jan 2026',
   );
   // Year: the whole months its bars draw, not the partial day its read ends on.
-  assert.equal(
-    periodSpan('year', periodAnchor('year', 1, now), now).label,
-    'November 2024 – October 2025',
-  );
-  // The label and phrase are the same description in the paged register.
-  const span = periodSpan('month', periodAnchor('month', 2, now), now);
-  assert.equal(span.label, span.phrase);
+  const year = periodSpan('year', periodAnchor('year', 1, now), now);
+  assert.equal(title(year), 'Nov 2024 – Oct 2025');
+  assert.equal(plain(year.phrase), 'November 2024 – October 2025');
+  assert.equal(breakable(year), 1);
 });
 
 test('paged copy names its span and never claims the window is now', () => {
@@ -438,14 +444,18 @@ test('paged copy names its span and never claims the window is now', () => {
   // A past Day says which date it is empty for.
   const daySpan = periodSpan('day', periodAnchor('day', 1, now), now);
   assert.equal(
-    periodById('day').copy(daySpan).emptyTitle,
+    plain(periodById('day').copy(daySpan).emptyTitle),
     'No energy recorded on 17 October 2026.',
   );
   // The Month window's offline copy names its dates too.
   const monthSpan = periodSpan('month', periodAnchor('month', 1, now), now);
   assert.equal(
-    periodById('month').copy(monthSpan).offlineLine,
-    'Reconnect, then tap Refresh to load 20 August – 18 September 2026.',
+    plain(periodById('month').copy(monthSpan).offlineLine),
+    'Reconnect, then tap Refresh to load the energy for 20 August – 18 September 2026.',
+  );
+  assert.equal(
+    plain(periodById('month').copy(monthSpan).emptyTitle),
+    'No energy recorded for 20 August – 18 September 2026.',
   );
 });
 
