@@ -70,6 +70,14 @@ let selectedId = null;
 // js/history.js.
 let periodOffset = 0;
 let chartWindow = null;
+// The window the series on screen was built for: the span every string that names
+// the drawn window is painted from. `chartWindow` is the window the *newest read*
+// started, and a reload rebuilds it from a fresh clock before its read settles —
+// after local midnight the two name different days, and a failed read would
+// otherwise relabel the bars it retained with a window they do not cover. The
+// label follows the series, never the read; the read's own window still names the
+// loading copy, which paints only with no series on screen.
+let seriesSpan = null;
 // The sessions list's whole view state — page one of the recent list or of a
 // browsed month, plus every page appended since. Kept as one object because
 // the paging rules (accumulate, adopt a view, conclude exhaustion) belong to
@@ -194,14 +202,21 @@ function paintPeriodCopy() {
   paintPagingControls(descriptor);
 }
 
-// The description of the window on screen. Before the first read (and after a
-// reset) there is no window, so the default view's wording is the honest one —
-// the same strings the read at offset 0 would paint. Both ends of that fallback
-// span come from one clock read: two `new Date()` calls could straddle local
-// midnight and name two different days.
+// The description of the window on screen. The series owns it whenever there is
+// one: a read for a different window (a reload that re-anchored at the new local
+// date) may not relabel bars it did not produce, so the label keeps naming the
+// window those bars were read for. With no series the window being read is the
+// honest one — the loading, empty, offline and error copy all name what was
+// asked for. Before the first read (and after a reset) there is no window at all,
+// so the default view's wording is the honest one — the same strings the read at
+// offset 0 would paint. Both ends of that fallback span come from one clock read:
+// two `new Date()` calls could straddle local midnight and name two different
+// days.
 function currentSpan() {
+  if (seriesSpan) return seriesSpan;
+  if (chartWindow) return chartWindow.span;
   const now = new Date();
-  return chartWindow ? chartWindow.span : periodSpan(currentPeriod(), now, now);
+  return periodSpan(currentPeriod(), now, now);
 }
 
 // "Previous 30 days" / "Next 12 months": the step the period pages by, so the
@@ -283,18 +298,25 @@ function renderSummary() {
   setText($('history-cost'), cost || '');
 }
 
-// The chart's hint names only what the state on screen can do. The selection
-// keys need bars to move through; the pager sits in the always-visible head and
-// works in every state, and its PageUp/PageDown shortcuts are bound on the card
-// rather than the SVG — so they are delivered in those states too. One source for
-// both sentences.
+// The chart's hint names only what the state on screen can do — two dimensions,
+// one source. The selection keys need bars to move through; and the paging
+// register depends on the window shown: at the present, Next is disabled and
+// PageDown is deliberately not consumed (it scrolls the page), so neither is
+// advertised, while a paged window offers both directions.
 const CHART_HINT = {
-  bars: 'Tap or ← → · PageUp/PageDown pages',
-  paging: 'Use ‹ › or PageUp/PageDown to page',
+  bars: {
+    present: 'Tap or ← → · PageUp pages back',
+    paged: 'Tap or ← → · PageUp/PageDown pages',
+  },
+  paging: {
+    present: 'Use ‹ or PageUp to page back',
+    paged: 'Use ‹ › or PageUp/PageDown to page',
+  },
 };
 
 function paintChartHint(barsDrawn) {
-  setText($('chart-hint'), barsDrawn ? CHART_HINT.bars : CHART_HINT.paging);
+  const register = periodOffset === 0 ? 'present' : 'paged';
+  setText($('chart-hint'), (barsDrawn ? CHART_HINT.bars : CHART_HINT.paging)[register]);
 }
 
 function showChartEmpty(title, line) {
@@ -783,6 +805,9 @@ export function applyHistory(descriptor, result, failure, anchor, sessions = [],
   // of daily documents.
   periodSessions = Array.isArray(sessions) ? sessions : [];
   series = periodSeries(descriptor, day ? result : result.docs, anchor, now);
+  // The window these points were built for — the only place a series acquires the
+  // window it is labelled by (see seriesSpan).
+  seriesSpan = periodSpan(descriptor, anchor, now);
   const kwh = Number(result.kwh);
   dayTotal = day && Number.isFinite(kwh) && kwh > 0 ? kwh : null;
   historyServer = historyState === 'fresh' || historyState === 'empty';
@@ -818,6 +843,9 @@ async function readHistory() {
   dayTotal = null;
   periodSessions = [];
   historyServer = false;
+  // The previous window's series leaves with its span: the new read's own window
+  // names the loading copy, and a failed read falls back to its panel.
+  seriesSpan = null;
   historyState = 'loading';
   renderHistory();
   // The session read is a sibling, not a gate: a rejected session payload
@@ -1239,6 +1267,7 @@ export function resetHistory() {
   dayTotal = null;
   periodOffset = 0;
   chartWindow = null;
+  seriesSpan = null;
   periodSessions = [];
   liveStatus = null;
   settlePending = false;

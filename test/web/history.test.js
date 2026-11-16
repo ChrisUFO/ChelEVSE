@@ -1693,10 +1693,13 @@ test('both history read paths end with the midnight re-check', () => {
     assert.match(body(name), /fetchPeriodSessions\(descriptor, bounds\)/, name);
   }
   // One read chooser, branching on the descriptor's source rather than a period
-  // id: the Day document read cannot acquire a tail of its own.
+  // id: the Day document read cannot acquire a tail of its own. The arguments are
+  // pinned to the window's bounds, not just the call: the Day period's whole claim
+  // is that it reads the day its window names, and `dayId(new Date())` there would
+  // read today's document for every paged day with nothing else failing.
   assert.match(body('fetchPeriod'), /descriptor\.source === 'day'/);
-  assert.match(body('fetchPeriod'), /periodReads\.day\(/);
-  assert.match(body('fetchPeriod'), /periodReads\.range\(/);
+  assert.match(body('fetchPeriod'), /periodReads\.day\(bounds\.endId\)/);
+  assert.match(body('fetchPeriod'), /periodReads\.range\(bounds\.startId, bounds\.endId\)/);
   // The read it chooses between is indirected (the harness substitutes it to drive
   // a read it controls), so the object must hold both of the store's reads: an
   // indirected read that stopped being the store's would fail no other test.
