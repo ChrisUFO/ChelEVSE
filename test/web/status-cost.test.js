@@ -56,9 +56,8 @@ globalThis.document = {
 // fixtures mean the same thing here as in cost.test.js.
 process.env.TZ = 'America/Denver';
 
-const { showStatus, showSettings, showConfig, leaveStatus } = await import(
-  '../../web/js/screens/status.js'
-);
+const { showStatus, showSettings, showConfig, leaveStatus } =
+  await import('../../web/js/screens/status.js');
 
 function at(year, month, day, hours, minutes) {
   const ms = new Date(year, month - 1, day, hours, minutes).getTime();
