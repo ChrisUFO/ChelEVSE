@@ -319,8 +319,56 @@ test('renderFeedback reports clean, unsaved, invalid and load-error states', () 
   enterSchedule();
   showScheduleError();
   const fb = element('schedule-feedback');
-  assert.equal(fb.textContent, "Couldn't load the schedule. Reload the page to try again.");
+  assert.equal(fb.textContent, 'Couldn’t load the schedule.');
   assert.equal(fb.className, 'feedback err');
+});
+
+test('a failed read shows its own alert line and a Retry that clears on success', () => {
+  resetSchedule();
+  enterSchedule();
+  showScheduleError();
+  const error = element('schedule-load-error');
+  assert.equal(error.hidden, false);
+  assert.equal(error.textContent, 'Couldn’t load the schedule.');
+  assert.equal(element('schedule-retry').hidden, false);
+  assert.equal(element('schedule-loading').hidden, true);
+  // The failure owns the announcement; no page reload is named anywhere.
+  assert.doesNotMatch(error.textContent, /reload/i);
+
+  // The click clears the live copy before it asks store.js for a new read, so a
+  // retry that fails again is an announced mutation rather than a bare un-hide.
+  // No store was started in this harness, so retryStore() returns false and
+  // nothing re-renders: the click must not throw and the failure state stays.
+  fire(element('schedule-retry'), 'click');
+  assert.equal(error.textContent, '');
+  assert.equal(element('schedule-feedback').textContent, '');
+  assert.equal(error.hidden, false);
+  assert.equal(element('schedule-retry').hidden, false);
+
+  // Recovery: the snapshot that lands hides the line and its control.
+  showSchedule(document_);
+  assert.equal(error.hidden, true);
+  assert.equal(error.textContent, '');
+  assert.equal(element('schedule-retry').hidden, true);
+  assert.equal(element('schedule-feedback').textContent, '');
+});
+
+test('a retry that re-delivers the same schedule clears the failure', () => {
+  // Regression: routeScheduleSnapshot calls an unchanged snapshot after a
+  // failure a `repeat`, and that branch used to refresh `confirmed` only — so
+  // the error line and Try again stayed on screen after a successful retry.
+  adoptOneRule();
+  showScheduleError();
+  const error = element('schedule-load-error');
+  assert.equal(error.hidden, false);
+  assert.equal(element('schedule-retry').hidden, false);
+  assert.deepEqual(feedback(), { text: 'Couldn’t load the schedule.', className: 'feedback err' });
+
+  showSchedule(document_);
+  assert.equal(error.hidden, true, 'the repeated snapshot proves the read works');
+  assert.equal(error.textContent, '');
+  assert.equal(element('schedule-retry').hidden, true);
+  assert.deepEqual(feedback(), { text: '', className: 'feedback' });
 });
 
 test('the plan count and empty state follow the rendered rules', () => {

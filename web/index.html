@@ -522,9 +522,11 @@
             <span id="schedule-live-text">Window active now</span>
           </p>
           <p class="section-state" id="schedule-loading">Loading schedule…</p>
-          <p class="section-state err" id="schedule-load-error" hidden>
-            Couldn't load the schedule. Reload the page to try again.
-          </p>
+          <!-- A failed read, kept apart from the loading line above. The copy is
+               written in when the line is revealed, so it is announced, and
+               #schedule-retry re-subscribes through store.js — no reload. -->
+          <p class="section-state err" id="schedule-load-error" role="alert" hidden></p>
+          <button id="schedule-retry" class="btn small" type="button" hidden>Try again</button>
 
           <div id="schedule-editor" hidden>
             <section class="schedule-card" style="--i: 1" aria-label="Schedule state">
