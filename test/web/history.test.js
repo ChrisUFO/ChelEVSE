@@ -140,6 +140,14 @@ test('PERIODS describes every chart range as data', () => {
     year: { unit: 'month', size: 12 },
   });
   for (const period of PERIODS) {
+    // The key set is the contract: every field has a consumer and a field that
+    // has none — a descriptor `label`, say — would be a second naming source the
+    // suite could not see being re-added.
+    assert.deepEqual(
+      Object.keys(period).sort(),
+      ['bucket', 'copy', 'id', 'noun', 'prefixToday', 'slots', 'source', 'span', 'step'],
+      period.id,
+    );
     assert.ok(['hour', 'day', 'month'].includes(period.bucket), period.id);
     assert.equal(typeof period.noun, 'string', `${period.id}.noun`);
     assert.ok(period.noun.length > 0, `${period.id}.noun`);
@@ -1677,8 +1685,15 @@ test('both history read paths end with the midnight re-check', () => {
   // One read chooser, branching on the descriptor's source rather than a period
   // id: the Day document read cannot acquire a tail of its own.
   assert.match(body('fetchPeriod'), /descriptor\.source === 'day'/);
-  assert.match(body('fetchPeriod'), /fetchHistoryDay\(/);
-  assert.match(body('fetchPeriod'), /fetchHistory\(/);
+  assert.match(body('fetchPeriod'), /periodReads\.day\(/);
+  assert.match(body('fetchPeriod'), /periodReads\.range\(/);
+  // The read it chooses between is indirected (the harness substitutes it to drive
+  // a read it controls), so the object must hold both of the store's reads: an
+  // indirected read that stopped being the store's would fail no other test.
+  assert.match(
+    source,
+    /export const periodReads = \{\s*day: \(day\) => fetchHistoryDay\(day\),\s*range: \(startId, endId\) => fetchHistory\(startId, endId\),\s*\};/,
+  );
   // The sessions read is the $ counterpart: Day resolves empty, a range pages
   // the widened started_at window (sessionsRange), and only Firestore can
   // reject it — the unwrap of the paged read's envelope into its docs is

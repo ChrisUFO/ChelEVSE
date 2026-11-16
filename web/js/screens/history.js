@@ -413,8 +413,10 @@ function focusChart() {
 // hands it back. It is screen state, not a per-read snapshot: a read superseded
 // before it settles must not lose the reservation (the read that supersedes it
 // starts with the bars already gone, so it would capture nothing), and only the
-// repaint that lands may consume it. The newest read is always the one that
-// repaints, so it always owns the settle focus however many reads it superseded.
+// repaint that lands may consume it. Both read paths paint and release under their
+// own sequence guard, so a superseded read — a paged read or a reload — leaves the
+// reservation to the read that superseded it, and that newest read always owns the
+// settle focus however many reads it superseded.
 let chartFocusReserved = false;
 
 // Reserve the chart's focus before a paint that removes the focused bar: the bar
@@ -722,13 +724,26 @@ function buildWindow(descriptor, now) {
   };
 }
 
+// The store reads behind one period: the Day period's single document and the
+// day-id range every other period reads. They are indirected through this object
+// for the reason fetchPeriodSessions takes its range read as a parameter — Node
+// cannot bind Firestore, so in the executed harness every store read rejects, and
+// a rejection cannot express *when* a read settles. Substituting the read is what
+// lets the harness drive a read that succeeds and the two orders in which a read
+// and the one that superseded it can settle (#154). The screen only ever reads
+// this object; production never assigns to it.
+export const periodReads = {
+  day: (day) => fetchHistoryDay(day),
+  range: (startId, endId) => fetchHistory(startId, endId),
+};
+
 // The selected period's read, chosen by the descriptor: the Day period reads its
 // one document, every other period its contiguous day-id range. Both resolve to
 // the input applyHistory classifies, so no caller special-cases a period id.
 function fetchPeriod(descriptor, bounds) {
   return descriptor.source === 'day'
-    ? fetchHistoryDay(bounds.endId)
-    : fetchHistory(bounds.startId, bounds.endId);
+    ? periodReads.day(bounds.endId)
+    : periodReads.range(bounds.startId, bounds.endId);
 }
 
 // The period's session archive read, the $ counterpart of fetchPeriod (#123):
@@ -939,7 +954,13 @@ async function loadAll() {
   loading = false;
   setRefreshBusy(false);
   // A period switch during the read owns the chart; this payload belongs to the
-  // superseded range and must not be painted.
+  // superseded range and must not be painted. The settle repaint and the focus
+  // handoff belong to the newest read for the same reason: repainting here would
+  // rebuild the bars the newest read has just focused (a superseded reload landing
+  // second would drop the focus to <body>), and releasing here would consume the
+  // reservation before the window that earned it is on screen. `loading` and the
+  // refresh control are finished above either way — they belong to this reload,
+  // not to the chart.
   if (seq === historySeq) {
     applyHistory(
       descriptor,
@@ -949,6 +970,8 @@ async function loadAll() {
       periodSess.status === 'fulfilled' ? periodSess.value : [],
       now,
     );
+    renderHistory();
+    releaseChartFocus();
   }
   // Same contract for the sessions view: only the newest sessions read paints,
   // and a failed read or an offline cache miss keeps the previous payload with
@@ -960,8 +983,6 @@ async function loadAll() {
       month,
     });
   }
-  renderHistory();
-  releaseChartFocus();
   renderSessions();
   renderLoadFeedback();
 

@@ -149,6 +149,7 @@ const {
   sessionsControls,
   applyHistory,
   fetchPeriodSessions,
+  periodReads,
   showHistorySettings,
   showHistoryStatus,
 } = await import('../../web/js/screens/history.js');
@@ -1098,13 +1099,18 @@ function modelChartContainment() {
     node === element('history-chart') || element('chart-bars').children.includes(node);
 }
 
-// Everything a press can reach from inside the chart card: the pager buttons, the
-// SVG and its bars. <body> is in nothing, so a press that arrives after the focus
-// was dropped reaches no listener and is the browser's key — the scroll this
-// screen's focus continuity exists to prevent.
+// Everything a press can reach from inside the chart card: the period switch and
+// its option buttons, the pager buttons, the SVG and its bars. The real markup
+// nests #period-switch (and its option buttons) inside #chart-card
+// (web/index.html:412-465), so a key pressed on an option bubbles to the card's
+// paging listener — the stub has no option elements of its own, so a test that
+// stands on one passes the group element. <body> is in nothing, so a press that
+// arrives after the focus was dropped reaches no listener and is the browser's
+// key — the scroll this screen's focus continuity exists to prevent.
 function inCard(node) {
   return (
     node === element('chart-card') ||
+    node === element('period-switch') ||
     node === element('chart-prev') ||
     node === element('chart-next') ||
     node === element('history-chart') ||
@@ -1121,10 +1127,39 @@ function pressFromFocus(key) {
   if (at === element('chart-prev')) return keydown('chart-prev', key);
   if (at === element('chart-next')) return keydown('chart-next', key);
   if (at === element('chart-card')) return keydown('chart-card', key);
+  if (at === element('period-switch')) return keydown('period-switch', key);
   if (at === element('history-chart') || element('chart-bars').children.includes(at)) {
     return keydown('history-chart', key);
   }
   return false;
+}
+
+// The store's own period read, kept so a test can put it back: the chart read is
+// indirected through periodReads precisely so the harness can substitute it.
+const storePeriodRead = periodReads.range;
+
+// A period read whose settling the harness decides: each call registers a pending
+// read the test resolves when that read (and no other) should land. This is the
+// only way to express the two orders a read and the read that superseded it can
+// settle in — every store read genuinely rejects in Node, and rejections settle in
+// the order they were issued.
+function controlPeriodReads() {
+  const reads = [];
+  periodReads.range = () => {
+    let settle;
+    const promise = new Promise((resolve) => {
+      settle = resolve;
+    });
+    reads.push({ promise, settle });
+    return promise;
+  };
+  return reads;
+}
+
+// Let a settled read's whole chain run — applyHistory, the settle repaint and the
+// focus handoff are consecutive microtasks behind the promise the test resolved.
+async function flushReads() {
+  for (let i = 0; i < 3; i++) await settle();
 }
 
 // A settled Week at the default view with its bars drawn: the state a keyboard
@@ -1602,6 +1637,164 @@ test('a repaint under a keyboard user focuses the bar the window selected', asyn
     // off-by-one would pick.
     assert.equal(document.activeElement, selected);
     assert.notEqual(document.activeElement, element('chart-prev'));
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+// ---------- the settle focus handoff (#154) ----------
+//
+// The park half of the focus fix is pinned above; these pin the release half,
+// which needs a read that *succeeds* (a rejecting read draws no bar to hand the
+// focus to) and a read whose settling the test times (periodReads). Both orders in
+// which a read superseded by another one can settle are covered, because the
+// screen's rule is that only the newest read may repaint the chart or spend the
+// reservation.
+
+test('a reload that lands as the newest read hands the focus to the bar its window drew', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const reads = controlPeriodReads();
+    try {
+      // A Refresh with no read to supersede it: the reload itself is the newest
+      // read, so its own settle hands the focus back.
+      const reload = fire('history-refresh', 'click');
+      assert.equal(reads.length, 1);
+      assert.equal(document.activeElement, element('chart-prev'));
+      reads[0].settle({ docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false });
+      await reload;
+      await flushReads();
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(bars().length, 7);
+      const selected = bars().find((bar) => bar.classList.contains('selected'));
+      assert.ok(selected, 'the window selects a bar');
+      // Not the pager it was parked on: the settled window owns the focus.
+      assert.equal(document.activeElement, selected);
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(labelText(), '5 – 11 Oct 2026');
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a successful paged read hands the reserved focus to the bar its window drew', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const reads = controlPeriodReads();
+    try {
+      // The loading paint parks the focus on Previous before the bars go, so a
+      // press arriving mid-read still pages.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(document.activeElement, element('chart-prev'));
+      assert.equal(reads.length, 1);
+      // The read answers with a document inside the paged week (5 – 11 Oct 2026).
+      reads[0].settle({ docs: [{ id: '2026-10-09', kwh: 1 }], fromCache: false });
+      await flushReads();
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(bars().length, 7);
+      const selected = bars().find((bar) => bar.classList.contains('selected'));
+      assert.ok(selected, 'the window selects a bar');
+      // The settled window spends the reservation on the bar it selected — the
+      // release half, which no rejecting read can reach.
+      assert.equal(document.activeElement, selected);
+      // …so the next press pages from the bar instead of scrolling the page.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a PageUp that supersedes a reload keeps the settle focus when the reload lands first', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const reads = controlPeriodReads();
+    try {
+      // Refresh starts a reload: it parks the focus on Previous and reads.
+      const reload = fire('history-refresh', 'click');
+      assert.equal(reads.length, 1);
+      assert.equal(document.activeElement, element('chart-prev'));
+      // A PageUp typed during the reload's round trip supersedes it.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(reads.length, 2);
+      assert.equal(labelText(), '5 – 11 Oct 2026');
+      // Order B: the superseded reload lands first, while the paged window is still
+      // loading. Its control state finishes, but it must neither repaint the chart
+      // nor spend the reservation the paged read is about to use.
+      reads[0].settle({ docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false });
+      await reload;
+      await flushReads();
+      assert.equal(document.activeElement, element('chart-prev'));
+      // The newest read then lands and hands the focus to the bar it drew, instead
+      // of leaving it parked beside a fully drawn window.
+      reads[1].settle({ docs: [{ id: '2026-10-09', kwh: 1 }], fromCache: false });
+      await flushReads();
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(bars().length, 7);
+      const selected = bars().find((bar) => bar.classList.contains('selected'));
+      assert.ok(selected, 'the window selects a bar');
+      assert.equal(document.activeElement, selected);
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+test('a reload that lands after its window was superseded leaves the drawn window and its focus alone', async () => {
+  freezeClock();
+  modelChartContainment();
+  try {
+    await showDrawnWeek();
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const reads = controlPeriodReads();
+    try {
+      const reload = fire('history-refresh', 'click');
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(reads.length, 2);
+      // Order A: the paged read lands first, draws its window and hands the focus
+      // to the bar it selected.
+      reads[1].settle({ docs: [{ id: '2026-10-09', kwh: 1 }], fromCache: false });
+      await flushReads();
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(bars().length, 7);
+      const selected = bars().find((bar) => bar.classList.contains('selected'));
+      assert.ok(selected, 'the window selects a bar');
+      assert.equal(document.activeElement, selected);
+      // The superseded reload then lands. A repaint here would rebuild the bars —
+      // dropping the focused one to <body>, where PageUp scrolls the page.
+      reads[0].settle({ docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false });
+      await reload;
+      await flushReads();
+      assert.equal(bars().length, 7);
+      assert.equal(bars().includes(document.activeElement), true);
+      assert.equal(document.activeElement, selected);
+      // The paging keys are still deliverable from it, without a re-Tab.
+      assert.equal(pressFromFocus('PageUp'), true);
+      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
   } finally {
     element('history-chart').contains = () => false;
     mock.timers.reset();
