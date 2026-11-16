@@ -180,6 +180,46 @@ test('a cached snapshot clears the failure too', () => {
   assert.equal(retryVisible(), false);
 });
 
+test('a failure after a recovery is a fresh write, not a mere un-hide (R1/R2)', () => {
+  // setText() no-ops on unchanged text, so a line left behind while hidden is
+  // only un-hidden on the next failure — the announcement case the order in
+  // renderStatusError exists to avoid. Recovery must hand the node back empty.
+  showStatusError();
+  const error = element('status-error');
+  assert.equal(error.textContent, 'Couldn’t load the charger status.');
+
+  showStatus(snapshot());
+  assert.equal(error.hidden, true);
+  assert.equal(error.textContent, '', 'recovery clears the copy it hid');
+
+  showStatusError();
+  assert.equal(error.hidden, false);
+  assert.equal(
+    error.textContent,
+    'Couldn’t load the charger status.',
+    'the second failure writes afresh',
+  );
+});
+
+test('activating Retry clears the copy so a repeat failure writes it again', () => {
+  // A retry that fails again without a snapshot in between would otherwise be a
+  // no-op render: same visible node, same text. Clearing the line on the click
+  // makes both outcomes observable — the copy reappears on failure.
+  const listeners = element('status-retry').listeners.get('click') || [];
+  showStatusError();
+  const error = element('status-error');
+  assert.equal(error.textContent, 'Couldn’t load the charger status.');
+
+  listeners[0]();
+  assert.equal(error.hidden, false, 'the failure stays up while the retry is pending');
+  assert.equal(error.textContent, '', 'the click leaves the line empty for the next answer');
+
+  showStatusError();
+  assert.equal(error.textContent, 'Couldn’t load the charger status.');
+  // Consume the pending retry so the focus cases below start from no request.
+  showStatus(snapshot());
+});
+
 test('the alert is exposed before its text is written', () => {
   // A live region announces content inserted into a node it can already see; a
   // hidden → shown node whose text changed while it was hidden is not announced
@@ -189,7 +229,7 @@ test('the alert is exposed before its text is written', () => {
   const body = /function renderStatusError\(\) \{([\s\S]*?)\n\}/.exec(source);
   assert.ok(body, 'status.js still declares renderStatusError');
   const reveal = body[1].indexOf('error.hidden = !failed');
-  const write = body[1].indexOf('setText(error, STATUS_FAILED)');
+  const write = body[1].indexOf("setText(error, failed ? STATUS_FAILED : '')");
   assert.notEqual(reveal, -1, 'renderStatusError still reveals #status-error');
   assert.notEqual(write, -1, 'renderStatusError still writes the failure text');
   assert.ok(reveal < write, 'the alert is on screen before its text is written');

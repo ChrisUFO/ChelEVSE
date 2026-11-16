@@ -147,7 +147,10 @@ function renderStatusError() {
   // can already expose, not a static line that was merely un-hidden — the order
   // #notify-error keeps.
   error.hidden = !failed;
-  if (failed) setText(error, STATUS_FAILED);
+  // Written on every render, '' included: a copy left in the hidden node would
+  // come back on the next failure as a bare un-hide, which is the case this
+  // order exists to avoid — #notify-error clears its line the same way.
+  setText(error, failed ? STATUS_FAILED : '');
   const retry = $('status-retry');
   retry.hidden = !failed;
   $('updated').hidden = failed;
@@ -409,6 +412,9 @@ export function initStatus() {
     // Remembered for the render that clears the failure: it hides the control
     // the click left focus on, so it owes the user a new focus target.
     retryRequested = true;
+    // The copy goes with the click: a retry that fails again must re-write the
+    // line, and an unchanged line is no mutation, so nothing would be announced.
+    setText($('status-error'), '');
     retryStore();
   });
 }
