@@ -309,10 +309,10 @@ The app owns `schedule/current`; the bridge validates and mirrors it into the
 charger's own scheduler. Use a window that starts a few minutes from now if you
 want to watch it apply.
 
-1. **Create and save.** Add a rule (e.g. Mon–Fri, 22:00–06:00, 24 A), enable
+1. **Create and save.** Add a rule (e.g. Mon–Fri, 22:00–06:00), enable
    scheduling, tap **Save**.
    - Expect: "Saving…" then **"Saved."**; the Firestore document has exactly
-     `{enabled, rules: [{id, days, start, end, amps}]}`; the bridge journal shows
+     `{enabled, rules: [{id, days, start, end}]}`; the bridge journal shows
      `schedule synced: N events (P posted), removed M`.
 2. **Firmware.** `GET http://<charger>/schedule` (or the charger's own UI) shows
    the two events per rule: an `active` event at `start` and a `disabled` event
@@ -325,7 +325,7 @@ want to watch it apply.
    `schedule plan failed` line.
 4. **Badge.** The status screen shows the scheduled window while it is active,
    and hides the badge afterwards.
-5. **Edit.** Change the start time/amps and save; the bridge re-syncs (journal
+5. **Edit.** Change the start time and save; the bridge re-syncs (journal
    digest change) and only the changed firmware events are posted.
 6. **Disable.** Turn the schedule off and save; the bridge clears the firmware
    schedule (`removed M`) and the charger stops enforcing windows. Turning it
@@ -471,8 +471,8 @@ covers the screen-reader announcement — that still needs the manual error abov
 | 8.1 | Rules test suite            | `npm run test:rules` (needs Java; uses the Firestore emulator and `--project demo-chelevse`)                                                        | All tests pass: ungranted users denied reads/writes, command schema enforced, schedule container rules, settings shape, own-token-only `fcmTokens`. | Test output     |
 | 8.2 | Unauthorized read (manual)  | Signed in as the ungranted account, read `status/current` (console/SDK)                                                                             | `permission-denied`; no data returned.                                                                                                              | Error output    |
 | 8.3 | Unauthorized write (manual) | As the ungranted account, attempt a `commands` create or `settings/current` write                                                                   | `permission-denied`; no document created.                                                                                                           | Error output    |
-| 8.4 | Deploy guard — mismatch     | `GOOGLE_APPLICATION_CREDENTIALS=private.example/service-account.json.example FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs` | Prints `✖ deploy blocked: target project "<project-id>" does not match the service-account key's project …` and exits non-zero; no deploy can run.  | Terminal output |
-| 8.5 | Deploy guard — match        | `GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs`                 | Prints `✔ deploy guard: <project-id> …`.                                                                                                            | Terminal output |
+| 8.4 | Deploy guard — mismatch     | `GOOGLE_APPLICATION_CREDENTIALS=private.example/service-account.json.example FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs` | Prints `✖ deploy blocked: target project "<project-id>" does not match the service-account key's project …` and exits non-zero; no deploy can run. | Terminal output |
+| 8.5 | Deploy guard — match        | `GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs`                 | Prints `✔ deploy guard: <project-id> …`.                                                                                                           | Terminal output |
 | 8.6 | Bridge-only writes          | Attempt a `status/current` write as the owner from the web SDK                                                                                      | `permission-denied`; only the Admin SDK (bridge) writes status/history/commands' lifecycle.                                                         | Error output    |
 
 ## 9. Human checks (on site)
@@ -497,8 +497,7 @@ Do them last; each is a single observation plus evidence.
       plug-in event merges into the same session document (no double count).
 - [ ] **Schedule enforcement (at the charger).** A window starting a few minutes
       out turns charging on when it starts and off when it ends, with the app
-      badge showing the active window. `amps` is not applied on firmware
-      v5.1.5 — the charger uses its configured limit; the bridge logs that once.
+      badge showing the active window. The charger uses its configured current limit.
 - [ ] **Charger address change from the app (#54).** With the bridge running,
       note its PID (`systemctl show -p MainPID chelevse-bridge`). Save a new
       address in **Config → Charger connection → Charger address** (e.g. the charger's

@@ -913,7 +913,7 @@ down.
 - **Validation.** A rule is used only when it has a non-empty string `id`, a
   non-empty `days` list of integers 0–6, `start`/`end` that are exactly `HH:MM`
   as 24-hour ASCII digits matched against the whole string (no trailing
-  newline, no non-ASCII digits), `start != end`, and a numeric `amps`. Malformed
+  newline, no non-ASCII digits), and `start != end`. Malformed
   rules are logged and skipped; at most 20 rules are synced (2 firmware events
   each, within the firmware's 50-event limit).
 - **No overlapping windows.** Per weekday (including an overnight rule's spill
@@ -1067,7 +1067,7 @@ records the transport that **carried** the request — `transport: "mqtt"` or
 that falls back and then fails over HTTP records `"http"`); a command rejected
 before anything was sent (validation, unsupported type, stale) records no
 transport. The journal logs `command transport: <transport> (…)` when the path
-changes. Validation (verified `/config` soft/hard/pilot limits, RAPI `$` and ≤32 characters), the 10-minute
+changes. Validation (verified `/config` soft/hard limits, RAPI `$` and ≤32 characters), the 10-minute
 staleness rule, `status` lifecycle and error copy are unchanged.
 
 ## Tests

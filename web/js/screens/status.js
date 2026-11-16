@@ -246,6 +246,11 @@ function renderTemperatureVisibility() {
   $('fig-temp-stat').hidden = !showTemperature;
 }
 
+function currentSeed() {
+  const pilot = status && status.pilot;
+  return Number.isInteger(pilot) && pilot > 0 ? pilot : current.max;
+}
+
 function renderStatus() {
   const theState = stateFor(status && status.state_label);
   document.documentElement.style.setProperty('--state', theState.color);
@@ -272,9 +277,9 @@ function renderStatus() {
   renderTemperatureVisibility();
 
   if (!ampsTouched && current) {
-    // `/config` pilot is the configured setpoint. Live draw is an active claim,
-    // not a safe fallback for the setting control.
-    setAmps(current.pilot);
+    // `/status` pilot is the configured setpoint. An idle charger legitimately
+    // reports zero, so fall back to the verified soft limit in that case.
+    setAmps(currentSeed());
   }
   renderElapsed();
   renderCost();
@@ -543,7 +548,7 @@ export function showConfig(config) {
   $('device-name').title = raw || 'ChelEVSE';
   current = currentCapability(config);
   if (current) {
-    const next = ampsTouched ? holdAmps : current.pilot;
+    const next = ampsTouched ? holdAmps : currentSeed();
     setAmps(next);
   } else {
     setHoldOpen(false);

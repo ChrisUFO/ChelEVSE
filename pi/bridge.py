@@ -103,6 +103,7 @@ from transport import (  # noqa: E402
     apply_command,
     enforce_current_policy,
     mqtt_command_ready,
+    validate_current_request,
 )
 from status_tracker import (  # noqa: E402
     MAX_SESSION_INTERVALS,
@@ -1600,6 +1601,7 @@ def _command_outcome(transport, host, auth, cmd, source):
     """Apply one command; the status fields to settle it with, either way."""
     try:
         if cmd.get("type") == "set_current":
+            cmd = validate_current_request(cmd)
             cmd = enforce_current_policy(cmd, _fetch_config(transport, host, auth))
         extra = apply_command(transport, host, auth, cmd, source=source)
     except CommandError as exc:
@@ -1616,6 +1618,9 @@ def _command_outcome(transport, host, auth, cmd, source):
             "error": f"charger request failed ({exc.__class__.__name__})",
             "transport": "http",
         }
+    except ValueError as exc:
+        # A malformed config reply happened before the command was sent.
+        fields = {"status": "failed", "error": f"charger config invalid ({exc})"}
     else:
         extra.setdefault("transport", "http")
         fields = {"status": "acked", **extra}

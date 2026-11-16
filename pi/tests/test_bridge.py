@@ -173,14 +173,14 @@ class ApplyCommandTests(unittest.TestCase):
         self.assertEqual(session.calls, [])
 
     def test_current_policy_caps_at_soft_limit_not_hard_or_pilot(self):
-        config = {"max_current_soft": 16, "max_current_hard": 24, "pilot": 12}
+        config = {"max_current_soft": 32, "max_current_hard": 80}
         self.assertEqual(
             bridge.enforce_current_policy(
                 {"type": "set_current", "amps": 16}, config
             )["amps"],
             16,
         )
-        for amps in (5, 17, 24, 48):
+        for amps in (5, 33, 48, 80):
             with self.subTest(amps=amps), self.assertRaises(bridge.CommandError):
                 bridge.enforce_current_policy(
                     {"type": "set_current", "amps": amps}, config
@@ -190,10 +190,11 @@ class ApplyCommandTests(unittest.TestCase):
         for config in (
             None,
             {},
-            {"max_current_soft": 16, "max_current_hard": 24},
-            {"max_current_soft": 25, "max_current_hard": 24, "pilot": 16},
-            {"max_current_soft": 16, "max_current_hard": 24, "pilot": 25},
-            {"max_current_soft": 16.5, "max_current_hard": 24, "pilot": 16},
+            {"max_current_soft": 16},
+            {"max_current_soft": 5, "max_current_hard": 24},
+            {"max_current_soft": 49, "max_current_hard": 80},
+            {"max_current_soft": 25, "max_current_hard": 24},
+            {"max_current_soft": 16.5, "max_current_hard": 24},
         ):
             with self.subTest(config=config), self.assertRaises(bridge.CommandError):
                 bridge.enforce_current_policy(
@@ -201,7 +202,7 @@ class ApplyCommandTests(unittest.TestCase):
                 )
 
     def test_current_policy_rejects_non_integer_commands(self):
-        config = {"max_current_soft": 16, "max_current_hard": 24, "pilot": 12}
+        config = {"max_current_soft": 16, "max_current_hard": 80}
         for amps in (True, "16", 15.5, None):
             with self.subTest(amps=amps), self.assertRaises(bridge.CommandError):
                 bridge.enforce_current_policy(
@@ -213,7 +214,7 @@ class ApplyCommandTests(unittest.TestCase):
             [
                 FakeResponse(
                     200,
-                    {"max_current_soft": 16, "max_current_hard": 24, "pilot": 12},
+                    {"max_current_soft": 16, "max_current_hard": 80},
                 ),
                 FakeResponse(200),
             ]
@@ -234,7 +235,7 @@ class ApplyCommandTests(unittest.TestCase):
             [
                 FakeResponse(
                     200,
-                    {"max_current_soft": 16, "max_current_hard": 24, "pilot": 12},
+                    {"max_current_soft": 16, "max_current_hard": 80},
                 )
             ]
         )
@@ -243,6 +244,25 @@ class ApplyCommandTests(unittest.TestCase):
         )
         self.assertEqual(outcome["status"], "failed")
         self.assertIn("between 6 and 16 A", outcome["error"])
+        self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
+
+    def test_command_outcome_rejects_bad_amps_before_fetching_config(self):
+        session = FakeSession()
+        outcome = bridge._command_outcome(
+            session, _host(), None, {"type": "set_current", "amps": "16"}, None
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("whole number", outcome["error"])
+        self.assertEqual(session.calls, [])
+
+    def test_command_outcome_fails_a_malformed_config_reply(self):
+        session = FakeSession([FakeResponse(200, ["not", "an", "object"])])
+        outcome = bridge._command_outcome(
+            session, _host(), None, {"type": "set_current", "amps": 16}, None
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("config response is not a JSON object", outcome["error"])
+        self.assertNotIn("transport", outcome)
         self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
 
     def test_rapi_returns_ret_value(self):

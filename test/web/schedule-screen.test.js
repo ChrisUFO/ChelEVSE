@@ -386,9 +386,9 @@ test('a retry that re-delivers a still-queued write clears the failure', () => {
   editor.querySelectorAll = (selector) => (selector === 'input, button' ? controls : []);
   try {
     const card = element('rule-list').children[0];
-    const ampsInput = card.children[3].children[1].children[1];
-    ampsInput.value = '30';
-    fire(ampsInput, 'input');
+    const startInput = card.children[2].children[0].children[1];
+    startInput.value = '21:30';
+    fire(startInput, 'input');
     assert.equal(element('save-schedule').disabled, true, 'a failed read locks the editor');
 
     showSchedule(document_, { pendingWrites: true });
