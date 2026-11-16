@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { initTabbar, routeFor, buildDayPicker, toggleDay } from '../../web/js/ui.js';
+import {
+  initTabbar,
+  routeFor,
+  buildDayPicker,
+  toggleDay,
+  focusAfterRetry,
+} from '../../web/js/ui.js';
 import { initConfig } from '../../web/js/screens/config.js';
 import { DAY_NAMES } from '../../web/js/schedule.js';
 
@@ -563,3 +569,122 @@ test('a rejected confirmation keeps the current route, restores its hash and fre
 function tick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// ---------- focusAfterRetry: the one retry-focus policy (#164) ----------
+//
+// #153 pinned this helper indirectly, through the five screens that call it;
+// #164 makes it the only implementation, so its policy is pinned here directly:
+// the cases that must move focus (a trigger that left with the failure, while
+// focus sat on <body>, on <html>, on a detached node, or on nothing at all), the
+// cases that must not (a still-visible trigger, a live element the owner chose,
+// a panel id that is not in the page). Same hand-rolled stub idiom as
+// status-error.test.js — `focus()` is the only observer an unstubbed DOM offers.
+
+function installFocusDoc() {
+  const focusLog = [];
+  const elements = new Map();
+  const body = { nodeName: 'BODY' };
+  const documentElement = { nodeName: 'HTML' };
+  // Every node this harness hands out stands for an element in the page;
+  // `contains` is how the helper tells one from a node it can only leak.
+  const live = new Set([body, documentElement]);
+  const element = (id) => {
+    let node = elements.get(id);
+    if (!node) {
+      node = {
+        id,
+        hidden: false,
+        focused: null,
+        focus(options) {
+          this.focused = options;
+          focusLog.push(id);
+        },
+      };
+      elements.set(id, node);
+      live.add(node);
+    }
+    return node;
+  };
+  const document_ = {
+    body,
+    documentElement,
+    activeElement: null,
+    getElementById: element,
+    contains: (node) => live.has(node),
+  };
+  globalThis.document = document_;
+  return { document: document_, element, focusLog };
+}
+
+test('focusAfterRetry moves focus to the panel when focus fell to <body> or <html>', () => {
+  // A Retry that leaves with its failure drops a focused control out of the tree,
+  // and the browser hands focus to the top of the document: nothing there says
+  // what just happened, so the panel the snapshot refilled takes it instead.
+  const { document: doc, element, focusLog } = installFocusDoc();
+  const retry = element('status-retry');
+  retry.hidden = true;
+
+  for (const active of [doc.body, doc.documentElement, null]) {
+    doc.activeElement = active;
+    focusAfterRetry(retry, 'panel-status');
+  }
+
+  assert.deepEqual(focusLog, ['panel-status', 'panel-status', 'panel-status']);
+  assert.deepEqual(element('panel-status').focused, { preventScroll: true });
+});
+
+test('focusAfterRetry moves focus when the focused node left the document', () => {
+  // The browser can keep `activeElement` pointing at the control a retry or a
+  // rebuild removed: the reference is real, the node is not in the page. That is
+  // not focus the owner placed (the settings rebuild restores already read it
+  // this way), so it must not keep focus off the panel.
+  const { document: doc, element, focusLog } = installFocusDoc();
+  doc.activeElement = { id: 'removed-control' }; // never handed out here: detached
+  const retry = element('status-retry');
+  retry.hidden = true;
+
+  focusAfterRetry(retry, 'panel-status');
+
+  assert.deepEqual(focusLog, ['panel-status']);
+});
+
+test('focusAfterRetry leaves a visible trigger alone, and a missing one too', () => {
+  // A Retry still on screen means the failure is still there, so there is no
+  // recovery to move focus for. No trigger at all is the same answer.
+  const { document: doc, element, focusLog } = installFocusDoc();
+  doc.activeElement = doc.body;
+  const retry = element('status-retry');
+  retry.hidden = false;
+
+  focusAfterRetry(retry, 'panel-status');
+  focusAfterRetry(null, 'panel-status');
+  focusAfterRetry(undefined, 'panel-status');
+
+  assert.deepEqual(focusLog, []);
+});
+
+test('focusAfterRetry does not steal focus from a live element', () => {
+  // The owner tabbed somewhere else while the retry was pending; that is where
+  // they are, even though the trigger went away underneath them.
+  const { document: doc, element, focusLog } = installFocusDoc();
+  const retry = element('status-retry');
+  retry.hidden = true;
+  doc.activeElement = element('status-stop');
+
+  focusAfterRetry(retry, 'panel-status');
+
+  assert.deepEqual(focusLog, []);
+});
+
+test('focusAfterRetry no-ops when the panel id is not in the document', () => {
+  // `panelId` is a lookup, not a promise: a screen whose panel is absent (or has
+  // not painted yet) must not throw on the way out of a retry.
+  const { document: doc, element, focusLog } = installFocusDoc();
+  const retry = element('status-retry');
+  retry.hidden = true;
+  doc.activeElement = doc.body;
+  doc.getElementById = () => undefined;
+
+  assert.doesNotThrow(() => focusAfterRetry(retry, 'panel-status'));
+  assert.deepEqual(focusLog, []);
+});

@@ -8,7 +8,7 @@
 // cache and retry markers) lives in the DOM-free coordinator so the sign-out
 // race is covered by test/web; this screen only wires Firebase and paints.
 
-import { $, setText } from '../ui.js';
+import { $, focusAfterRetry, setText } from '../ui.js';
 import {
   OFFLINE_TOKEN_MESSAGE,
   notificationState,
@@ -60,15 +60,6 @@ function currentUid() {
 
 function isOffline() {
   return typeof navigator !== 'undefined' && navigator.onLine === false;
-}
-
-// A button that disappears on the next render drops focus to <body>. Move it to
-// the status line the user needs to hear instead of the top of the page.
-function focusAfterAction(trigger) {
-  if (!trigger || !trigger.hidden) return;
-  const active = document.activeElement;
-  if (active && active !== document.body && active !== document.documentElement) return;
-  $('notify-status').focus({ preventScroll: true });
 }
 
 // The service worker registers on page load; a waiting `ready` promise keeps
@@ -307,7 +298,7 @@ async function enable() {
     message = permission === 'default' ? 'Permission wasn’t granted. You can try again.' : '';
     render();
   } finally {
-    focusAfterAction(trigger);
+    focusAfterRetry(trigger, 'notify-status');
   }
 }
 
@@ -318,7 +309,7 @@ export function initNotifications() {
   $('notify-retry').addEventListener('click', async () => {
     const trigger = $('notify-retry');
     await registerToken();
-    focusAfterAction(trigger);
+    focusAfterRetry(trigger, 'notify-status');
   });
   notificationApi = hasNotificationApi();
   permission = readPermission();
