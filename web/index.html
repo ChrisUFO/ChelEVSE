@@ -985,7 +985,12 @@
               <h2 id="rapi-log-heading">Recent commands</h2>
               <span class="section-note advanced-note">Last 20</span>
             </div>
-            <p class="section-state" id="rapi-log-state">Loading recent commands…</p>
+            <!-- A polite live region, the Settings convention: the failure copy
+                 written in by renderLog is announced, and so is the loading
+                 line this same node carries. -->
+            <p class="section-state" id="rapi-log-state" role="status" aria-live="polite">
+              Loading recent commands…
+            </p>
             <!-- Shown only while #rapi-log-state carries a failure. Retry
                  re-subscribes through store.js — no reload. -->
             <button id="rapi-log-retry" class="btn small" type="button" hidden>Try again</button>

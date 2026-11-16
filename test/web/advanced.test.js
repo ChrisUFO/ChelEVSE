@@ -267,3 +267,27 @@ test('a failed log read shows its copy beside a Retry, and a snapshot clears bot
   assert.equal(state.className, 'section-state');
   assert.equal(state.textContent, 'No commands sent yet. Recent RAPI commands will appear here.');
 });
+
+test('index.html makes the log line a polite live region above its Retry', () => {
+  // The stub answers any id on demand, so the markup is pinned from source (the
+  // status-error/settings-screen convention). renderLog writes the failure copy
+  // into #rapi-log-state with setText: without a live region a screen-reader
+  // user gets nothing, while the other three screens all announce.
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  const tag = /<p\b[^>]*id="rapi-log-state"[^>]*>/.exec(source);
+  assert.ok(tag, 'web/index.html ships #rapi-log-state');
+  // Polite, not alert: the same node is the `Loading recent commands…` line, so
+  // an alert would interrupt for a line that is not an error.
+  assert.match(tag[0], /role="status"/);
+  assert.match(tag[0], /aria-live="polite"/);
+
+  const at = {
+    state: source.indexOf('id="rapi-log-state"'),
+    retry: source.indexOf('id="rapi-log-retry"'),
+    list: source.indexOf('id="rapi-log"'),
+  };
+  for (const [marker, position] of Object.entries(at)) {
+    assert.notEqual(position, -1, `${marker} is missing from web/index.html`);
+  }
+  assert.ok(at.state < at.retry && at.retry < at.list, 'the Retry sits under the log line');
+});
