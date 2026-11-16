@@ -222,10 +222,10 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 
 ### 3.3 Set current (hold)
 
-- **Do:** confirm `/config` reports coherent soft/hard/pilot limits, tap **Hold**, move the slider up to the soft maximum, then tap **Apply**.
+- **Do:** confirm `/config` reports coherent soft/hard limits, tap **Hold**, move the slider up to the soft maximum, then tap **Apply**.
 - **Expect:** the charger holds at that current (`charge_current`/`max_current`);
   feedback "Current set to N A."; doc `acked` with `amps: N`. The slider
-  prefills from `pilot` (the limit), not the live draw.
+  prefills from `pilot` (`/status`, the limit), not the live draw.
 - **Evidence:** command doc with `amps`, screenshot showing the new setpoint.
 
 ### 3.4 RAPI console — valid
@@ -479,8 +479,8 @@ covers the screen-reader announcement — that still needs the manual error abov
 | 8.1 | Rules test suite            | `npm run test:rules` (needs Java; uses the Firestore emulator and `--project demo-chelevse`)                                                        | All tests pass: ungranted users denied reads/writes, command schema enforced, schedule container rules, settings shape, own-token-only `fcmTokens`. | Test output     |
 | 8.2 | Unauthorized read (manual)  | Signed in as the ungranted account, read `status/current` (console/SDK)                                                                             | `permission-denied`; no data returned.                                                                                                              | Error output    |
 | 8.3 | Unauthorized write (manual) | As the ungranted account, attempt a `commands` create or `settings/current` write                                                                   | `permission-denied`; no document created.                                                                                                           | Error output    |
-| 8.4 | Deploy guard — mismatch     | `GOOGLE_APPLICATION_CREDENTIALS=private.example/service-account.json.example FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs` | Prints `✖ deploy blocked: target project "<project-id>" does not match the service-account key's project …` and exits non-zero; no deploy can run. | Terminal output |
-| 8.5 | Deploy guard — match        | `GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs`                 | Prints `✔ deploy guard: <project-id> …`.                                                                                                           | Terminal output |
+| 8.4 | Deploy guard — mismatch     | `GOOGLE_APPLICATION_CREDENTIALS=private.example/service-account.json.example FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs` | Prints `✖ deploy blocked: target project "<project-id>" does not match the service-account key's project …` and exits non-zero; no deploy can run.  | Terminal output |
+| 8.5 | Deploy guard — match        | `GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs`                 | Prints `✔ deploy guard: <project-id> …`.                                                                                                            | Terminal output |
 | 8.6 | Bridge-only writes          | Attempt a `status/current` write as the owner from the web SDK                                                                                      | `permission-denied`; only the Admin SDK (bridge) writes status/history/commands' lifecycle.                                                         | Error output    |
 
 ## 9. Human checks (on site)
