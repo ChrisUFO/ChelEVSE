@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   CHART_VIEW_W,
@@ -2089,7 +2090,9 @@ test('no web source or README still calls a chart period a rolling window', () =
       else if (/\.(js|html|css)$/.test(entry.name)) files.push(path);
     }
   };
-  walk(webRoot.pathname);
+  // `pathname` keeps the leading slash of a file URL, which Windows treats as
+  // a drive-relative path: readdirSync('C:\C:\...') fails with ENOENT.
+  walk(fileURLToPath(webRoot));
   assert.ok(files.length > 0, 'the sweep found the web sources');
   const shipped = [
     ['README.md', readFileSync(new URL('../../README.md', import.meta.url), 'utf8')],
