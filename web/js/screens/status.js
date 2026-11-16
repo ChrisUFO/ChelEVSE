@@ -2,7 +2,7 @@
 // oriented pause/resume/set-current controls. All rendering and status-specific
 // state lives here so the screen survives tab switches intact.
 
-import { $, setText } from '../ui.js';
+import { $, focusAfterRetry, setText } from '../ui.js';
 import {
   elapsedClock,
   fmtK,
@@ -132,17 +132,6 @@ function renderFreshness() {
 // arrives afterwards puts the screen back with no further bookkeeping.
 const STATUS_FAILED = 'Couldn’t load the charger status.';
 
-// Retry leaves with the failure it belonged to, and a focused node that leaves
-// the tree drops focus to <body> — the top of the document, with nothing said
-// about what just happened. Move it to the panel the snapshot refilled; the
-// shape is notifications.js's focusAfterAction, for the same reason.
-function focusAfterRetry(retry) {
-  if (!retry || !retry.hidden) return;
-  const active = document.activeElement;
-  if (active && active !== document.body && active !== document.documentElement) return;
-  $('panel-status').focus({ preventScroll: true });
-}
-
 function renderStatusError() {
   const failed = statusError;
   const error = $('status-error');
@@ -160,7 +149,7 @@ function renderStatusError() {
   // Recovery lands where the user was, not at the top of the page.
   if (!failed && retryRequested) {
     retryRequested = false;
-    focusAfterRetry(retry);
+    focusAfterRetry(retry, 'panel-status');
   }
 }
 
