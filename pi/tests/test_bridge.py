@@ -549,8 +549,11 @@ class HistoryTests(unittest.TestCase):
             elapsed = (when - self._last_when).total_seconds()
             self.boot += elapsed if elapsed > 0 else 3600.0
         self._last_when = when
+        # CLOCK_BOOTTIME and clock_gettime are Linux-only; create=True keeps the
+        # same patch valid on a Windows host, where `_interval_clock` takes its
+        # monotonic fallback — patched to the same value right here.
         with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=self.boot
+            bridge.time, "clock_gettime", return_value=self.boot, create=True
         ), mock.patch.object(bridge.time, "monotonic", return_value=self.boot):
             self.tracker.record_history(total)
 
@@ -881,7 +884,9 @@ class IntervalTests(unittest.TestCase):
         self.boot += (boot_step if boot_step is not None else step).total_seconds()
         with mock.patch.object(bridge, "_utcnow", return_value=self.now), mock.patch.object(
             bridge.time, "monotonic", return_value=self.mono
-        ), mock.patch.object(bridge.time, "clock_gettime", return_value=self.boot):
+        ), mock.patch.object(
+            bridge.time, "clock_gettime", return_value=self.boot, create=True
+        ):
             (tracker or self.tracker).observe(
                 {
                     "state": state,

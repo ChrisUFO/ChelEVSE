@@ -49,7 +49,7 @@ class HistoryBase(unittest.TestCase):
             self.boot += max(0.0, (when - self._last_when).total_seconds())
         self._last_when = when
         with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=self.boot
+            bridge.time, "clock_gettime", return_value=self.boot, create=True
         ), mock.patch.object(bridge.time, "monotonic", return_value=self.boot):
             self.tracker.record_history(total)
 
@@ -334,7 +334,7 @@ class SinkIntervalTests(unittest.TestCase):
     def apply(self, when, **overrides):
         boot = self.clock()
         with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=boot
+            bridge.time, "clock_gettime", return_value=boot, create=True
         ), mock.patch.object(bridge.time, "monotonic", return_value=boot):
             fields = bridge.parse_status(status_payload(**overrides))
             self.sink.apply_status(fields, "http")
@@ -619,7 +619,7 @@ class HistoryPlausibilityTests(HistoryBase):
         self.assertTrue(tracker.seed())
         now = datetime(2026, 11, 8, 22, 32, 31, tzinfo=UTC)
         with mock.patch.object(bridge, "_localnow", return_value=now), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=1000.0
+            bridge.time, "clock_gettime", return_value=1000.0, create=True
         ), mock.patch.object(bridge.time, "monotonic", return_value=1000.0):
             tracker.record_history(0.0)
             self.assertEqual(tracker.total_energy, 385.284)
