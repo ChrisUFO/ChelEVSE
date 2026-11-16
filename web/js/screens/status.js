@@ -25,7 +25,7 @@ import {
   statusCostLabel,
   statusCostUncovered,
 } from '../cost.js';
-import { sendCommand as postCommand } from '../store.js';
+import { retryStore, sendCommand as postCommand } from '../store.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -41,6 +41,15 @@ const CMD_TEXT = {
 const CONTROL_TYPES = new Set(Object.keys(CMD_TEXT));
 
 let status = null;
+// The status listener failed. Kept apart from `status` because "no data yet"
+// and "the read failed" must not render the same: the figures stay blank in
+// both, but only this one owes the owner an error and a way back. Cleared by
+// any snapshot, so recovery needs no other bookkeeping.
+let statusError = false;
+// Set when the owner activates Retry. The render that clears the failure hides
+// the control that had their focus, so that render — and only a render a retry
+// preceded — has to put focus somewhere useful. Any snapshot moves nothing.
+let retryRequested = false;
 let schedule = null;
 // Full cost settings ({rate, currency, rates}); the schedule prices a session
 // over its elapsed interval, and the stored flat rate applies only when no row
@@ -81,7 +90,10 @@ function ageMs() {
 
 function renderFreshness() {
   if (!status) {
-    setText($('updated'), 'waiting for data');
+    // A failed listener has nothing left to wait for: the error line speaks for
+    // the screen, so the caption stands down instead of promising a snapshot
+    // that is not coming. The pre-data screen is unchanged.
+    setText($('updated'), statusError ? '' : 'waiting for data');
     $('banner').hidden = true;
     return;
   }
@@ -108,6 +120,45 @@ function renderFreshness() {
         ? 'Not updating — showing last known values'
         : 'Bridge offline — showing last known values',
   );
+}
+
+// The listener's failure gets a line of its own rather than the freshness
+// caption's slot: the caption is a claim about data that arrived, and this is
+// the state where none did. One flag drives all three nodes on every render —
+// the error and its Retry appear, the caption stands down — so a snapshot that
+// arrives afterwards puts the screen back with no further bookkeeping.
+const STATUS_FAILED = 'Couldn’t load the charger status.';
+
+// Retry leaves with the failure it belonged to, and a focused node that leaves
+// the tree drops focus to <body> — the top of the document, with nothing said
+// about what just happened. Move it to the panel the snapshot refilled; the
+// shape is notifications.js's focusAfterAction, for the same reason.
+function focusAfterRetry(retry) {
+  if (!retry || !retry.hidden) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) return;
+  $('panel-status').focus({ preventScroll: true });
+}
+
+function renderStatusError() {
+  const failed = statusError;
+  const error = $('status-error');
+  // Reveal, then write: a live region announces content inserted into a node it
+  // can already expose, not a static line that was merely un-hidden — the order
+  // #notify-error keeps.
+  error.hidden = !failed;
+  // Written on every render, '' included: a copy left in the hidden node would
+  // come back on the next failure as a bare un-hide, which is the case this
+  // order exists to avoid — #notify-error clears its line the same way.
+  setText(error, failed ? STATUS_FAILED : '');
+  const retry = $('status-retry');
+  retry.hidden = !failed;
+  $('updated').hidden = failed;
+  // Recovery lands where the user was, not at the top of the page.
+  if (!failed && retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry);
+  }
 }
 
 // The snapshot carries elapsed seconds. The clock is anchored to the local
@@ -230,6 +281,7 @@ function renderStatus() {
   renderCost();
   renderScheduleBadge();
   renderFreshness();
+  renderStatusError();
 }
 
 function setBusy(busy) {
@@ -353,6 +405,18 @@ export function initStatus() {
     holdAmps = Number($('amps').value);
     paintSlider();
   });
+  // Retry re-subscribes through the one startStore path (which stops first), so
+  // repeated taps cannot stack listeners. Deliberately no busy state, no
+  // backoff and no budget: the control stays usable and idempotent.
+  $('status-retry').addEventListener('click', () => {
+    // Remembered for the render that clears the failure: it hides the control
+    // the click left focus on, so it owes the user a new focus target.
+    retryRequested = true;
+    // The copy goes with the click: a retry that fails again must re-write the
+    // line, and an unchanged line is no mutation, so nothing would be announced.
+    setText($('status-error'), '');
+    retryStore();
+  });
 }
 
 export function enterStatus() {
@@ -377,6 +441,10 @@ export function leaveStatus() {
   clearTimeout(resultTimer);
   ticker = resultTimer = null;
   status = null;
+  // Sign-out teardown: the next session starts from the pre-data screen, not
+  // from a failure that belonged to the session that just ended.
+  statusError = false;
+  retryRequested = false;
   schedule = null;
   settings = null;
   showTemperature = true;
@@ -407,6 +475,10 @@ export function leaveStatus() {
 
 export function showStatus(snap) {
   const data = snap && snap.exists() ? snap.data() : null;
+  // Any snapshot proves the listener is alive again — a cache-provenance one
+  // included, since it is data the screen can show — so the failure line and
+  // its Retry go away and the normal render takes over.
+  statusError = false;
   // Only a new status write releases a stop-time hold. The bridge merges only
   // `schedule` into status/current, and releasing on that merge would let the
   // clock interpolate from the old write and jump before the stop lands.
@@ -423,6 +495,9 @@ export function showStatus(snap) {
 }
 
 export function showStatusError() {
+  // No snapshot reached the screen, so nothing may be left claiming one did:
+  // the failure state is the whole picture (blank figures, no caption).
+  statusError = true;
   clock = null;
   clockHold = null;
   costAnchor = null;

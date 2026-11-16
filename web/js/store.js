@@ -30,21 +30,30 @@ let unsubConfig = null;
 let unsubSchedule = null;
 let unsubRapi = null;
 let unsubPending = null;
+// The argument object of the most recent startStore(), retained so a screen's
+// Retry can re-subscribe without every caller holding the callbacks. It is
+// taken only after startStore has stopped the previous subscriptions, and
+// stopStore() drops it: a retry after sign-out must not resurrect a listener.
+let lastOptions = null;
 
-export function startStore({
-  onStatus,
-  onCommands,
-  onSettings,
-  onSettingsError,
-  onConfig,
-  onConfigError,
-  onSchedule,
-  onScheduleError,
-  onRapiCommands,
-  onRapiError,
-  onAccessDenied,
-}) {
+export function startStore(options) {
+  const {
+    onStatus,
+    onCommands,
+    onSettings,
+    onSettingsError,
+    onConfig,
+    onConfigError,
+    onSchedule,
+    onScheduleError,
+    onRapiCommands,
+    onRapiError,
+    onAccessDenied,
+  } = options;
   stopStore();
+  // Retained after the stop, never before: a retry replays exactly the call
+  // that is subscribing now, and nothing retained outlives its listeners.
+  lastOptions = options;
   const denied = (err) => {
     if (err && err.code === 'permission-denied' && onAccessDenied) {
       onAccessDenied();
@@ -55,10 +64,12 @@ export function startStore({
   // Every document subscription hands the snapshot's provenance to its callback
   // alongside the data: a cached snapshot is what the local cache knew before
   // the server answered, which is not the same as the server's answer.
-  const watch = (path, onData, onError, options = {}) =>
+  // `snapshotOptions` rather than `options`: the outer name is the retained
+  // argument object, and the two must never be confused for one another.
+  const watch = (path, onData, onError, snapshotOptions = {}) =>
     onSnapshot(
       doc(db, path),
-      options,
+      snapshotOptions,
       (snap) =>
         onData(snap && snap.exists() ? snap.data() : null, {
           fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
@@ -172,6 +183,19 @@ export function stopStore() {
     unsubRapi =
     unsubPending =
       null;
+  // Dropped with the handles: nothing retained may outlive the subscriptions it
+  // would re-create (sign-out teardown runs through here).
+  lastOptions = null;
+}
+
+// Re-run the last startStore: the one re-subscribe path every screen's Retry
+// shares. startStore stops the previous subscriptions before subscribing, so
+// repeated activation cannot stack listeners; with nothing retained (before the
+// first start, or after stopStore) this is a no-op rather than a resurrection.
+export function retryStore() {
+  if (!lastOptions) return false;
+  startStore(lastOptions);
+  return true;
 }
 
 // Every command is created pending; the bridge owns the lifecycle after that.

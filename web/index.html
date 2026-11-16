@@ -293,6 +293,12 @@
               <span class="elapsed" id="elapsed">—</span>
             </p>
             <p class="updated" id="updated">waiting for data</p>
+            <!-- The listener's failure, kept apart from the pre-data caption
+                 above and from #banner (the staleness verdict). The copy is
+                 written in when the line appears, so it is announced, and
+                 #status-retry re-subscribes through store.js — no reload. -->
+            <p class="field-error" id="status-error" role="alert" hidden></p>
+            <button id="status-retry" class="btn small" type="button" hidden>Try again</button>
           </section>
 
           <section class="figures" style="--i: 2" aria-label="Live figures">

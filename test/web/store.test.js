@@ -9,7 +9,9 @@ import {
   SESSION_LIMIT,
   fetchSessionsInRange,
   mergeCommandWindows,
+  retryStore,
   sessionsQueryOptions,
+  stopStore,
 } from '../../web/js/store.js';
 
 test('sessionsQueryOptions selects the 20 newest sessions', () => {
@@ -233,4 +235,93 @@ test("the range read's default page reader forwards its page size into the query
   // limit reaches the query's constraints.
   assert.match(body, /sessionsQueryOptions\(\{[^}]*pageSize,/);
   assert.match(body, /constraints\.push\(limit\(max\)\)/);
+});
+
+// ---------- the in-place retry path (#153) ----------
+//
+// startStore/retryStore cannot be executed here (onSnapshot needs the SDK's
+// live `db`), so the subscription order is pinned from source, the same
+// sw-shell pattern as the reads above. What *can* run is the no-op contract:
+// retryStore() before any store has started must do nothing at all.
+
+function startStoreBody() {
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function startStore(');
+  assert.ok(start >= 0, 'store.js declares startStore');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes startStore');
+  return source.slice(start, end + 2).replace(/\s+/g, ' ');
+}
+
+test('startStore retains the options it is subscribing with, after stopping the old ones', () => {
+  // The retry contract (R6/R8): one re-subscribe path, in this order. The
+  // argument object is taken as given — a rebuilt literal would quietly drop a
+  // callback added later, and a Retry would then re-subscribe half a store.
+  // Holding it *after* stopStore() is what keeps a retained object from
+  // outliving the listeners it belongs to when teardown and start overlap.
+  const body = startStoreBody();
+  assert.match(body, /^export function startStore\(options\) \{/);
+  assert.match(body, /\} = options; stopStore\(\);/);
+  const stopAt = body.indexOf('stopStore();');
+  const retainAt = body.indexOf('lastOptions = options;');
+  assert.ok(retainAt > stopAt, 'the options are retained only after the stop');
+  // Nothing may subscribe before the old handles are stopped: that ordering is
+  // the whole reason a repeated Retry cannot stack listeners.
+  const firstSnapshotAt = body.indexOf('onSnapshot(');
+  assert.ok(firstSnapshotAt > stopAt, 'no listener is created before stopStore()');
+  assert.ok(retainAt < firstSnapshotAt, 'the retained object is the one about to subscribe');
+});
+
+test('retryStore replays the retained call, and is a plain no-op before the first start', () => {
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function retryStore(');
+  assert.ok(start >= 0, 'store.js declares retryStore');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes retryStore');
+  const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  // No arguments, no local bookkeeping: it hands the retained object back to
+  // the one startStore path, which stops before it subscribes.
+  assert.match(body, /if \(!lastOptions\) return false;/);
+  assert.match(body, /startStore\(lastOptions\);/);
+  assert.match(body, /return true;/);
+
+  // Executed: this file never starts a store, so nothing is retained and the
+  // two contract cases below are both real. A failed/no-op retry must not
+  // throw — a Retry in the error state is wired straight to this.
+  assert.equal(retryStore(), false, 'nothing retained, nothing to replay');
+  assert.doesNotThrow(() => stopStore(), 'teardown with nothing retained is safe');
+  assert.equal(retryStore(), false, 'stopStore() leaves nothing to replay');
+});
+
+test('stopStore drops the retained options with the listener handles', () => {
+  // R8: sign-out runs through stopStore(); a retained object that survived it
+  // would let a later Retry resurrect subscriptions for a session that ended.
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function stopStore(');
+  assert.ok(start >= 0, 'store.js declares stopStore');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes stopStore');
+  const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  assert.match(body, /lastOptions = null;/);
+});
+
+test('every listener error path still asks denied() first', () => {
+  // R7: `permission-denied` routes to onAccessDenied and offers no Retry. A
+  // retry refactor is exactly the kind of change that could reorder this, so
+  // the gate is pinned where it is: defined before any subscription, its
+  // access-denied branch intact, and every error callback opening with it (the
+  // two command windows hand `denied` itself to onSnapshot).
+  const body = startStoreBody();
+  const deniedAt = body.indexOf('const denied = (err) => {');
+  assert.ok(deniedAt >= 0, 'startStore defines denied');
+  assert.ok(deniedAt < body.indexOf('onSnapshot('), 'denied is defined before any listener');
+  const deniedBody = body.slice(deniedAt, body.indexOf('return false;', deniedAt));
+  assert.match(deniedBody, /err\.code === 'permission-denied'/);
+  assert.match(deniedBody, /onAccessDenied\(\)/);
+  assert.match(deniedBody, /return true;/);
+
+  const gated = body.match(/\(err\) => \{ if \(!denied\(err\)/g) || [];
+  assert.equal(gated.length, 4, 'the four inline error callbacks all gate on denied(err)');
+  const handed = body.match(/denied,/g) || [];
+  assert.equal(handed.length, 2, 'both command windows pass denied as the error handler');
 });
