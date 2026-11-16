@@ -214,7 +214,8 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 - **Do:** with the car charging, tap **Stop**.
 - **Expect:** feedback "Sending stop…", controls disabled; within a few seconds
   the charger stops (state leaves `3`), feedback "Stop command applied.", and
-  the command document is `status: "acked"`.
+  the command document is `status: "acked"`. If the **Hold** panel was open it
+  closes as the command is sent, and focus stays on **Stop**.
 - **Evidence:** command doc id/status, journal line
   `command <id> acked: pause`, screenshot of the stopped state.
 
@@ -222,7 +223,9 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 
 - **Do:** tap **Auto**.
 - **Expect:** bridge sends `DELETE /override`; the charger returns to its normal
-  (scheduled/auto) behaviour; "Auto command applied."; doc `acked`.
+  (scheduled/auto) behaviour; "Auto command applied."; doc `acked`. An open
+  **Hold** panel closes on send, and the slider re-seeds from `pilot` on the
+  next status write rather than keeping the abandoned drag.
 - **Evidence:** command doc, screenshot, journal line.
 
 ### 3.3 Set current (hold)

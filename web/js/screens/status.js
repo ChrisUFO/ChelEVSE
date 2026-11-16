@@ -346,6 +346,13 @@ function renderCommands(cmds) {
 }
 
 async function send(payload) {
+  // Auto and Stop replace the mode the panel belongs to, so the panel goes with
+  // them — without moving focus off the button just pressed. The slider re-seeds
+  // from the next status write rather than the drag left behind.
+  if (payload.type === 'pause' || payload.type === 'resume') {
+    setHoldOpen(false, { focus: false });
+    ampsTouched = false;
+  }
   setBusy(true); // optimistic; the commands listener keeps this set until the bridge acks
   try {
     await postCommand(payload);
@@ -381,10 +388,12 @@ function paintSlider() {
 
 // Hold reveals the set-current editor; it does not claim a mode is active.
 // Stop and Auto send their commands immediately.
-function setHoldOpen(open) {
+function setHoldOpen(open, { focus = true } = {}) {
   holdOpen = open;
   $('hold-panel').hidden = !open;
   $('hold').setAttribute('aria-expanded', String(open));
+  // A close triggered by another control leaves focus on that control.
+  if (!focus) return;
   if (open) $('amps').focus({ preventScroll: true });
   else $('hold').focus({ preventScroll: true });
 }
