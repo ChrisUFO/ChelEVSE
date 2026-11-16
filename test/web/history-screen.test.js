@@ -2,10 +2,12 @@ import { beforeEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  dayId,
   dayLabel,
   periodAnchor,
   periodById,
   periodBounds,
+  periodSpan,
   sessionsRange,
 } from '../../web/js/history.js';
 import { statusCostLabel } from '../../web/js/cost.js';
@@ -382,6 +384,23 @@ test('monthRange bounds one month half-open', () => {
   const december = monthRange('2026-12');
   assert.equal(december.end.getFullYear(), 2027);
   assert.equal(december.end.getMonth(), 0);
+});
+
+test('the chart month and the sessions browser name the same calendar month', () => {
+  // #155's cross-screen claim: one meaning for a month. The chart's October 2026
+  // window and the picker's `2026-10` are the same calendar month, so the two
+  // controls can never describe different 30-day spans.
+  const now = new Date(2026, 10, 16, 12);
+  const anchor = periodAnchor('month', 1, now); // October 2026, one page back
+  const bounds = periodBounds('month', anchor, now);
+  const range = monthRange('2026-10');
+  assert.equal(dayId(range.start), bounds.startId);
+  // The picker's range is half-open, so the chart's last day is the day before
+  // its end.
+  const after = new Date(range.end);
+  after.setDate(after.getDate() - 1);
+  assert.equal(dayId(after), bounds.endId);
+  assert.equal(plain(periodSpan('month', anchor, now).label), 'October 2026');
 });
 
 // ---------- the screen wiring (DOM stub) ----------
@@ -1195,26 +1214,29 @@ function labelText() {
   return plain(element('history-total-label').textContent);
 }
 
-test('the default view paints exactly the strings it always has', async () => {
+test('the default view names the current calendar month', async () => {
   freezeClock();
   try {
     resetHistory();
     enterHistory();
     await fire('history-refresh', 'click');
-    // Byte-identical to the pre-paging screen: summary label, its aria-label,
-    // the SVG label and the heading.
-    assert.equal(element('history-total-label').textContent, 'Last 30 days');
-    assert.equal(element('history-summary').attrs['aria-label'], 'Last 30 days summary');
+    // One register: offset 0 is October 2026, named as the calendar month it is
+    // on the summary label, its aria-label, the SVG label and the heading.
+    assert.equal(labelText(), 'October 2026');
     assert.equal(
-      element('history-chart').attrs['aria-label'],
-      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for October 2026',
+    );
+    assert.equal(
+      plain(element('history-chart').attrs['aria-label']),
+      'Daily energy for October 2026. Use the left and right arrow keys to move between days.',
     );
     assert.equal(element('chart-heading').textContent, 'Daily energy');
     // Next cannot reach the future; Previous pages back from the present.
     assert.equal(element('chart-next').disabled, true);
     assert.equal(element('chart-prev').disabled, false);
-    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous 30 days');
-    assert.equal(element('chart-next').attrs['aria-label'], 'Next 30 days');
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous month');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next month');
   } finally {
     mock.timers.reset();
   }
@@ -1230,37 +1252,34 @@ test('Previous pages one window back and Next returns to the default view', asyn
     // The window is built before the read is awaited, so the control state and
     // the paged loading copy are painted synchronously.
     assert.equal(element('chart-next').disabled, false);
-    assert.equal(labelText(), '20 Aug – 18 Sep 2026');
+    assert.equal(labelText(), 'September 2026');
     assert.equal(
       plain(element('history-summary').attrs['aria-label']),
-      'Energy summary for 20 August – 18 September 2026',
+      'Energy summary for September 2026',
     );
     assert.equal(
       plain(element('history-chart').attrs['aria-label']),
-      'Daily energy for 20 August – 18 September 2026. Use the left and right arrow keys to move between days.',
+      'Daily energy for September 2026. Use the left and right arrow keys to move between days.',
     );
-    assert.equal(
-      plain(element('chart-empty-line').textContent),
-      'Reading 20 August – 18 September 2026.',
-    );
+    assert.equal(plain(element('chart-empty-line').textContent), 'Reading September 2026.');
     await back;
     await readFailed();
-    // One more window back: the 30 days ending 30 days before the previous one.
+    // One more window back: the calendar month before September's.
     await fire('chart-prev', 'click');
     await readFailed();
-    assert.equal(labelText(), '21 Jul – 19 Aug 2026');
+    assert.equal(labelText(), 'August 2026');
     // Next walks back toward the present one window at a time.
     await fire('chart-next', 'click');
     await readFailed();
-    assert.equal(labelText(), '20 Aug – 18 Sep 2026');
+    assert.equal(labelText(), 'September 2026');
     assert.equal(element('chart-next').disabled, false);
     await fire('chart-next', 'click');
     await readFailed();
-    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(labelText(), 'October 2026');
     assert.equal(element('chart-next').disabled, true);
     // Next at the present is inert: no window beyond it, and no re-read.
     await fire('chart-next', 'click');
-    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(labelText(), 'October 2026');
     assert.doesNotMatch(element('chart-empty-title').textContent, /Loading/);
   } finally {
     mock.timers.reset();
@@ -1276,7 +1295,7 @@ test('a paged window names its dates everywhere and never says today', async () 
     await fire('chart-prev', 'click');
     await readFailed();
     const label = labelText();
-    assert.equal(label, '20 Aug – 18 Sep 2026');
+    assert.equal(label, 'September 2026');
     // Chart, summary, SVG label and heading — none may claim a window they are
     // not drawing.
     for (const [what, text] of Object.entries({
@@ -1295,7 +1314,7 @@ test('a paged window names its dates everywhere and never says today', async () 
       'summary aria-label': element('history-summary').attrs['aria-label'],
       'chart aria-label': element('history-chart').attrs['aria-label'],
     })) {
-      assert.ok(plain(text).includes('20 August – 18 September 2026'), text);
+      assert.ok(plain(text).includes('September 2026'), text);
     }
 
     // The empty panel names the same window — the offline line is the same
@@ -1307,7 +1326,7 @@ test('a paged window names its dates everywhere and never says today', async () 
     showHistorySettings(nightly());
     assert.equal(
       plain(element('chart-empty-title').textContent),
-      'No energy recorded for 20 August – 18 September 2026.',
+      'No energy recorded in September 2026.',
     );
     // An empty window is still a window: the paging controls stay on screen, so
     // the owner can page back out of it.
@@ -1325,22 +1344,22 @@ test('a paged window names its dates everywhere and never says today', async () 
     showHistorySettings(nightly());
     assert.equal(
       plain(element('chart-empty-line').textContent),
-      'Reconnect, then tap Refresh to load the energy for 20 August – 18 September 2026.',
+      'Reconnect, then tap Refresh to load the energy for September 2026.',
     );
     assert.equal(element('chart-bars').children.length, 0);
 
     // A paged window's readout names its own newest bucket (no bucket in it is
-    // current, so the newest is selected) and still prices its $.
+    // current, so the newest is September's last day) and still prices its $.
     applyHistory(
       descriptor,
-      { docs: [{ id: '2026-09-18', kwh: 2 }], fromCache: false },
+      { docs: [{ id: '2026-09-30', kwh: 2 }], fromCache: false },
       null,
       anchor,
       [],
       now,
     );
     showHistorySettings({ rate: 0.25, currency: 'GBP' });
-    assert.equal(element('chart-day').textContent, dayLabel('2026-09-18'));
+    assert.equal(element('chart-day').textContent, dayLabel('2026-09-30'));
     assert.doesNotMatch(element('chart-day').textContent, /Today/);
     assert.equal(element('history-total').textContent, '2.00');
     assert.equal(element('history-cost').textContent, fmtMoney(0.5, 'GBP'));
@@ -1354,6 +1373,38 @@ test('a paged window names its dates everywhere and never says today', async () 
     showHistoryStatus(statusAt(3, PAGED_NOW, 7200, 1000));
     assert.equal(element('history-cost-cell').hidden, true);
     assert.equal(element('chart-cost').textContent, '');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('a Year month bucket never carries the Today prefix', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    const now = new Date(PAGED_NOW);
+    // The real segment listener puts the screen on Year, so the chart paints the
+    // year descriptor's series with its own bucket kind.
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'year' } }) } });
+    await readFailed();
+    // The current year's newest bucket is this month: it is the bucket the clock
+    // marks current, but "Today ·" names a day, so a month bar must not wear it.
+    applyHistory(
+      periodById('year'),
+      { docs: [{ id: '2026-05-06', kwh: 1 }], fromCache: false },
+      null,
+      now,
+      [],
+      now,
+    );
+    showHistorySettings(nightly());
+    assert.equal(element('chart-day').textContent, 'Oct 2026');
+    assert.doesNotMatch(element('chart-day').textContent, /Today/);
+    // Ten bars, not twelve: the current year stops with this month.
+    assert.equal(element('chart-bars').children.length, 10 + 1);
   } finally {
     mock.timers.reset();
   }
@@ -1456,24 +1507,79 @@ test('switching period returns the chart to the default view', async () => {
     await readFailed();
     await fire('chart-prev', 'click');
     await readFailed();
-    assert.equal(labelText(), '21 Jul – 19 Aug 2026');
+    assert.equal(labelText(), 'August 2026');
 
     // The real segment listener: a Week switch resets the offset and renames the
     // paging controls for the unit it now pages in.
     element('period-switch').contains = () => true;
     const click = element('period-switch').listeners.get('click')[0];
     await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
-    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+    assert.equal(labelText(), 'Mon 12 – Sun 18 Oct 2026');
     assert.equal(element('chart-next').disabled, true);
-    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous 7 days');
-    assert.equal(element('chart-next').attrs['aria-label'], 'Next 7 days');
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous week');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next week');
     await readFailed();
 
     // Back to Month: offset 0 again, not the offset it was left on.
     await click({ target: { closest: () => ({ dataset: { period: 'month' } }) } });
-    assert.equal(element('history-total-label').textContent, 'Last 30 days');
+    assert.equal(labelText(), 'October 2026');
     assert.equal(element('chart-next').disabled, true);
     await readFailed();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('a clipped current week on its Monday is named by one date', async () => {
+  // Monday 12 October 2026: the current ISO week is that one day, so every string
+  // that names the window names it once — never "Mon 12 – Mon 12 Oct 2026".
+  freezeClock(new Date(2026, 9, 12, 12).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    await switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    assert.equal(labelText(), 'Mon 12 Oct 2026');
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for the week of Monday 12 October 2026',
+    );
+    assert.equal(
+      plain(element('history-chart').attrs['aria-label']),
+      'Daily energy for the week of Monday 12 October 2026. Use the left and right arrow keys to move between days.',
+    );
+    // A one-day week is still the present window: Next stays disabled.
+    assert.equal(element('chart-next').disabled, true);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('Year pages one calendar year each way across the year boundary', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    await switchTo({ target: { closest: () => ({ dataset: { period: 'year' } }) } });
+    await readFailed();
+    assert.equal(labelText(), '2026');
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(element('chart-prev').attrs['aria-label'], 'Previous year');
+    assert.equal(element('chart-next').attrs['aria-label'], 'Next year');
+    // Previous steps one whole calendar year: the completed 2025.
+    await fire('chart-prev', 'click');
+    await readFailed();
+    assert.equal(labelText(), '2025');
+    assert.equal(element('chart-next').disabled, false);
+    // Next steps forward one calendar year, back across the January boundary.
+    await fire('chart-next', 'click');
+    await readFailed();
+    assert.equal(labelText(), '2026');
+    assert.equal(element('chart-next').disabled, true);
   } finally {
     mock.timers.reset();
   }
@@ -1514,16 +1620,23 @@ test('PageUp and PageDown page the window while the arrows move the selection', 
 
     // PageUp pages the window back one week; the new window names its dates.
     assert.equal(keydown('history-chart', 'PageUp'), true);
-    assert.equal(labelText(), '5 – 11 Oct 2026');
+    assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     await readFailed();
+    // A two-ended week is announced in the prose register of the same span, months
+    // spelled out — the clipped one-day week pinned above is the only title-form
+    // exception.
+    assert.equal(
+      plain(element('history-summary').attrs['aria-label']),
+      'Energy summary for the week of Monday 5 – Sunday 11 October 2026',
+    );
     // PageDown pages toward the present, and stops at it.
     assert.equal(keydown('history-chart', 'PageDown'), true);
-    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+    assert.equal(labelText(), 'Mon 12 – Sun 18 Oct 2026');
     await readFailed();
     // At the present PageDown moves nothing, so it is the browser's key again:
     // consuming it would swallow a scroll for an action that does not happen.
     assert.equal(keydown('history-chart', 'PageDown'), false);
-    assert.equal(element('history-total-label').textContent, 'Last 7 days');
+    assert.equal(labelText(), 'Mon 12 – Sun 18 Oct 2026');
   } finally {
     mock.timers.reset();
   }
@@ -1558,7 +1671,7 @@ test('PageUp pages twice in a row from inside the chart, keeping its focus', asy
     // First press: paging crops the chart for the read, so the focused bar is
     // removed with it. The window still pages.
     assert.equal(keydown('history-chart', 'PageUp'), true);
-    assert.equal(labelText(), '5 – 11 Oct 2026');
+    assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     await readFailed();
     // The settled window handed the focus back inside the card rather than letting
     // it fall to <body> — this window drew no bars (the read failed), so it rests
@@ -1568,10 +1681,10 @@ test('PageUp pages twice in a row from inside the chart, keeping its focus', asy
     // Second press, with no re-Tab in between, pages again: the advertised
     // two-windows-back interaction works from the keyboard.
     assert.equal(keydown('chart-prev', 'PageUp'), true);
-    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
     await readFailed();
     assert.equal(document.activeElement, element('chart-prev'));
-    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
   } finally {
     element('history-chart').contains = () => false;
     mock.timers.reset();
@@ -1590,7 +1703,7 @@ test('a press during a paged read keeps the focus in the card and pages again', 
     // First press: the read starts, and its loading paint removes the focused bar
     // before the fetch has settled.
     assert.equal(pressFromFocus('PageUp'), true);
-    assert.equal(labelText(), '5 – 11 Oct 2026');
+    assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     // The focus is already on a control inside the card, so a press arriving
     // mid-read reaches the paging keys instead of scrolling the viewport.
     assert.notEqual(document.activeElement, document.body);
@@ -1598,14 +1711,14 @@ test('a press during a paged read keeps the focus in the card and pages again', 
 
     // A second press, typed before the first read settles, pages a second window.
     assert.equal(pressFromFocus('PageUp'), true);
-    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
 
     // The read that lands is the newest one and it owns the settle focus. This
     // window drew no bars, so the focus rests on the pager — the documented
     // fallback — rather than being left on <body>.
     await readFailed();
     for (let i = 0; i < 5; i++) await settle();
-    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
     assert.notEqual(document.activeElement, document.body);
     assert.equal(document.activeElement, element('chart-prev'));
   } finally {
@@ -1734,7 +1847,7 @@ test('a reload that lands as the newest read hands the focus to the bar its wind
       // Not the pager it was parked on: the settled window owns the focus.
       assert.equal(document.activeElement, selected);
       assert.equal(pressFromFocus('PageUp'), true);
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     } finally {
       periodReads.range = storePeriodRead;
     }
@@ -1769,7 +1882,7 @@ test('a successful paged read hands the reserved focus to the bar its window dre
       assert.equal(document.activeElement, selected);
       // …so the next press pages from the bar instead of scrolling the page.
       assert.equal(pressFromFocus('PageUp'), true);
-      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
     } finally {
       periodReads.range = storePeriodRead;
     }
@@ -1794,7 +1907,7 @@ test('a PageUp that supersedes a reload keeps the settle focus when the reload l
       // A PageUp typed during the reload's round trip supersedes it.
       assert.equal(pressFromFocus('PageUp'), true);
       assert.equal(reads.length, 2);
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       // Order B: the superseded reload lands first, while the paged window is still
       // loading. Its control state finishes, but it must neither repaint the chart
       // nor spend the reservation the paged read is about to use.
@@ -1861,7 +1974,7 @@ test('a reload that lands after its window was superseded leaves the drawn windo
       assert.equal(document.activeElement, selected);
       // The paging keys are still deliverable from it, without a re-Tab.
       assert.equal(pressFromFocus('PageUp'), true);
-      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
     } finally {
       periodReads.range = storePeriodRead;
     }
@@ -1880,11 +1993,11 @@ test('a paged read that lands after a newer paged read paints neither its bars n
     const reads = controlPeriodReads();
     try {
       // Two presses inside one round trip — a held key's repeat, or a quick
-      // double press: read A names 5 – 11 Oct 2026, read B 28 Sep – 4 Oct 2026.
+      // double press: read A names Mon 5 – Sun 11 Oct 2026, read B the week before.
       assert.equal(pressFromFocus('PageUp'), true);
       assert.equal(pressFromFocus('PageUp'), true);
       assert.equal(reads.length, 2);
-      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
       // The newest read lands first and owns the window: its bar is drawn, focused
       // and priced.
       reads[1].settle({ docs: [{ id: '2026-10-01', kwh: 1 }], fromCache: false });
@@ -1900,13 +2013,13 @@ test('a paged read that lands after a newer paged read paints neither its bars n
       // bars — dropping the focused one to <body>, where PageUp scrolls the page.
       reads[0].settle({ docs: [{ id: '2026-10-09', kwh: 9 }], fromCache: false });
       await flushReads();
-      assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
       assert.equal(element('history-total').textContent, '1.00');
       assert.equal(bars().length, 7);
       assert.equal(document.activeElement, selected);
       // The paging keys are still deliverable from it, without a re-Tab.
       assert.equal(pressFromFocus('PageUp'), true);
-      assert.equal(labelText(), '21 – 27 Sep 2026');
+      assert.equal(labelText(), 'Mon 21 – Sun 27 Sep 2026');
     } finally {
       periodReads.range = storePeriodRead;
     }
@@ -1965,7 +2078,7 @@ test('a paged read that settles after local midnight reloads exactly once', asyn
     reloadLimit = 20;
     // Build the paged window on the 18th…
     const paging = fire('chart-prev', 'click');
-    assert.equal(labelText(), '5 – 11 Oct 2026');
+    assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
     // …and let the clock cross local midnight before the read settles.
     mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
     await paging;
@@ -1973,7 +2086,7 @@ test('a paged read that settles after local midnight reloads exactly once', asyn
     for (let i = 0; i < 5; i++) await settle();
     // Exactly one re-entry, and it rebuilt the same paged offset from the new day.
     assert.equal(reloads.length - before, 1);
-    assert.equal(labelText(), '6 – 12 Oct 2026');
+    assert.equal(labelText(), 'Mon 12 – Sun 18 Oct 2026');
     // The guard then rests: the re-entry captured today's anchor, so no further
     // reload follows however many turns pass.
     for (let i = 0; i < 5; i++) await settle();
@@ -2029,13 +2142,13 @@ test('a failed reload at a paged offset keeps the bars under the window they wer
       await paging;
       await flushReads();
       const bars = () => element('chart-bars').children.slice(1);
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       assert.equal(element('history-total').textContent, '2.00');
       assert.equal(bars().length, 7);
       assert.equal(bars()[0].getAttribute('aria-label'), 'Mon 5 Oct: 2.00 kWh');
       assert.equal(bars()[6].getAttribute('aria-label'), 'Sun 11 Oct: 0.00 kWh');
 
-      // Local midnight passes. The reload builds 6 – 12 Oct from the new clock
+      // Local midnight passes. The reload builds 12 – 18 Oct from the new clock
       // and its read fails, so the bars it retained are the only series there is.
       mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
       periodReads.range = () =>
@@ -2044,12 +2157,12 @@ test('a failed reload at a paged offset keeps the bars under the window they wer
       // A live status push repaints while the reload is in flight: that repaint
       // must not decorate the retained bars with the window being read either.
       showHistoryStatus(statusAt(3, new Date(2026, 9, 19, 0, 0, 20).getTime(), 7200, 1000));
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       await reload;
       for (let i = 0; i < 5; i++) await settle();
       // The in-flight repaint and the settled failure both name the window the
-      // bars were read for — never 6 – 12 Oct, which the bars do not cover.
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      // bars were read for — never 12 – 18 Oct, which the bars do not cover.
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       assert.equal(element('history-total').textContent, '2.00');
       assert.equal(bars().length, 7);
       assert.equal(bars()[0].getAttribute('aria-label'), 'Mon 5 Oct: 2.00 kWh');
@@ -2059,10 +2172,14 @@ test('a failed reload at a paged offset keeps the bars under the window they wer
       assert.match(element('history-state').textContent, /last values loaded/);
 
       // The paging read owns the same rule from the other side: it clears the
-      // bars before its read, so the panel names the window it is reading.
+      // bars before its read, so the panel names the window it is reading. Two
+      // steps back, because one lands on the same 5 – 11 Oct dates the retained
+      // bars already name.
       await fire('chart-prev', 'click');
       await readFailed();
-      assert.equal(labelText(), '29 Sep – 5 Oct 2026');
+      await fire('chart-prev', 'click');
+      await readFailed();
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
       assert.equal(bars().length, 0);
     } finally {
       periodReads.range = storePeriodRead;
@@ -2094,7 +2211,7 @@ test('a failed re-entry over an empty paged window names the window Refresh will
       reads[1].settle({ docs: [], fromCache: false });
       await paging;
       await flushReads();
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       assert.equal(element('history-total').textContent, '0.00');
 
       // Midnight, then a re-entry whose read is a cache miss: there are no bars
@@ -2110,11 +2227,11 @@ test('a failed re-entry over an empty paged window names the window Refresh will
       );
       assert.equal(
         plain(element('chart-empty-line').textContent),
-        'Reconnect, then tap Refresh to load the energy for 6 – 12 October 2026.',
+        'Reconnect, then tap Refresh to load the energy for the week of Monday 12 – Sunday 18 October 2026.',
       );
       // The label still names the read that produced the (empty) series: there
       // is no bar to mislabel, and Refresh is the only thing moving forward.
-      assert.equal(labelText(), '5 – 11 Oct 2026');
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
       assert.equal(element('history-state').hidden, true);
     } finally {
       periodReads.range = storePeriodRead;
@@ -2152,12 +2269,18 @@ test('a paged Day read targets the date its window names', async () => {
       switchTo({ target: { closest: () => ({ dataset: { period: 'day' } }) } });
       await flushReads();
       assert.deepEqual(days, ['2026-10-18']);
-      assert.equal(labelText(), 'Today');
+      assert.equal(labelText(), 'Sun 18 Oct 2026');
+      // The Day readout names the hour in progress and nothing else: its bucket
+      // is `hour`, so the "Today · " prefix (a day-bucket register) can never
+      // appear here — the summary label above it names the date. Pinned so a
+      // copy change cannot silently promise the prefix H.11 used to claim.
+      assert.equal(element('chart-day').textContent, '12:00–13:00');
+      assert.doesNotMatch(element('chart-day').textContent, /Today/);
       // One day back: the read targets the day the window names, and the bars and
       // summary are that document's.
       await fire('chart-prev', 'click');
       assert.deepEqual(days, ['2026-10-18', '2026-10-17']);
-      assert.equal(labelText(), '17 Oct 2026');
+      assert.equal(labelText(), 'Sat 17 Oct 2026');
       assert.equal(element('history-total').textContent, '3.00');
       // 24 hour slots plus the base line.
       assert.equal(element('chart-bars').children.length, 25);

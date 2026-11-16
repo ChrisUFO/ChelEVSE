@@ -3,6 +3,16 @@
 // the sessions paging block by test/web/history-screen.test.js.
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAYS_LONG = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS_LONG = [
   'January',
@@ -20,7 +30,10 @@ const MONTHS_LONG = [
 ];
 
 export function dayId(date) {
-  const y = date.getFullYear();
+  // Zero-padded to four digits so the id is dayStartFromId's format at every
+  // year — the parser requires `^\d{4}` and the window's order comparisons are
+  // lexicographic, so a deep-paged year must not emit '826-01-01'.
+  const y = String(date.getFullYear()).padStart(4, '0');
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
@@ -39,23 +52,85 @@ export function dayStartFromId(id) {
   return date;
 }
 
-// The last `count` local day ids, oldest first, ending with `today`.
-// Noon avoids local-midnight DST transitions shifting the calendar date.
-export function lastDayIds(count, today = new Date()) {
+// Local noon of a date. Every calendar step is taken at noon so a local-midnight
+// DST transition cannot shift the day it lands on (23:00 plus an hour is
+// tomorrow), and a day step on a midnight epoch can never skip or repeat a date.
+function noonOf(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12);
+}
+
+// The local calendar unit a period window covers, whole and unclipped, as an
+// inclusive day-id range oldest first. One row per unit: a day is itself, a week
+// is ISO 8601 Monday–Sunday, a month is its 1st to its last day, a year is
+// 1 January to 31 December. `periodBounds` is the only caller, and it is what
+// clips these at the present — so "which days does this period cover" has
+// exactly one answer and every period's length comes from the calendar.
+function calendarUnitIds(unit, anchor) {
+  const noon = noonOf(anchor);
+  const year = noon.getFullYear();
+  const month = noon.getMonth();
+  if (unit === 'week') {
+    // ISO 8601: Monday opens the week, so getDay()'s Sunday 0 becomes 6.
+    const monday = new Date(year, month, noon.getDate() - ((noon.getDay() + 6) % 7), 12);
+    return {
+      startId: dayId(monday),
+      endId: dayId(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6, 12)),
+    };
+  }
+  if (unit === 'month') {
+    return {
+      startId: dayId(new Date(year, month, 1, 12)),
+      endId: dayId(new Date(year, month + 1, 0, 12)),
+    };
+  }
+  if (unit === 'year') {
+    return { startId: dayId(new Date(year, 0, 1, 12)), endId: dayId(new Date(year, 11, 31, 12)) };
+  }
+  return { startId: dayId(noon), endId: dayId(noon) };
+}
+
+// Every day id in an inclusive range, oldest first. The read range and the
+// series ids both start from the window's bounds, so they cannot drift apart; a
+// range whose end precedes its start is no days at all, never a reversed list.
+export function dayIdsInRange(startId, endId) {
+  const first = dayStartFromId(startId);
+  const last = dayStartFromId(endId);
+  if (!first || !last) return [];
   const ids = [];
-  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 12);
-  for (let i = count - 1; i >= 0; i--) {
-    const date = new Date(end);
-    date.setDate(end.getDate() - i);
+  const stop = dayId(last);
+  const date = noonOf(first);
+  while (dayId(date) <= stop) {
     ids.push(dayId(date));
+    date.setDate(date.getDate() + 1);
+  }
+  return ids;
+}
+
+// Every local month whose days a range touches, oldest first: the Year period's
+// buckets are the months its window covers (January..this month in the current
+// year, all twelve in a completed one), never a fixed count.
+export function monthIdsInRange(startId, endId) {
+  const first = dayStartFromId(startId);
+  const last = dayStartFromId(endId);
+  if (!first || !last) return [];
+  if (dayId(first) > dayId(last)) return [];
+  const ids = [];
+  const stop = monthId(last);
+  let cursor = new Date(first.getFullYear(), first.getMonth(), 1, 12);
+  while (monthId(cursor) <= stop) {
+    ids.push(monthId(cursor));
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1, 12);
   }
   return ids;
 }
 
 // Local calendar month, e.g. 2026-10. The year series buckets a day document by
-// this prefix; no UTC conversion, matching dayId's local-date convention.
+// this prefix; no UTC conversion, matching dayId's local-date convention, and the
+// year is padded the same way so a document's prefix and its bucket id stay the
+// same format at any depth of paging.
 export function monthId(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const y = String(date.getFullYear()).padStart(4, '0');
+  return `${y}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
 // Stable "Oct 2026" label; a malformed id is returned unchanged.
@@ -128,134 +203,80 @@ export function hourRange(id) {
 // One descriptor per selectable chart range. A period is data, not a branch:
 // `bucket` decides how series points are derived ('hour', 'day' or 'month'),
 // `source` decides which read supplies them (one day document or a contiguous
-// day-id range) and `slots` is the number of points the chart draws. The screen
-// reads the series length for its bar geometry, so the Day period's 24 hourly
-// points need a descriptor and a segment button — no geometry or hit-test
-// change.
+// day-id range) and `unit` is the calendar unit the window covers and pages by.
+// A window's *length* is not data: it comes from the calendar, so a month is
+// 28–31 daily bars and the current year is January..this month. The screen reads
+// the series length for its bar geometry, so no layout constant knows how long a
+// period is.
 //
-// Paging shifts the window's anchor by one `step` in the period's own unit
-// (day 1 day, week 7 days, month 30 days, year 12 calendar months); `span` is
-// the wording offset 0 keeps ("Today" / "the last 7 days"), and `copy(span)`
-// is the single source of every string that names the window — `span` is the
-// description `periodSpan` returns, so the paged register names the dates the
-// chart is actually drawing.
+// Paging steps exactly one of the period's own calendar units; `copy(span)` is
+// the single source of every string that names the window, and `span` is the
+// description `periodSpan` returns. There is one register per period — offset 0
+// is simply the current calendar unit ("October 2026"), not a second set of
+// words.
 export const PERIODS = [
   {
     id: 'day',
-    slots: HOURS_PER_DAY,
+    unit: 'day',
     bucket: 'hour',
     source: 'day',
-    prefixToday: false,
-    step: { unit: 'day', size: 1 },
-    span: { label: 'Today', phrase: 'today' },
     noun: 'hourly energy',
-    copy: (span) =>
-      span.isDefault
-        ? {
-            chartLabel:
-              'Hourly energy for today. Use the left and right arrow keys to move between hours.',
-            emptyTitle: 'No energy recorded today.',
-            emptyLine: 'Hours appear as charging is recorded.',
-            noIntradayTitle: 'No hourly detail for today.',
-            noIntradayLine:
-              'Hourly capture began recently, so today has a total but no hours behind it.',
-            loadingLine: 'Reading today.',
-            offlineLine: "Reconnect, then tap Refresh to load today's hours.",
-          }
-        : {
-            chartLabel: `Hourly energy for ${span.phrase}. Use the left and right arrow keys to move between hours.`,
-            emptyTitle: `No energy recorded on ${span.phrase}.`,
-            emptyLine: 'Hours appear as charging is recorded.',
-            noIntradayTitle: `No hourly detail for ${span.phrase}.`,
-            noIntradayLine: `Hourly capture began recently, so ${span.phrase} has a total but no hours behind it.`,
-            loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load the hours for ${span.phrase}.`,
-          },
+    copy: (span) => ({
+      chartLabel: `Hourly energy for ${span.phrase}. Use the left and right arrow keys to move between hours.`,
+      emptyTitle: `No energy recorded on ${span.phrase}.`,
+      emptyLine: 'Hours appear as charging is recorded.',
+      noIntradayTitle: `No hourly detail for ${span.phrase}.`,
+      noIntradayLine: `Hourly capture began recently, so ${span.phrase} has a total but no hours behind it.`,
+      loadingLine: `Reading ${span.phrase}.`,
+      offlineLine: `Reconnect, then tap Refresh to load the hours for ${span.phrase}.`,
+    }),
   },
   {
     id: 'week',
-    slots: 7,
+    unit: 'week',
     bucket: 'day',
     source: 'range',
-    prefixToday: true,
-    step: { unit: 'day', size: 7 },
-    span: { label: 'Last 7 days', phrase: 'the last 7 days' },
     noun: 'daily energy',
-    copy: (span) =>
-      span.isDefault
-        ? {
-            chartLabel:
-              'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
-            emptyTitle: 'No energy recorded in the last 7 days.',
-            emptyLine: 'Days without charging count as zero.',
-            loadingLine: 'Reading the last 7 days.',
-            offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
-          }
-        : {
-            chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
-            emptyTitle: `No energy recorded for ${span.phrase}.`,
-            emptyLine: 'Days without charging count as zero.',
-            loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
-          },
+    copy: (span) => ({
+      chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
+      emptyTitle: `No energy recorded in ${span.phrase}.`,
+      emptyLine: 'Days without charging count as zero.',
+      loadingLine: `Reading ${span.phrase}.`,
+      offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
+    }),
   },
   {
     id: 'month',
-    slots: 30,
+    unit: 'month',
     bucket: 'day',
     source: 'range',
-    prefixToday: true,
-    step: { unit: 'day', size: 30 },
-    span: { label: 'Last 30 days', phrase: 'the last 30 days' },
     noun: 'daily energy',
-    copy: (span) =>
-      span.isDefault
-        ? {
-            chartLabel:
-              'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
-            emptyTitle: 'No energy recorded in the last 30 days.',
-            emptyLine: 'Days without charging count as zero.',
-            loadingLine: 'Reading the last 30 days.',
-            offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
-          }
-        : {
-            chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
-            emptyTitle: `No energy recorded for ${span.phrase}.`,
-            emptyLine: 'Days without charging count as zero.',
-            loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
-          },
+    copy: (span) => ({
+      chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
+      emptyTitle: `No energy recorded in ${span.phrase}.`,
+      emptyLine: 'Days without charging count as zero.',
+      loadingLine: `Reading ${span.phrase}.`,
+      offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
+    }),
   },
   {
     id: 'year',
-    slots: 12,
+    unit: 'year',
     bucket: 'month',
     source: 'range',
-    prefixToday: false,
-    step: { unit: 'month', size: 12 },
-    span: { label: 'Last 12 months', phrase: 'the last 12 months' },
     noun: 'monthly energy',
-    copy: (span) =>
-      span.isDefault
-        ? {
-            chartLabel:
-              'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
-            emptyTitle: 'No energy recorded in the last 12 months.',
-            emptyLine: 'Months without charging count as zero.',
-            loadingLine: 'Reading the last 12 months.',
-            offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
-          }
-        : {
-            chartLabel: `Monthly energy for ${span.phrase}. Use the left and right arrow keys to move between months.`,
-            emptyTitle: `No energy recorded for ${span.phrase}.`,
-            emptyLine: 'Months without charging count as zero.',
-            loadingLine: `Reading ${span.phrase}.`,
-            offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
-          },
+    copy: (span) => ({
+      chartLabel: `Monthly energy for ${span.phrase}. Use the left and right arrow keys to move between months.`,
+      emptyTitle: `No energy recorded in ${span.phrase}.`,
+      emptyLine: 'Months without charging count as zero.',
+      loadingLine: `Reading ${span.phrase}.`,
+      offlineLine: `Reconnect, then tap Refresh to load the energy for ${span.phrase}.`,
+    }),
   },
 ];
 
-// Month keeps today's 30-day behaviour when the screen first opens.
+// Month is the default period — after the calendar re-baseline, that means this
+// month.
 export const DEFAULT_PERIOD = 'month';
 
 export function periodById(id) {
@@ -270,84 +291,113 @@ function periodFor(period) {
 }
 
 // The anchor a window at `offset` is drawn for: offset 0 is now, every deeper
-// offset shifts back one `step` in the period's own unit — day 1 day, week 7
-// days, month 30 days, year 12 calendar months — so consecutive windows neither
-// overlap nor leave a gap. Local noon keeps the shift off a DST midnight
-// transition, and a calendar-month step clamps its day (31 March back a year is
-// 31 March; 29 February back a year is 28 February).
+// offset steps back one whole calendar unit of the period's own kind — a day, an
+// ISO week, a calendar month, a calendar year — so consecutive windows neither
+// overlap nor leave a day uncovered. The anchor is the unit's first moment (the
+// date itself for Day, that week's Monday for Week, the 1st for Month, 1 January
+// for Year), so a step never carries a day-of-month into a shorter month: no
+// month-end clamping exists to get wrong, and 29 February plus a year is simply
+// the next year's January. Local noon keeps every step off a DST midnight
+// transition.
 export function periodAnchor(period, offset, now = new Date()) {
   const descriptor = periodFor(period);
   const steps = Number(offset);
   if (!Number.isFinite(steps) || steps <= 0) return new Date(now);
-  const { unit, size } = descriptor.step;
-  const noon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
-  if (unit !== 'month') {
-    return new Date(noon.getFullYear(), noon.getMonth(), noon.getDate() - steps * size, 12);
+  const noon = noonOf(now);
+  const year = noon.getFullYear();
+  const month = noon.getMonth();
+  if (descriptor.unit === 'week') {
+    const monday = noon.getDate() - ((noon.getDay() + 6) % 7);
+    return new Date(year, month, monday - steps * 7, 12);
   }
-  const target = new Date(noon.getFullYear(), noon.getMonth() - steps * size, 1, 12);
-  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0, 12).getDate();
-  target.setDate(Math.min(noon.getDate(), lastDay));
-  return target;
+  if (descriptor.unit === 'month') return new Date(year, month - steps, 1, 12);
+  if (descriptor.unit === 'year') return new Date(year - steps, 0, 1, 12);
+  return new Date(year, month, noon.getDate() - steps, 12);
 }
 
-// A date span reads in two registers, both built here from the same ids.
+// A span reads in two registers, both built here from the same ids.
 //
 // The title register (`label`) is what the summary's label has room for: short
-// months — the chart's own bar-label vocabulary ("Fri 18 Sep"). The prose
+// months — the chart's own bar-label vocabulary ("Sat 18 Oct"). The prose
 // register (`phrase`) spells the months out for the sentences ("No energy
-// recorded for 20 August – 18 September 2026"), where short month names would
-// read like a table.
+// recorded on Saturday 18 October 2026"), where short month names would read
+// like a table.
 //
 // Both registers glue each date run with a hard space and glue the dash to the
-// date it follows, so the only place a span may wrap is the space after the
+// date it follows, so the only place a week may wrap is the space after the
 // dash. A year never lands on a line of its own, and a sentence never breaks
 // between a day and its month.
 const HARD_SPACE = '\u00a0';
 
-// "18 Oct 2026" in the title register, "18 October 2026" in the prose one; a
-// range inside one month collapses its month ("5 – 11 Oct 2026"), and a range
-// across a year boundary names both years ("27 Dec 2025 – 2 Jan 2026").
-function daySpan(startId, endId, months) {
+// One calendar date — the Day period's whole span. "Sat 18 Oct 2026" in the
+// title register, "Saturday 18 October 2026" in the prose one.
+function dateSpan(id, weekdays, months) {
+  const date = dayStartFromId(id);
+  if (!date) return String(id);
+  return (
+    `${weekdays[date.getDay()]}${HARD_SPACE}${date.getDate()}${HARD_SPACE}` +
+    `${months[date.getMonth()]}${HARD_SPACE}${date.getFullYear()}`
+  );
+}
+
+// A whole ISO week, named by both of its ends: "Mon 5 – Sun 11 Oct 2026" in the
+// title register, "Monday 5 – Sunday 11 October 2026" in the prose one, with the
+// month collapsed when the week sits inside one and both years named when it
+// crosses a year end. A single shared month is what most weeks look like, so it
+// is the shape that must stay shortest.
+//
+// The one-day exception is the clipped current week on its Monday: both bounds
+// are that Monday, so naming both ends would say the same date twice
+// ("Mon 12 – Mon 12 Oct 2026"). It is a single date and reads as one.
+function weekSpan(startId, endId, weekdays, months) {
+  if (startId === endId) return dateSpan(startId, weekdays, months);
   const first = dayStartFromId(startId);
   const last = dayStartFromId(endId);
   if (!first || !last) return `${startId} – ${endId}`;
-  const date = (value, withYear) =>
-    `${value.getDate()}${HARD_SPACE}${months[value.getMonth()]}` +
-    (withYear ? `${HARD_SPACE}${value.getFullYear()}` : '');
-  if (startId === endId) return date(last, true);
   const sameYear = first.getFullYear() === last.getFullYear();
   const sameMonth = sameYear && first.getMonth() === last.getMonth();
-  const left = sameMonth ? String(first.getDate()) : date(first, !sameYear);
-  return `${left}${HARD_SPACE}– ${date(last, true)}`;
+  const left = `${weekdays[first.getDay()]}${HARD_SPACE}${first.getDate()}`;
+  return (
+    (sameMonth
+      ? left
+      : `${left}${HARD_SPACE}${months[first.getMonth()]}` +
+        (sameYear ? '' : `${HARD_SPACE}${first.getFullYear()}`)) +
+    `${HARD_SPACE}– ${weekdays[last.getDay()]}${HARD_SPACE}${last.getDate()}${HARD_SPACE}` +
+    `${months[last.getMonth()]}${HARD_SPACE}${last.getFullYear()}`
+  );
 }
 
-// The Year period's window as its month buckets name it: the first and last
-// month of the day range the chart sums, never a partial-day phrasing its bars
-// do not draw.
-function monthSpan(startId, endId, months) {
-  const first = dayStartFromId(startId);
-  const last = dayStartFromId(endId);
-  if (!first || !last) return `${startId} – ${endId}`;
-  return `${months[first.getMonth()]}${HARD_SPACE}${first.getFullYear()}${HARD_SPACE}– ${months[last.getMonth()]}${HARD_SPACE}${last.getFullYear()}`;
-}
-
-// The window one chart paints, described once for every string that names it:
-// `label` titles it (summary label), `phrase` is the mid-sentence form the copy
-// uses, and `isDefault` marks offset 0 — the one register that keeps today's
-// wording ("Today", "the last 30 days"). A past window is named by the dates
-// actually drawn.
+// The calendar unit one chart paints, described once for every string that names
+// it: `label` titles it (the summary label), `phrase` is the mid-sentence form
+// the copy uses. Month and Year are named as the units they are ("October 2026",
+// "2026"); Week and Day are named by the dates they cover, which for the unit
+// holding the clock is exactly the days drawn, because the bounds are clipped at
+// today. There is no second, default-view register: offset 0 is simply the
+// current calendar unit.
 export function periodSpan(period, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
-  if (dayId(anchor) === dayId(now)) {
-    return { label: descriptor.span.label, phrase: descriptor.span.phrase, isDefault: true };
-  }
   const bounds = periodBounds(descriptor, anchor, now);
-  const span = descriptor.bucket === 'month' ? monthSpan : daySpan;
-  return {
-    label: span(bounds.startId, bounds.endId, MONTHS),
-    phrase: span(bounds.startId, bounds.endId, MONTHS_LONG),
-    isDefault: false,
-  };
+  if (descriptor.unit === 'month') {
+    const first = dayStartFromId(bounds.startId);
+    const label = first
+      ? `${MONTHS_LONG[first.getMonth()]}${HARD_SPACE}${first.getFullYear()}`
+      : bounds.startId;
+    return { label, phrase: label };
+  }
+  if (descriptor.unit === 'year') {
+    const first = dayStartFromId(bounds.startId);
+    const label = first ? String(first.getFullYear()) : bounds.startId;
+    return { label, phrase: label };
+  }
+  return descriptor.unit === 'week'
+    ? {
+        label: weekSpan(bounds.startId, bounds.endId, WEEKDAYS, MONTHS),
+        phrase: `the week of ${weekSpan(bounds.startId, bounds.endId, WEEKDAYS_LONG, MONTHS_LONG)}`,
+      }
+    : {
+        label: dateSpan(bounds.startId, WEEKDAYS, MONTHS),
+        phrase: dateSpan(bounds.startId, WEEKDAYS_LONG, MONTHS_LONG),
+      };
 }
 
 // Inclusive document-id range for one period, oldest first. Week, Month and
@@ -355,28 +405,23 @@ export function periodSpan(period, anchor = new Date(), now = anchor) {
 // documentId() query. The Day period has no range: it names exactly the day its
 // single-document read targets and its window's anchor names.
 //
-// `anchor` is the window's date and `now` the clock it was built for. Only the
-// month-bucket window reads `now`: a paged Year window covers whole months, so
-// its end is the last day of the anchor's month. The default window is the live
-// one, whose newest month is in progress — it ends at today's date, exactly as
-// before paging existed, because the anchor and now share a month. Either way
-// offset 1 ends the day before offset 0 begins.
+// The start is the calendar unit's first day and the end is the unit's last day
+// **clamped at today**. That clamp is the whole clipping rule: the unit holding
+// the clock stops at today (this month 1..today, this week Monday..today, this
+// year January..today), so no bar is a future bucket the app would have to paint
+// as zero, while every completed unit ends before today and is therefore already
+// whole (a past October is 1–31, a past year January–December). Offset 1 still
+// ends the day before offset 0 begins, because it is the day before the current
+// unit's first day.
 export function periodBounds(period, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') {
     const id = dayId(anchor);
     return { startId: id, endId: id };
   }
-  if (descriptor.bucket === 'month') {
-    const start = new Date(anchor.getFullYear(), anchor.getMonth() - (descriptor.slots - 1), 1, 12);
-    const end =
-      monthId(anchor) === monthId(now)
-        ? anchor
-        : new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0, 12);
-    return { startId: dayId(start), endId: dayId(end) };
-  }
-  const ids = lastDayIds(descriptor.slots, anchor);
-  return { startId: ids[0], endId: ids[ids.length - 1] };
+  const unit = calendarUnitIds(descriptor.unit, anchor);
+  const today = dayId(now);
+  return { startId: unit.startId, endId: unit.endId < today ? unit.endId : today };
 }
 
 // How far before the range a session may have started and still be read.
@@ -408,10 +453,13 @@ export function sessionsRange(bounds) {
   };
 }
 
-// One point per rendered slot, oldest first, in one shape for every period:
-// { id, kwh, label, isCurrent }. The Day period's data is the single day
-// document (`{ kwh, hours }`) rather than a list, so its series is the hours map
-// itself; every range period aligns an array of daily documents to its slots.
+// One point per rendered bucket, oldest first, in one shape for every period:
+// { id, kwh, label, isCurrent }. The buckets are the window's own bounds read
+// back through the calendar — never a slot count — so a 28-day February draws 28
+// bars and the current year draws January..this month. The Day period's data is
+// the single day document (`{ kwh, hours }`) rather than a list, so its series is
+// the hours map itself; every range period aligns an array of daily documents to
+// its days.
 // A month bucket sums its daily documents by the local YYYY-MM prefix — kWh is
 // all the point carries, because a Year bar's $ comes from the period's
 // overlapping sessions, never from day documents; days without a document are
@@ -422,17 +470,14 @@ export function sessionsRange(bounds) {
 // current only when it is now's own bucket (today's day, the hour in progress,
 // this month) — so a paged window, whose anchor is in the past, marks nothing
 // current and the live pricing gate stays closed for it. `now` defaults to the
-// anchor, which is the pre-paging behaviour.
+// anchor, which is the pre-paging shape.
 export function periodSeries(period, data, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') return hourSeries(data && data.hours, anchor, now);
   const docs = data;
+  const bounds = periodBounds(descriptor, anchor, now);
   if (descriptor.bucket === 'month') {
-    const months = [];
-    const end = new Date(anchor.getFullYear(), anchor.getMonth(), 1, 12);
-    for (let i = descriptor.slots - 1; i >= 0; i--) {
-      months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
-    }
+    const months = monthIdsInRange(bounds.startId, bounds.endId);
     const totals = new Map(months.map((id) => [id, 0]));
     for (const doc of docs || []) {
       if (!doc || typeof doc.id !== 'string') continue;
@@ -452,16 +497,16 @@ export function periodSeries(period, data, anchor = new Date(), now = anchor) {
     }));
   }
   const current = dayId(now);
-  return historySeries(lastDayIds(descriptor.slots, anchor), docs).map((point) => ({
+  return historySeries(dayIdsInRange(bounds.startId, bounds.endId), docs).map((point) => ({
     ...point,
     isCurrent: point.id === current,
   }));
 }
 
 // Slot index for a pointer x, or null outside the plot. `count` is the number of
-// points actually rendered: they fill the viewBox with no dead slots (7, 12 and
-// 30 all map across the full width). `rect` is the SVG's bounding box in CSS
-// pixels.
+// points actually rendered: they fill the viewBox with no dead slots, whatever
+// the calendar hands the period — 7, 12, 24 or a 28–31-bar month. `rect` is the
+// SVG's bounding box in CSS pixels.
 export function chartIndexAt(clientX, rect, count) {
   if (!rect || !(rect.width > 0) || !Number.isFinite(clientX)) return null;
   const slots = Number(count);

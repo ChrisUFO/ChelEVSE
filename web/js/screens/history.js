@@ -63,11 +63,11 @@ let periodId = DEFAULT_PERIOD;
 let historySeq = 0;
 let series = [];
 let selectedId = null;
-// How many whole periods back the chart is paged; 0 is the default view that
-// ends now, and nothing past it is reachable. The window itself — its anchor,
-// document range, span wording and the local date the anchor was taken on — is
-// built once per read by buildWindow; all window arithmetic stays in
-// js/history.js.
+// How many whole calendar units back the chart is paged; 0 is the current unit
+// (this month at the default period), and nothing beyond the present is
+// reachable. The window itself — its anchor, document range, calendar span and
+// the local date the anchor was taken on — is built once per read by
+// buildWindow; all window arithmetic stays in js/history.js.
 let periodOffset = 0;
 let chartWindow = null;
 // The window the series on screen was built for: the span every string that names
@@ -180,24 +180,24 @@ function periodHeading(descriptor) {
   return descriptor.noun.charAt(0).toUpperCase() + descriptor.noun.slice(1);
 }
 
-// The chart heading, summary label and SVG label name the selected range; the
-// segment control is static markup, so the period copy is applied here instead
-// of being duplicated across the markup. Every one of those strings comes from
-// the descriptor's copy(span) — the window the chart is actually drawing — so a
-// paged window is named by its dates and never by the rolling words offset 0
-// keeps.
+// The chart heading, summary label and SVG label name the selected period's
+// calendar unit; the segment control is static markup, so the period copy is
+// applied here instead of being duplicated across the markup. Every one of those
+// strings comes from the descriptor's copy(span) — the window the chart is
+// actually drawing — so a paged window is named by its own month, week, year or
+// date ("September 2026", "Mon 5 – Sun 11 Oct 2026") and never by the window the
+// clock happens to be in.
 function paintPeriodCopy() {
   const descriptor = currentPeriod();
   const span = currentSpan();
   const copy = descriptor.copy(span);
   setText($('chart-heading'), periodHeading(descriptor));
   setText($('history-total-label'), span.label);
-  // The default view keeps the name it always had; a date span does not read as
-  // a noun before the word "summary", so a paged window gets a sentence.
-  $('history-summary').setAttribute(
-    'aria-label',
-    span.isDefault ? `${span.label} summary` : `Energy summary for ${span.phrase}`,
-  );
+  // One sentence for every unit and every offset, in the span's prose register —
+  // the same register the SVG label beside it reads. A bare label plus "summary"
+  // would glue a hard-spaced date range ("Mon 5 – Sun 11 Oct 2026 summary") where
+  // only a month or year noun reads.
+  $('history-summary').setAttribute('aria-label', `Energy summary for ${span.phrase}`);
   $('history-chart').setAttribute('aria-label', copy.chartLabel);
   paintPagingControls(descriptor);
 }
@@ -219,11 +219,10 @@ function currentSpan() {
   return periodSpan(currentPeriod(), now, now);
 }
 
-// "Previous 30 days" / "Next 12 months": the step the period pages by, so the
+// "Previous week" / "Next month": the calendar unit the period pages by, so the
 // accessible name says what activating the control does.
 function pagingName(descriptor, direction) {
-  const { unit, size } = descriptor.step;
-  return `${direction} ${size === 1 ? unit : `${size} ${unit}s`}`;
+  return `${direction} ${descriptor.unit}`;
 }
 
 // Next is offered only while a past window is shown: offset 0 is the present and
@@ -354,8 +353,10 @@ function renderChart() {
       y2: String(BASE),
     }),
   );
-  // Geometry follows the series: every rendered point fills the viewBox, so 7,
-  // 12 and 30 bars all use the full width and the hit test has no dead slots.
+  // Geometry follows the series: every rendered bucket fills the viewBox, so a
+  // 7-bar week, a 28–31-bar month, a part-year's 10 months and 24 hours all use
+  // the full width and the hit test has no dead slots. The slot width is the one
+  // thing a variable-length period costs, and it is derived here.
   const slot = VIEW_W / Math.max(1, series.length);
   const barW = slot * BAR_RATIO;
   // The screen resolves each bar's inputs — the period's bucket kind, the
@@ -391,9 +392,11 @@ function paintSelection(index) {
   selectedId = point.id;
   const cost = seriesCost(point);
   // The Day period names the selected hour's span; every other period names its
-  // bucket (a day or a month). "Today ·" only prefixes a whole-day bucket.
+  // bucket (a day or a month). "Today ·" prefixes only a day bucket that the
+  // clock marks current — the bucket containing today, in the window that is
+  // being drawn — so a paged window and a Year's month bucket never claim it.
   const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
-  const prefix = descriptor.prefixToday && point.isCurrent ? 'Today · ' : '';
+  const prefix = descriptor.bucket === 'day' && point.isCurrent ? 'Today · ' : '';
   setText($('chart-day'), `${prefix}${label}`);
   setText($('chart-kwh'), fmtK(point.kwh));
   $('chart-cost').hidden = !cost;
@@ -885,9 +888,9 @@ async function switchPeriod(id) {
   await readHistory();
 }
 
-// Page the window by one period: +1 goes back in time, -1 toward the present.
-// Offset 0 is the present, so Next cannot advance past it (and the control is
-// disabled there); no window in the future is reachable.
+// Page the window by one calendar unit: +1 goes back in time, -1 toward the
+// present. Offset 0 is the current unit, so Next cannot advance past it (and the
+// control is disabled there); no window beyond the present is reachable.
 async function pageBy(step) {
   const next = Math.max(0, periodOffset + step);
   if (next === periodOffset) return;
