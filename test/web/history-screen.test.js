@@ -88,7 +88,11 @@ function stubElement() {
       listeners.get(type).push(listener);
     },
     removeEventListener() {},
-    focus() {},
+    focus() {
+      // The real DOM moves focus; the stub records it so the screen's focus
+      // handoff (a control that disables itself) can be asserted.
+      globalThis.document.activeElement = this;
+    },
     click() {},
     scrollIntoView() {},
   };
@@ -107,6 +111,7 @@ function element(id) {
 
 globalThis.document = {
   documentElement: { style: { setProperty() {} } },
+  activeElement: null,
   getElementById: (id) => element(id),
   createElement: () => stubElement(),
   // renderChart builds its SVG bars through the namespace creator (#123: the
@@ -1238,6 +1243,76 @@ test('a paged window names its dates everywhere and never says today', async () 
     showHistoryStatus(statusAt(3, PAGED_NOW, 7200, 1000));
     assert.equal(element('history-cost-cell').hidden, true);
     assert.equal(element('chart-cost').textContent, '');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the hint names only what the state on screen offers', async () => {
+  const PAGING_HINT = 'Use ‹ › or PageUp/PageDown to page';
+  const BARS_HINT = 'Tap or ← → · PageUp/PageDown pages';
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    // Loading paints no bars, so nothing is there to tap or arrow through: the
+    // hint names the pager that does work from here.
+    assert.equal(element('chart-hint').textContent, PAGING_HINT);
+    await readFailed();
+    // A failed read is still an empty chart, and paging out of it still works.
+    assert.equal(element('chart-hint').textContent, PAGING_HINT);
+    // Bars on screen: the selection keys join the pager.
+    const now = new Date(PAGED_NOW);
+    const descriptor = periodById('month');
+    applyHistory(
+      descriptor,
+      { docs: [{ id: '2026-10-18', kwh: 2 }], fromCache: false },
+      null,
+      now,
+      [],
+      now,
+    );
+    showHistorySettings(nightly());
+    assert.equal(element('chart-hint').textContent, BARS_HINT);
+    // The selection clause leaves with the bars.
+    applyHistory(
+      descriptor,
+      { docs: [], fromCache: false },
+      null,
+      periodAnchor('month', 1, now),
+      [],
+      now,
+    );
+    showHistorySettings(nightly());
+    assert.equal(element('chart-hint').textContent, PAGING_HINT);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('paging back to the present hands focus from Next to Previous', async () => {
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    await fire('history-refresh', 'click');
+    await fire('chart-prev', 'click');
+    await readFailed();
+    assert.equal(element('chart-next').disabled, false);
+    // A keyboard user activates Next while it owns the focus; the read that
+    // returns to offset 0 disables it, which would otherwise drop focus to
+    // <body> and restart the next Tab at the top of the page.
+    element('chart-next').focus();
+    assert.equal(document.activeElement, element('chart-next'));
+    const back = fire('chart-next', 'click');
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(document.activeElement, element('chart-prev'));
+    await back;
+    await readFailed();
+    // The handoff survives the settle: the default view keeps the focus.
+    assert.equal(element('chart-next').disabled, true);
+    assert.equal(document.activeElement, element('chart-prev'));
   } finally {
     mock.timers.reset();
   }

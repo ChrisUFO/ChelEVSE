@@ -214,10 +214,15 @@ function paintPagingControls(descriptor) {
   const prev = $('chart-prev');
   const next = $('chart-next');
   if (prev) prev.setAttribute('aria-label', pagingName(descriptor, 'Previous'));
-  if (next) {
-    next.setAttribute('aria-label', pagingName(descriptor, 'Next'));
-    next.disabled = periodOffset === 0;
-  }
+  if (!next) return;
+  next.setAttribute('aria-label', pagingName(descriptor, 'Next'));
+  // A control that disables itself while focused drops the focus to <body> — the
+  // next Tab then restarts at the top of the page — so paging back to the
+  // present hands it on to the only move left. Disabled controls are not
+  // focusable, which is why the destination is Previous rather than itself.
+  const handoff = periodOffset === 0 && document.activeElement === next;
+  next.disabled = periodOffset === 0;
+  if (handoff && prev) prev.focus({ preventScroll: true });
 }
 
 function periodButtons() {
@@ -275,8 +280,23 @@ function renderSummary() {
   setText($('history-cost'), cost || '');
 }
 
+// The chart's hint names only what the state on screen can do. The selection
+// keys need bars to move through; the pager sits in the always-visible head and
+// works in every state, so it is always named. One source for both sentences.
+const CHART_HINT = {
+  bars: 'Tap or ← → · PageUp/PageDown pages',
+  paging: 'Use ‹ › or PageUp/PageDown to page',
+};
+
+function paintChartHint(barsDrawn) {
+  setText($('chart-hint'), barsDrawn ? CHART_HINT.bars : CHART_HINT.paging);
+}
+
 function showChartEmpty(title, line) {
   $('history-chart').setAttribute('hidden', '');
+  // With no bars there is nothing to tap or arrow through: the hint keeps the
+  // pager it does offer and drops the selection clause.
+  paintChartHint(false);
   // The head stays visible: the paging controls live in it, and an empty window
   // is still a window the owner has to be able to page out of. Its readout
   // describes a bar that is no longer drawn, so it returns to its initial
@@ -329,6 +349,7 @@ function renderChart() {
   svg.removeAttribute('hidden');
   $('chart-head').hidden = false;
   $('chart-empty').hidden = true;
+  paintChartHint(true);
   const index = Math.max(
     0,
     series.findIndex((point) => point.id === selectedId),
