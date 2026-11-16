@@ -14,7 +14,7 @@ import {
   validateRapi,
 } from '../advanced.js';
 import { relTime } from '../format.js';
-import { sendCommand } from '../store.js';
+import { retryStore, sendCommand } from '../store.js';
 import { settleWrite } from '../write.js';
 
 const STATUS_LABEL = {
@@ -44,16 +44,19 @@ function formatResult(value) {
 function renderLog() {
   const state = $('rapi-log-state');
   const list = $('rapi-log');
+  const retry = $('rapi-log-retry');
 
   if (logError) {
     state.hidden = false;
     state.className = 'section-state err';
     setText(state, logError);
+    retry.hidden = false;
     list.hidden = true;
     list.replaceChildren();
     renderedLogSignature = null;
     return;
   }
+  retry.hidden = true;
   if (!logLoaded) {
     state.hidden = false;
     state.className = 'section-state';
@@ -282,6 +285,14 @@ export function initAdvanced() {
   $('rapi-input').addEventListener('input', handleInput);
   $('rapi-gate-confirm').addEventListener('click', confirmGate);
   $('rapi-gate-cancel').addEventListener('click', () => cancelGate({ focusInput: true }));
+  // Retry re-subscribes through store.js's single startStore path (which stops
+  // first), so repeated taps cannot stack listeners. No busy state, no backoff,
+  // no budget. The copy goes with the click so a retry that fails again re-writes
+  // the line and is announced.
+  $('rapi-log-retry').addEventListener('click', () => {
+    setText($('rapi-log-state'), '');
+    retryStore();
+  });
   $('panel-advanced').addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !gate.open || gate.sending) return;
     event.preventDefault();

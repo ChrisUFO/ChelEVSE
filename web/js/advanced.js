@@ -35,17 +35,17 @@ export function validateRapi(raw) {
 
 // Firestore surfaces a missing composite index as failed-precondition. The
 // console query is the only one that needs one, so say what is happening
-// instead of showing a generic failure while the index builds. The listener is
-// not retried, so recovery really does need a reload.
+// instead of showing a generic failure while the index builds; once it is ready,
+// Try again re-runs the read.
 export function rapiErrorMessage(err) {
   const code = err && err.code;
   if (code === 'failed-precondition') {
-    return 'Recent commands need a Firestore index that is still being built. They’ll appear here when it’s ready — reload the page once it has finished building.';
+    return 'Recent commands need a Firestore index that is still being built. Try again once it has finished building.';
   }
   if (code === 'unavailable') {
     return 'Recent commands are unavailable right now. Check your connection and try again.';
   }
-  return 'Couldn’t load recent commands. Reload the page to try again.';
+  return 'Couldn’t load recent commands.';
 }
 
 export function commandMillis(createdAt) {

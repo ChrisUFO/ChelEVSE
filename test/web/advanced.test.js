@@ -51,12 +51,23 @@ test('validateRapi rejects everything else before it reaches Firestore', () => {
   assert.match(validateRapi('$ABC').error, /\$/);
 });
 
-test('rapiErrorMessage explains a building index and offline reads', () => {
-  assert.match(rapiErrorMessage({ code: 'failed-precondition' }), /index/);
-  assert.match(rapiErrorMessage({ code: 'failed-precondition' }), /built/);
-  assert.match(rapiErrorMessage({ code: 'unavailable' }), /connection/);
-  assert.match(rapiErrorMessage({ code: 'something-else' }), /Reload/);
-  assert.match(rapiErrorMessage(null), /Reload/);
+test('rapiErrorMessage explains all three branches without a reload', () => {
+  const index = rapiErrorMessage({ code: 'failed-precondition' });
+  assert.match(index, /index/);
+  assert.match(index, /building/);
+  assert.match(index, /Try again/);
+  assert.doesNotMatch(index, /reload/i);
+
+  const offline = rapiErrorMessage({ code: 'unavailable' });
+  assert.match(offline, /connection/);
+  assert.match(offline, /try again/);
+
+  // Unknown codes and a missing error get the plain failure line; recovery is
+  // the Retry control beside it, never a page reload.
+  for (const message of [rapiErrorMessage({ code: 'something-else' }), rapiErrorMessage(null)]) {
+    assert.equal(message, 'Couldn’t load recent commands.');
+    assert.doesNotMatch(message, /reload/i);
+  }
 });
 
 test('commandMillis reads Firestore timestamps, numbers, and seconds', () => {
@@ -189,8 +200,70 @@ test('the gate re-arms on every visit and cancel/edit dismiss it', () => {
   assert.equal(gateTransition(GATE_INITIAL, { type: 'confirm' }).action, 'idle');
 });
 
-test('the index error tells the operator a reload is required', () => {
+test('the index error points at Try again, not a page reload', () => {
   const message = rapiErrorMessage({ code: 'failed-precondition' });
   assert.match(message, /index/);
-  assert.match(message, /reload/i);
+  assert.match(message, /Try again/);
+  assert.doesNotMatch(message, /reload/i);
+});
+
+// ---------- the RAPI log's failure surface ----------
+
+// The same module-mock-free DOM stub the other screen tests use: one stub per
+// id, lookups deferred to render time, then a plain import of the real screen
+// module (no jsdom, no module mocks).
+function stubElement(tag = '') {
+  return {
+    tag,
+    className: '',
+    textContent: '',
+    hidden: false,
+    id: '',
+    children: [],
+    replaceChildren(...nodes) {
+      this.children = nodes;
+    },
+    append(...nodes) {
+      this.children.push(...nodes);
+    },
+    setAttribute() {},
+    removeAttribute() {},
+    addEventListener() {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+}
+
+const elements = new Map();
+const element = (id) => {
+  let node = elements.get(id);
+  if (!node) {
+    node = stubElement();
+    node.id = id;
+    elements.set(id, node);
+  }
+  return node;
+};
+
+globalThis.document = {
+  getElementById: (id) => element(id),
+  createElement: (tag) => stubElement(tag),
+};
+
+const { showRapiCommands, showRapiError } = await import('../../web/js/screens/advanced.js');
+
+test('a failed log read shows its copy beside a Retry, and a snapshot clears both', () => {
+  showRapiError({ code: 'unavailable' });
+  const state = element('rapi-log-state');
+  assert.equal(state.hidden, false);
+  assert.equal(state.className, 'section-state err');
+  assert.equal(state.textContent, rapiErrorMessage({ code: 'unavailable' }));
+  assert.equal(element('rapi-log-retry').hidden, false);
+
+  // The snapshot that lands owns the recovery, and an empty list is still a
+  // working read: the control goes with the failure.
+  showRapiCommands([]);
+  assert.equal(element('rapi-log-retry').hidden, true);
+  assert.equal(state.className, 'section-state');
+  assert.equal(state.textContent, 'No commands sent yet. Recent RAPI commands will appear here.');
 });

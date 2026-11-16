@@ -986,6 +986,9 @@
               <span class="section-note advanced-note">Last 20</span>
             </div>
             <p class="section-state" id="rapi-log-state">Loading recent commands…</p>
+            <!-- Shown only while #rapi-log-state carries a failure. Retry
+                 re-subscribes through store.js — no reload. -->
+            <button id="rapi-log-retry" class="btn small" type="button" hidden>Try again</button>
             <ol class="rapi-log" id="rapi-log" hidden></ol>
           </section>
         </section>
