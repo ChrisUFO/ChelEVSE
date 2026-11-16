@@ -1959,7 +1959,6 @@ def notifications_loop(
                 f"{host.base}/notifications", auth=auth, timeout=HTTP_TIMEOUT
             )
             resp.raise_for_status()
-            payload = resp.json()
         except requests.HTTPError as exc:
             # 404: the firmware has no such endpoint (an older gateway build).
             code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -1968,10 +1967,17 @@ def notifications_loop(
                 "reachable": False,
                 "source": "unsupported" if code == 404 else "http",
             }
-        except (requests.RequestException, ValueError) as exc:
+        except requests.RequestException as exc:
             log(f"notifications poll failed ({_offline_reason(exc)})")
             content = {"reachable": False, "source": "http"}
         else:
+            try:
+                payload = resp.json()
+            except ValueError:
+                # The charger answered, so this is not a transport failure: the
+                # body is not the notification contract (a proxy or captive
+                # portal in front of an older gateway, say).
+                payload = None
             parsed = parse_notifications(payload)
             if parsed is None:
                 log(

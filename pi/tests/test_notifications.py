@@ -389,6 +389,13 @@ class FailurePathTests(unittest.TestCase):
         self.assertFalse(document["reachable"])
         self.assertEqual(document["source"], "unsupported")
 
+    def test_a_non_json_200_is_unsupported_not_an_http_failure(self):
+        db, _ = self.run_loop([FakeResponse(200, text="<html>proxy</html>")], polls=1)
+
+        document = self.health_writes(db)[0][3]
+        self.assertFalse(document["reachable"])
+        self.assertEqual(document["source"], "unsupported")
+
     def test_a_non_2xx_is_an_unreachable_poll_not_a_404(self):
         db, _ = self.run_loop([FakeResponse(500)], polls=1)
 
