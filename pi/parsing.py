@@ -130,6 +130,66 @@ def parse_snapshot(data):
     return parsed
 
 
+def parse_fault_counters(data):
+    """The latched ``$GF`` fault counters of a ``/status`` reply.
+
+    Absent or mistyped counters are None (unknown), never 0: a zero is a record
+    that no trip happened, and the health projection must not invent one.
+    """
+    data = data if isinstance(data, dict) else {}
+    return {
+        name: as_int(data.get(name))
+        for name in ("nogndcount", "gfcicount", "stuckcount")
+    }
+
+
+def parse_notifications(data):
+    """The ``/notifications`` ring, normalized for the health projection.
+
+    Returns the live advisories, or None when the payload is not that contract
+    at all -- a non-object body or no ``notifications`` list -- which the caller
+    records as unsupported rather than raising.
+
+    Every field is tolerated: an entry that is not an object, or has no string
+    ``id``, is dropped (there is nothing to key it on). ``category`` and
+    ``severity`` are copied verbatim -- the firmware's rating is the only
+    severity there is -- and ``sticky`` is renamed ``firmware_sticky`` because it
+    is a literal per-rule constant, never a liveness signal. ``acked`` defaults
+    to False and the two epoch fields coerce to int or None.
+    """
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("notifications")
+    if not isinstance(entries, list):
+        return None
+    parsed = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        if not entry["id"]:
+            continue
+        parsed.append(
+            {
+                "id": entry["id"],
+                "category": (
+                    entry.get("category")
+                    if isinstance(entry.get("category"), str)
+                    else None
+                ),
+                "severity": (
+                    entry.get("severity")
+                    if isinstance(entry.get("severity"), str)
+                    else None
+                ),
+                "firmware_sticky": entry.get("sticky") is True,
+                "acked": entry.get("acked") is True,
+                "first_seen": as_int(entry.get("first_seen")),
+                "last_seen": as_int(entry.get("last_seen")),
+            }
+        )
+    return parsed
+
+
 def _is_number(value):
     """True for int/float but not bool (bool is a subclass of int)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
