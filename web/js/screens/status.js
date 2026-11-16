@@ -46,6 +46,10 @@ let status = null;
 // both, but only this one owes the owner an error and a way back. Cleared by
 // any snapshot, so recovery needs no other bookkeeping.
 let statusError = false;
+// Set when the owner activates Retry. The render that clears the failure hides
+// the control that had their focus, so that render — and only a render a retry
+// preceded — has to put focus somewhere useful. Any snapshot moves nothing.
+let retryRequested = false;
 let schedule = null;
 // Full cost settings ({rate, currency, rates}); the schedule prices a session
 // over its elapsed interval, and the stored flat rate applies only when no row
@@ -125,15 +129,33 @@ function renderFreshness() {
 // arrives afterwards puts the screen back with no further bookkeeping.
 const STATUS_FAILED = 'Couldn’t load the charger status.';
 
+// Retry leaves with the failure it belonged to, and a focused node that leaves
+// the tree drops focus to <body> — the top of the document, with nothing said
+// about what just happened. Move it to the panel the snapshot refilled; the
+// shape is notifications.js's focusAfterAction, for the same reason.
+function focusAfterRetry(retry) {
+  if (!retry || !retry.hidden) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) return;
+  $('panel-status').focus({ preventScroll: true });
+}
+
 function renderStatusError() {
   const failed = statusError;
-  // Written in the same paint that reveals the alert, the way #notify-error
-  // announces: content inserted into a live region is what a screen reader
-  // reads out, not a static line that was merely un-hidden.
-  if (failed) setText($('status-error'), STATUS_FAILED);
-  $('status-error').hidden = !failed;
-  $('status-retry').hidden = !failed;
+  const error = $('status-error');
+  // Reveal, then write: a live region announces content inserted into a node it
+  // can already expose, not a static line that was merely un-hidden — the order
+  // #notify-error keeps.
+  error.hidden = !failed;
+  if (failed) setText(error, STATUS_FAILED);
+  const retry = $('status-retry');
+  retry.hidden = !failed;
   $('updated').hidden = failed;
+  // Recovery lands where the user was, not at the top of the page.
+  if (!failed && retryRequested) {
+    retryRequested = false;
+    focusAfterRetry(retry);
+  }
 }
 
 // The snapshot carries elapsed seconds. The clock is anchored to the local
@@ -383,7 +405,12 @@ export function initStatus() {
   // Retry re-subscribes through the one startStore path (which stops first), so
   // repeated taps cannot stack listeners. Deliberately no busy state, no
   // backoff and no budget: the control stays usable and idempotent.
-  $('status-retry').addEventListener('click', () => retryStore());
+  $('status-retry').addEventListener('click', () => {
+    // Remembered for the render that clears the failure: it hides the control
+    // the click left focus on, so it owes the user a new focus target.
+    retryRequested = true;
+    retryStore();
+  });
 }
 
 export function enterStatus() {
@@ -411,6 +438,7 @@ export function leaveStatus() {
   // Sign-out teardown: the next session starts from the pre-data screen, not
   // from a failure that belonged to the session that just ended.
   statusError = false;
+  retryRequested = false;
   schedule = null;
   settings = null;
   showTemperature = true;

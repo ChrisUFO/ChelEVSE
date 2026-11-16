@@ -14,6 +14,11 @@ import { readFileSync } from 'node:fs';
 // `role="alert"` exposure is therefore pinned from source (the
 // config-lifetime convention) beside the copy, which the alert's own text
 // carries.
+
+// What the screen moved focus to, in order (settings-screen.test.js records the
+// same way: the stub's focus() is the only observer an unstubbed DOM offers).
+const focusLog = [];
+
 function stubElement(tag = '') {
   const classes = new Set();
   const listeners = new Map();
@@ -55,7 +60,10 @@ function stubElement(tag = '') {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(listener);
     },
-    focus() {},
+    focus(options) {
+      this.focused = options;
+      focusLog.push(this.id);
+    },
   };
 }
 
@@ -170,6 +178,51 @@ test('a cached snapshot clears the failure too', () => {
   showStatus(snapshot({ charger_online: false }));
   assert.equal(errorVisible(), false);
   assert.equal(retryVisible(), false);
+});
+
+test('the alert is exposed before its text is written', () => {
+  // A live region announces content inserted into a node it can already see; a
+  // hidden → shown node whose text changed while it was hidden is not announced
+  // by every screen-reader/browser pair, so the order is the promise. Pinned
+  // from source, the convention this file already uses for the markup.
+  const source = readFileSync(new URL('../../web/js/screens/status.js', import.meta.url), 'utf8');
+  const body = /function renderStatusError\(\) \{([\s\S]*?)\n\}/.exec(source);
+  assert.ok(body, 'status.js still declares renderStatusError');
+  const reveal = body[1].indexOf('error.hidden = !failed');
+  const write = body[1].indexOf('setText(error, STATUS_FAILED)');
+  assert.notEqual(reveal, -1, 'renderStatusError still reveals #status-error');
+  assert.notEqual(write, -1, 'renderStatusError still writes the failure text');
+  assert.ok(reveal < write, 'the alert is on screen before its text is written');
+});
+
+test('a snapshot no retry preceded moves no focus', () => {
+  // Recovery focus must not become a general "every snapshot jumps the caret"
+  // rule: nothing was asked for, so nothing moves.
+  showStatusError();
+  focusLog.length = 0;
+  showStatus(snapshot());
+  assert.deepEqual(focusLog, []);
+  showStatus(snapshot());
+  assert.deepEqual(focusLog, []);
+});
+
+test('a successful retry moves focus from the hidden control to the panel', () => {
+  // The snapshot that clears the failure hides Try again; a focused node that
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The retry itself moves nothing while it is still pending.
+  const listeners = element('status-retry').listeners.get('click') || [];
+  assert.equal(listeners.length, 1, 'initStatus wired #status-retry once');
+
+  showStatusError();
+  focusLog.length = 0;
+  listeners[0]();
+  assert.deepEqual(focusLog, [], 'a pending retry leaves focus where the click put it');
+
+  showStatus(snapshot());
+  assert.equal(retryVisible(), false);
+  assert.equal(errorVisible(), false);
+  assert.equal(focusLog.at(-1), 'panel-status');
+  assert.deepEqual(element('panel-status').focused, { preventScroll: true });
 });
 
 test('activating Retry with no store started throws nothing (R5)', () => {
