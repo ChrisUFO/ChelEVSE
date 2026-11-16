@@ -26,6 +26,7 @@ const SHELL = [
   './js/push.js',
   './js/history.js',
   './js/schedule.js',
+  './js/current.js',
   './js/config.js',
   './js/settings.js',
   './js/settings/plan.js',

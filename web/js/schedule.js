@@ -4,8 +4,6 @@
 
 export const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 export const MAX_RULES = 20;
-export const MIN_AMPS = 6;
-export const MAX_AMPS = 48;
 
 // ASCII digits only, exactly HH:MM — the bridge's fullmatch validator.
 const TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
@@ -15,20 +13,19 @@ export function defaultSchedule() {
 }
 
 export function defaultRule(id) {
-  return { id, days: [0, 1, 2, 3, 4], start: '22:00', end: '06:00', amps: 32 };
+  return { id, days: [0, 1, 2, 3, 4], start: '22:00', end: '06:00' };
 }
 
 function normalizeRule(raw) {
   const source = raw && typeof raw === 'object' ? raw : {};
-  // Keep the server's values visible instead of repairing them: the bridge
-  // skips a rule whose days/amps are malformed, so repairing it here would let
-  // a later save activate a window the charger currently ignores.
+  // Legacy `amps`, `feature`, and `feature_value` fields are deliberately
+  // tolerated but not copied into the editable shape: schedule windows control
+  // time/state only, and the next save removes those discarded fields.
   return {
     id: typeof source.id === 'string' ? source.id : '',
     days: Array.isArray(source.days) ? [...source.days] : [],
     start: typeof source.start === 'string' ? source.start : '',
     end: typeof source.end === 'string' ? source.end : '',
-    amps: source.amps !== undefined ? source.amps : 0,
   };
 }
 
@@ -76,11 +73,6 @@ function validateRule(rule) {
     errors.end = 'Start and end must be different.';
   }
 
-  if (!rule || !Number.isInteger(rule.amps)) {
-    errors.amps = 'Current must be a whole number from 6 to 48 A.';
-  } else if (rule.amps < MIN_AMPS || rule.amps > MAX_AMPS) {
-    errors.amps = 'Current must be a whole number from 6 to 48 A.';
-  }
   return errors;
 }
 
@@ -377,7 +369,6 @@ export function scheduleKey(schedule) {
       days: rule && Array.isArray(rule.days) ? [...new Set(rule.days)].sort((a, b) => a - b) : [],
       start: rule && rule.start,
       end: rule && rule.end,
-      amps: rule && rule.amps,
     })),
     malformed: Boolean(schedule && schedule.malformed === true),
   });

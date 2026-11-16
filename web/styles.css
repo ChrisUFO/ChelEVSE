@@ -1540,8 +1540,7 @@ input[type='range']::-moz-range-thumb {
   font-size: 12px;
   color: var(--muted);
 }
-input[type='time'],
-.amps-input {
+input[type='time'] {
   width: 100%;
   min-width: 0;
   min-height: 44px;
@@ -1554,67 +1553,13 @@ input[type='time'],
   font-size: 14px;
   color-scheme: dark;
 }
-input[type='time']:focus-visible,
-.amps-input:focus-visible {
+input[type='time']:focus-visible {
   border-color: transparent;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 input[aria-invalid='true'] {
   border-color: color-mix(in oklab, var(--err) 60%, var(--line));
-}
-.amps-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.stepper {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-}
-.stepper.invalid {
-  border-color: color-mix(in oklab, var(--err) 60%, var(--line));
-  background: color-mix(in oklab, var(--err) 8%, var(--bg));
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--err) 35%, transparent);
-}
-.step {
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
-  color: var(--muted);
-  font-size: 17px;
-  font-weight: 600;
-}
-.step:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text);
-}
-.amps-input {
-  width: 52px;
-  min-height: 34px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  text-align: center;
-  font-size: 14.5px;
-  -moz-appearance: textfield;
-  appearance: textfield;
-}
-.amps-input::-webkit-outer-spin-button,
-.amps-input::-webkit-inner-spin-button {
-  margin: 0;
-  -webkit-appearance: none;
-}
-.stepper-unit {
-  padding-right: 6px;
-  font-size: 11px;
-  color: var(--muted);
 }
 .rule-error {
   margin: -3px 0 0;

@@ -222,10 +222,10 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 
 ### 3.3 Set current (hold)
 
-- **Do:** tap **Hold**, move the slider (6–48 A), tap **Apply**.
+- **Do:** confirm `/config` reports coherent soft/hard limits, tap **Hold**, move the slider up to the soft maximum, then tap **Apply**.
 - **Expect:** the charger holds at that current (`charge_current`/`max_current`);
   feedback "Current set to N A."; doc `acked` with `amps: N`. The slider
-  prefills from `pilot` (the limit), not the live draw.
+  prefills from `pilot` (`/status`, the limit), not the live draw.
 - **Evidence:** command doc with `amps`, screenshot showing the new setpoint.
 
 ### 3.4 RAPI console — valid
@@ -269,16 +269,16 @@ command and `command transport: http (mqtt unavailable before publish)` after a
 fallback. Each command document carries `transport: "mqtt"|"http"` once it
 settles.
 
-| #   | Check                           | How                                                                                                                                                                                                          | Expected observation                                                                                                                                                                                                                                                                                                                          | Evidence                                                     |
-| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| C.1 | Pause over MQTT                 | With the car charging, tap **Stop**                                                                                                                                                                          | Journal shows no `POST /override`; `<base>/override/set` carries `{"state":"disabled"}`; the retained `<base>/override` becomes `{"state":"disabled",…}`; the command doc is `acked` with `transport: "mqtt"`; the charger stops within ~5 s                                                                                                  | Command doc, journal, `mosquitto_sub -t '<topic>/override'`  |
-| C.2 | Resume over MQTT                | Tap **Auto** after a pause                                                                                                                                                                                   | `<base>/override/set` carries `clear`; the retained document returns to `{"state":"null"}`; doc `acked`, `transport: "mqtt"`; the charger returns to its normal behaviour. With no override to clear the command still acks at once (no 500 path needed)                                                                                      | Command doc, retained override, journal                      |
-| C.3 | Set current over MQTT           | Tap **Hold**, pick a current (6–48 A), apply                                                                                                                                                                 | `<base>/override/set` carries `{"state":"active","charge_current":N,"max_current":N}`; the retained document shows the same `N`; `GET /status` shows `manual_override: 1`, `pilot` at `N` (or at the EVSE's own `max_current` when `N` is above it — the clamp), and its `max_current` field is present; doc `acked` with `transport: "mqtt"` | Command doc, retained override, `GET /status`, status screen |
-| C.4 | RAPI over MQTT — valid          | **Advanced**, send `$GS` (and `$FS 20` for a command with a parameter)                                                                                                                                       | Topics are `<base>/rapi/in/$GS` with an empty payload and `<base>/rapi/in/$FS` with payload `20`; the next `<base>/rapi/out` is `$OK…`; doc `acked` with `result` = the reply and `transport: "mqtt"`                                                                                                                                         | Command docs, `mosquitto_sub -t '<topic>/rapi/out'`          |
-| C.5 | RAPI over MQTT — `$NK`          | Send an invalid RAPI command the firmware rejects (e.g. `$XX 20`)                                                                                                                                            | `<base>/rapi/out` is `$NK^…`; doc `failed` with the reply in `error`, `transport: "mqtt"`; no HTTP `/rapi` call                                                                                                                                                                                                                               | Command doc, journal                                         |
-| C.6 | Fallback when MQTT is not ready | `sudo systemctl stop mosquitto`, wait until the journal logs `status source: http (mqtt disconnected …)`, then tap **Stop** (or send `$GS`)                                                                  | One `command transport: http (mqtt unavailable before publish)`; the existing HTTP request applies the command; doc `acked`/`failed` as before with `transport: "http"`; no MQTT publish is attempted. Restart mosquitto afterwards                                                                                                           | Journal, command doc                                         |
-| C.7 | No double-apply on a drop       | Start a pause and stop mosquitto as soon as the publish appears under `mosquitto_sub -t '<topic>/override/set'` (or when the retained `<topic>/override` document updates), before the acknowledgement lands | The bridge does **not** send `POST/DELETE /override`: it reads `/status` once, acks if the status already shows the override, otherwise marks the command `failed` with `no confirmation within 5s (…)`. One publish only, one command document — never two charger actions                                                                   | Journal (no `POST`/`DELETE /override`), command doc          |
-| C.8 | Flag off is unchanged           | `MQTT_ENABLED=false`, restart the bridge, apply each command type                                                                                                                                            | `mqtt: disabled (HTTP status polling)` at startup; commands use HTTP exactly as before and record `transport: "http"`; no MQTT publish                                                                                                                                                                                                        | Journal, command docs                                        |
+| #   | Check                           | How                                                                                                                                                                                                          | Expected observation                                                                                                                                                                                                                                                                                       | Evidence                                                                |
+| --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| C.1 | Pause over MQTT                 | With the car charging, tap **Stop**                                                                                                                                                                          | Journal shows no `POST /override`; `<base>/override/set` carries `{"state":"disabled"}`; the retained `<base>/override` becomes `{"state":"disabled",…}`; the command doc is `acked` with `transport: "mqtt"`; the charger stops within ~5 s                                                               | Command doc, journal, `mosquitto_sub -t '<topic>/override'`             |
+| C.2 | Resume over MQTT                | Tap **Auto** after a pause                                                                                                                                                                                   | `<base>/override/set` carries `clear`; the retained document returns to `{"state":"null"}`; doc `acked`, `transport: "mqtt"`; the charger returns to its normal behaviour. With no override to clear the command still acks at once (no 500 path needed)                                                   | Command doc, retained override, journal                                 |
+| C.3 | Set current over MQTT           | Tap **Hold**, pick a current from 6 A through `/config.max_current_soft`, apply                                                                                                                              | `<base>/override/set` carries `{"state":"active","charge_current":N,"max_current":N}`; the retained document shows the same `N`; `GET /status` shows `manual_override: 1` and `pilot` at `N`; a hand-crafted command above the soft maximum is failed before publish; doc `acked` with `transport: "mqtt"` | Command doc, retained override, `/config`, `GET /status`, status screen |
+| C.4 | RAPI over MQTT — valid          | **Advanced**, send `$GS` (and `$FS 20` for a command with a parameter)                                                                                                                                       | Topics are `<base>/rapi/in/$GS` with an empty payload and `<base>/rapi/in/$FS` with payload `20`; the next `<base>/rapi/out` is `$OK…`; doc `acked` with `result` = the reply and `transport: "mqtt"`                                                                                                      | Command docs, `mosquitto_sub -t '<topic>/rapi/out'`                     |
+| C.5 | RAPI over MQTT — `$NK`          | Send an invalid RAPI command the firmware rejects (e.g. `$XX 20`)                                                                                                                                            | `<base>/rapi/out` is `$NK^…`; doc `failed` with the reply in `error`, `transport: "mqtt"`; no HTTP `/rapi` call                                                                                                                                                                                            | Command doc, journal                                                    |
+| C.6 | Fallback when MQTT is not ready | `sudo systemctl stop mosquitto`, wait until the journal logs `status source: http (mqtt disconnected …)`, then tap **Stop** (or send `$GS`)                                                                  | One `command transport: http (mqtt unavailable before publish)`; the existing HTTP request applies the command; doc `acked`/`failed` as before with `transport: "http"`; no MQTT publish is attempted. Restart mosquitto afterwards                                                                        | Journal, command doc                                                    |
+| C.7 | No double-apply on a drop       | Start a pause and stop mosquitto as soon as the publish appears under `mosquitto_sub -t '<topic>/override/set'` (or when the retained `<topic>/override` document updates), before the acknowledgement lands | The bridge does **not** send `POST/DELETE /override`: it reads `/status` once, acks if the status already shows the override, otherwise marks the command `failed` with `no confirmation within 5s (…)`. One publish only, one command document — never two charger actions                                | Journal (no `POST`/`DELETE /override`), command doc                     |
+| C.8 | Flag off is unchanged           | `MQTT_ENABLED=false`, restart the bridge, apply each command type                                                                                                                                            | `mqtt: disabled (HTTP status polling)` at startup; commands use HTTP exactly as before and record `transport: "http"`; no MQTT publish                                                                                                                                                                     | Journal, command docs                                                   |
 
 Notes:
 
@@ -317,10 +317,10 @@ The app owns `schedule/current`; the bridge validates and mirrors it into the
 charger's own scheduler. Use a window that starts a few minutes from now if you
 want to watch it apply.
 
-1. **Create and save.** Add a rule (e.g. Mon–Fri, 22:00–06:00, 24 A), enable
+1. **Create and save.** Add a rule (e.g. Mon–Fri, 22:00–06:00), enable
    scheduling, tap **Save**.
    - Expect: "Saving…" then **"Saved."**; the Firestore document has exactly
-     `{enabled, rules: [{id, days, start, end, amps}]}`; the bridge journal shows
+     `{enabled, rules: [{id, days, start, end}]}`; the bridge journal shows
      `schedule synced: N events (P posted), removed M`.
 2. **Firmware.** `GET http://<charger>/schedule` (or the charger's own UI) shows
    the two events per rule: an `active` event at `start` and a `disabled` event
@@ -333,7 +333,7 @@ want to watch it apply.
    `schedule plan failed` line.
 4. **Badge.** The status screen shows the scheduled window while it is active,
    and hides the badge afterwards.
-5. **Edit.** Change the start time/amps and save; the bridge re-syncs (journal
+5. **Edit.** Change the start time and save; the bridge re-syncs (journal
    digest change) and only the changed firmware events are posted.
 6. **Disable.** Turn the schedule off and save; the bridge clears the firmware
    schedule (`removed M`) and the charger stops enforcing windows. Turning it
@@ -353,9 +353,9 @@ Evidence: the saved document, the `/schedule` events and `/schedule/plan`
 payloads, the journal sync lines, screenshots of the badge and the feedback
 states.
 
-Note: firmware v5.1.5 has no per-event current, so `amps` is stored but not
-applied — the charger uses its configured limit. The bridge logs this once per
-changed sync; that log line is expected, not a failure.
+Legacy schedule `amps`, `feature`, and `feature_value` fields remain readable,
+but the editor no longer collects or writes them; the charger uses its configured
+limit for every schedule event.
 
 ### Rate plan editor (issues #58, #65, #75 and #76)
 
@@ -505,8 +505,7 @@ Do them last; each is a single observation plus evidence.
       plug-in event merges into the same session document (no double count).
 - [ ] **Schedule enforcement (at the charger).** A window starting a few minutes
       out turns charging on when it starts and off when it ends, with the app
-      badge showing the active window. `amps` is not applied on firmware
-      v5.1.5 — the charger uses its configured limit; the bridge logs that once.
+      badge showing the active window. The charger uses its configured current limit.
 - [ ] **Charger address change from the app (#54).** With the bridge running,
       note its PID (`systemctl show -p MainPID chelevse-bridge`). Save a new
       address in **Config → Charger connection → Charger address** (e.g. the charger's

@@ -26,6 +26,7 @@ import {
   statusCostUncovered,
 } from '../cost.js';
 import { retryStore, sendCommand as postCommand } from '../store.js';
+import { currentCapability } from '../current.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -64,6 +65,8 @@ let active = false;
 let ampsTouched = false;
 let holdOpen = false;
 let holdAmps = 32;
+let current = null;
+let commandsBusy = false;
 let ticker = null;
 let resultTimer = null;
 let shownResultId = null;
@@ -243,6 +246,11 @@ function renderTemperatureVisibility() {
   $('fig-temp-stat').hidden = !showTemperature;
 }
 
+function currentSeed() {
+  const pilot = status && status.pilot;
+  return Number.isInteger(pilot) && pilot > 0 ? pilot : current.max;
+}
+
 function renderStatus() {
   const theState = stateFor(status && status.state_label);
   document.documentElement.style.setProperty('--state', theState.color);
@@ -268,14 +276,10 @@ function renderStatus() {
   }
   renderTemperatureVisibility();
 
-  if (!ampsTouched) {
-    // Hold sets a limit: prefill from the pilot setpoint, not the live draw.
-    const pilot = status ? toNumber(status.pilot) : Number.NaN;
-    const live = status ? toNumber(status.amp) : Number.NaN;
-    const source = pilot >= 6 && pilot <= 48 ? pilot : live;
-    if (Number.isFinite(source) && source > 0) {
-      setAmps(Math.min(48, Math.max(6, Math.round(source))));
-    }
+  if (!ampsTouched && current) {
+    // `/status` pilot is the configured setpoint. An idle charger legitimately
+    // reports zero, so fall back to the verified soft limit in that case.
+    setAmps(currentSeed());
   }
   renderElapsed();
   renderCost();
@@ -285,7 +289,14 @@ function renderStatus() {
 }
 
 function setBusy(busy) {
-  for (const el of [$('pause'), $('resume'), $('hold'), $('amps'), $('apply')]) el.disabled = busy;
+  commandsBusy = busy;
+  $('pause').disabled = busy;
+  $('resume').disabled = busy;
+  const unavailable = !current;
+  for (const el of [$('hold'), $('amps'), $('apply')]) el.disabled = busy || unavailable;
+  $('hold').title = unavailable
+    ? 'Current setting is unavailable until charger limits are verified.'
+    : '';
 }
 
 function renderCommands(cmds) {
@@ -350,15 +361,22 @@ async function send(payload) {
 }
 
 function setAmps(v) {
-  holdAmps = v;
-  $('amps').value = v;
+  const min = current ? current.min : 6;
+  const max = current ? current.max : 48;
+  holdAmps = Math.min(max, Math.max(min, Math.round(v)));
+  $('amps').min = String(min);
+  $('amps').max = String(max);
+  $('amps').value = holdAmps;
   paintSlider();
 }
 
 function paintSlider() {
   const v = Number($('amps').value);
   setText($('amps-out'), `${v} A`);
-  $('amps').style.setProperty('--fill', `${((v - 6) / 42) * 100}%`);
+  const min = current ? current.min : 6;
+  const max = current ? current.max : 48;
+  const span = Math.max(1, max - min);
+  $('amps').style.setProperty('--fill', `${((v - min) / span) * 100}%`);
 }
 
 // Hold reveals the set-current editor; it does not claim a mode is active.
@@ -451,6 +469,8 @@ export function leaveStatus() {
   ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;
+  current = null;
+  commandsBusy = false;
   shownResultId = null;
   clock = null;
   clockHold = null;
@@ -526,6 +546,14 @@ export function showConfig(config) {
   const raw = config && typeof config.hostname === 'string' ? config.hostname.trim() : '';
   setText($('device-name'), raw || 'ChelEVSE');
   $('device-name').title = raw || 'ChelEVSE';
+  current = currentCapability(config);
+  if (current) {
+    const next = ampsTouched ? holdAmps : currentSeed();
+    setAmps(next);
+  } else {
+    setHoldOpen(false);
+  }
+  setBusy(commandsBusy);
 }
 
 // schedule/current — used only to resolve the active rule's window.

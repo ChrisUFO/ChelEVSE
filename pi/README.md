@@ -901,7 +901,7 @@ read or send is only ever a log line, never a loop failure.
 The app owns `schedule/current`:
 
 ```
-schedule/current   { enabled: bool, rules: [{id, days: [0-6], start, end, amps}] }
+schedule/current   { enabled: bool, rules: [{id, days: [0-6], start, end}] }
 ```
 
 `days` uses **0 = Monday … 6 = Sunday**. `start`/`end` are `HH:MM` (24-hour);
@@ -913,7 +913,7 @@ down.
 - **Validation.** A rule is used only when it has a non-empty string `id`, a
   non-empty `days` list of integers 0–6, `start`/`end` that are exactly `HH:MM`
   as 24-hour ASCII digits matched against the whole string (no trailing
-  newline, no non-ASCII digits), `start != end`, and a numeric `amps`. Malformed
+  newline, no non-ASCII digits), and `start != end`. Malformed
   rules are logged and skipped; at most 20 rules are synced (2 firmware events
   each, within the firmware's 50-event limit).
 - **No overlapping windows.** Per weekday (including an overnight rule's spill
@@ -965,11 +965,10 @@ down.
   `[]` plan (no events configured) is normal and publishes
   `{in_window: false, active_rule_id: null}` without a failure log; any other
   non-object payload is still an error.
-- **Amps are not pushed.** Firmware v5.1.5 has no per-event current: its
-  schedule events are flat `{id, state, time, days}` and the event charges at
-  the EVSE's configured limit. `amps` is validated and stored, but the bridge
-  logs `schedule: firmware v5.1.5 has no per-event current; amps not applied`
-  once per changed sync rather than pretending to apply it.
+- **No per-event current.** Schedule events are `{id, state, time, days}` and
+  charge at the EVSE's configured limit. Legacy stored `amps`, `feature`, and
+  `feature_value` fields remain readable but are ignored and removed by the
+  next editor save.
 
 ## Commands
 
@@ -983,12 +982,12 @@ command older than **10 minutes** is not applied: it is marked `failed` with
 command queued while the Pi was offline cannot start or stop a charge hours
 later.
 
-| `type`        | Charger request                                                          | Meaning                                                        |
-| ------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                  |
-| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes |
-| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps (clamped to 6–48)                             |
-| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                     |
+| `type`        | Charger request                                                          | Meaning                                                                             |
+| ------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                                       |
+| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes                      |
+| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps, only after `/config` verifies `N` is 6 through `max_current_soft` |
+| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                                          |
 
 `rapi.command` must be a string starting with `$` and at most 32 characters;
 anything else is marked `failed` with `error: "invalid rapi"` without contacting
@@ -1068,7 +1067,7 @@ records the transport that **carried** the request — `transport: "mqtt"` or
 that falls back and then fails over HTTP records `"http"`); a command rejected
 before anything was sent (validation, unsupported type, stale) records no
 transport. The journal logs `command transport: <transport> (…)` when the path
-changes. Validation (`amps` 6–48, RAPI `$` and ≤32 characters), the 10-minute
+changes. Validation (verified `/config` soft/hard limits, RAPI `$` and ≤32 characters), the 10-minute
 staleness rule, `status` lifecycle and error copy are unchanged.
 
 ## Tests

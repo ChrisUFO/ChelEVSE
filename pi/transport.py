@@ -10,6 +10,7 @@ that ``schedule.py`` and the facade import from here.
 """
 
 import json
+import math
 import threading
 
 import requests
@@ -107,6 +108,48 @@ def _command_amps(cmd):
         return max(MIN_AMPS, min(MAX_AMPS, int(cmd.get("amps"))))
     except (TypeError, ValueError):
         raise CommandError("missing or invalid amps")
+
+
+def validate_current_request(cmd):
+    """Return a set-current command with a verified whole-number value."""
+    raw = cmd.get("amps")
+    requested = _as_int(raw)
+    if isinstance(raw, bool) or requested is None or requested != raw:
+        raise CommandError("current must be a whole number")
+    return {**cmd, "amps": requested}
+
+
+def enforce_current_policy(cmd, config):
+    """Return a command constrained by verified charger capabilities.
+
+    The soft maximum is the ordinary setting ceiling. The hard maximum only
+    proves that ceiling is coherent; it may describe hardware above the app's
+    48 A setting range. Pilot belongs to ``/status``, not ``/config``.
+    """
+    cmd = validate_current_request(cmd)
+    if not isinstance(config, dict):
+        raise CommandError("current setting unavailable: charger limits missing")
+    def whole_amps(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if not math.isfinite(value) or int(value) != value:
+            return None
+        return int(value)
+
+    soft = whole_amps(config.get("max_current_soft"))
+    hard = whole_amps(config.get("max_current_hard"))
+    requested = cmd["amps"]
+    valid_config = (
+        soft is not None
+        and hard is not None
+        and MIN_AMPS <= soft <= MAX_AMPS
+        and soft <= hard
+    )
+    if not valid_config:
+        raise CommandError("current setting unavailable: charger limits invalid")
+    if not MIN_AMPS <= requested <= soft:
+        raise CommandError(f"current must be between {MIN_AMPS} and {soft} A")
+    return cmd
 
 
 def _command_rapi(cmd):

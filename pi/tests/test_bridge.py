@@ -172,6 +172,99 @@ class ApplyCommandTests(unittest.TestCase):
             bridge.apply_command(session, _host(), None, {"type": "set_current"})
         self.assertEqual(session.calls, [])
 
+    def test_current_policy_caps_at_soft_limit_not_hard_or_pilot(self):
+        config = {"max_current_soft": 32, "max_current_hard": 80}
+        self.assertEqual(
+            bridge.enforce_current_policy(
+                {"type": "set_current", "amps": 16}, config
+            )["amps"],
+            16,
+        )
+        for amps in (5, 33, 48, 80):
+            with self.subTest(amps=amps), self.assertRaises(bridge.CommandError):
+                bridge.enforce_current_policy(
+                    {"type": "set_current", "amps": amps}, config
+                )
+
+    def test_current_policy_fails_closed_for_unverified_capabilities(self):
+        for config in (
+            None,
+            {},
+            {"max_current_soft": 16},
+            {"max_current_soft": 5, "max_current_hard": 24},
+            {"max_current_soft": 49, "max_current_hard": 80},
+            {"max_current_soft": 25, "max_current_hard": 24},
+            {"max_current_soft": 16.5, "max_current_hard": 24},
+        ):
+            with self.subTest(config=config), self.assertRaises(bridge.CommandError):
+                bridge.enforce_current_policy(
+                    {"type": "set_current", "amps": 16}, config
+                )
+
+    def test_current_policy_rejects_non_integer_commands(self):
+        config = {"max_current_soft": 16, "max_current_hard": 80}
+        for amps in (True, "16", 15.5, None):
+            with self.subTest(amps=amps), self.assertRaises(bridge.CommandError):
+                bridge.enforce_current_policy(
+                    {"type": "set_current", "amps": amps}, config
+                )
+
+    def test_command_outcome_verifies_config_before_sending_current(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {"max_current_soft": 16, "max_current_hard": 80},
+                ),
+                FakeResponse(200),
+            ]
+        )
+        self.assertEqual(
+            bridge._command_outcome(
+                session, _host(), None, {"type": "set_current", "amps": 16}, None
+            ),
+            {"status": "acked", "transport": "http"},
+        )
+        self.assertEqual(
+            [call[1] for call in session.calls],
+            ["http://charger/config", "http://charger/override"],
+        )
+
+    def test_command_outcome_rejects_above_soft_limit_without_override(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    {"max_current_soft": 16, "max_current_hard": 80},
+                )
+            ]
+        )
+        outcome = bridge._command_outcome(
+            session, _host(), None, {"type": "set_current", "amps": 24}, None
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("between 6 and 16 A", outcome["error"])
+        self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
+
+    def test_command_outcome_rejects_bad_amps_before_fetching_config(self):
+        session = FakeSession()
+        outcome = bridge._command_outcome(
+            session, _host(), None, {"type": "set_current", "amps": "16"}, None
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("whole number", outcome["error"])
+        self.assertEqual(session.calls, [])
+
+    def test_command_outcome_fails_a_malformed_config_reply(self):
+        session = FakeSession([FakeResponse(200, ["not", "an", "object"])])
+        outcome = bridge._command_outcome(
+            session, _host(), None, {"type": "set_current", "amps": 16}, None
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("config response is not a JSON object", outcome["error"])
+        self.assertNotIn("transport", outcome)
+        self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
+
     def test_rapi_returns_ret_value(self):
         session = FakeSession([FakeResponse(200, {"ret": "OK"})])
         extra = bridge.apply_command(
@@ -274,12 +367,23 @@ class NormalizeScheduleTests(unittest.TestCase):
             (rule("a", [0], "7:00", "11:00"), False),
             (rule("a", [0], "10:00", "24:00"), False),
             (rule("a", [0], "10:00", "10:00"), False),
-            (rule("a", [0], "10:00", "11:00", amps=True), False),
-            (rule("a", [0], "10:00", "11:00", amps=float("inf")), False),
+            (rule("a", [0], "10:00", "11:00", amps=True), True),
+            (rule("a", [0], "10:00", "11:00", amps=float("inf")), True),
         ]
         for raw, accepted in cases:
             with self.subTest(raw=raw):
                 self.assertEqual(bridge._normalize_rule(raw) is not None, accepted)
+
+    def test_legacy_current_fields_are_tolerated_but_not_applied(self):
+        raw = {
+            **rule("a", [0], "10:00", "11:00", amps=48),
+            "feature": "current",
+            "feature_value": 48,
+        }
+        self.assertEqual(
+            bridge._normalize_rule(raw),
+            {"id": "a", "days": [0], "start": "10:00", "end": "11:00"},
+        )
 
     def test_times_must_be_exact_ascii_hh_mm(self):
         malformed = [

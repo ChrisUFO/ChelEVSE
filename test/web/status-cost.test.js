@@ -56,7 +56,9 @@ globalThis.document = {
 // fixtures mean the same thing here as in cost.test.js.
 process.env.TZ = 'America/Denver';
 
-const { showStatus, showSettings, leaveStatus } = await import('../../web/js/screens/status.js');
+const { showStatus, showSettings, showConfig, leaveStatus } = await import(
+  '../../web/js/screens/status.js'
+);
 
 function at(year, month, day, hours, minutes) {
   const ms = new Date(year, month - 1, day, hours, minutes).getTime();
@@ -123,6 +125,30 @@ const FLAT = { rate: 0.245, currency: 'GBP' };
 const HOUR = 60 * 60 * 1000;
 const cost = () => element('fig-cost').textContent;
 const sub = () => element('cost-sub');
+
+test('current controls fail closed while stop and auto remain available', () => {
+  showConfig(null);
+  assert.equal(element('hold').disabled, true);
+  assert.equal(element('amps').disabled, true);
+  assert.equal(element('apply').disabled, true);
+  assert.equal(element('pause').disabled, false);
+  assert.equal(element('resume').disabled, false);
+});
+
+test('verified config caps current and status pilot seeds the slider', () => {
+  showStatus(snapshot({ pilot: 12 }));
+  showConfig({ hostname: 'driveway', max_current_soft: 16, max_current_hard: 80 });
+  assert.equal(element('hold').disabled, false);
+  assert.equal(element('amps').min, '6');
+  assert.equal(element('amps').max, '16');
+  assert.equal(element('amps').value, 12);
+
+  showStatus(snapshot({ pilot: 0 }));
+  assert.equal(element('amps').value, 16, 'idle pilot falls back to the soft limit');
+
+  showConfig({ max_current_soft: 25, max_current_hard: 24 });
+  assert.equal(element('hold').disabled, true);
+});
 
 test('the cost tile shows the live window while charging', () => {
   showSettings(NIGHTLY);
