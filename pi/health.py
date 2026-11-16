@@ -242,9 +242,10 @@ def project(notifications, facts, first_observed, observed_at, alerted):
     a :class:`LiveObservations` snapshot; ``first_observed`` maps
     ``(id, counter_token)`` to the epoch second this bridge first saw that
     advisory state. Returns ``(content, first_observed)``: the content is every
-    comparable field of the document except the write stamps, and the map is the
-    input plus whatever this observation added, pruned to the current ring, so a
-    re-raised advisory is a new observation.
+    field of the document except the write stamps, ``last_seen`` included (the
+    change test compares :func:`comparable` of it, which drops that moving
+    field), and the map is the input plus whatever this observation added,
+    pruned to the current ring, so a re-raised advisory is a new observation.
 
     The advisory list mirrors the gateway's ring exactly -- an entry that left it
     is gone, no synthetic history -- and keeps the ring's own order.
@@ -281,6 +282,35 @@ def project(notifications, facts, first_observed, observed_at, alerted):
         "alerted": dict(alerted or {}),
     }
     return content, observed
+
+
+def comparable(content):
+    """The change test's stability view of a projection.
+
+    The gateway re-stamps ``last_seen`` on **every** evaluation pass (~5 s) for
+    every live advisory, so the raw projection differs on every poll while
+    nothing about the charger's health has changed. Comparing this view -- the
+    content with each entry's ``last_seen`` dropped -- keeps a steady state at
+    zero writes, while every real change still writes: an ack flip, a
+    counter/token move, an advisory added or removed, a gate, counter or
+    reachability/source transition (``first_seen``, ``acked``, ``severity``,
+    ``classification`` and ``corroborated`` all stay in the view).
+
+    ``last_seen`` itself stays in the written document: it is the honest "still
+    seen at" fact, refreshed by whichever poll does write.
+    """
+    if not isinstance(content, dict):
+        return content
+    stable = dict(content)
+    entries = stable.get("advisories")
+    if isinstance(entries, list):
+        stable["advisories"] = [
+            {key: value for key, value in entry.items() if key != "last_seen"}
+            if isinstance(entry, dict)
+            else entry
+            for entry in entries
+        ]
+    return stable
 
 
 class LiveObservations:

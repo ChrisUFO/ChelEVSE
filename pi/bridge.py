@@ -90,6 +90,7 @@ from parsing import (  # noqa: E402
 from health import (  # noqa: E402
     CONTENT_FIELDS,
     LiveObservations,
+    comparable,
     project,
 )
 from schedule import (  # noqa: E402
@@ -1920,7 +1921,11 @@ def notifications_loop(
     last one written and only a content change reaches Firestore, so a steady
     state adds **zero** writes: ``checked_at`` records the observation that
     produced the last write, it is not a heartbeat (D8 -- bridge liveness stays
-    ``status/current``'s freshness banner).
+    ``status/current``'s freshness banner). The comparison is
+    :func:`health.comparable` of the content, which drops each entry's moving
+    ``last_seen`` (the gateway re-stamps it every ~5 s for every live advisory,
+    so the raw content differs on every poll); the written document still
+    carries the fresh ``last_seen`` whenever it is written.
 
     ``observations`` (:class:`health.LiveObservations`) supplies the live signals
     the classifier corroborates with: the counters, state and temperatures the
@@ -1939,13 +1944,14 @@ def notifications_loop(
     """
     doc = db.collection("status").document("notifications")
     counter = counter or WriteCounter()
-    last_content, alerted, first_observed = _seed_notifications(doc)
+    stored, alerted, first_observed = _seed_notifications(doc)
+    last_stable = comparable(stored)
     if initial_delay:
         # Offset from the other pollers; only the first iteration is delayed.
         _stop.wait(initial_delay)
 
     def one_tick():
-        nonlocal last_content, first_observed
+        nonlocal last_stable, first_observed
 
         checked_at = int(clock())
         try:
@@ -1981,7 +1987,8 @@ def notifications_loop(
                     checked_at,
                     alerted,
                 )
-        if content == last_content:
+        stable = comparable(content)
+        if stable == last_stable:
             return
         write = {
             **content,
@@ -1996,7 +2003,7 @@ def notifications_loop(
             # stale observation.
             log(f"notifications write failed ({exc.__class__.__name__}: {exc})")
         else:
-            last_content = content
+            last_stable = stable
 
     run_loop("notifications", one_tick, lambda: _stop.wait(interval))
 

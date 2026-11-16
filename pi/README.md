@@ -435,19 +435,19 @@ unaffected.
 Each loop is failure-isolated: a charger or Firestore error is logged as one
 timestamped line and the loop carries on at its next interval.
 
-| Loop          | Firestore document     | Content                                                                                                                                                          |
-| ------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status        | `status/current`       | Curated `/status` fields on the write policy's cadence (see below)                                                                                               |
-| Status        | `history/<date>`       | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence   |
-| Status        | `sessions/{id}`        | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                  |
-| Schedule      | `status/current`       | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                            |
-| Status        | `status/health`        | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                          |
-| Status        | `status/health`        | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                               |
-| Config        | `status/config`        | `/config` object with credential fields redacted, plus `updated_at`                                                                                              |
-| Notifications | `status/notifications` | The gateway's live advisory ring projected into the three-fact model; written only when the projection changes (see [Charger health](#charger-health-issue-158)) |
-| Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                       |
-| Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                          |
-| Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                             |
+| Loop          | Firestore document     | Content                                                                                                                                                                                                    |
+| ------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status        | `status/current`       | Curated `/status` fields on the write policy's cadence (see below)                                                                                                                                         |
+| Status        | `history/<date>`       | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence                                             |
+| Status        | `sessions/{id}`        | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                                                            |
+| Schedule      | `status/current`       | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                                                                      |
+| Status        | `status/health`        | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                                                                    |
+| Status        | `status/health`        | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                                                                         |
+| Config        | `status/config`        | `/config` object with credential fields redacted, plus `updated_at`                                                                                                                                        |
+| Notifications | `status/notifications` | The gateway's live advisory ring projected into the three-fact model; written only when the projection changes, ignoring each entry's moving `last_seen` (see [Charger health](#charger-health-issue-158)) |
+| Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                                                                 |
+| Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                                                                    |
+| Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                                                                       |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -641,14 +641,16 @@ RAM-only (they restart at gateway boot), which is why the counter — not
 Corroboration (`active`) comes from observations other loops already fetch — no
 extra charger GET:
 
-| Advisories                                                     | Live proof                                                                                                                                                    | Ack token (`counter_token`)                                  |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `safety.*`                                                     | the matching `/config` boolean is `false` (`ground_check`, `relay_check`, `diode_check`, `vent_check`, `temp_check`) — never `/status.flags`, which is VFLAGS | the five booleans together, `1`/`0` in that order            |
-| `fault.gfci_tripped` / `fault.no_ground` / `fault.stuck_relay` | controller `state` is 6 / 7 / 8                                                                                                                               | `gfcicount` / `nogndcount` / `stuckcount`                    |
-| `thermal.high_temp`                                            | a valid sensor at or above `over_temp_shutdown − 5` (default panic 72 °C)                                                                                     | `first_seen`                                                 |
-| `thermal.relay_thermal`                                        | `relay_thermal_warning_level` 1 (watch) or 2 (warn)                                                                                                           | the level                                                    |
-| `thermal.throttling`                                           | none exposed → always historical                                                                                                                              | `first_seen`                                                 |
-| `wear.*`                                                       | lifetime records → always historical                                                                                                                          | the wear counter, or the severity step for `wear.relay_life` |
+| Advisories                                                     | Live proof                                                                                                                                                    | Ack token (`counter_token`)                                                                |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `safety.*`                                                     | the matching `/config` boolean is `false` (`ground_check`, `relay_check`, `diode_check`, `vent_check`, `temp_check`) — never `/status.flags`, which is VFLAGS | the five booleans together, `1`/`0` in that order                                          |
+| `fault.gfci_tripped` / `fault.no_ground` / `fault.stuck_relay` | controller `state` is 6 / 7 / 8                                                                                                                               | `gfcicount` / `nogndcount` / `stuckcount`                                                  |
+| `thermal.high_temp`                                            | a valid sensor at or above `over_temp_shutdown − 5` (default panic 72 °C)                                                                                     | `first_seen`                                                                               |
+| `thermal.relay_thermal`                                        | `relay_thermal_warning_level ≥ 1` — 1 (watch) or 2 (warn); 0 is none/not available, so presence alone is not proof                                            | the level                                                                                  |
+| `thermal.throttling`                                           | none exposed → always historical                                                                                                                              | `first_seen`                                                                               |
+| `wear.relay_cold_open` / `wear.stuck_relay_recovery`           | lifetime records → always historical                                                                                                                          | their counters (`relay_cold_open_count` / `relay_stuck_recovery_count`)                    |
+| `wear.relay_life`                                              | lifetime record → always historical                                                                                                                           | the severity step, not the percentage (ordinary wear ticking 20 → 19 must not void an ack) |
+| `wear.relay_transit_drift`                                     | lifetime record → always historical                                                                                                                           | `first_seen` (the firmware's own token for this rule is the constant `0`)                  |
 
 The counters come from the status loop's latest `/status` reply and the config
 view from the config loop's last `status/config` write, handed over through one
@@ -699,6 +701,13 @@ incomplete**, never "no faults".
 - `first_observed` is a bridge-local watermark: the first time this bridge saw
   this `(id, counter_token)`. It is seeded from the stored document at start-up,
   so a restart neither re-stamps an observation nor re-alerts on one.
+- **The change test ignores `last_seen`.** The gateway re-stamps it on every
+  ~5 s evaluation pass for every live advisory, so it moves on every poll while
+  nothing has changed; comparing it would make each 300 s poll a write. Every
+  other field still counts as a change — `first_seen`, `acked`, severity,
+  classification, `counter_token`, `first_observed`, the gates, the counters and
+  the reachability/source transition — and each write stores that poll's fresh
+  `last_seen`.
 - `alerted` is reserved for the health alert's dedupe watermark and is carried
   across every write; the ingest does not populate it.
 - The advisory list mirrors the gateway's live ring exactly — an entry that

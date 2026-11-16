@@ -168,6 +168,73 @@ class NotificationsLoopTests(unittest.TestCase):
         db, _ = self.run_loop([FakeResponse(200, LIVE_PAYLOAD)], polls=1)
         self.assertNotIn("current", db.data.get("status", {}))
 
+    def test_a_moving_last_seen_alone_is_not_a_change(self):
+        # The gateway re-stamps `last_seen` every ~5 s for every live advisory, so
+        # two polls of one unchanged advisory differ in exactly that field.
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, payload([advisory(last_seen=1794868200)])),
+                FakeResponse(200, payload([advisory(last_seen=1794868805)])),
+                # The next real change still writes, and that write carries the
+                # poll's own fresh `last_seen`.
+                FakeResponse(
+                    200, payload([advisory(last_seen=1794869410, acked=True)])
+                ),
+            ],
+            polls=3,
+        )
+
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 2, "a re-stamped last_seen is not a change")
+        self.assertEqual(writes[0][3]["advisories"][0]["last_seen"], 1794868200)
+        self.assertEqual(writes[1][3]["advisories"][0]["last_seen"], 1794869410)
+        self.assertEqual(
+            writes[1][3]["advisories"][0]["classification"], "acknowledged"
+        )
+
+    def test_first_seen_acked_and_a_counter_move_each_still_write(self):
+        # The stability view drops `last_seen` only: every other projected field
+        # is still a change, whatever the payload's `last_seen` did.
+        for field, changed in (
+            ("first_seen", advisory(first_seen=1794177200)),
+            ("acked", advisory(acked=True)),
+        ):
+            with self.subTest(field=field):
+                db, _ = self.run_loop(
+                    [
+                        FakeResponse(200, payload([advisory(last_seen=1794868200)])),
+                        FakeResponse(
+                            200,
+                            payload([{**changed, "last_seen": 1794868805}]),
+                        ),
+                    ],
+                    polls=2,
+                )
+                self.assertEqual(len(self.health_writes(db)), 2)
+
+        live = observations()
+
+        def move_counter():
+            live.note_status(
+                {"state": 2, "temp1": None, "temp2": None, "temp3": None},
+                {**COUNTERS, "nogndcount": 8},
+            )
+
+        times = iter([1000.4, 2000.4])
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, payload([advisory(last_seen=1794868200)])),
+                FakeResponse(200, payload([advisory(last_seen=1794868805)])),
+            ],
+            polls=2,
+            live=live,
+            on_wait=move_counter,
+            clock=lambda: next(times),
+        )
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[1][3]["advisories"][0]["counter_token"], 8)
+
     def test_an_ack_flip_writes_once(self):
         db, _ = self.run_loop(
             [
