@@ -298,7 +298,10 @@ Notes:
   EVSE state (`254` sleeping / `255` disabled). Live 8.2.3 pauses into
   `state 254` with `manual_override 1` (`255` is not observed); a sleeping
   charger with no override reports the same `254` with `manual_override 0`. The
-  HTTP `/status` reply additionally spells the same state as `status: "disabled"`.
+  same pair sets the published label: the bridge derives `state_label: "stopped"`
+  for `254` with `manual_override 1` and `"sleeping"` otherwise, so this pause
+  reads **Stopped** on the Status screen rather than **Sleeping**. The HTTP
+  `/status` reply additionally spells the same state as `status: "disabled"`.
   A retained document with `state: "active"` but **no** current field confirms
   nothing — it cannot tell an applied hold from a lost publish — so the
   read-only `/status` reconcile decides.

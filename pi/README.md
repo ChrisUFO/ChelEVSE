@@ -1041,6 +1041,12 @@ bridge reads `/status` once (read-only) and accepts it if the status already
 reflects the target state, otherwise marks it `failed` with
 `no confirmation within 5s (…)`.
 
+That same `254` pair sets the published label: `parse_status` derives
+`state_label: "stopped"` for `254` with `manual_override: 1` and `"sleeping"`
+for the same `254` otherwise, so a user Stop reads **Stopped** on the Status
+screen instead of **Sleeping**. `manual_override` stays a raw `/status` field —
+it is not added to `status/current`; the label is the only derived value.
+
 RAPI replies carry no correlation id, so RAPI publishes are serialised: one
 lock covers the publish and the wait, making the next `rapi/out` belong to the
 command in flight. The topic is the command itself (`$FS`), the parameters go in
