@@ -312,13 +312,14 @@ export async function fetchHistory(startId, endId) {
   };
 }
 
-// The Day period reads one document: `history/{today}` already carries the
-// whole day, so a range query would add nothing and could not tell an absent
-// document from one that a cached read never reached. The bridge writes
-// `hours.<HH>` with zero-padded, strftime-shaped keys ('00'–'23'); a day
-// recorded before hourly capture has `kwh` and no `hours` at all, so `hours`
-// stays null rather than becoming an empty map — the screen uses that to say
-// "no intraday detail" instead of drawing 24 zero bars.
+// The Day period reads one document for the day its window names —
+// `history/{today}` at the default view, the paged date after Previous — which
+// already carries the whole day, so a range query would add nothing and could
+// not tell an absent document from one that a cached read never reached. The
+// bridge writes `hours.<HH>` with zero-padded, strftime-shaped keys ('00'–'23');
+// a day recorded before hourly capture has `kwh` and no `hours` at all, so
+// `hours` stays null rather than becoming an empty map — the screen uses that to
+// say "no intraday detail" instead of drawing 24 zero bars.
 //
 // getDoc prefers the server but may resolve from the cache (reported in
 // metadata) and rejects while offline when the document is not cached, which the

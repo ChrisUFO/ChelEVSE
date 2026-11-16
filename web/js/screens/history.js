@@ -24,9 +24,11 @@ import {
   hourReadState,
   maxSeries,
   nextSessionsView,
+  periodAnchor,
   periodBounds,
   periodById,
   periodSeries,
+  periodSpan,
   sectionView,
   sessionsControls,
   sessionsRange,
@@ -61,7 +63,21 @@ let periodId = DEFAULT_PERIOD;
 let historySeq = 0;
 let series = [];
 let selectedId = null;
-let todayId = null;
+// How many whole periods back the chart is paged; 0 is the default view that
+// ends now, and nothing past it is reachable. The window itself — its anchor,
+// document range, span wording and the local date the anchor was taken on — is
+// built once per read by buildWindow; all window arithmetic stays in
+// js/history.js.
+let periodOffset = 0;
+let chartWindow = null;
+// The window the series on screen was built for: the span every string that names
+// the drawn window is painted from. `chartWindow` is the window the *newest read*
+// started, and a reload rebuilds it from a fresh clock before its read settles —
+// after local midnight the two name different days, and a failed read would
+// otherwise relabel the bars it retained with a window they do not cover. The
+// label follows the series, never the read; the read's own window still names the
+// loading copy, which paints only with no series on screen.
+let seriesSpan = null;
 // The sessions list's whole view state — page one of the recent list or of a
 // browsed month, plus every page appended since. Kept as one object because
 // the paging rules (accumulate, adopt a view, conclude exhaustion) belong to
@@ -166,13 +182,65 @@ function periodHeading(descriptor) {
 
 // The chart heading, summary label and SVG label name the selected range; the
 // segment control is static markup, so the period copy is applied here instead
-// of being duplicated across the markup.
+// of being duplicated across the markup. Every one of those strings comes from
+// the descriptor's copy(span) — the window the chart is actually drawing — so a
+// paged window is named by its dates and never by the rolling words offset 0
+// keeps.
 function paintPeriodCopy() {
   const descriptor = currentPeriod();
+  const span = currentSpan();
+  const copy = descriptor.copy(span);
   setText($('chart-heading'), periodHeading(descriptor));
-  setText($('history-total-label'), descriptor.summaryLabel);
-  $('history-summary').setAttribute('aria-label', `${descriptor.summaryLabel} summary`);
-  $('history-chart').setAttribute('aria-label', descriptor.chartLabel);
+  setText($('history-total-label'), span.label);
+  // The default view keeps the name it always had; a date span does not read as
+  // a noun before the word "summary", so a paged window gets a sentence.
+  $('history-summary').setAttribute(
+    'aria-label',
+    span.isDefault ? `${span.label} summary` : `Energy summary for ${span.phrase}`,
+  );
+  $('history-chart').setAttribute('aria-label', copy.chartLabel);
+  paintPagingControls(descriptor);
+}
+
+// The description of the window on screen. The series owns it whenever there is
+// one: a read for a different window (a reload that re-anchored at the new local
+// date) may not relabel bars it did not produce, so the label keeps naming the
+// window those bars were read for. With no series the window being read is the
+// honest one — the loading, empty, offline and error copy all name what was
+// asked for. Before the first read (and after a reset) there is no window at all,
+// so the default view's wording is the honest one — the same strings the read at
+// offset 0 would paint. Both ends of that fallback span come from one clock read:
+// two `new Date()` calls could straddle local midnight and name two different
+// days.
+function currentSpan() {
+  if (seriesSpan) return seriesSpan;
+  if (chartWindow) return chartWindow.span;
+  const now = new Date();
+  return periodSpan(currentPeriod(), now, now);
+}
+
+// "Previous 30 days" / "Next 12 months": the step the period pages by, so the
+// accessible name says what activating the control does.
+function pagingName(descriptor, direction) {
+  const { unit, size } = descriptor.step;
+  return `${direction} ${size === 1 ? unit : `${size} ${unit}s`}`;
+}
+
+// Next is offered only while a past window is shown: offset 0 is the present and
+// no window beyond it exists.
+function paintPagingControls(descriptor) {
+  const prev = $('chart-prev');
+  const next = $('chart-next');
+  if (prev) prev.setAttribute('aria-label', pagingName(descriptor, 'Previous'));
+  if (!next) return;
+  next.setAttribute('aria-label', pagingName(descriptor, 'Next'));
+  // A control that disables itself while focused drops the focus to <body> — the
+  // next Tab then restarts at the top of the page — so paging back to the
+  // present hands it on to the only move left. Disabled controls are not
+  // focusable, which is why the destination is Previous rather than itself.
+  const handoff = periodOffset === 0 && document.activeElement === next;
+  next.disabled = periodOffset === 0;
+  if (handoff && prev) prev.focus({ preventScroll: true });
 }
 
 function periodButtons() {
@@ -230,9 +298,40 @@ function renderSummary() {
   setText($('history-cost'), cost || '');
 }
 
+// The chart's hint names only what the state on screen can do — two dimensions,
+// one source. The selection keys need bars to move through; and the paging
+// register depends on the window shown: at the present, Next is disabled and
+// PageDown is deliberately not consumed (it scrolls the page), so neither is
+// advertised, while a paged window offers both directions.
+const CHART_HINT = {
+  bars: {
+    present: 'Tap or ← → · PageUp pages back',
+    paged: 'Tap or ← → · PageUp/PageDown pages',
+  },
+  paging: {
+    present: 'Use ‹ or PageUp to page back',
+    paged: 'Use ‹ › or PageUp/PageDown to page',
+  },
+};
+
+function paintChartHint(barsDrawn) {
+  const register = periodOffset === 0 ? 'present' : 'paged';
+  setText($('chart-hint'), (barsDrawn ? CHART_HINT.bars : CHART_HINT.paging)[register]);
+}
+
 function showChartEmpty(title, line) {
   $('history-chart').setAttribute('hidden', '');
-  $('chart-head').hidden = true;
+  // With no bars there is nothing to tap or arrow through: the hint keeps the
+  // pager it does offer and drops the selection clause.
+  paintChartHint(false);
+  // The head is never hidden: the paging controls live in it, and an empty window
+  // is still a window the owner has to be able to page out of. Its readout
+  // describes a bar that is no longer drawn, so it returns to its initial
+  // "nothing selected" state instead of naming the previous window.
+  setText($('chart-day'), '—');
+  setText($('chart-kwh'), '—');
+  $('chart-cost').hidden = true;
+  setText($('chart-cost'), '');
   $('chart-empty').hidden = false;
   // A hidden chart must not keep another period's points in the DOM; the next
   // paint rebuilds them from the selected range.
@@ -274,8 +373,8 @@ function renderChart() {
     return group;
   });
   svg.removeAttribute('hidden');
-  $('chart-head').hidden = false;
   $('chart-empty').hidden = true;
+  paintChartHint(true);
   const index = Math.max(
     0,
     series.findIndex((point) => point.id === selectedId),
@@ -314,10 +413,60 @@ function selectIndex(index, { focus = false } = {}) {
   if (focus && target) target.focus({ preventScroll: true });
 }
 
+// Focus continuity across a read: the loading paint removes the bars, so the bar
+// that held the focus is gone long before the new window is drawn. A caller that
+// repaints under a keyboard user hands the focus back here — to the bar the new
+// window selected, or to the pager when it drew none — so the paging keys stay
+// deliverable and the focus never comes to rest on <body>, where PageUp/PageDown
+// scroll the page instead of paging.
+function chartHasFocus() {
+  return $('history-chart').contains(document.activeElement);
+}
+
+function focusChart() {
+  const index = series.findIndex((point) => point.id === selectedId);
+  const target = barEls[index] || $('chart-prev');
+  if (target) target.focus({ preventScroll: true });
+}
+
+// True from the moment a read parks the focus on the pager until the repaint that
+// hands it back. It is screen state, not a per-read snapshot: a read superseded
+// before it settles must not lose the reservation (the read that supersedes it
+// starts with the bars already gone, so it would capture nothing), and only the
+// repaint that lands may consume it. Both read paths paint and release under their
+// own sequence guard, so a superseded read — a paged read or a reload — leaves the
+// reservation to the read that superseded it, and that newest read always owns the
+// settle focus however many reads it superseded.
+let chartFocusReserved = false;
+
+// Reserve the chart's focus before a paint that removes the focused bar: the bar
+// is about to leave the document, so the focus moves to Previous first — a control
+// the always-visible head renders, that is never disabled, and that lives inside
+// #chart-card where the paging keys are bound. A press arriving *during* the read
+// (a double tap, or every key-repeat event of a held key) therefore still pages
+// instead of scrolling the viewport from <body>.
+function parkChartFocus() {
+  const prev = $('chart-prev');
+  if (!prev || !chartHasFocus()) return;
+  chartFocusReserved = true;
+  prev.focus({ preventScroll: true });
+}
+
+// Hand the reserved focus to the window that just landed. Skipped when the reader
+// has since tabbed or clicked elsewhere: the reservation only starts from the
+// pager this interaction parked the focus on, so nobody is yanked back into the
+// chart from a control they moved to themselves.
+function releaseChartFocus() {
+  if (!chartFocusReserved) return;
+  chartFocusReserved = false;
+  const at = document.activeElement;
+  if (at === $('chart-prev') || chartHasFocus()) focusChart();
+}
+
 const OFFLINE_TITLE = "You're offline — history isn't available.";
 const NO_HISTORY_COPY = {
   title: 'No history yet',
-  line: 'Totals appear once the charger logs a day.',
+  line: 'Daily totals appear once the charger logs a day.',
 };
 
 function setHistoryNote(text) {
@@ -339,11 +488,12 @@ function historyNote(view) {
 function renderHistory() {
   const descriptor = currentPeriod();
   paintPeriodCopy();
+  const copy = descriptor.copy(currentSpan());
   const hasData = historyServer && sumSeries(series) > 0;
   const view = sectionView(historyState, hasData);
   if (historyState === 'loading' && !series.length) {
     renderSummary();
-    showChartEmpty(`Loading ${descriptor.noun}…`, descriptor.loadingLine);
+    showChartEmpty(`Loading ${descriptor.noun}…`, copy.loadingLine);
     setHistoryNote('');
     return;
   }
@@ -351,7 +501,7 @@ function renderHistory() {
     // The chart has nothing it may draw, but the day's total is a real record:
     // the summary keeps it and the panel names why the hours are missing.
     renderSummary();
-    showChartEmpty(descriptor.noIntradayTitle, descriptor.noIntradayLine);
+    showChartEmpty(copy.noIntradayTitle, copy.noIntradayLine);
     setHistoryNote('');
     return;
   }
@@ -363,16 +513,24 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
-    const copy =
+    // The rescue line names the window the next Refresh will load, which is the
+    // one this render is reporting: a series the server answered with nothing
+    // draws no bars, so a failed re-entry over it has no drawn window to defend
+    // and must not send the owner back to the superseded dates (see currentSpan
+    // for the label, which still names what that read covered).
+    const offlineLine = chartWindow
+      ? descriptor.copy(chartWindow.span).offlineLine
+      : copy.offlineLine;
+    const message =
       historyState === 'offline'
-        ? { title: OFFLINE_TITLE, line: descriptor.offlineLine }
+        ? { title: OFFLINE_TITLE, line: offlineLine }
         : historyState === 'error'
           ? {
               title: `Couldn't load ${descriptor.noun}.`,
               line: 'Check your connection and refresh.',
             }
           : NO_HISTORY_COPY;
-    showChartEmpty(copy.title, copy.line);
+    showChartEmpty(message.title, message.line);
     setHistoryNote('');
     return;
   }
@@ -380,7 +538,7 @@ function renderHistory() {
   if (view.claimEmpty || (sumSeries(series) === 0 && !view.stale)) {
     // Zero days inside a rendered period are real zero-height bars; only a read
     // that found nothing in the whole range uses the empty panel.
-    showChartEmpty(descriptor.emptyTitle, descriptor.emptyLine);
+    showChartEmpty(copy.emptyTitle, copy.emptyLine);
   } else {
     renderChart();
   }
@@ -549,7 +707,10 @@ function renderLoadFeedback() {
 }
 
 function windowStale() {
-  return todayId !== dayId(new Date());
+  // The day the window was anchored to, never the day its range ends: a paged
+  // window's endId is a past date, so comparing that would make every read
+  // permanently stale and re-enter it in a loop.
+  return !chartWindow || chartWindow.anchorDay !== dayId(new Date());
 }
 
 // Reload once the local date moves past the day the window was built for.
@@ -567,7 +728,7 @@ function recheckWindow() {
 // Every one-shot read ends here: a read that was in flight across local midnight
 // has painted yesterday's window under today's labels, so re-enter it once with
 // today's ids instead of leaving "Today · <yesterday>" on screen. Re-entry
-// captures a fresh `today`, so this check can only fire again at the next local
+// captures a fresh window, so this check can only fire again at the next local
 // midnight, never in a loop.
 function reloadIfWindowStale() {
   if (!active || !windowStale()) return;
@@ -577,23 +738,40 @@ function reloadIfWindowStale() {
   loadAll();
 }
 
-// The window for the selected period. `today` is captured once per read so the
-// bounds, the points and the midnight check are derived from the same local
-// date. The Day period's window is exactly today, which is also the document its
-// read targets.
-function periodRange(descriptor, today = new Date()) {
-  const bounds = periodBounds(descriptor, today);
-  todayId = bounds.endId;
-  return bounds;
+// The window the selected period is paged to. `now` is captured once per read,
+// and the anchor, the bounds, the span wording and the midnight check all come
+// from it: the anchor decides which window is drawn, `now` decides which bucket
+// (if any) is current. Every bit of window arithmetic happens in js/history.js.
+function buildWindow(descriptor, now) {
+  const anchor = periodAnchor(descriptor, periodOffset, now);
+  return {
+    anchor,
+    bounds: periodBounds(descriptor, anchor, now),
+    span: periodSpan(descriptor, anchor, now),
+    anchorDay: dayId(now),
+  };
 }
+
+// The store reads behind one period: the Day period's single document and the
+// day-id range every other period reads. They are indirected through this object
+// for the reason fetchPeriodSessions takes its range read as a parameter — Node
+// cannot bind Firestore, so in the executed harness every store read rejects, and
+// a rejection cannot express *when* a read settles. Substituting the read is what
+// lets the harness drive a read that succeeds and the two orders in which a read
+// and the one that superseded it can settle (#154). The screen only ever reads
+// this object; production never assigns to it.
+export const periodReads = {
+  day: (day) => fetchHistoryDay(day),
+  range: (startId, endId) => fetchHistory(startId, endId),
+};
 
 // The selected period's read, chosen by the descriptor: the Day period reads its
 // one document, every other period its contiguous day-id range. Both resolve to
 // the input applyHistory classifies, so no caller special-cases a period id.
 function fetchPeriod(descriptor, bounds) {
   return descriptor.source === 'day'
-    ? fetchHistoryDay(bounds.endId)
-    : fetchHistory(bounds.startId, bounds.endId);
+    ? periodReads.day(bounds.endId)
+    : periodReads.range(bounds.startId, bounds.endId);
 }
 
 // The period's session archive read, the $ counterpart of fetchPeriod (#123):
@@ -618,10 +796,13 @@ export function fetchPeriodSessions(descriptor, bounds, readRange = fetchSession
 // the state only: points already on screen must never be relabelled as the newly
 // selected period. `sessions` is the same read's session payload and is applied
 // with the points it prices — the previous period's sessions must never price
-// this one's bars. Exported so the executed harness can drive the fetch→apply
+// this one's bars. `anchor` is the window the read was built for and `now` the
+// clock it was captured at (defaulting to the anchor, the pre-paging shape): the
+// series marks a current bucket only when its window contains now, so a paged
+// window marks none. Exported so the executed harness can drive the fetch→apply
 // step readHistory and loadAll perform (with the store seam stubbed): the
 // payload's shape crossing this boundary is what the harness must observe.
-export function applyHistory(descriptor, result, failure, today, sessions = []) {
+export function applyHistory(descriptor, result, failure, anchor, sessions = [], now = anchor) {
   const day = descriptor.source === 'day';
   if (result) historyState = day ? hourReadState(result) : historyReadState(result);
   else historyState = day ? hourReadFailure(failure) : 'error';
@@ -629,13 +810,17 @@ export function applyHistory(descriptor, result, failure, today, sessions = []) 
   // A Day read's payload is the day document itself; a range read's is its list
   // of daily documents.
   periodSessions = Array.isArray(sessions) ? sessions : [];
-  series = periodSeries(descriptor, day ? result : result.docs, today);
+  series = periodSeries(descriptor, day ? result : result.docs, anchor, now);
+  // The window these points were built for — the only place a series acquires the
+  // window it is labelled by (see seriesSpan).
+  seriesSpan = periodSpan(descriptor, anchor, now);
   const kwh = Number(result.kwh);
   dayTotal = day && Number.isFinite(kwh) && kwh > 0 ? kwh : null;
   historyServer = historyState === 'fresh' || historyState === 'empty';
   if (!series.some((point) => point.id === selectedId)) {
     // Prefer the slot the series marks as current (today, this month, the hour
-    // in progress), else the newest slot.
+    // in progress), else the newest slot — which is what a paged window, whose
+    // buckets are all in the past, lands on.
     const current = series.findIndex((point) => point.isCurrent);
     selectedId = series.length ? series[current >= 0 ? current : series.length - 1].id : null;
   }
@@ -648,13 +833,25 @@ async function readHistory() {
   const gen = generation;
   const seq = ++historySeq;
   const descriptor = currentPeriod();
-  const today = new Date();
-  const bounds = periodRange(descriptor, today);
+  const now = new Date();
+  // One window build owns the anchor, the range, the span wording and the
+  // midnight guard's day; the value is kept so the guard can ask what date the
+  // window on screen was anchored to.
+  const readWindow = buildWindow(descriptor, now);
+  chartWindow = readWindow;
+  const { bounds } = readWindow;
+  // A paging keystroke arrives with the focus on a bar, and the loading paint
+  // below removes it; the pager holds the focus until the settled window hands it
+  // back (see releaseChartFocus).
+  parkChartFocus();
   series = [];
   selectedId = null;
   dayTotal = null;
   periodSessions = [];
   historyServer = false;
+  // The previous window's series leaves with its span: the new read's own window
+  // names the loading copy, and a failed read falls back to its panel.
+  seriesSpan = null;
   historyState = 'loading';
   renderHistory();
   // The session read is a sibling, not a gate: a rejected session payload
@@ -668,10 +865,12 @@ async function readHistory() {
     descriptor,
     hist.status === 'fulfilled' ? hist.value : null,
     hist.status === 'rejected' ? hist.reason : null,
-    today,
+    readWindow.anchor,
     sess.status === 'fulfilled' ? sess.value : [],
+    now,
   );
   renderHistory();
+  releaseChartFocus();
   reloadIfWindowStale();
 }
 
@@ -679,7 +878,20 @@ async function switchPeriod(id) {
   const next = periodById(id);
   if (!next || next.id === periodId) return;
   periodId = next.id;
+  // A Week offset of 4 has no meaning as a Month offset, so a switch returns to
+  // the default view.
+  periodOffset = 0;
   paintPeriodSwitch();
+  await readHistory();
+}
+
+// Page the window by one period: +1 goes back in time, -1 toward the present.
+// Offset 0 is the present, so Next cannot advance past it (and the control is
+// disabled there); no window in the future is reachable.
+async function pageBy(step) {
+  const next = Math.max(0, periodOffset + step);
+  if (next === periodOffset) return;
+  periodOffset = next;
   await readHistory();
 }
 
@@ -738,6 +950,10 @@ async function loadAll() {
   loading = true;
   loaded = true;
   const gen = generation;
+  // The same focus continuity a paged read keeps: this reload can land under a
+  // keyboard user (the midnight re-entry a paged read triggers), and its repaint
+  // must not leave the focus on <body>.
+  parkChartFocus();
   const first = historyState === 'idle' && sessionsView.state === 'idle';
   if (first) {
     historyState = 'loading';
@@ -753,8 +969,10 @@ async function loadAll() {
   const sessSeq = ++sessionsSeq;
   sessionsBusy = true;
   const descriptor = currentPeriod();
-  const today = new Date();
-  const bounds = periodRange(descriptor, today);
+  const now = new Date();
+  const readWindow = buildWindow(descriptor, now);
+  chartWindow = readWindow;
+  const { bounds } = readWindow;
   // Refresh re-reads the current view's first page — the month the picker
   // names, or the recent list when none is picked — beside the period's own
   // day documents and overlapping sessions.
@@ -770,15 +988,24 @@ async function loadAll() {
   loading = false;
   setRefreshBusy(false);
   // A period switch during the read owns the chart; this payload belongs to the
-  // superseded range and must not be painted.
+  // superseded range and must not be painted. The settle repaint and the focus
+  // handoff belong to the newest read for the same reason: repainting here would
+  // rebuild the bars the newest read has just focused (a superseded reload landing
+  // second would drop the focus to <body>), and releasing here would consume the
+  // reservation before the window that earned it is on screen. `loading` and the
+  // refresh control are finished above either way — they belong to this reload,
+  // not to the chart.
   if (seq === historySeq) {
     applyHistory(
       descriptor,
       hist.status === 'fulfilled' ? hist.value : null,
       hist.status === 'rejected' ? hist.reason : null,
-      today,
+      readWindow.anchor,
       periodSess.status === 'fulfilled' ? periodSess.value : [],
+      now,
     );
+    renderHistory();
+    releaseChartFocus();
   }
   // Same contract for the sessions view: only the newest sessions read paints,
   // and a failed read or an offline cache miss keeps the previous payload with
@@ -790,7 +1017,6 @@ async function loadAll() {
       month,
     });
   }
-  renderHistory();
   renderSessions();
   renderLoadFeedback();
 
@@ -824,6 +1050,11 @@ export function initHistory() {
   }
   const moreButton = $('sessions-more');
   if (moreButton) moreButton.addEventListener('click', loadMoreSessions);
+  // The chart's paging controls: one window back, one window toward the present.
+  const prevButton = $('chart-prev');
+  if (prevButton) prevButton.addEventListener('click', () => pageBy(1));
+  const nextButton = $('chart-next');
+  if (nextButton) nextButton.addEventListener('click', () => pageBy(-1));
   const periodSwitch = $('period-switch');
   if (periodSwitch) {
     periodSwitch.addEventListener('click', (e) => {
@@ -845,12 +1076,33 @@ export function initHistory() {
     });
     paintPeriodSwitch();
   }
+  // The paging keys are bound to the card that holds the chart and its pager, not
+  // to the SVG: a paged read clears the bars (and the loading/empty/offline states
+  // hide the SVG outright), so the chart cannot keep the focus the key needs. The
+  // pager in the always-visible head can, and the hint beside it advertises the
+  // keys in exactly those states.
+  const card = $('chart-card');
+  if (card) {
+    card.addEventListener('keydown', (e) => {
+      // Modified keys and every other key belong to the browser (back/forward,
+      // tab switching, scrolling), so they are never consumed here.
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+      // The present is the newest window, so PageDown there moves nothing: the key
+      // stays the browser's and scrolls, instead of being swallowed by an action
+      // that does not happen. PageUp always has a window to go back to.
+      if (e.key === 'PageDown' && periodOffset === 0) return;
+      e.preventDefault();
+      pageBy(e.key === 'PageUp' ? 1 : -1);
+    });
+  }
   const svg = $('history-chart');
   svg.addEventListener('keydown', (e) => {
-    // Only the documented ←/→ mapping moves the selection. Modified keys and
-    // every other key belong to the browser (back/forward, tab switching,
-    // scrolling), so they are never consumed here.
+    // Modified keys and every other key belong to the browser (back/forward,
+    // tab switching, scrolling), so they are never consumed here.
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    // ←/→ move the bar selection inside the window already drawn; paging belongs
+    // to the card (above), which survives the repaint the paged read performs.
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     if (!series.length) return;
     e.preventDefault();
@@ -1000,12 +1252,9 @@ export function showHistoryStatus(data) {
 // keyboard user scrubbing them keeps the selected one focused.
 function renderKeepingFocus() {
   if (!series.length) return;
-  const hadFocus = $('history-chart').contains(document.activeElement);
+  const hadFocus = chartHasFocus();
   renderHistory();
-  if (hadFocus) {
-    const index = series.findIndex((point) => point.id === selectedId);
-    if (barEls[index]) barEls[index].focus({ preventScroll: true });
-  }
+  if (hadFocus) focusChart();
 }
 
 export function resetHistory() {
@@ -1022,11 +1271,14 @@ export function resetHistory() {
   series = [];
   selectedId = null;
   dayTotal = null;
-  todayId = null;
+  periodOffset = 0;
+  chartWindow = null;
+  seriesSpan = null;
   periodSessions = [];
   liveStatus = null;
   settlePending = false;
   settleVerify = false;
+  chartFocusReserved = false;
   sessionsView = emptySessionsView();
   sessionsBusy = false;
   historyState = 'idle';
@@ -1046,7 +1298,7 @@ export function resetHistory() {
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);
-    showChartEmpty('No history yet', 'Daily totals appear once the charger logs a day.');
+    showChartEmpty(NO_HISTORY_COPY.title, NO_HISTORY_COPY.line);
     const note = $('history-state');
     if (note) {
       note.hidden = true;
