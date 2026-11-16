@@ -4,6 +4,20 @@
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_LONG = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 export function dayId(date) {
   const y = date.getFullYear();
@@ -80,15 +94,25 @@ function hourValues(hours) {
 
 // 24 hourly points in the same shape every period's series uses:
 // { id, kwh, label, isCurrent }. `isCurrent` marks the hour in progress (the
-// bar shows what is recorded so far — nothing is padded or extrapolated).
-// `dayId` carries the day the buckets belong to (the Day period's read targets
-// that day's document): the pricing inputs for a schedule-priced hour bar.
-export function hourSeries(hours, today = new Date()) {
-  const currentHour = hourId(today.getHours());
-  const day = dayId(today);
+// bar shows what is recorded so far — nothing is padded or extrapolated), and
+// only for the day the anchor names: `now` is the clock, `anchor` is the day
+// being drawn, so a paged (past) day marks no hour current. The default `now`
+// is the anchor, which is exactly the pre-paging behaviour. `dayId` carries the
+// day the buckets belong to (the Day period's read targets that day's
+// document): the pricing inputs for a schedule-priced hour bar.
+export function hourSeries(hours, anchor = new Date(), now = anchor) {
+  const currentHour = hourId(now.getHours());
+  const currentDay = dayId(anchor) === dayId(now);
+  const day = dayId(anchor);
   return hourValues(hours).map((kwh, hour) => {
     const id = hourId(hour);
-    return { id, kwh, label: `${id}:00`, isCurrent: id === currentHour, dayId: day };
+    return {
+      id,
+      kwh,
+      label: `${id}:00`,
+      isCurrent: currentDay && id === currentHour,
+      dayId: day,
+    };
   });
 }
 
@@ -108,6 +132,13 @@ export function hourRange(id) {
 // reads the series length for its bar geometry, so the Day period's 24 hourly
 // points need a descriptor and a segment button — no geometry or hit-test
 // change.
+//
+// Paging shifts the window's anchor by one `step` in the period's own unit
+// (day 1 day, week 7 days, month 30 days, year 12 calendar months); `span` is
+// the wording offset 0 keeps ("Today" / "the last 7 days"), and `copy(span)`
+// is the single source of every string that names the window — `span` is the
+// description `periodSpan` returns, so the paged register names the dates the
+// chart is actually drawing.
 export const PERIODS = [
   {
     id: 'day',
@@ -116,15 +147,31 @@ export const PERIODS = [
     bucket: 'hour',
     source: 'day',
     prefixToday: false,
-    summaryLabel: 'Today',
+    step: { unit: 'day', size: 1 },
+    span: { label: 'Today', phrase: 'today' },
     noun: 'hourly energy',
-    chartLabel: 'Hourly energy for today. Use the left and right arrow keys to move between hours.',
-    emptyTitle: 'No energy recorded today.',
-    emptyLine: 'Hours appear as charging is recorded.',
-    noIntradayTitle: 'No hourly detail for today.',
-    noIntradayLine: 'Hourly capture began recently, so today has a total but no hours behind it.',
-    loadingLine: 'Reading today.',
-    offlineLine: "Reconnect, then tap Refresh to load today's hours.",
+    copy: (span) =>
+      span.isDefault
+        ? {
+            chartLabel:
+              'Hourly energy for today. Use the left and right arrow keys to move between hours.',
+            emptyTitle: 'No energy recorded today.',
+            emptyLine: 'Hours appear as charging is recorded.',
+            noIntradayTitle: 'No hourly detail for today.',
+            noIntradayLine:
+              'Hourly capture began recently, so today has a total but no hours behind it.',
+            loadingLine: 'Reading today.',
+            offlineLine: "Reconnect, then tap Refresh to load today's hours.",
+          }
+        : {
+            chartLabel: `Hourly energy for ${span.phrase}. Use the left and right arrow keys to move between hours.`,
+            emptyTitle: `No energy recorded on ${span.phrase}.`,
+            emptyLine: 'Hours appear as charging is recorded.',
+            noIntradayTitle: `No hourly detail for ${span.phrase}.`,
+            noIntradayLine: `Hourly capture began recently, so ${span.phrase} has a total but no hours behind it.`,
+            loadingLine: `Reading ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load the hours for ${span.phrase}.`,
+          },
   },
   {
     id: 'week',
@@ -133,14 +180,26 @@ export const PERIODS = [
     bucket: 'day',
     source: 'range',
     prefixToday: true,
-    summaryLabel: 'Last 7 days',
+    step: { unit: 'day', size: 7 },
+    span: { label: 'Last 7 days', phrase: 'the last 7 days' },
     noun: 'daily energy',
-    chartLabel:
-      'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
-    emptyTitle: 'No energy recorded in the last 7 days.',
-    emptyLine: 'Days without charging count as zero.',
-    loadingLine: 'Reading the last 7 days.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
+    copy: (span) =>
+      span.isDefault
+        ? {
+            chartLabel:
+              'Daily energy for the last 7 days. Use the left and right arrow keys to move between days.',
+            emptyTitle: 'No energy recorded in the last 7 days.',
+            emptyLine: 'Days without charging count as zero.',
+            loadingLine: 'Reading the last 7 days.',
+            offlineLine: 'Reconnect, then tap Refresh to load the last 7 days.',
+          }
+        : {
+            chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
+            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyLine: 'Days without charging count as zero.',
+            loadingLine: `Reading ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+          },
   },
   {
     id: 'month',
@@ -149,14 +208,26 @@ export const PERIODS = [
     bucket: 'day',
     source: 'range',
     prefixToday: true,
-    summaryLabel: 'Last 30 days',
+    step: { unit: 'day', size: 30 },
+    span: { label: 'Last 30 days', phrase: 'the last 30 days' },
     noun: 'daily energy',
-    chartLabel:
-      'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
-    emptyTitle: 'No energy recorded in the last 30 days.',
-    emptyLine: 'Days without charging count as zero.',
-    loadingLine: 'Reading the last 30 days.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
+    copy: (span) =>
+      span.isDefault
+        ? {
+            chartLabel:
+              'Daily energy for the last 30 days. Use the left and right arrow keys to move between days.',
+            emptyTitle: 'No energy recorded in the last 30 days.',
+            emptyLine: 'Days without charging count as zero.',
+            loadingLine: 'Reading the last 30 days.',
+            offlineLine: 'Reconnect, then tap Refresh to load the last 30 days.',
+          }
+        : {
+            chartLabel: `Daily energy for ${span.phrase}. Use the left and right arrow keys to move between days.`,
+            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyLine: 'Days without charging count as zero.',
+            loadingLine: `Reading ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+          },
   },
   {
     id: 'year',
@@ -165,14 +236,26 @@ export const PERIODS = [
     bucket: 'month',
     source: 'range',
     prefixToday: false,
-    summaryLabel: 'Last 12 months',
+    step: { unit: 'month', size: 12 },
+    span: { label: 'Last 12 months', phrase: 'the last 12 months' },
     noun: 'monthly energy',
-    chartLabel:
-      'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
-    emptyTitle: 'No energy recorded in the last 12 months.',
-    emptyLine: 'Months without charging count as zero.',
-    loadingLine: 'Reading the last 12 months.',
-    offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
+    copy: (span) =>
+      span.isDefault
+        ? {
+            chartLabel:
+              'Monthly energy for the last 12 months. Use the left and right arrow keys to move between months.',
+            emptyTitle: 'No energy recorded in the last 12 months.',
+            emptyLine: 'Months without charging count as zero.',
+            loadingLine: 'Reading the last 12 months.',
+            offlineLine: 'Reconnect, then tap Refresh to load the last 12 months.',
+          }
+        : {
+            chartLabel: `Monthly energy for ${span.phrase}. Use the left and right arrow keys to move between months.`,
+            emptyTitle: `No energy recorded in ${span.phrase}.`,
+            emptyLine: 'Months without charging count as zero.',
+            loadingLine: `Reading ${span.phrase}.`,
+            offlineLine: `Reconnect, then tap Refresh to load ${span.phrase}.`,
+          },
   },
 ];
 
@@ -190,22 +273,87 @@ function periodFor(period) {
   return typeof period === 'string' ? periodById(period) : periodById(period && period.id);
 }
 
+// The anchor a window at `offset` is drawn for: offset 0 is now, every deeper
+// offset shifts back one `step` in the period's own unit — day 1 day, week 7
+// days, month 30 days, year 12 calendar months — so consecutive windows neither
+// overlap nor leave a gap. Local noon keeps the shift off a DST midnight
+// transition, and a calendar-month step clamps its day (31 March back a year is
+// 31 March; 29 February back a year is 28 February).
+export function periodAnchor(period, offset, now = new Date()) {
+  const descriptor = periodFor(period);
+  const steps = Number(offset);
+  if (!Number.isFinite(steps) || steps <= 0) return new Date(now);
+  const { unit, size } = descriptor.step;
+  const noon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
+  if (unit !== 'month') {
+    return new Date(noon.getFullYear(), noon.getMonth(), noon.getDate() - steps * size, 12);
+  }
+  const target = new Date(noon.getFullYear(), noon.getMonth() - steps * size, 1, 12);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0, 12).getDate();
+  target.setDate(Math.min(noon.getDate(), lastDay));
+  return target;
+}
+
+// "18 October 2026", "12 – 18 October 2026" inside one month, "17 September –
+// 16 October 2026" inside one year, both years across a year boundary.
+function daySpanLabel(startId, endId) {
+  const first = dayStartFromId(startId);
+  const last = dayStartFromId(endId);
+  if (!first || !last) return `${startId} – ${endId}`;
+  if (startId === endId) {
+    return `${last.getDate()} ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
+  }
+  const sameYear = first.getFullYear() === last.getFullYear();
+  const sameMonth = sameYear && first.getMonth() === last.getMonth();
+  const left = sameMonth
+    ? String(first.getDate())
+    : `${first.getDate()} ${MONTHS_LONG[first.getMonth()]}${sameYear ? '' : ` ${first.getFullYear()}`}`;
+  return `${left} – ${last.getDate()} ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
+}
+
+// The Year period's window as its month buckets name it: the first and last
+// month of the day range the chart sums, never a partial-day phrasing its bars
+// do not draw.
+function monthSpanLabel(startId, endId) {
+  const first = dayStartFromId(startId);
+  const last = dayStartFromId(endId);
+  if (!first || !last) return `${startId} – ${endId}`;
+  return `${MONTHS_LONG[first.getMonth()]} ${first.getFullYear()} – ${MONTHS_LONG[last.getMonth()]} ${last.getFullYear()}`;
+}
+
+// The window one chart paints, described once for every string that names it:
+// `label` titles it (summary label and its aria-label), `phrase` is the
+// mid-sentence form the copy uses, and `isDefault` marks offset 0 — the one
+// register that keeps today's wording ("Today", "the last 30 days"). A past
+// window is named by the dates actually drawn.
+export function periodSpan(period, anchor = new Date(), now = new Date()) {
+  const descriptor = periodFor(period);
+  if (dayId(anchor) === dayId(now)) {
+    return { label: descriptor.span.label, phrase: descriptor.span.phrase, isDefault: true };
+  }
+  const bounds = periodBounds(descriptor, anchor);
+  const label =
+    descriptor.bucket === 'month'
+      ? monthSpanLabel(bounds.startId, bounds.endId)
+      : daySpanLabel(bounds.startId, bounds.endId);
+  return { label, phrase: label, isDefault: false };
+}
+
 // Inclusive document-id range for one period, oldest first. Week, Month and
 // Year resolve to a contiguous day-id range, so the store needs one
-// documentId() query. The Day period has no range: it names exactly today, which
-// is also the day its single-document read targets and the day the screen's
-// midnight guard compares against.
-export function periodBounds(period, today = new Date()) {
+// documentId() query. The Day period has no range: it names exactly the day its
+// single-document read targets and its window's anchor names.
+export function periodBounds(period, anchor = new Date()) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') {
-    const id = dayId(today);
+    const id = dayId(anchor);
     return { startId: id, endId: id };
   }
   if (descriptor.bucket === 'month') {
-    const start = new Date(today.getFullYear(), today.getMonth() - (descriptor.slots - 1), 1, 12);
-    return { startId: dayId(start), endId: dayId(today) };
+    const start = new Date(anchor.getFullYear(), anchor.getMonth() - (descriptor.slots - 1), 1, 12);
+    return { startId: dayId(start), endId: dayId(anchor) };
   }
-  const ids = lastDayIds(descriptor.slots, today);
+  const ids = lastDayIds(descriptor.slots, anchor);
   return { startId: ids[0], endId: ids[ids.length - 1] };
 }
 
@@ -247,13 +395,19 @@ export function sessionsRange(bounds) {
 // overlapping sessions, never from day documents; days without a document are
 // genuine zero points, not gaps, and the current month is partial because only
 // recorded days exist.
-export function periodSeries(period, data, today = new Date()) {
+//
+// `anchor` is the window the chart draws; `now` is the clock, and a bucket is
+// current only when it is now's own bucket (today's day, the hour in progress,
+// this month) — so a paged window, whose anchor is in the past, marks nothing
+// current and the live pricing gate stays closed for it. `now` defaults to the
+// anchor, which is the pre-paging behaviour.
+export function periodSeries(period, data, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
-  if (descriptor.source === 'day') return hourSeries(data && data.hours, today);
+  if (descriptor.source === 'day') return hourSeries(data && data.hours, anchor, now);
   const docs = data;
   if (descriptor.bucket === 'month') {
     const months = [];
-    const end = new Date(today.getFullYear(), today.getMonth(), 1, 12);
+    const end = new Date(anchor.getFullYear(), anchor.getMonth(), 1, 12);
     for (let i = descriptor.slots - 1; i >= 0; i--) {
       months.push(monthId(new Date(end.getFullYear(), end.getMonth() - i, 1, 12)));
     }
@@ -267,7 +421,7 @@ export function periodSeries(period, data, today = new Date()) {
         totals.set(bucket, totals.get(bucket) + kwh);
       }
     }
-    const current = monthId(today);
+    const current = monthId(now);
     return months.map((id) => ({
       id,
       kwh: totals.get(id),
@@ -275,8 +429,8 @@ export function periodSeries(period, data, today = new Date()) {
       isCurrent: id === current,
     }));
   }
-  const current = dayId(today);
-  return historySeries(lastDayIds(descriptor.slots, today), docs).map((point) => ({
+  const current = dayId(now);
+  return historySeries(lastDayIds(descriptor.slots, anchor), docs).map((point) => ({
     ...point,
     isCurrent: point.id === current,
   }));
