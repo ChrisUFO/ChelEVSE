@@ -38,8 +38,10 @@ MIN_AMPS, MAX_AMPS = 6, 48
 COMMAND_TYPES = frozenset({"pause", "resume", "set_current", "rapi", "ack_notification"})
 # Advisory ids are firmware rule names: a lowercase dotted path ("fault.no_ground").
 # The same grammar the Firestore rules and the app enforce, so a doc created
-# before the rules shipped is still bounded here.
-NOTIFICATION_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
+# before the rules shipped is still bounded here. ``\Z`` is strict end-of-text;
+# Python's ``$`` would also accept one trailing newline, which RE2 (the rules)
+# rejects.
+NOTIFICATION_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*\Z")
 NOTIFICATION_ID_MAX = 64
 class ChargerTransport:
     """The process's one charger Session, serialised by a lock.

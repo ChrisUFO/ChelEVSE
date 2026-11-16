@@ -703,6 +703,7 @@ class AckNotificationCommandTests(unittest.TestCase):
             "fault.",
             "fault..no_ground",
             "fault.no-ground",
+            "fault.no_ground\n",
             "a" * 65,
         ):
             session = FakeSession([FakeResponse(200)])

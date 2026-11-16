@@ -1583,6 +1583,28 @@ class AckCommandLoopTests(unittest.TestCase):
         self.assertEqual(list(write[3]["acks"]), ["fault.no_ground"])
         self.assertIs(write[4], True)
 
+    def test_two_acks_for_different_ids_both_survive(self):
+        # Firestore deep-merges a nested map, so successive acks accumulate:
+        # the second write must add to the first, not replace the acks map.
+        first = self.command("fault.no_ground")
+        second = self.command("wear.relay_cold_open")
+        second["created_at"] = first["created_at"] + timedelta(seconds=1)
+        db = FakeDB({"commands": {"one": first, "two": second}})
+
+        session = self.run_loop(db, [FakeResponse(200), FakeResponse(200)])
+
+        self.assertEqual(
+            [call[2]["params"]["id"] for call in session.calls],
+            ["fault.no_ground", "wear.relay_cold_open"],
+        )
+        acks = db.data["status"]["notifications"]["acks"]
+        self.assertEqual(set(acks), {"fault.no_ground", "wear.relay_cold_open"})
+        self.assertTrue(all(isinstance(value, int) for value in acks.values()))
+        self.assertEqual(
+            len([w for w in db.writes if w[1] == "status"]),
+            2,
+        )
+
     def test_a_404_writes_no_ack_and_fails_with_the_reason(self):
         db = FakeDB({"commands": {"cmd": self.command()}})
         self.run_loop(db, [FakeResponse(404)])
