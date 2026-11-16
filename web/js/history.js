@@ -345,7 +345,7 @@ export function periodSpan(period, anchor = new Date(), now = new Date()) {
   if (dayId(anchor) === dayId(now)) {
     return { label: descriptor.span.label, phrase: descriptor.span.phrase, isDefault: true };
   }
-  const bounds = periodBounds(descriptor, anchor);
+  const bounds = periodBounds(descriptor, anchor, now);
   const span = descriptor.bucket === 'month' ? monthSpan : daySpan;
   return {
     label: span(bounds.startId, bounds.endId, MONTHS),
@@ -358,7 +358,14 @@ export function periodSpan(period, anchor = new Date(), now = new Date()) {
 // Year resolve to a contiguous day-id range, so the store needs one
 // documentId() query. The Day period has no range: it names exactly the day its
 // single-document read targets and its window's anchor names.
-export function periodBounds(period, anchor = new Date()) {
+//
+// `anchor` is the window's date and `now` the clock it was built for. Only the
+// month-bucket window reads `now`: a paged Year window covers whole months, so
+// its end is the last day of the anchor's month. The default window is the live
+// one, whose newest month is in progress — it ends at today's date, exactly as
+// before paging existed, because the anchor and now share a month. Either way
+// offset 1 ends the day before offset 0 begins.
+export function periodBounds(period, anchor = new Date(), now = anchor) {
   const descriptor = periodFor(period);
   if (descriptor.source === 'day') {
     const id = dayId(anchor);
@@ -366,7 +373,11 @@ export function periodBounds(period, anchor = new Date()) {
   }
   if (descriptor.bucket === 'month') {
     const start = new Date(anchor.getFullYear(), anchor.getMonth() - (descriptor.slots - 1), 1, 12);
-    return { startId: dayId(start), endId: dayId(anchor) };
+    const end =
+      monthId(anchor) === monthId(now)
+        ? anchor
+        : new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0, 12);
+    return { startId: dayId(start), endId: dayId(end) };
   }
   const ids = lastDayIds(descriptor.slots, anchor);
   return { startId: ids[0], endId: ids[ids.length - 1] };

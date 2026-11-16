@@ -1202,6 +1202,17 @@ test('a paged window names its dates everywhere and never says today', async () 
     assert.equal(element('chart-day').textContent, '—');
     assert.equal(element('chart-kwh').textContent, '—');
 
+    // A cached miss in the same window paints that window's offline copy — the
+    // one changed branch (renderHistory's offline message) the empty read cannot
+    // reach — and leaves none of the previous window's bars behind.
+    applyHistory(descriptor, { docs: [], fromCache: true }, null, anchor, [], now);
+    showHistorySettings(nightly());
+    assert.equal(
+      plain(element('chart-empty-line').textContent),
+      'Reconnect, then tap Refresh to load the energy for 20 August – 18 September 2026.',
+    );
+    assert.equal(element('chart-bars').children.length, 0);
+
     // A paged window's readout names its own newest bucket (no bucket in it is
     // current, so the newest is selected) and still prices its $.
     applyHistory(

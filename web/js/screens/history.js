@@ -642,7 +642,7 @@ function buildWindow(descriptor, now) {
   const anchor = periodAnchor(descriptor, periodOffset, now);
   return {
     anchor,
-    bounds: periodBounds(descriptor, anchor),
+    bounds: periodBounds(descriptor, anchor, now),
     span: periodSpan(descriptor, anchor, now),
     anchorDay: dayId(now),
   };

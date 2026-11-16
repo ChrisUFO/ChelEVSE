@@ -338,12 +338,14 @@ test('consecutive windows neither overlap nor leave a gap', () => {
     date.setDate(date.getDate() - 1);
     return dayId(date);
   };
-  // Day, Week and Month are contiguous day-id ranges: the earlier window's last
-  // day is the day before the later window's first day.
-  for (const period of ['day', 'week', 'month']) {
+  // Every period is a contiguous day-id range, Year included: the earlier
+  // window's last day is the day before the later window's first day. Year is
+  // the one month-bucketed period, so this is the assertion that its paged
+  // window covers whole months instead of stopping on the anchor's day.
+  for (const period of ['day', 'week', 'month', 'year']) {
     for (const offset of [0, 1, 2, 3]) {
-      const later = periodBounds(period, periodAnchor(period, offset, now));
-      const earlier = periodBounds(period, periodAnchor(period, offset + 1, now));
+      const later = periodBounds(period, periodAnchor(period, offset, now), now);
+      const earlier = periodBounds(period, periodAnchor(period, offset + 1, now), now);
       assert.equal(
         earlier.endId,
         before(later),
@@ -356,25 +358,37 @@ test('consecutive windows neither overlap nor leave a gap', () => {
       assert.equal(new Set(ids).size, ids.length, `${period} offset ${offset}`);
     }
   }
-  // Year pages in whole months: the earlier window's last month is the month
-  // before the later window's first month.
-  const months = (offset) =>
-    periodSeries('year', [], periodAnchor('year', offset, now), now).map((point) => point.id);
-  for (const offset of [0, 1, 2]) {
-    const later = months(offset);
-    const earlier = months(offset + 1);
-    assert.equal(later.length, 12);
-    assert.equal(earlier.length, 12);
-    const expected = new Date(
-      Number(later[0].slice(0, 4)),
-      Number(later[0].slice(5, 7)) - 2,
-      1,
-      12,
-    );
-    assert.equal(earlier[11], monthId(expected), `year offset ${offset + 1}`);
-    assert.equal(new Set([...later, ...earlier]).size, 24);
-    assert.equal(new Set(later).size, 12);
+});
+
+test('a paged Year window reads whole months', () => {
+  const now = new Date(2026, 10, 16, 12);
+  // Offset 1 is the 12 months before the newest month drawn, so its last day is
+  // 30 November — not the anchor's 16 November, which left 17–30 November owned
+  // by no window and the Nov 2025 bar reading 16 kWh instead of 30.
+  const anchor = periodAnchor('year', 1, now);
+  assert.deepEqual(periodBounds('year', anchor, now), {
+    startId: '2024-12-01',
+    endId: '2025-11-30',
+  });
+  // The label names exactly the months that range reads.
+  assert.equal(plain(periodSpan('year', anchor, now).label), 'Dec 2024 – Nov 2025');
+  // The default window is unchanged: its newest month is in progress, so it
+  // still stops at today's date.
+  assert.deepEqual(periodBounds('year', periodAnchor('year', 0, now), now), {
+    startId: '2025-12-01',
+    endId: '2026-11-16',
+  });
+  // A fully recorded year sums every day of its months: the partial-month hole
+  // would have made the newest bar 16 and the total 351.
+  const docs = [];
+  for (const day = new Date(2024, 11, 1, 12); day <= new Date(2025, 11, 30, 12);) {
+    docs.push({ id: dayId(day), kwh: 1 });
+    day.setDate(day.getDate() + 1);
   }
+  const series = periodSeries('year', docs, anchor, now);
+  assert.equal(series.length, 12);
+  assert.equal(series[11].kwh, 30);
+  assert.equal(sumSeries(series), 365);
 });
 
 test('periodSpan names a past window by the dates it draws', () => {
@@ -1475,23 +1489,28 @@ test('an all-unpriceable bar hides its figure instead of pricing it free', () =>
 // window mid-flight — none of which source text or the pure layer can prove.
 
 test('a read that straddles local midnight leaves a stale window to re-check', () => {
-  // The screen captures `today` once per read and stores its day as `todayId`,
-  // so its midnight check is exactly `dayId(new Date()) !== bounds.endId`. Pin
-  // the clock either side of midnight and assert what the guard must answer:
-  // true once the day has moved (re-enter the read), false while it has not (so
-  // the re-read cannot fire, or loop, without a day change).
+  // The window record stores the day it was anchored to — `anchorDay`,
+  // captured from `now` — and the guard compares that with dayId(new Date()),
+  // never with the window's end. Pin the clock either side of midnight and
+  // assert what the guard must answer: stale once the day has moved (re-enter
+  // the read), fresh while it has not (so the re-read cannot fire, or loop,
+  // without a day change).
   const before = new Date(2026, 9, 18, 23, 59, 30).getTime();
   mock.timers.enable({ apis: ['Date'], now: before });
   try {
     for (const period of PERIODS) {
       mock.timers.setTime(before);
-      const bounds = periodBounds(period);
+      const now = new Date();
+      const anchor = periodAnchor(period, 0, now);
+      const bounds = periodBounds(period, anchor, now);
+      const anchorDay = dayId(now);
       const data = period.source === 'day' ? {} : [];
-      const points = periodSeries(period, data);
+      const points = periodSeries(period, data, anchor, now);
       // The window and its current-slot flag come from the captured date: at
       // 23:59:30 on 18 Oct the last point is the current one, built for that day
       // (the year's last point is its month, Oct 2026; the day period's last
       // point is the hour in progress, 23).
+      assert.equal(anchorDay, '2026-10-18', period.id);
       assert.equal(bounds.endId, '2026-10-18', period.id);
       const last = points[points.length - 1];
       assert.equal(last.isCurrent, true, period.id);
@@ -1502,15 +1521,15 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
       );
       // Settled 20 s later, still on 18 Oct: the window is current, no re-read.
       mock.timers.setTime(before + 20_000);
-      assert.equal(bounds.endId, dayId(new Date()), period.id);
-      // Settled after midnight: the same window now ends yesterday, so the
-      // guard must fire rather than leave yesterday's bars under a "Today" label.
+      assert.equal(anchorDay, dayId(new Date()), period.id);
+      // Settled after midnight: the anchored day is yesterday, so the guard
+      // must fire rather than leave yesterday's bars under a "Today" label.
       mock.timers.setTime(before + 60_000);
       assert.equal(dayId(new Date()), '2026-10-19', period.id);
-      assert.notEqual(bounds.endId, dayId(new Date()), period.id);
+      assert.notEqual(anchorDay, dayId(new Date()), period.id);
       // A series rebuilt for the new day starts at its own current slot: the
       // hour period restarts at 00, every range period ends on the new day.
-      const rebuilt = periodSeries(period, data);
+      const rebuilt = periodSeries(period, data, periodAnchor(period, 0, new Date()), new Date());
       const current = rebuilt.findIndex((point) => point.isCurrent);
       assert.equal(current, period.bucket === 'hour' ? 0 : rebuilt.length - 1, period.id);
     }
@@ -1519,23 +1538,61 @@ test('a read that straddles local midnight leaves a stale window to re-check', (
   }
 });
 
-test('the day period keeps its captured day until local midnight', () => {
-  // Day is the one period read from a single document rather than a day-id
-  // range, so its captured window is both the query and the guard: the screen
-  // stores `bounds.endId` as `todayId` and compares it with dayId(new Date()).
-  // Exercise that for Day explicitly (the loop above covers all four periods
-  // generically): the window and the current hour slot survive a clock advance
-  // within the captured day, and the window is stale once local midnight passes.
+test('a paged window is guarded on the day it was anchored to, not its end', () => {
   const captured = new Date(2026, 9, 18, 23, 59, 30).getTime();
   mock.timers.enable({ apis: ['Date'], now: captured });
   try {
-    const bounds = periodBounds('day');
+    // The window record buildWindow hands to windowStale(), built the way the
+    // screen builds it: the anchor and its bounds belong to the paged offset,
+    // the guard's day to `now`.
+    const now = new Date();
+    const anchor = periodAnchor('month', 1, now);
+    const record = {
+      anchor,
+      bounds: periodBounds('month', anchor, now),
+      anchorDay: dayId(now),
+    };
+    assert.equal(record.bounds.endId, '2026-09-18');
+    // The paged end is a past date: comparing it with today would make every
+    // read of this window stale and re-enter it forever.
+    assert.notEqual(record.bounds.endId, dayId(new Date()));
+    assert.equal(record.anchorDay, dayId(new Date()));
+    // Same day, later clock: still fresh, so no re-read.
+    mock.timers.setTime(captured + 20_000);
+    assert.equal(record.anchorDay, dayId(new Date()));
+    // Past local midnight the paged window is stale exactly once — the re-read
+    // captures a fresh record, so this cannot fire again until the next day.
+    mock.timers.setTime(captured + 60_000);
+    assert.equal(dayId(new Date()), '2026-10-19');
+    assert.notEqual(record.anchorDay, dayId(new Date()));
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the day period keeps its captured day until local midnight', () => {
+  // Day is the one period read from a single document rather than a day-id
+  // range, so its captured window is both the query and the guard's input: the
+  // screen stores `anchorDay = dayId(now)` beside the window and compares it
+  // with dayId(new Date()). Exercise that for Day explicitly (the loop above
+  // covers all four periods generically): the window and the current hour slot
+  // survive a clock advance within the captured day, and the window is stale
+  // once local midnight passes.
+  const captured = new Date(2026, 9, 18, 23, 59, 30).getTime();
+  mock.timers.enable({ apis: ['Date'], now: captured });
+  try {
+    const now = new Date();
+    const anchor = periodAnchor('day', 0, now);
+    const bounds = periodBounds('day', anchor, now);
+    const anchorDay = dayId(now);
     // The captured day is the whole window, and it is the document the read
-    // targets: startId and endId are the same day.
+    // targets: startId and endId are the same day — and the guard stores that
+    // day as `anchorDay`, captured from the same clock.
     assert.deepEqual(bounds, { startId: '2026-10-18', endId: '2026-10-18' });
     assert.equal(bounds.startId, bounds.endId);
+    assert.equal(anchorDay, bounds.startId);
     // The painted series belongs to that day: hour 23 is in progress.
-    const points = periodSeries('day', {});
+    const points = periodSeries('day', {}, anchor, now);
     assert.equal(points.length, 24);
     assert.equal(points[23].id, '23');
     assert.equal(points[23].isCurrent, true);
@@ -1547,15 +1604,15 @@ test('the day period keeps its captured day until local midnight', () => {
     // Settled 20 s later, still 18 Oct: the captured day is current, so the
     // guard must not fire and the painted slot stays today's.
     mock.timers.setTime(captured + 20_000);
+    assert.equal(anchorDay, dayId(new Date()));
     assert.equal(dayId(new Date()), bounds.startId);
-    assert.equal(dayId(new Date()), bounds.endId);
     assert.equal(points[23].isCurrent, true);
 
-    // Settled after local midnight: the same window now ends yesterday, so the
-    // guard must fire instead of leaving yesterday's hours under "Today".
+    // Settled after local midnight: the anchored day is yesterday, so the guard
+    // must fire instead of leaving yesterday's hours under "Today".
     mock.timers.setTime(captured + 60_000);
     assert.equal(dayId(new Date()), '2026-10-19');
-    assert.notEqual(bounds.endId, dayId(new Date()));
+    assert.notEqual(anchorDay, dayId(new Date()));
     // A re-read captures the new day, and a series built for it starts at hour 0.
     assert.deepEqual(periodBounds('day'), { startId: '2026-10-19', endId: '2026-10-19' });
     const rebuilt = periodSeries('day', {});
@@ -1602,6 +1659,21 @@ test('both history read paths end with the midnight re-check', () => {
   // executed by the history-screen harness, not pinned here.
   assert.match(body('fetchPeriodSessions'), /descriptor\.source === 'day'/);
   assert.match(body('fetchPeriodSessions'), /readRange\(range\)\.then\(\(read\) => read\.docs\)/);
+  // `now` is the clock the window was captured at, passed as applyHistory's 6th
+  // argument: dropping it makes the series mark a past bucket current again.
+  // The pure tests prove periodSeries honours `now`; only this pin proves the
+  // read paths pass it.
+  for (const name of ['readHistory', 'loadAll']) {
+    assert.match(
+      body(name),
+      /applyHistory\(\s*descriptor,[\s\S]*?readWindow\.anchor,[\s\S]*?\bnow,\s*\)/,
+      name,
+    );
+  }
+  // The window build takes `now` for the bounds as well as the span: a paged
+  // Year window is whole months only while the third argument is passed.
+  assert.match(body('buildWindow'), /periodBounds\(descriptor, anchor, now\)/);
+  assert.match(body('buildWindow'), /anchorDay: dayId\(now\)/);
   // The payload is applied with the points it prices — never painted beside
   // another range's sessions.
   assert.match(body('applyHistory'), /periodSessions = Array\.isArray\(sessions\)/);
