@@ -629,6 +629,109 @@ class MqttRapiCommandTests(unittest.TestCase):
         self.assertEqual(session.calls[0][1], f"{BASE}/rapi")
 
 
+class AckNotificationCommandTests(unittest.TestCase):
+    """``ack_notification`` is HTTP-only and must never touch MQTT (D4)."""
+
+    def ack(self, **extra):
+        return {"type": "ack_notification", "notification_id": "fault.no_ground", **extra}
+
+    def test_the_ack_posts_the_id_as_a_query_parameter(self):
+        session = FakeSession([FakeResponse(200, text="acknowledged")])
+        extra = bridge.apply_command(session, HOST, None, self.ack())
+        self.assertEqual(extra, {})
+        self.assertEqual(len(session.calls), 1)
+        method, url, kwargs = session.calls[0]
+        self.assertEqual(method, "post")
+        self.assertEqual(url, f"{BASE}/notifications/ack")
+        self.assertEqual(kwargs["params"], {"id": "fault.no_ground"})
+        self.assertEqual(kwargs["timeout"], bridge.HTTP_TIMEOUT)
+
+    def test_an_ack_never_publishes_over_mqtt_even_when_ready(self):
+        # The firmware publishes no per-advisory MQTT surface: only the
+        # {count,severity} rollup, so there is nothing to publish and the
+        # ready+subscribed source must not divert the command.
+        source, client = make_source()
+        self.assertTrue(source.ready)
+        session = FakeSession([FakeResponse(200, text="acknowledged")])
+        extra = bridge.apply_command(
+            session, HOST, None, self.ack(), source=source, confirm_sec=CONFIRM
+        )
+        self.assertEqual(extra, {})
+        self.assertEqual(client.published, [])
+        self.assertEqual([call[0] for call in session.calls], ["post"])
+        self.assertEqual(session.calls[0][1], f"{BASE}/notifications/ack")
+
+    def test_a_404_means_the_advisory_is_not_live(self):
+        session = FakeSession([FakeResponse(404)])
+        with self.assertRaises(bridge.CommandError) as raised:
+            bridge.apply_command(session, HOST, None, self.ack())
+        self.assertEqual(str(raised.exception), "no such active notification")
+        self.assertEqual(raised.exception.transport, "http")
+
+    def test_a_400_means_the_id_was_missing(self):
+        session = FakeSession([FakeResponse(400)])
+        with self.assertRaises(bridge.CommandError) as raised:
+            bridge.apply_command(session, HOST, None, self.ack())
+        self.assertEqual(str(raised.exception), "id required")
+        self.assertEqual(raised.exception.transport, "http")
+
+    def test_a_405_is_a_refusal_of_the_method(self):
+        for code in (403, 405):
+            session = FakeSession([FakeResponse(code, text="Method Not Allowed")])
+            with self.assertRaises(bridge.CommandError) as raised:
+                bridge.apply_command(session, HOST, None, self.ack())
+            self.assertIn("acknowledgement refused by the charger", str(raised.exception))
+            self.assertIn(f"HTTP {code}", str(raised.exception))
+            self.assertEqual(raised.exception.transport, "http")
+
+    def test_any_other_non_2xx_is_a_plain_http_failure(self):
+        session = FakeSession([FakeResponse(500, text="boom")])
+        with self.assertRaises(bridge.CommandError) as raised:
+            bridge.apply_command(session, HOST, None, self.ack())
+        self.assertEqual(str(raised.exception), "HTTP 500: boom")
+        self.assertEqual(raised.exception.transport, "http")
+
+    def test_a_malformed_id_is_rejected_before_any_request(self):
+        source, client = make_source()
+        for bad in (
+            None,
+            42,
+            "",
+            "Fault.No_Ground",
+            "1fault.no_ground",
+            ".fault",
+            "fault.",
+            "fault..no_ground",
+            "fault.no-ground",
+            "a" * 65,
+        ):
+            session = FakeSession([FakeResponse(200)])
+            with self.assertRaises(bridge.CommandError) as raised:
+                bridge.apply_command(
+                    session,
+                    HOST,
+                    None,
+                    {"type": "ack_notification", "notification_id": bad},
+                    source=source,
+                    confirm_sec=CONFIRM,
+                )
+            self.assertEqual(str(raised.exception), "invalid notification id")
+            self.assertIsNone(raised.exception.transport)
+            self.assertEqual(session.calls, [])
+        self.assertEqual(client.published, [])
+
+    def test_a_64_character_id_is_accepted(self):
+        notification_id = "a" + "b" * 63
+        session = FakeSession([FakeResponse(200)])
+        bridge.apply_command(
+            session,
+            HOST,
+            None,
+            {"type": "ack_notification", "notification_id": notification_id},
+        )
+        self.assertEqual(session.calls[0][2]["params"], {"id": notification_id})
+
+
 class FallbackTests(unittest.TestCase):
     def test_a_connected_but_unsubscribed_source_uses_http(self):
         source, client = make_source(ready=False)
@@ -750,6 +853,26 @@ class CommandLoopTransportTests(unittest.TestCase):
         self.assertEqual(client.published, [])
         self.assertEqual(session.calls, [])
 
+    def test_an_ack_command_is_acked_over_http_and_never_published(self):
+        source, client = make_source()
+        self.assertTrue(source.ready)
+        db = FakeDB(
+            {
+                "commands": {
+                    "cmd": self.command(
+                        "ack_notification", notification_id="fault.no_ground"
+                    )
+                }
+            }
+        )
+        session = self.run_loop(db, source)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "acked")
+        self.assertEqual(doc["transport"], "http")
+        self.assertEqual(client.published, [])
+        self.assertEqual([call[0] for call in session.calls], ["post"])
+        self.assertEqual(session.calls[0][1], f"{HOST.base}/notifications/ack")
+    
 
 if __name__ == "__main__":
     unittest.main()
