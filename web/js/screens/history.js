@@ -196,9 +196,12 @@ function paintPeriodCopy() {
 
 // The description of the window on screen. Before the first read (and after a
 // reset) there is no window, so the default view's wording is the honest one —
-// the same strings the read at offset 0 would paint.
+// the same strings the read at offset 0 would paint. Both ends of that fallback
+// span come from one clock read: two `new Date()` calls could straddle local
+// midnight and name two different days.
 function currentSpan() {
-  return chartWindow ? chartWindow.span : periodSpan(currentPeriod());
+  const now = new Date();
+  return chartWindow ? chartWindow.span : periodSpan(currentPeriod(), now, now);
 }
 
 // "Previous 30 days" / "Next 12 months": the step the period pages by, so the
@@ -282,7 +285,9 @@ function renderSummary() {
 
 // The chart's hint names only what the state on screen can do. The selection
 // keys need bars to move through; the pager sits in the always-visible head and
-// works in every state, so it is always named. One source for both sentences.
+// works in every state, and its PageUp/PageDown shortcuts are bound on the card
+// rather than the SVG — so they are delivered in those states too. One source for
+// both sentences.
 const CHART_HINT = {
   bars: 'Tap or ← → · PageUp/PageDown pages',
   paging: 'Use ‹ › or PageUp/PageDown to page',
@@ -386,6 +391,22 @@ function selectIndex(index, { focus = false } = {}) {
   paintSelection(index);
   const target = barEls[Math.max(0, Math.min(series.length - 1, index))];
   if (focus && target) target.focus({ preventScroll: true });
+}
+
+// Focus continuity across a repaint: a rebuild replaces the bars, so the bar that
+// held the focus is gone by the time the new window is drawn. A caller that
+// repaints under a keyboard user restores it here — to the bar the new window
+// selected, or to the pager when it drew none — so the paging keys stay
+// deliverable and the focus never falls to <body>, where PageUp/PageDown would
+// scroll the page instead of paging.
+function chartHasFocus() {
+  return $('history-chart').contains(document.activeElement);
+}
+
+function focusChart() {
+  const index = series.findIndex((point) => point.id === selectedId);
+  const target = barEls[index] || $('chart-prev');
+  if (target) target.focus({ preventScroll: true });
 }
 
 const OFFLINE_TITLE = "You're offline — history isn't available.";
@@ -741,6 +762,9 @@ async function readHistory() {
   const readWindow = buildWindow(descriptor, now);
   chartWindow = readWindow;
   const { bounds } = readWindow;
+  // A paging keystroke arrives with the focus on a bar, and clearing the chart
+  // below removes it; the settled window hands the focus back (see focusChart).
+  const keepFocus = chartHasFocus();
   series = [];
   selectedId = null;
   dayTotal = null;
@@ -764,6 +788,7 @@ async function readHistory() {
     now,
   );
   renderHistory();
+  if (keepFocus) focusChart();
   reloadIfWindowStale();
 }
 
@@ -843,6 +868,10 @@ async function loadAll() {
   loading = true;
   loaded = true;
   const gen = generation;
+  // The same focus continuity a paged read keeps: this reload can land under a
+  // keyboard user (the midnight re-entry a paged read triggers), and its repaint
+  // must not leave the focus on <body>.
+  const keepFocus = chartHasFocus();
   const first = historyState === 'idle' && sessionsView.state === 'idle';
   if (first) {
     historyState = 'loading';
@@ -899,6 +928,7 @@ async function loadAll() {
     });
   }
   renderHistory();
+  if (keepFocus) focusChart();
   renderSessions();
   renderLoadFeedback();
 
@@ -958,18 +988,33 @@ export function initHistory() {
     });
     paintPeriodSwitch();
   }
+  // The paging keys are bound to the card that holds the chart and its pager, not
+  // to the SVG: a paged read clears the bars (and the loading/empty/offline states
+  // hide the SVG outright), so the chart cannot keep the focus the key needs. The
+  // pager in the always-visible head can, and the hint beside it advertises the
+  // keys in exactly those states.
+  const card = $('chart-card');
+  if (card) {
+    card.addEventListener('keydown', (e) => {
+      // Modified keys and every other key belong to the browser (back/forward,
+      // tab switching, scrolling), so they are never consumed here.
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+      // The present is the newest window, so PageDown there moves nothing: the key
+      // stays the browser's and scrolls, instead of being swallowed by an action
+      // that does not happen. PageUp always has a window to go back to.
+      if (e.key === 'PageDown' && periodOffset === 0) return;
+      e.preventDefault();
+      pageBy(e.key === 'PageUp' ? 1 : -1);
+    });
+  }
   const svg = $('history-chart');
   svg.addEventListener('keydown', (e) => {
     // Modified keys and every other key belong to the browser (back/forward,
     // tab switching, scrolling), so they are never consumed here.
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-    // PageUp/PageDown page the window back/forward; ←/→ move the bar selection
-    // inside the window already drawn.
-    if (e.key === 'PageUp' || e.key === 'PageDown') {
-      e.preventDefault();
-      pageBy(e.key === 'PageUp' ? 1 : -1);
-      return;
-    }
+    // ←/→ move the bar selection inside the window already drawn; paging belongs
+    // to the card (above), which survives the repaint the paged read performs.
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     if (!series.length) return;
     e.preventDefault();
@@ -1119,12 +1164,9 @@ export function showHistoryStatus(data) {
 // keyboard user scrubbing them keeps the selected one focused.
 function renderKeepingFocus() {
   if (!series.length) return;
-  const hadFocus = $('history-chart').contains(document.activeElement);
+  const hadFocus = chartHasFocus();
   renderHistory();
-  if (hadFocus) {
-    const index = series.findIndex((point) => point.id === selectedId);
-    if (barEls[index]) barEls[index].focus({ preventScroll: true });
-  }
+  if (hadFocus) focusChart();
 }
 
 export function resetHistory() {

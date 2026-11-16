@@ -142,7 +142,6 @@ export function hourRange(id) {
 export const PERIODS = [
   {
     id: 'day',
-    label: 'Day',
     slots: HOURS_PER_DAY,
     bucket: 'hour',
     source: 'day',
@@ -175,7 +174,6 @@ export const PERIODS = [
   },
   {
     id: 'week',
-    label: 'Week',
     slots: 7,
     bucket: 'day',
     source: 'range',
@@ -203,7 +201,6 @@ export const PERIODS = [
   },
   {
     id: 'month',
-    label: 'Month',
     slots: 30,
     bucket: 'day',
     source: 'range',
@@ -231,7 +228,6 @@ export const PERIODS = [
   },
   {
     id: 'year',
-    label: 'Year',
     slots: 12,
     bucket: 'month',
     source: 'range',

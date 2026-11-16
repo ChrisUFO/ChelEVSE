@@ -351,10 +351,12 @@ test('consecutive windows neither overlap nor leave a gap', () => {
         before(later),
         `${period} offset ${offset + 1} ends where offset ${offset} begins`,
       );
-      // Same length every time, and no id is drawn twice.
+      // The full slot count, and no id is drawn twice: a paged window that lost
+      // its newest slot would still pass adjacency, so the length is pinned here.
       const ids = periodSeries(period, [], periodAnchor(period, offset, now), now).map(
         (point) => point.id,
       );
+      assert.equal(ids.length, periodById(period).slots, `${period} offset ${offset}`);
       assert.equal(new Set(ids).size, ids.length, `${period} offset ${offset}`);
     }
   }
@@ -429,8 +431,17 @@ test('periodSpan names a past window by the dates it draws', () => {
 
 test('paged copy names its span and never claims the window is now', () => {
   const now = new Date(2026, 9, 18, 12);
-  // Every word that names the default window, and must not describe another.
-  const banned = [/today/i, /last 7 days/i, /last 30 days/i, /last 12 months/i];
+  // Every word that names the default window, and must not describe another —
+  // including the partial-bucket wording the Year bars would otherwise borrow
+  // from the current month.
+  const banned = [
+    /today/i,
+    /last 7 days/i,
+    /last 30 days/i,
+    /last 12 months/i,
+    /(this|current) month/i,
+    /\byesterday\b/i,
+  ];
   // `emptyLine` names no window at all ("Days without charging count as zero"),
   // so it is held to the banned-word rule only; every other string describes
   // the window and must name this one.
@@ -844,8 +855,11 @@ test('hour points carry the day their buckets price', () => {
 
 test('isCurrent is the clock, never the window anchor', () => {
   // #154's first latent defect: a paged window's newest bucket would otherwise
-  // be flagged current (a past Day's same clock hour), which reads as "Today"
-  // in the readout and opens the live pricing gate over a past bucket.
+  // be flagged current (a past Day's same clock hour). Nothing in the readout
+  // says "Today" for Day (prefixToday is false), so the damage was concrete
+  // elsewhere: the live-pricing gate opened over a past bucket, the bar's
+  // accessible name gained "(this hour so far)", and the selection jumped to that
+  // bucket instead of the newest one.
   const now = new Date(2026, 9, 18, 12, 40);
   const pastDay = periodAnchor('day', 1, now);
   assert.equal(dayId(pastDay), '2026-10-17');

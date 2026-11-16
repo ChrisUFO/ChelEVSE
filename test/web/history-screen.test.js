@@ -1055,8 +1055,11 @@ function freezeClock(at = PAGED_NOW) {
   mock.timers.enable({ apis: ['Date'], now: at });
 }
 
-// Fire one keydown through the chart's real listener; the return value reports
-// whether the screen consumed the key.
+// Fire one keydown the way the document delivers it: to the focused element and
+// then up its ancestors. The chart's keys live in two places — the selection keys
+// on the SVG, the paging keys on the card that holds the SVG and its pager — so a
+// key aimed at a chart descendant is offered to that element's listeners and then
+// to the card's, and the return value reports whether either consumed it.
 function keydown(target, key, mods = {}) {
   let prevented = false;
   const event = {
@@ -1070,7 +1073,10 @@ function keydown(target, key, mods = {}) {
     },
     ...mods,
   };
-  for (const listener of element(target).listeners.get('keydown') || []) listener(event);
+  const path = target === 'chart-card' ? ['chart-card'] : [target, 'chart-card'];
+  for (const id of path) {
+    for (const listener of element(id).listeners.get('keydown') || []) listener(event);
+  }
   return prevented;
 }
 
@@ -1392,8 +1398,142 @@ test('PageUp and PageDown page the window while the arrows move the selection', 
     assert.equal(keydown('history-chart', 'PageDown'), true);
     assert.equal(element('history-total-label').textContent, 'Last 7 days');
     await readFailed();
-    assert.equal(keydown('history-chart', 'PageDown'), true);
+    // At the present PageDown moves nothing, so it is the browser's key again:
+    // consuming it would swallow a scroll for an action that does not happen.
+    assert.equal(keydown('history-chart', 'PageDown'), false);
     assert.equal(element('history-total-label').textContent, 'Last 7 days');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('PageUp pages twice in a row from inside the chart, keeping its focus', async () => {
+  freezeClock();
+  // The stub has no DOM tree, so model the one relationship the screen's focus
+  // checks ask about: a bar lives in #chart-bars, which lives in the SVG.
+  element('history-chart').contains = (node) =>
+    node === element('history-chart') || element('chart-bars').children.includes(node);
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    const now = new Date(PAGED_NOW);
+    const descriptor = periodById('week');
+    applyHistory(
+      descriptor,
+      { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+      null,
+      now,
+      [],
+      now,
+    );
+    showHistorySettings({ rate: 0.25, currency: 'GBP' });
+    // A keyboard user arrives on the roving bar (Tab, an arrow press or a click).
+    assert.equal(keydown('history-chart', 'ArrowLeft'), true);
+    const bars = () => element('chart-bars').children.slice(1);
+    assert.equal(bars().includes(document.activeElement), true);
+
+    // First press: paging crops the chart for the read, so the focused bar is
+    // removed with it. The window still pages.
+    assert.equal(keydown('history-chart', 'PageUp'), true);
+    assert.equal(labelText(), '5 – 11 Oct 2026');
+    await readFailed();
+    // The settled window handed the focus back inside the card rather than letting
+    // it fall to <body> — this window drew no bars (the read failed), so it rests
+    // on the pager, which is in the card and still hears the key.
+    assert.equal(document.activeElement, element('chart-prev'));
+
+    // Second press, with no re-Tab in between, pages again: the advertised
+    // two-windows-back interaction works from the keyboard.
+    assert.equal(keydown('chart-prev', 'PageUp'), true);
+    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+    await readFailed();
+    assert.equal(document.activeElement, element('chart-prev'));
+    assert.equal(labelText(), '28 Sep – 4 Oct 2026');
+  } finally {
+    element('history-chart').contains = () => false;
+    mock.timers.reset();
+  }
+});
+
+// Every full reload (loadAll) paints "Refreshing…" on the Refresh control exactly
+// once; the screen's other reads do not. The stub's textContent is a plain
+// property, so a setter counts them without touching the module under test. A
+// guard that never rests reloads in a microtask chain that starves the timers, so
+// passing `reloadLimit` fails the run instead of hanging it.
+const reloads = [];
+let reloadLimit = Infinity;
+{
+  const button = element('history-refresh');
+  let value = button.textContent;
+  Object.defineProperty(button, 'textContent', {
+    configurable: true,
+    get: () => value,
+    set(next) {
+      value = String(next);
+      if (value !== 'Refreshing…') return;
+      reloads.push(value);
+      if (reloads.length > reloadLimit) {
+        throw new Error(`the midnight guard never rested (${reloads.length} reloads)`);
+      }
+    },
+  });
+}
+
+test('a paged read that settles after local midnight reloads exactly once', async () => {
+  // The guard asks which day the window was anchored to, never which day its
+  // range ends: a paged window's last day is always in the past, so comparing
+  // that (`bounds.endId !== dayId(now)`) would mark every paged read permanently
+  // stale and re-enter it forever — an unbounded read loop on any paged window.
+  freezeClock(new Date(2026, 9, 18, 23, 59, 40).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    element('period-switch').contains = () => true;
+    const click = element('period-switch').listeners.get('click')[0];
+    await click({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+    await readFailed();
+    const before = reloads.length;
+    reloadLimit = before + 20;
+    // Build the paged window on the 18th…
+    const paging = fire('chart-prev', 'click');
+    assert.equal(labelText(), '5 – 11 Oct 2026');
+    // …and let the clock cross local midnight before the read settles.
+    mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
+    await paging;
+    await readFailed();
+    for (let i = 0; i < 5; i++) await settle();
+    // Exactly one re-entry, and it rebuilt the same paged offset from the new day.
+    assert.equal(reloads.length - before, 1);
+    assert.equal(labelText(), '6 – 12 Oct 2026');
+    // The guard then rests: the re-entry captured today's anchor, so no further
+    // reload follows however many turns pass.
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(reloads.length - before, 1);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('the default read that settles after local midnight reloads exactly once', async () => {
+  freezeClock(new Date(2026, 9, 18, 23, 59, 40).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    const before = reloads.length;
+    reloadLimit = before + 20;
+    const first = fire('history-refresh', 'click');
+    mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
+    await first;
+    await readFailed();
+    for (let i = 0; i < 5; i++) await settle();
+    // The read itself, then exactly one re-entry for the new day.
+    assert.equal(reloads.length - before, 2);
+    for (let i = 0; i < 5; i++) await settle();
+    assert.equal(reloads.length - before, 2);
   } finally {
     mock.timers.reset();
   }
