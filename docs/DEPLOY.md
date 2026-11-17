@@ -302,6 +302,25 @@ acknowledging rather than stranding a pending command. `npm run test:rules`
 loads the same file into the emulator and covers the accept/deny shapes, so a
 green local run is the pre-deploy check.
 
+### Rules need the charger's ceiling document (#167)
+
+The `set_current` rule enforces `status/config.max_current_soft`, read from that
+document by the rule itself, instead of a hard-coded 6–48 A window. Two
+consequences for a rules deploy:
+
+- **Check the document first.** `status/config` must exist and carry an integer
+  `max_current_soft` before the rules go live. An absent document, or one
+  without that field, denies every `set_current` create — fail-closed, never a
+  fallback ceiling. The bridge writes it within 60 s of a healthy start, so a
+  long-running project already has it; a fresh or repaired project may not.
+- **Rules can deploy on their own.** Unlike the `ack_notification` case above,
+  this change has no bridge or web dependency: the bridge re-reads `/config`
+  per command and rejects outside the soft limit regardless, and the deployed
+  PWA already offers nothing above it. Rules alone, any time.
+
+`npm run test:rules` covers the accept/deny shapes, including the absent-document
+case, so a green local run is the pre-deploy check.
+
 ## 9. First sign-in and the allowlist
 
 The allowlist is the only authorization layer, and a grant needs an existing
