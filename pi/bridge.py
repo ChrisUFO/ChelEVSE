@@ -53,7 +53,6 @@ from history_accumulator import HistoryAccumulator  # noqa: E402
 from write_policy import (  # noqa: E402
     WritePolicy,
     WritePolicyConfig,
-    _transition_body,
 )
 from notify import Notifier, notify  # noqa: E402
 from charger_host import (  # noqa: E402
@@ -90,6 +89,7 @@ from parsing import (  # noqa: E402
 from health import (  # noqa: E402
     CONTENT_FIELDS,
     LiveObservations,
+    alert_plan,
     comparable,
     project,
 )
@@ -1964,6 +1964,8 @@ def notifications_loop(
     transport,
     interval,
     observations,
+    *,
+    notifier,
     initial_delay=0,
     counter=None,
     clock=time.time,
@@ -1991,9 +1993,22 @@ def notifications_loop(
     faults". A 404 (endpoint absent) is recorded as ``source: "unsupported"``,
     and a 200 that is not the notification contract the same way.
 
-    ``alerted`` (PR-7's alert watermark) and each advisory's ``first_observed``
+    ``alerted`` (the alert watermark, D3) and each advisory's ``first_observed``
     are seeded from the stored document before the first poll, so a restart
-    neither forgets a watermark nor re-stamps an observation.
+    neither forgets a watermark nor re-stamps an observation -- which is exactly
+    why a restart sends no alert for an advisory the previous run already
+    announced, as long as that seed read succeeded. A failed seed read starts
+    from an empty watermark, so that restart re-alerts each live critical
+    advisory once.
+
+    This loop is also the push site for that one alert (D9): a newly observed
+    ``critical`` unacknowledged advisory gets one body, and the watermark that
+    silences it is carried by the **same** write pass. A repeat poll or a failed
+    write therefore cannot push twice: the watermark makes a repeat impossible
+    whenever both the decision and the write complete. Delivery is at most once,
+    so the loss side stays open -- a full notifier queue, or a crash between the
+    write and the enqueue, loses that one push rather than repeating it.
+    Watchdog and offline pushes are not this loop's.
     """
     doc = db.collection("status").document("notifications")
     counter = counter or WriteCounter()
@@ -2004,9 +2019,11 @@ def notifications_loop(
         _stop.wait(initial_delay)
 
     def one_tick():
-        nonlocal last_stable, first_observed
+        nonlocal last_stable, first_observed, alerted
 
         checked_at = int(clock())
+        alerts = []
+        watermark = alerted
         try:
             resp = transport.get(
                 f"{host.base}/notifications", auth=auth, timeout=HTTP_TIMEOUT
@@ -2046,6 +2063,15 @@ def notifications_loop(
                     checked_at,
                     alerted,
                 )
+                # The one alert (D9): one body per newly observed critical
+                # unacknowledged advisory, decided from the projection and
+                # written into it, so this pass's write is the watermark's
+                # write. `alert_plan` also prunes keys whose advisory left the
+                # ring, which keeps the map bounded.
+                alerts, watermark = alert_plan(
+                    content["advisories"], content["alerted"], checked_at
+                )
+                content["alerted"] = watermark
         stable = comparable(content)
         if stable == last_stable:
             return
@@ -2054,15 +2080,33 @@ def notifications_loop(
             "checked_at": checked_at,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
+        # A merge write deep-merges maps, so a key `alert_plan` pruned would
+        # survive in the stored document for the life of the install: name each
+        # departed key with the delete sentinel, which is the only way a merge
+        # write drops one entry of a stored map. A map that empties outright
+        # needs none -- an empty map replaces the stored value.
+        if watermark:
+            departed = {
+                key: firestore.DELETE_FIELD
+                for key in alerted
+                if key not in watermark
+            }
+            if departed:
+                write["alerted"] = {**watermark, **departed}
         try:
             counter.counted("health", doc.set, write, merge=True)
         except Exception as exc:
             # Keep the projection unwritten so the next poll retries it; the
             # loop already read the charger, so this is a stale write, not a
-            # stale observation.
+            # stale observation. The alerts stay unsent with it: their
+            # watermark never landed, and the next poll re-decides them.
             log(f"notifications write failed ({exc.__class__.__name__}: {exc})")
         else:
             last_stable = stable
+            alerted = watermark
+            # Only now, with the watermark durable, may the pushes go out.
+            for alert in alerts:
+                notifier.enqueue(alert["body"])
 
     run_loop("notifications", one_tick, lambda: _stop.wait(interval))
 
@@ -2228,10 +2272,17 @@ def run(
         notifications_interval,
         observations,
     )
+    # ``notifier`` binds by keyword: it is keyword-only, after the defaulted
+    # parameters, so a future caller adding a positional argument cannot land it
+    # in ``initial_delay`` and lose the first push (the ``config_loop`` lesson).
     threading.Thread(
         target=notifications_loop,
         args=notifications_args,
-        kwargs={"initial_delay": NOTIFICATIONS_INITIAL_DELAY, "counter": counter},
+        kwargs={
+            "notifier": notifier,
+            "initial_delay": NOTIFICATIONS_INITIAL_DELAY,
+            "counter": counter,
+        },
         daemon=True,
     ).start()
     if mqtt_status_args is not None:

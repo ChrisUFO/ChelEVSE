@@ -128,8 +128,8 @@ service cloud.firestore {
       //
       // Delete deliberately does not require the access grant: revoking access
       // must not also trap the device's registration, or the bridge keeps
-      // pushing the old account's charging alerts. An authenticated owner can
-      // always remove its own doc.
+      // pushing the old account's charger-health and offline alerts. An
+      // authenticated owner can always remove its own doc.
       allow delete: if request.auth != null
         && (resource == null || resource.data.uid == request.auth.uid);
     }

@@ -69,10 +69,15 @@ def _merge_recursive(existing, data):
     ``{"acks": {"b": 2}}`` keeps both entries. Lists, scalars and an empty map
     replace the stored value outright, which is why the ack map (a non-empty
     map, not a list) is the shape that accumulates: the SDK's mask names the
-    empty map's own path, so the server clears that field.
+    empty map's own path, so the server clears that field. A ``DELETE_FIELD``
+    sentinel in the payload removes the field it is named at, which is the only
+    way a merge write can drop one entry of a stored map.
     """
     merged = dict(existing)
     for key, value in data.items():
+        if value is firestore.DELETE_FIELD:
+            merged.pop(key, None)
+            continue
         current = merged.get(key)
         if isinstance(value, dict) and value:
             base = current if isinstance(current, dict) else {}

@@ -21,11 +21,6 @@ WRITE_MIN_GAP_SEC = 30
 # trigger a write themselves. Idle (any other state) liveness cadence.
 CHARGING_HEARTBEAT_SEC = 60
 HEARTBEAT_INTERVAL = 300
-def _transition_body(had_state, was_charging, is_charging):
-    """FCM body for a charging-state edge, or None when there is no edge."""
-    if not had_state or was_charging == is_charging:
-        return None
-    return "Charging started" if is_charging else "Charging stopped"
 
 
 class WritePolicyConfig(NamedTuple):
