@@ -28,6 +28,7 @@ import {
 import { retryStore, ackNotification, sendCommand as postCommand } from '../store.js';
 import { currentCapability } from '../current.js';
 import { ackControlState, createAckTracker, healthState } from '../health.js';
+import { claimsState } from '../claims.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -54,6 +55,11 @@ let statusError = false;
 let health = null;
 let healthError = false;
 let healthRetryRequested = false;
+// status/claims — the one authoritative reason the charger is not charging
+// (#159). Kept like `health`: the raw document, projected at render time by
+// claimsState, never interpreted here. Null is a real answer (no confident
+// reason), not a missing one.
+let claims = null;
 // What the advisory list currently shows, so a snapshot that only moves the
 // document's write stamp does not rebuild the rows under a text selection.
 let healthSignature = null;
@@ -272,6 +278,30 @@ function renderTemperatureVisibility() {
   $('fig-temp-stat').hidden = !showTemperature;
 }
 
+// The claims reason line (#159): a deliberately dumb paint of claimsState's
+// projection, the renderHealth split — the whole decision lives in
+// js/claims.js, unit-tested without a DOM. The freshness facts are the same
+// ones renderFreshness feeds freshnessState, so the line and the banner can
+// never disagree about what they were asked. No staleness machinery of its
+// own: with no status document there is no freshness fact at all, and the
+// line stands down with the rest of the hero (the pre-data and error screens
+// show no derived state).
+function renderClaims() {
+  const node = $('claims-line');
+  const state = status
+    ? claimsState({
+        doc: claims,
+        stateLabel: status.state_label,
+        chargerOnline: status.charger_online,
+      })
+    : null;
+  node.hidden = !state;
+  // Written on every render, '' included: a copy left in the hidden node
+  // must not come back as a bare un-hide (the #status-error order).
+  setText(node, state ? state.line : '');
+  if (state) node.setAttribute('data-tone', state.tone);
+}
+
 function currentSeed() {
   const pilot = status && status.pilot;
   return Number.isInteger(pilot) && pilot > 0 ? pilot : current.max;
@@ -310,6 +340,7 @@ function renderStatus() {
   renderElapsed();
   renderCost();
   renderScheduleBadge();
+  renderClaims();
   renderFreshness();
   renderStatusError();
   renderHealth();
@@ -690,6 +721,7 @@ export function leaveStatus() {
   healthError = false;
   healthRetryRequested = false;
   healthSignature = null;
+  claims = null;
   // Sign-out teardown: no acknowledgement may outlive the session that started
   // it — its timers are cancelled and the generation bump drops any settlement
   // still in flight.
@@ -720,6 +752,8 @@ export function leaveStatus() {
   setText($('fig-cost'), '—');
   $('cost-sub').replaceChildren();
   $('schedule-badge').hidden = true;
+  $('claims-line').hidden = true;
+  setText($('claims-line'), '');
   setAmps(32);
   showConfig(null);
   renderStatus();
@@ -780,6 +814,17 @@ export function showHealthError() {
   health = null;
   healthError = true;
   renderHealth();
+}
+
+// status/claims — the one authoritative reason line. A null document (absent,
+// or the listener failed and app.js passes the failure through here) is a real
+// answer that leaves nothing to show: the bridge writes this document only on
+// change, and the line never outlives the facts behind it. Re-rendered beside
+// the status facts, because the projection also reads the banner's freshness
+// inputs from status/current.
+export function showClaims(data) {
+  claims = data && typeof data === 'object' ? data : null;
+  renderClaims();
 }
 
 // settings/current — null until an owner saves a rate. The whole document is

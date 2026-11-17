@@ -1054,6 +1054,16 @@ input[type='range']::-moz-range-thumb {
   font-size: 11px;
   color: var(--faint);
 }
+/* The claims line reuses the health card's data-tone vocabulary (safety holds
+   warn, boosts accent); these carry colour only — the line explains, it never
+   alarms, so no glyph or weight may give it a second severity channel. Muted
+   keeps the .section-note default (--faint) above. */
+#claims-line[data-tone='warn'] {
+  color: var(--warn);
+}
+#claims-line[data-tone='accent'] {
+  color: var(--accent);
+}
 /* Informational notes added with the Config/Advanced screens need AA contrast
    on the dark surfaces; the older History/Schedule counters keep --faint. */
 #config-updated,

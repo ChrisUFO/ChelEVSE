@@ -286,6 +286,12 @@
               <span class="badge schedule" id="schedule-badge" hidden>
                 <span class="dot"></span><span id="schedule-badge-text">Scheduled window</span>
               </span>
+              <!-- The one authoritative "why isn't it charging?" (#159):
+                   projected from status/claims (js/claims.js), hidden whenever
+                   there is no confident reason. A quiet caption beside the
+                   state pills, not a badge: it explains the state, it does not
+                   declare one. -->
+              <span class="section-note" id="claims-line" hidden></span>
             </div>
             <div class="power"><span id="power">—</span><em>kW</em></div>
             <p class="elapsed-row">
