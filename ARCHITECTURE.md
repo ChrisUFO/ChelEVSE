@@ -173,7 +173,8 @@ exactly 288 charger `GET /notifications`/day
 — charger reads, not Firestore reads — plus one Firestore read of the stored
 document per process start. The claims loop (#159) is the same economy on a
 trigger-driven cadence: zero steady-state writes (`status/claims` changes only
-when the reason, a winner or the detail content moves), and its
+when the projected content moves — the reason, a winner, the detail content, or
+its reachability/source), and its
 `GET /claims/target` rides the status poll's cadence behind a ≥ 5 s debounce
 (plus one seed read per process start). An acknowledgement command adds one `health` write for
 its `acks` merge (plus the forced `status/current` write every acked command
