@@ -1996,14 +1996,18 @@ def notifications_loop(
     are seeded from the stored document before the first poll, so a restart
     neither forgets a watermark nor re-stamps an observation -- which is exactly
     why a restart sends no alert for an advisory the previous run already
-    announced.
+    announced, as long as that seed read succeeded. A failed seed read starts
+    from an empty watermark, so that restart re-alerts each live critical
+    advisory once.
 
     This loop is also the push site for that one alert (D9): a newly observed
     ``critical`` unacknowledged advisory gets one body, and the watermark that
-    silences it is carried by the **same** write pass. The enqueue happens only
-    after that write landed, so a crash, a failed write or a repeat poll can
-    never push twice for one advisory; the worst a crash can do is delay a push
-    to the next successful pass. Watchdog and offline pushes are not this loop's.
+    silences it is carried by the **same** write pass. A repeat poll or a failed
+    write therefore cannot push twice: the watermark makes a repeat impossible
+    whenever both the decision and the write complete. Delivery is at most once,
+    so the loss side stays open -- a full notifier queue, or a crash between the
+    write and the enqueue, loses that one push rather than repeating it.
+    Watchdog and offline pushes are not this loop's.
     """
     doc = db.collection("status").document("notifications")
     counter = counter or WriteCounter()

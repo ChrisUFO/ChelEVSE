@@ -1014,14 +1014,21 @@ map key — `fault.no_ground|7` — where the token is the controller counter fo
 `thermal.relay_thermal`, and `first_seen` for everything else. The map lives in
 `status/notifications.alerted` as `{<key>: <epoch seconds>}` and is written by
 the health loop's **own projection write**, in the same pass that decides the
-push: the body is enqueued only after that write landed, so a repeat poll, a
-failed write or a crash cannot push twice for one advisory — the worst case is a
-delay to the next successful pass. On start-up the loop seeds the map from the
-stored document **before** its first poll, so a bridge restart sends nothing. A
-key is pruned when its advisory leaves the live ring, so the map stays bounded by
-the ring (the firmware's 15 ids). A new trip moves the controller counter — which
-also voids the firmware's own ack — so the key changes and the same advisory
-alerts again; an acknowledged advisory never alerts.
+push: the body is enqueued only after that write landed, so a repeat poll or a
+failed write cannot push twice for one advisory — the watermark makes a repeat
+impossible whenever both the decision and the write complete. Delivery is at most
+once, and the loss side stays open: a crash between the write and the enqueue, or
+a full notifier queue, can drop that one alert (it can never duplicate it). On
+start-up the loop seeds the map from the stored document **before** its first
+poll, so a restart whose seed read succeeds sends nothing; a failed seed read
+starts from an empty watermark, so that restart re-alerts each live critical
+advisory once. A key is pruned when its advisory leaves the live ring, so the map
+stays bounded by the ring (the firmware's 15 ids). An advisory whose token has
+not been observed yet — no applied `/status` counters, say — has no key to
+compare: that pass pushes nothing and leaves the map whole, and the first pass
+with the facts decides once, on the real key. A new trip moves the controller
+counter — which also voids the firmware's own ack — so the key changes and the
+same advisory alerts again; an acknowledged advisory never alerts.
 
 `charger offline` / `charger online` are journaled only on their edges, and the
 offline reason includes the HTTP status (401/403/5xx) or transport exception so

@@ -538,6 +538,19 @@ class SeedTests(unittest.TestCase):
         # unacknowledged, so it alerts and the write carries the fresh key.
         self.assertEqual(document["alerted"], {"fault.no_ground|7": 5000})
 
+    def test_a_failed_seed_read_re_alerts_the_live_advisory_once(self):
+        # The documented trade-off (at-most-once delivery): a start-up read that
+        # fails starts from an empty watermark, so that restart sends one alert
+        # per live critical advisory rather than nothing. Pinned so the loss is
+        # a decision, not an accident.
+        stored = {"reachable": True, "alerted": {"fault.no_ground|7": 1234}}
+        db = FakeDB({"status": {"notifications": stored}})
+        db.fail_reads = True
+        notifier = _RecordingNotifier()
+        self.run_loop(db, [FakeResponse(200, payload([advisory()]))], notifier=notifier)
+
+        self.assertEqual(notifier.bodies, [RECORDED_BODY])
+
 
 class _CountingNotifier:
     """Records each body beside how many Firestore writes had already landed."""
