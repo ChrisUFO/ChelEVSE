@@ -1638,6 +1638,21 @@ def _fail_stale_command(doc, counter):
     log(f"command {doc.id} failed: {reason}")
 
 
+def _fetch_policy_config(transport, host, auth):
+    """Fetch ``/config`` for the current policy, as a pre-send ``CommandError``.
+
+    Nothing is sent on this path, so a failed read must not be settled like a
+    failed send: ``CommandError`` carries no transport, which keeps the
+    ``transport: "http"`` edge log for commands that really reached HTTP.
+    """
+    try:
+        return _fetch_config(transport, host, auth)
+    except requests.RequestException as exc:
+        raise CommandError(
+            f"charger config read failed ({exc.__class__.__name__})"
+        ) from exc
+
+
 def _record_notification_ack(db, counter, notification_id):
     """Merge one acknowledgement into ``status/notifications`` (D5).
 
@@ -1679,7 +1694,9 @@ def _command_outcome(transport, host, auth, cmd, source, db=None, counter=None):
     try:
         if cmd.get("type") == "set_current":
             cmd = validate_current_request(cmd)
-            cmd = enforce_current_policy(cmd, _fetch_config(transport, host, auth))
+            cmd = enforce_current_policy(
+                cmd, _fetch_policy_config(transport, host, auth)
+            )
         extra = apply_command(transport, host, auth, cmd, source=source)
     except CommandError as exc:
         # `transport` names the path that carried the request;
@@ -1688,7 +1705,8 @@ def _command_outcome(transport, host, auth, cmd, source, db=None, counter=None):
         if exc.transport is not None:
             fields["transport"] = exc.transport
     except requests.RequestException as exc:
-        # Only an HTTP command send raises these: the MQTT
+        # Only an HTTP command send reaches here now: a failed /config
+        # read is raised as a CommandError above, and the MQTT
         # reconcile catches its own request errors.
         fields = {
             "status": "failed",
