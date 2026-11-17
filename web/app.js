@@ -22,6 +22,8 @@ import {
   leaveStatus,
   showCommands,
   showConfig as showStatusConfig,
+  showHealth,
+  showHealthError,
   showSettings,
   showStatus,
   showStatusError,
@@ -285,6 +287,10 @@ function enterApp(user) {
       showStatusConfig(null);
       showConfigError(err);
     },
+    // Charger health rides the same fan-out as the other status documents; the
+    // screen owns how an absent document and a failed listener read on screen.
+    onNotifications: showHealth,
+    onNotificationsError: showHealthError,
     // The editor needs the write metadata; the status badge resolves only the
     // active window from the data.
     onSchedule: (data, meta) => {
