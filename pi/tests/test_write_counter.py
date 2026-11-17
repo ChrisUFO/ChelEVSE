@@ -148,7 +148,8 @@ class WriteCounterCountingTests(CounterBase):
         self.assertEqual(
             self.counter.summary(),
             "firestore writes: 0 in 24h "
-            "(status=0 history=0 session=0 config=0 command=0 health=0 fcm=0)",
+            "(status=0 history=0 session=0 config=0 command=0 health=0 claims=0 "
+            "fcm=0)",
         )
         self.counter.record("status")
         self.counter.record("status")
@@ -156,7 +157,8 @@ class WriteCounterCountingTests(CounterBase):
         self.assertEqual(
             self.counter.summary(),
             "firestore writes: 3 in 24h "
-            "(status=2 history=1 session=0 config=0 command=0 health=0 fcm=0)",
+            "(status=2 history=1 session=0 config=0 command=0 health=0 claims=0 "
+            "fcm=0)",
         )
 
 
@@ -630,7 +632,7 @@ class RunWiringTests(unittest.TestCase):
     def shared_counter(self):
         return self.loops()["status_loop"]["sink"].counter
 
-    def test_run_starts_exactly_the_five_poller_threads(self):
+    def test_run_starts_exactly_the_six_poller_threads(self):
         self.assertEqual(
             set(self.loops()),
             {
@@ -639,6 +641,7 @@ class RunWiringTests(unittest.TestCase):
                 "settings_loop",
                 "schedule_loop",
                 "notifications_loop",
+                "claims_loop",
             },
         )
         self.assertEqual(self.command.arguments["interval"], 5)
@@ -659,6 +662,7 @@ class RunWiringTests(unittest.TestCase):
         self.assertIs(status["watchdog"].counter, shared)
         self.assertIs(self.loops()["config_loop"]["counter"], shared)
         self.assertIs(self.loops()["notifications_loop"]["counter"], shared)
+        self.assertIs(self.loops()["claims_loop"]["counter"], shared)
         # The health loop pushes the one alert (#158): it binds the process's
         # notifier, so a forgotten wiring cannot silently drop it.
         self.assertIs(
@@ -695,6 +699,14 @@ class RunWiringTests(unittest.TestCase):
         self.assertEqual(
             loops["notifications_loop"]["initial_delay"],
             bridge.NOTIFICATIONS_INITIAL_DELAY,
+        )
+        self.assertEqual(
+            loops["claims_loop"]["initial_delay"], bridge.CLAIMS_INITIAL_DELAY
+        )
+        # The claims loop derives its offline precedence from the tracker the
+        # status loop already owns -- one online fact per process.
+        self.assertIs(
+            loops["claims_loop"]["tracker"], loops["status_loop"]["tracker"]
         )
         self.assertIsNone(self.command.arguments["source"])
 

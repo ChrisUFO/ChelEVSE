@@ -9,6 +9,10 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   notifications every NOTIFICATIONS_INTERVAL: GET /notifications -> the live
     advisory ring projected into status/notifications, written on change only
     (issue #158; see health.py)
+  claims beside every applied /status observation (plus a claims_version or
+    state transition, debounced): GET /claims/target -> the one authoritative
+    "why isn't it charging?" projected into status/claims, written on change
+    only (issue #159; see claims.py)
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
@@ -93,6 +97,13 @@ from health import (  # noqa: E402
     comparable,
     project,
 )
+from claims import (  # noqa: E402
+    ClaimsObservations,
+    normalize_target,
+    project as claims_project,
+)
+from claims import comparable as claims_comparable  # noqa: E402
+from claims import CONTENT_FIELDS as CLAIMS_CONTENT_FIELDS  # noqa: E402
 from schedule import (  # noqa: E402
     _normalize_rule,
     _rule_segments,
@@ -139,6 +150,16 @@ SCHEDULE_INITIAL_DELAY = 7
 # its first projection carries known gates where the charger allows them instead
 # of a transient "gates closed" document that would be rewritten seconds later.
 NOTIFICATIONS_INITIAL_DELAY = 15
+# The claims loop has no cadence of its own: it is woken by the status loop's
+# trigger (every applied observation is a reconcile tick, #159) and answers a
+# claims_version/state transition at most this often, so a flapping state
+# cannot turn it into a hot loop against the gateway.
+CLAIMS_DEBOUNCE_SEC = 5.0
+# Safety cadence only: with no trigger ever firing (a wiring bug, or a status
+# loop that never applies), the claims document still refreshes this often.
+CLAIMS_INTERVAL_SEC = 300.0
+CLAIMS_TICK_SEC = 1.0
+CLAIMS_INITIAL_DELAY = 11
 # Retry a failed /config sync with this bounded backoff while MQTT is healthy
 # (the periodic poll is skipped then, so a failure would otherwise strand the
 # config until the charger's next setting change).
@@ -2129,6 +2150,155 @@ def notifications_loop(
     run_loop("notifications", one_tick, lambda: _stop.wait(interval))
 
 
+def _seed_claims(doc):
+    """Read the stored claims projection once: its content fields, or None.
+
+    A restart seeds ``last_stable`` from the stored document, so a claims
+    answer identical to the one the previous run wrote costs no write -- and
+    a read failure is a log line, never a crash: the first successful poll
+    rewrites the document anyway.
+    """
+    try:
+        snapshot = doc.get()
+        data = snapshot.to_dict() if snapshot.exists else None
+    except Exception as exc:
+        log(f"claims seed read failed ({exc.__class__.__name__}: {exc})")
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: data.get(key) for key in CLAIMS_CONTENT_FIELDS}
+
+
+def _unanswered_claims(source):
+    """The content of a poll that produced no authoritative answer.
+
+    ``reason: "unknown"`` is the answer itself (#159: unavailable target =>
+    unknown, never a guess from retained evidence), so the failure
+    transitions write it beside the source word; the merge leaves the last
+    known winners in the document under it, exactly like the health loop's
+    unreachable projection keeps its last gates.
+    """
+    return {"reachable": False, "source": source, "reason": "unknown"}
+
+
+def claims_loop(
+    db,
+    host,
+    auth,
+    transport,
+    observations,
+    *,
+    tracker=None,
+    counter=None,
+    clock=time.time,
+    monotonic=time.monotonic,
+    interval=CLAIMS_INTERVAL_SEC,
+    debounce=CLAIMS_DEBOUNCE_SEC,
+    tick=CLAIMS_TICK_SEC,
+    initial_delay=0,
+):
+    """Fetch the gateway's claim arbitration; project ``status/claims``.
+
+    One pass is one ``GET /claims/target``. The loop has no polling cadence
+    of its own: ``observations.trigger`` is set by the loops that already
+    observed something claims-relevant (every applied ``/status`` observation
+    is a reconcile tick; a ``claims_version`` move or a ``state``/
+    ``state_label`` transition is an immediate tick), with ``debounce`` the
+    floor between two fetches and ``interval`` the safety cadence that
+    refreshes the document even if no trigger ever fires. Not a second
+    poller: one loop, woken by the trigger flag.
+
+    The projection is compared with the last one written and only a content
+    change reaches Firestore, so a steady charger adds **zero** writes; the
+    comparison is :func:`claims.comparable`, which drops the write stamps and
+    the boost countdown (a retained boost ticks its ``remaining`` down on its
+    own). ``checked_at`` records the observation that produced the last
+    write, it is not a heartbeat.
+
+    A failed poll projects ``reason: "unknown"`` under ``reachable: false``
+    and is written on its transition only. A 404 (firmware below 4.1.5, no
+    such endpoint) is ``source: "unsupported"``, as is a 200 that is not the
+    claims contract. ``tracker`` supplies the process's charger-online fact:
+    a gateway that answers while the charger is flagged offline still cannot
+    make a stale arbitration current.
+    """
+    doc = db.collection("status").document("claims")
+    counter = counter or WriteCounter()
+    stored = _seed_claims(doc)
+    last_stable = claims_comparable(stored)
+    last_fetch = None
+    trigger = getattr(observations, "trigger", None)
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
+
+    def one_tick():
+        nonlocal last_stable, last_fetch
+
+        now = monotonic()
+        forced = trigger is not None and trigger.is_set()
+        if trigger is not None:
+            trigger.clear()
+        since = None if last_fetch is None else now - last_fetch
+        if since is not None and since < debounce:
+            # A trigger inside the debounce window is dropped, not queued:
+            # the next trigger or the safety cadence re-reads the target.
+            return
+        if not forced and since is not None and since < interval:
+            return
+        last_fetch = now
+
+        checked_at = int(clock())
+        try:
+            resp = transport.get(
+                f"{host.base}/claims/target", auth=auth, timeout=HTTP_TIMEOUT
+            )
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # 404: the firmware has no such endpoint (below 4.1.5).
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            log(f"claims poll failed ({_offline_reason(exc)})")
+            content = _unanswered_claims("unsupported" if code == 404 else "http")
+        except requests.RequestException as exc:
+            log(f"claims poll failed ({_offline_reason(exc)})")
+            content = _unanswered_claims("http")
+        else:
+            try:
+                payload = resp.json()
+            except ValueError:
+                # The charger answered, so this is not a transport failure:
+                # the body is not the claims contract.
+                payload = None
+            target = normalize_target(payload)
+            if target is None:
+                log("claims poll unsupported (payload is not the claims contract)")
+                content = _unanswered_claims("unsupported")
+            else:
+                facts = observations.snapshot()
+                if tracker is not None:
+                    facts["charger_online"] = getattr(
+                        tracker, "charger_online", None
+                    )
+                content = claims_project(target, facts)
+        stable = claims_comparable(content)
+        if stable == last_stable:
+            return
+        write = {
+            **content,
+            "checked_at": checked_at,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        try:
+            counter.counted("claims", doc.set, write, merge=True)
+        except Exception as exc:
+            # Keep the projection unwritten so the next poll retries it.
+            log(f"claims write failed ({exc.__class__.__name__}: {exc})")
+        else:
+            last_stable = stable
+
+    run_loop("claims", one_tick, lambda: _stop.wait(tick))
+
+
 def run(
     db,
     host,
@@ -2177,6 +2347,9 @@ def run(
     # status and config loops, read by the notifications loop -- no extra charger
     # GET and no new ``status/current`` field.
     observations = LiveObservations()
+    # The claims facts (#159): the same holder pattern, fed by the status,
+    # schedule and MQTT loops, read by the claims loop beside its own fetch.
+    claims = ClaimsObservations()
     tracker = StatusTracker(
         db,
         history=HistoryAccumulator(
@@ -2300,6 +2473,19 @@ def run(
             "notifier": notifier,
             "initial_delay": NOTIFICATIONS_INITIAL_DELAY,
             "counter": counter,
+        },
+        daemon=True,
+    ).start()
+    claims_thread_args = (db, host, auth, transport, claims)
+    # ``tracker`` binds by keyword: the claims loop derives its offline
+    # precedence from the tracker's own online fact.
+    threading.Thread(
+        target=claims_loop,
+        args=claims_thread_args,
+        kwargs={
+            "tracker": tracker,
+            "counter": counter,
+            "initial_delay": CLAIMS_INITIAL_DELAY,
         },
         daemon=True,
     ).start()

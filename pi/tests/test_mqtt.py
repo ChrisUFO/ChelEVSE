@@ -1964,6 +1964,8 @@ class RunWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "notifications_loop", spy("notifications_loop")
         ), mock.patch.object(
+            bridge, "claims_loop", spy("claims_loop")
+        ), mock.patch.object(
             bridge, "mqtt_status_loop", spy("mqtt_status_loop")
         ), mock.patch.object(
             bridge, "MqttSource", return_value=source
@@ -2005,6 +2007,7 @@ class RunWiringTests(unittest.TestCase):
                 "settings_loop",
                 "schedule_loop",
                 "notifications_loop",
+                "claims_loop",
                 "mqtt_status_loop",
             ],
         )
@@ -2045,6 +2048,7 @@ class RunWiringTests(unittest.TestCase):
                 bridge.settings_loop,
                 bridge.schedule_loop,
                 bridge.notifications_loop,
+                bridge.claims_loop,
             ],
         )
 
