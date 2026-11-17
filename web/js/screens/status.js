@@ -67,7 +67,11 @@ let ackNodes = new Map();
 // blurs a control the instant it becomes unfocusable (HTML's focus fix-up rule,
 // down to <body> here), so by the time the success rebuild runs
 // `document.activeElement` no longer names it — this records the displacement
-// where it happens, and the next rebuild spends it.
+// where it happens. Whichever comes first then spends it and clears it: the
+// rebuild (`renderHealth`, the row flipped) or the row's own repaint when the
+// attempt ends there instead (a failure — `paintAckRow`). Only a live attempt
+// may leave it set, so no later rebuild can read a finished attempt's flag as
+// "my control was destroyed" and pull focus off whatever the owner is on.
 let ackFocusId = null;
 // The acknowledgement state machine (health.js, unit-tested): one click writes
 // one command, the snapshot settles it, and every completion repaints only the
@@ -377,7 +381,8 @@ function healthRow(row) {
 function paintAckRow(row) {
   const nodes = ackNodes.get(row.id);
   if (!nodes) return;
-  const control = ackControlState(row, acks.state(row.id));
+  const state = acks.state(row.id);
+  const control = ackControlState(row, state);
   nodes.area.hidden = !control.show;
   nodes.button.textContent = control.label;
   // Disabling the control the owner just activated takes their focus with it
@@ -390,6 +395,24 @@ function paintAckRow(row) {
   nodes.button.setAttribute('aria-label', control.ariaLabel);
   nodes.message.hidden = !control.message;
   setText(nodes.message, control.message);
+  // The attempt ended without a rebuild (a failure): retire the flag here, so it
+  // cannot outlive the attempt it describes.
+  if (!state.pending && ackFocusId === row.id) settleAckFocus(control, nodes);
+}
+
+// The retry end of the hand-off above: an attempt that ends on the row itself —
+// a rejected write, a command settled `failed`, the bounded wait — re-enables
+// the control instead of removing it, so nothing rebuilds and nothing else would
+// ever spend the flag. It is spent here, the moment the attempt is over, and
+// focus settles at the same time: back on the control that came back enabled
+// (the owner's retry target), or the card's title when the row no longer offers
+// one. The shared fell-away test keeps a focus the owner moved somewhere live in
+// the meantime exactly where they put it.
+function settleAckFocus(control, nodes) {
+  ackFocusId = null;
+  if (!focusFellAway()) return;
+  const target = control.show ? nodes.button : $('health-title');
+  target.focus({ preventScroll: true });
 }
 
 function renderHealth() {
@@ -422,9 +445,11 @@ function renderHealth() {
     // their focus is about to be destroyed: a control that still holds it
     // (`heldControl` — a remote ack, or a control tabbed to but never pressed),
     // and the control whose disable displaced it (`ackFocusId`, because the
-    // browser had already dropped focus to <body> by now). Either hands focus to
-    // the card's title — the same fell-away policy the Retry screens use, so
-    // focus that is still on a live element is never stolen.
+    // browser had already dropped focus to <body> by now — an attempt that ends
+    // as a failure retires that flag in `paintAckRow` instead, so one it left
+    // here really was in flight). Either hands focus to the card's title — the
+    // same fell-away policy the Retry screens use, so focus that is still on a
+    // live element is never stolen.
     const heldControl = [...ackNodes.values()].some(
       (nodes) => nodes.button === document.activeElement,
     );

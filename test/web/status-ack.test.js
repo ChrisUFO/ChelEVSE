@@ -284,6 +284,68 @@ test('a rebuild leaves focus alone when the owner has moved to another control',
   assert.deepEqual(focusLog, [], 'no hand-off steals a live focus');
 });
 
+test('a failed attempt puts focus back on the control that came back', async () => {
+  showHealth(doc());
+  const row = rowOf();
+  const button = buttonOf(row);
+  button.focus({ preventScroll: true });
+  click(button);
+  // The disable displaced focus synchronously, exactly as on the success path.
+  assert.equal(document.activeElement, body);
+
+  // Here the write itself is refused (the SDK is unbound), so the attempt ends
+  // on the row: the control repaints enabled, under the reason.
+  await flush();
+
+  assert.equal(button.disabled, false);
+  assert.equal(messageOf(row).hidden, false);
+  // Focus went back to the retry target instead of being left on <body>.
+  assert.equal(document.activeElement, button);
+  assert.deepEqual(button.focused, { preventScroll: true });
+});
+
+test('a failed attempt leaves no flag for a later rebuild to spend', async () => {
+  showHealth(doc());
+  const button = buttonOf(rowOf());
+  button.focus({ preventScroll: true });
+  click(button);
+  await flush();
+  assert.equal(button.disabled, false);
+
+  // The owner gave up on the retry and clicked the card's text: focus fell to
+  // <body>, so nothing in the list is holding it any more.
+  body.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  // An unrelated health update rebuilds the list. Nothing the owner was on is
+  // going away, so focus stays where it is; the finished attempt's flag must not
+  // pull it to the card title.
+  showHealth(
+    doc({
+      advisories: [
+        ...doc().advisories,
+        {
+          id: 'safety.ground_check',
+          category: 'safety',
+          severity: 'warning',
+          firmware_sticky: false,
+          acked: false,
+          first_seen: at(2026, 11, 1),
+          last_seen: Date.now() / 1000,
+          classification: 'historical',
+          corroborated: false,
+          counter_token: 0,
+          first_observed: at(2026, 11, 1),
+        },
+      ],
+    }),
+  );
+
+  assert.equal(rows().length, 2, 'the unrelated advisory did rebuild the list');
+  assert.equal(document.activeElement, body);
+  assert.deepEqual(focusLog, [], 'a finished attempt owns no focus hand-off');
+});
+
 test('an already acknowledged advisory and unknown health offer no control at all', () => {
   showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
   assert.equal(rowOf().children.length, 2);
