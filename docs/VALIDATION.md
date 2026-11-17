@@ -277,8 +277,8 @@ Run these with `MQTT_ENABLED=true` and the bridge's source ready (the charger
 connected to the broker and `<MQTT_TOPIC>/#` granted). The journal records
 `command transport: mqtt (mqtt connected and subscribed)` on the first MQTT
 command and `command transport: http (mqtt unavailable before publish)` after a
-fallback. Each command document carries `transport: "mqtt"|"http"` once it
-settles.
+fallback. Each command document carries `transport: "mqtt"|"http"` once a
+request was sent.
 
 | #   | Check                           | How                                                                                                                                                                                                          | Expected observation                                                                                                                                                                                                                                                                                       | Evidence                                                                |
 | --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
@@ -313,7 +313,10 @@ Notes:
   8.2.3 reports `max_current` in `/status` (live on the test charger: `pilot`
   16 with `max_current` 16, the soft limit), and `GET /config` spells the pair
   `max_current_soft`/`max_current_hard` without a bare `max_current` — so
-  `/status` is the field's only source. C.3 pins it.
+  `/status` is the field's only source. C.3 pins the commanded-value
+  confirmation; the `amps > cap` clamp is defensive-only — reachable only when
+  `/status.max_current` is below the `/config` soft limit (firmware derating),
+  not by the above-soft command C.3 rejects before publish.
 - **RAPI serialisation.** Replies have no correlation id. Only one RAPI command
   is in flight at a time and the first reply after its publish is its answer; a
   missing reply is `failed (no rapi/out within 5s)` (covered by
@@ -322,8 +325,8 @@ Notes:
   retired rather than settling the next command.
 - **Transport field.** `transport` names the path that carried the request, so a
   refused MQTT publish that falls back and then fails over HTTP records
-  `"http"`. A command rejected before any send (validation, unsupported type)
-  records no transport at all.
+  `"http"`. A command rejected before any send (validation, unsupported type,
+  a failed `/config` read) records no transport at all.
 
 ## 4. Schedule round-trip
 

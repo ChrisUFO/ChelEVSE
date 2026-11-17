@@ -1150,8 +1150,10 @@ state (`254` sleeping or `255` disabled; 8.2.3 pauses into `254` and `255` is
 never observed). A sleeping charger with no override reports the same `254`
 with `manual_override: 0`, so the override flag is what separates the two. A
 hold is confirmed from `pilot`, which tracks the held setpoint up to the EVSE's
-configured maximum, so a command above that maximum is confirmed at the clamp
-(`pilot` == the `/status` `max_current`). A retained document that is
+configured maximum. The clamp (`pilot` == the `/status` `max_current`) is
+defensive-only: a hold above the `/config` soft maximum is now rejected before
+any send, so only a `/status.max_current` below that soft limit (firmware
+derating) can reach it. A retained document that is
 `"active"` but names no current confirms nothing — it cannot distinguish an
 applied hold from a lost publish — and falls through to the `/status`
 reconcile. A timeout does **not** re-apply the command: the
@@ -1189,10 +1191,12 @@ published command is not repeated on the next poll. Every command document
 records the transport that **carried** the request — `transport: "mqtt"` or
 `"http"` — on success and on any failure after a send (a refused MQTT publish
 that falls back and then fails over HTTP records `"http"`); a command rejected
-before anything was sent (validation, unsupported type, stale) records no
-transport. The journal logs `command transport: <transport> (…)` when the path
-changes. Validation (verified `/config` soft/hard limits, RAPI `$` and ≤32 characters), the 10-minute
-staleness rule, `status` lifecycle and error copy are unchanged.
+before anything was sent (validation, unsupported type, stale, a failed
+`/config` read) records no transport. The journal logs
+`command transport: <transport> (…)` when the path changes. Validation (verified `/config` soft/hard limits, RAPI `$` and ≤32 characters) and the 10-minute
+staleness rule are unchanged, and `status` lifecycle is unchanged; the error
+copy gains one pre-send case, a failed `/config` read settling as
+`charger config read failed (<exception>)` with no transport.
 
 ## Tests
 
