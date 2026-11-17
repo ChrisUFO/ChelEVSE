@@ -396,6 +396,14 @@ def alert_plan(advisories, alerted, observed_at):
     silent: a repeated poll, an acknowledged entry, a rating below ``critical``,
     and an advisory this bridge already alerted all leave the map as it is.
 
+    An entry whose token is unknown (``None``: the counter, settings word or
+    ``first_seen`` this key is built from has not been observed yet) is
+    *undecidable*, not actionable: it pushes nothing this pass and the map is
+    left whole, because a state without a stable key cannot be deduped and the
+    seeded keys this pass cannot re-derive must survive it. The first pass with
+    the facts decides -- once, on the real key -- so a cold observation window
+    delays an alert instead of duplicating it.
+
     The returned map keeps only the current ring's keys, so it stays bounded by
     the ring (the firmware's own 15 ids) instead of growing for the life of the
     bridge. That pruning never costs an alert: a re-raise is a *new* key by
@@ -405,17 +413,28 @@ def alert_plan(advisories, alerted, observed_at):
     known = alerted if isinstance(alerted, dict) else {}
     messages = []
     ring = []
+    undecided = False
     for entry in advisories or []:
         if not isinstance(entry, dict):
             continue
-        key = watermark_key(entry.get("id"), entry.get("counter_token"))
+        token = entry.get("counter_token")
+        if token is None:
+            undecided = True
+            continue
+        key = watermark_key(entry.get("id"), token)
         ring.append(key)
         if key in known or entry.get("acked"):
             continue
         if entry.get("severity") != ALERT_SEVERITY:
             continue
         messages.append({"key": key, "body": alert_body(entry)})
-    watermark = {key: known[key] for key in ring if key in known}
+    if undecided:
+        # No key of this ring can be called stale: the undecidable entry's
+        # seeded key is still the one its facts will produce, and deleting it
+        # here would re-alert on the next pass.
+        watermark = dict(known)
+    else:
+        watermark = {key: known[key] for key in ring if key in known}
     for message in messages:
         watermark[message["key"]] = observed_at
     return messages, watermark

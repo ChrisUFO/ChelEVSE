@@ -659,6 +659,55 @@ class AlertTests(unittest.TestCase):
         # the ring instead of growing for the life of the bridge.
         self.assertEqual(writes[1][3]["alerted"], {})
 
+    def test_a_pass_without_the_facts_defers_the_alert_and_keeps_the_watermark(self):
+        # A cold holder: the notifications poll can run before the first
+        # *applied* `/status` observation (an HTTP reply overtaken by an MQTT
+        # snapshot is discarded), so the counter token is unknown. That state
+        # has no stable dedupe key, so it must push nothing and must not prune
+        # the seeded key it cannot re-derive.
+        live = bridge.LiveObservations()
+
+        def feed():
+            live.note_status(
+                {"state": 2, "temp1": None, "temp2": None, "temp3": None},
+                dict(COUNTERS),
+            )
+            live.note_config(CONFIG)
+
+        db = FakeDB(
+            {
+                "status": {
+                    "notifications": {
+                        "reachable": False,
+                        "source": "http",
+                        "alerted": {"fault.gfci_tripped|3": 500},
+                    }
+                }
+            }
+        )
+        times = iter([2000.4, 3000.4])
+        db, notifier = self.run_loop(
+            [FakeResponse(200, payload([advisory()]))] * 2,
+            polls=2,
+            db=db,
+            live=live,
+            on_wait=feed,
+            clock=lambda: next(times),
+        )
+
+        # The pass with the counters alerted once, on the real key, and the
+        # last write had landed when it was queued.
+        self.assertEqual(notifier.bodies, [self.RECORDED])
+        self.assertEqual(notifier.writes_at_enqueue, [2])
+        # The deferred pass wrote the projection but kept the seeded watermark:
+        # it did not key on `fault.no_ground|None` and did not prune a key it
+        # could not re-derive.
+        cold = self.health_writes(db)[0][3]
+        self.assertEqual(cold["alerted"], {"fault.gfci_tripped|3": 500})
+        self.assertEqual(
+            db.data["status"]["notifications"]["alerted"]["fault.no_ground|7"], 3000
+        )
+
     def test_the_watermark_is_written_before_the_push(self):
         db = FakeDB()
         notifier = _CountingNotifier(db)
