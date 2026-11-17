@@ -304,6 +304,29 @@ test('a failed attempt puts focus back on the control that came back', async () 
   assert.deepEqual(button.focused, { preventScroll: true });
 });
 
+test('a failed attempt leaves focus alone when the owner has moved to another control', async () => {
+  showHealth(doc());
+  const row = rowOf();
+  const button = buttonOf(row);
+  button.focus({ preventScroll: true });
+  click(button);
+  // The disable dropped focus to <body>; while the write is still out the owner
+  // went back to the charger controls, exactly as on the rebuild path above.
+  const elsewhere = element('pause');
+  elsewhere.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  // The write is then refused, so the attempt ends on the row: the control
+  // repaints enabled and the reason appears, but the settle must not pull focus
+  // off the live control the owner is on.
+  await flush();
+
+  assert.equal(button.disabled, false);
+  assert.equal(messageOf(row).hidden, false);
+  assert.equal(document.activeElement, elsewhere, 'focus stays where the owner put it');
+  assert.deepEqual(focusLog, [], 'the settle steals no live focus');
+});
+
 test('a failed attempt leaves no flag for a later rebuild to spend', async () => {
   showHealth(doc());
   const button = buttonOf(rowOf());
