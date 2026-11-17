@@ -205,9 +205,18 @@ def as_int(value):
     if isinstance(value, bool):
         return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads accepts ``Infinity``/``1e999`` as float
+        # inf, and int(inf) overflows rather than failing to coerce.
         return None
+    # Firestore stores every integer as int64 and rejects an out-of-range
+    # value while building the write, before any RPC: a coerced number
+    # beyond that range (e.g. a firmware arithmetic slip's UINT64_MAX
+    # "no limit" sentinel) is absent, never carried into a projection.
+    if not -(2**63) <= result <= 2**63 - 1:
+        return None
+    return result
 
 
 def _sensor_temp(value):

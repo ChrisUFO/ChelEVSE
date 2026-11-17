@@ -174,8 +174,16 @@ only the curated fields listed under
 | `<base>/temp1`–`temp3`    | `temp1`–`temp3`        | 10ths of °C; `false` when absent                    |
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
-Everything else on the base topic (retained `config`/`claim`/`schedule`/
-`limit`/`boost`, availability counters) is ignored by the status path. The
+Everything else on the base topic (retained `config`, availability counters) is
+ignored by the status path. The retained `claim`, `limit` and `boost` documents
+are **ingested as claims evidence** (#159): each delivery is decoded and handed
+to the claims holder, parsed defensively (malformed → ignored), and used for
+`status/claims` detail enrichment and corroboration only — never as a status
+field, and never as the reason (that is `GET /claims/target`; see
+[Claims reason](#claims-reason-issue-159)). The retained `schedule` event list
+is not ingested: nothing consumes it (the schedule reason's rule id comes from
+the schedule loop's `/schedule/plan` window), so it is ignored like any other
+unmapped retained document. The
 retained `override` document and `rapi/out` feed the command acknowledgements
 ([Commands over MQTT](#commands-over-mqtt-issue-46)); `override/set` and
 `rapi/in` are our own publishes; LWT handling is #45.
@@ -435,20 +443,21 @@ unaffected.
 Each loop is failure-isolated: a charger or Firestore error is logged as one
 timestamped line and the loop carries on at its next interval.
 
-| Loop          | Firestore document     | Content                                                                                                                                                                                                    |
-| ------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status        | `status/current`       | Curated `/status` fields on the write policy's cadence (see below)                                                                                                                                         |
-| Status        | `history/<date>`       | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence                                             |
-| Status        | `sessions/{id}`        | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                                                            |
-| Schedule      | `status/current`       | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                                                                      |
-| Status        | `status/health`        | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                                                                    |
-| Status        | `status/health`        | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                                                                         |
-| Config        | `status/config`        | `/config` object with credential fields redacted, plus `updated_at`                                                                                                                                        |
-| Notifications | `status/notifications` | The gateway's live advisory ring projected into the three-fact model; written only when the projection changes, ignoring each entry's moving `last_seen` (see [Charger health](#charger-health-issue-158)) |
-| Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                                                                 |
-| Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                                                                    |
-| Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                                                                       |
-| Commands      | `status/notifications` | `acks.<notification_id> = <epoch seconds>` after a 2xx `POST /notifications/ack` — a nested map merge the health poll never writes, so the two cannot clobber each other (see [Commands](#commands))       |
+| Loop          | Firestore document     | Content                                                                                                                                                                                                                                                       |
+| ------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status        | `status/current`       | Curated `/status` fields on the write policy's cadence (see below)                                                                                                                                                                                            |
+| Status        | `history/<date>`       | `{kwh, hours: {"00"…"23"}, updated_at}`, both counters accumulated from `total_energy` deltas, flushed on the [history flush](#history-flush-issue-94) cadence                                                                                                |
+| Status        | `sessions/{id}`        | `{started_at, ended_at, wh, elapsed, intervals?}` per completed plug-in session                                                                                                                                                                               |
+| Schedule      | `status/current`       | `schedule: {in_window, active_rule_id}` from the firmware's plan, published on change as a write-policy trigger (#95)                                                                                                                                         |
+| Status        | `status/health`        | Watchdog state, decision reason, probe results, the last restart attempt, and the rolling write counts (`writes_24h`, `writes_by_kind`)                                                                                                                       |
+| Status        | `status/health`        | `source`/`mqtt_connected`/`mqtt_announced`/`mqtt_last_lwt_at` transport fields (MQTT mode, merged)                                                                                                                                                            |
+| Config        | `status/config`        | `/config` object with credential fields redacted, plus `updated_at`                                                                                                                                                                                           |
+| Notifications | `status/notifications` | The gateway's live advisory ring projected into the three-fact model; written only when the projection changes, ignoring each entry's moving `last_seen` (see [Charger health](#charger-health-issue-158))                                                    |
+| Claims        | `status/claims`        | The one authoritative "why isn't it charging?" from `GET /claims/target` (`reason`, the winning clients, evidence `detail`); written only when the content changes — `unknown` when the target is unavailable (see [Claims reason](#claims-reason-issue-159)) |
+| Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                                                                                                                    |
+| Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                                                                                                                       |
+| Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                                                                                                                          |
+| Commands      | `status/notifications` | `acks.<notification_id> = <epoch seconds>` after a 2xx `POST /notifications/ack` — a nested map merge the health poll never writes, so the two cannot clobber each other (see [Commands](#commands))                                                          |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -537,12 +546,13 @@ The bridge counts every successful Firestore write, by kind, in a
 process-local counter over a rolling 24 h window: `status` (`status/current`),
 `history` (`history/<day>`), `session` (`sessions/<id>`), `config`
 (`status/config`), `command` (`commands/<id>`), `health` (`status/health` and
-`status/notifications`) and `fcm` (token-prune deletes — Firestore bills a
-delete as a write). The status loop logs the summary once an hour (the first
-line right after start, proving the counter is alive):
+`status/notifications`), `claims` (`status/claims`) and `fcm` (token-prune
+deletes — Firestore bills a delete as a write). The status loop logs the
+summary once an hour (the first line right after start, proving the counter is
+alive):
 
 ```
-firestore writes: 318 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 fcm=0)
+firestore writes: 319 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 claims=1 fcm=0)
 ```
 
 `status/health` carries the same counts as `writes_24h` and `writes_by_kind`
@@ -738,6 +748,87 @@ poll never looks like an empty advisory ring.
 **Cost.** One charger GET per poll: 288/day at 300 s, beside the status and
 config polls. Firestore writes are the real changes only (zero in steady state)
 plus one read of the stored document at process start.
+
+### Claims reason (issue #159)
+
+The gateway resolves every claim — manual pause, schedule, boost, limit, error,
+solar divert, OCPP — itself, and firmware ≥ 4.1.5 answers the resolved
+arbitration at `GET /claims/target`: which client currently wins `state`,
+`charge_current` and `max_current`, plus the resolved target properties. That
+answer is the **only** authoritative source for "why isn't it charging?"; the
+bridge maps the winning client ids (`pi/claims.py`, treated as opaque names —
+priorities are compile-time and version-dependent) onto a bounded vocabulary:
+
+| `reason`          | Winning claim                                                        |
+| ----------------- | -------------------------------------------------------------------- |
+| `manual_override` | manual (65537) holds `state`                                         |
+| `schedule`        | timer/schedule (65540) holds `state`                                 |
+| `boost`           | boost (65539) holds `state`                                          |
+| `current_limit`   | limit (65542) holds `state`, or holds `charge_current`/`max_current` |
+| `safety`          | error (65543), shaper (65548) or temp_throttle (65549) holds `state` |
+| `not_connected`   | no winner at all and the vehicle is known disconnected               |
+| `unknown`         | no authoritative answer (see below), or an unmapped winner id        |
+| `null`            | no restriction — charging/ready; the web hides the line              |
+
+**Fail-closed.** When `/claims/target` is unavailable — firmware below 4.1.5
+answers 404, the fetch can fail, the bridge may have just started — the derived
+reason is `unknown`, and retained MQTT evidence **never** yields a confident
+reason on its own: the retained `claim`/`limit`/`boost` documents carry no
+authoritative freshness, so they are ingested as supporting evidence
+(`ClaimsObservations`, the same locked-holder pattern as the health facts) that
+enriches `detail` (boost type/value/remaining, limit type/value) and
+corroborates, but structurally cannot move `reason`. The `schedule` reason's
+active rule id is not retained evidence: it comes from the schedule loop's
+`/schedule/plan` window, so the retained event list is not ingested at all. The
+charger being offline is also `unknown`: the loop reads the tracker's online
+fact beside its own fetch, so a stale arbitration never reads as current.
+
+**Cadence.** The claims loop (`bridge.claims_loop`) has no polling interval of
+its own — it is woken by a trigger the other loops set: every applied `/status`
+observation (the reconcile tick, HTTP or heartbeat-forced), a `claims_version`
+move in an observed `/status` reply, a `state`/`state_label` transition
+arriving over either transport, or a charger-offline transition the status loop
+landed (under MQTT that answers a stop — or an outage, once its
+two-failed-reconcile landing fires — within the 5 s debounce plus one 1 s tick
+instead of the 60 s reconcile / 300 s safety cadence — a trigger landing inside
+the window is deferred to its close, never dropped for the reconcile). A 300 s
+safety cadence refreshes the document even if no trigger ever fires. One `GET
+/claims/target` per fetched tick, debounced ≥ 5 s.
+
+**Document.** `status/claims`, merge writes only when the comparable content
+changes (the change test drops the write stamps and the moving boost countdown,
+so an identical answer, an unchanged response or an identical retained
+redelivery costs **zero** writes — the same economy as
+`status/notifications`):
+
+```json
+{
+  "reachable": true,
+  "checked_at": 1794870706,
+  "source": "http",
+  "reason": "manual_override",
+  "winner_state": "manual",
+  "winner_current": null,
+  "detail": { "claim": { "state": "disabled", "charge_current": 32000 } },
+  "updated_at": "<server timestamp>"
+}
+```
+
+`winner_state`/`winner_current` name the gateway's winning clients in the
+firmware's own words (`manual`, `timer`, `limit`, …); `detail` carries the
+evidence for the reason — the retained documents for the claim/limit/boost
+reasons, the schedule loop's active rule id for `schedule` (the key is absent
+when none resolves); `checked_at` is the
+observation that produced the last write, not a heartbeat. `reachable` is
+endpoint reachability — whether this loop's own `GET /claims/target` answered —
+not the tracker's charger-online verdict: a charger the tracker flags offline
+whose endpoint still answers writes `reachable: true` beside
+`reason: "unknown"` (the offline fact folds into the reason), and only a
+failed fetch writes `reachable: false`. Failure transitions
+write `{reachable: false, source: "http"|"unsupported", reason: "unknown"}` once
+per transition and merge over the last known winners — a 404 (old firmware) or a
+200 that is not the claims contract is `source: "unsupported"`. `status/claims`
+is counted under its own `claims` write kind.
 
 ### Access allowlist (`pi/acl.py`)
 
@@ -1196,10 +1287,14 @@ On a 2xx the bridge merges `acks: {<notification_id>: <epoch seconds>}` into
 `status/notifications` with `set(..., merge=True)` — a **nested map merge**, and
 the only field family the command writes there. The health loop's own merges
 project their content fields (`reachable`, `source`, `gates`, `counters`,
-`advisories`, `alerted`) and never `acks`, so a poll can neither clobber an
-acknowledgement nor be clobbered by one, and no read-modify-write of the
-`advisories` list is needed. The map is bounded by the firmware's 15 advisory
-ids, so it is never pruned. The write is counted as `health` (no new kind).
+`advisories`, `alerted`, `ack_command`) and never `acks`, so a poll can neither
+clobber an acknowledgement nor be clobbered by one, and no read-modify-write of
+the `advisories` list is needed. `ack_command` is a bridge-build capability
+fact, not an observation: `true` on every projection this bridge writes, absent
+on documents written by an older bridge that cannot acknowledge over HTTP, so
+the web's ack control will gate on `=== true` (fail closed; that gate lands
+with PR-4). The map is bounded by the firmware's 15 advisory ids, so it is
+never pruned. The write is counted as `health` (no new kind).
 
 **Ordering: charger → Firestore → command doc.** The acknowledgement is written
 _before_ the command document is settled, so a charger 2xx that cannot reach

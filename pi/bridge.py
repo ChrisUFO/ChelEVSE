@@ -9,6 +9,10 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   notifications every NOTIFICATIONS_INTERVAL: GET /notifications -> the live
     advisory ring projected into status/notifications, written on change only
     (issue #158; see health.py)
+  claims beside every applied /status observation (plus a claims_version or
+    state transition, debounced): GET /claims/target -> the one authoritative
+    "why isn't it charging?" projected into status/claims, written on change
+    only (issue #159; see claims.py)
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
@@ -93,6 +97,13 @@ from health import (  # noqa: E402
     comparable,
     project,
 )
+from claims import (  # noqa: E402
+    ClaimsObservations,
+    normalize_target,
+    project as claims_project,
+)
+from claims import comparable as claims_comparable  # noqa: E402
+from claims import CONTENT_FIELDS as CLAIMS_CONTENT_FIELDS  # noqa: E402
 from schedule import (  # noqa: E402
     _normalize_rule,
     _rule_segments,
@@ -139,6 +150,17 @@ SCHEDULE_INITIAL_DELAY = 7
 # its first projection carries known gates where the charger allows them instead
 # of a transient "gates closed" document that would be rewritten seconds later.
 NOTIFICATIONS_INITIAL_DELAY = 15
+# The claims loop has no cadence of its own: it is woken by the status loop's
+# trigger (every applied observation is a reconcile tick, #159) and answers a
+# claims_version/state transition at most this often -- a trigger inside the
+# window is deferred to its close, not dropped -- so a flapping state cannot
+# turn it into a hot loop against the gateway.
+CLAIMS_DEBOUNCE_SEC = 5.0
+# Safety cadence only: with no trigger ever firing (a wiring bug, or a status
+# loop that never applies), the claims document still refreshes this often.
+CLAIMS_INTERVAL_SEC = 300.0
+CLAIMS_TICK_SEC = 1.0
+CLAIMS_INITIAL_DELAY = 11
 # Retry a failed /config sync with this bounded backoff while MQTT is healthy
 # (the periodic poll is skipped then, so a failure would otherwise strand the
 # config until the charger's next setting change).
@@ -349,7 +371,7 @@ def settings_loop(db, host, bootstrap, interval, initial_delay=0):
         _stop.wait(interval)
 
 
-def mqtt_status_loop(sink, snapshots):
+def mqtt_status_loop(sink, snapshots, claims=None):
     """Apply debounced MQTT snapshots as they arrive (state updates only).
 
     Runs on its own thread so a Firestore write never blocks paho's network
@@ -364,6 +386,12 @@ def mqtt_status_loop(sink, snapshots):
     publishes only when a first snapshot, a discrete trigger past its rate
     limit, or a forced write is due, and the status loop's scheduler tick
     resolves the rest.
+
+    ``claims`` (optional) is the run's claims holder: an applied snapshot that
+    transitions ``state``/``state_label`` wakes the claims loop immediately
+    (#159) -- under MQTT the 60 s reconcile is too slow to answer "why did it
+    stop?" -- while unchanged telemetry never does. The retained claim-family
+    documents this loop's source ingests are evidence and never wake it.
     """
     while not _stop.is_set():
         try:
@@ -373,10 +401,13 @@ def mqtt_status_loop(sink, snapshots):
         try:
             fields = parse_snapshot(record.fields)
             complete = bool(record.complete) and _is_number(fields.get("state"))
-            if not sink.apply_status(
+            applied = sink.apply_status(
                 fields, "mqtt", complete=complete, arrival=record.arrival
-            ):
+            )
+            if not applied:
                 log("mqtt snapshot dropped (a reconcile applied a newer view)")
+            elif claims is not None and claims.note_status(fields):
+                claims.wake()
         except Exception as exc:
             log(f"mqtt status apply failed ({exc.__class__.__name__}: {exc})")
 
@@ -1023,7 +1054,9 @@ def _snapshot_arrived(mqtt, mqtt_ready, mqtt_snapshots):
     return mqtt_ready and mqtt.snapshots != mqtt_snapshots
 
 
-def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
+def _escalate_reconcile_failure(
+    sink, mqtt_snapshots, reconcile_failures, exc, claims=None
+):
     """Escalate one failed reconcile with no snapshot since the last one.
 
     The charger may be idle (normal) or gone, and one failed poll cannot
@@ -1032,6 +1065,15 @@ def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
     comparison and the offline decision — the same proof of life a fresh
     snapshot is, so the caller refuses the outage and restarts the streak
     from this snapshot.
+
+    ``claims`` (the run's claims holder) is woken when the offline
+    *transition* is written: ``status/claims`` must never assert a
+    confident reason over a charger the tracker just flagged offline
+    (#159) -- the fetch that follows fails outright (``reachable: false``)
+    or answers with the offline fact folded in (``reason: "unknown"``) --
+    not wait out the safety cadence. A re-apply over an already-offline
+    charger is not that transition and wakes nothing: the reconciles that
+    follow a landed outage add no claims fact.
     """
     if reconcile_failures < MQTT_OUTAGE_FAILURES:
         log(
@@ -1039,13 +1081,18 @@ def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
             "no mqtt snapshot, outage unconfirmed"
         )
         return False
-    if sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc)):
-        return False
-    log(
-        f"status reconcile failed ({_offline_reason(exc)}); "
-        "mqtt snapshot arrived, outage refused"
+    landed = sink.apply_offline_if_no_snapshot(
+        mqtt_snapshots, _offline_reason(exc)
     )
-    return True
+    if landed is None:
+        log(
+            f"status reconcile failed ({_offline_reason(exc)}); "
+            "mqtt snapshot arrived, outage refused"
+        )
+        return True
+    if landed and claims is not None:
+        claims.wake()
+    return False
 
 
 def _apply_http_status(sink, mqtt, fields, payload, mqtt_mark, mqtt_arrivals):
@@ -1117,6 +1164,7 @@ def status_loop(
     reconcile_interval=MQTT_RECONCILE_SEC,
     sink=None,
     observations=None,
+    claims=None,
 ):
     """Poll /status and apply it; with MQTT, poll only to reconcile.
 
@@ -1138,6 +1186,16 @@ def status_loop(
     HTTP observation hands the health projection the controller state, the sensor
     temperatures and the ``$GF`` fault counters from the reply it already has --
     no second charger GET, and no new field on ``status/current`` (D6).
+
+    ``claims`` is the run's :class:`claims.ClaimsObservations`: every applied
+    HTTP observation is a reconcile tick for the claims loop too (#159) -- the
+    holder records the reply's ``claims_version`` and the state, then wakes the
+    claims loop, which fetches ``/claims/target`` debounced. A charger-offline
+    transition landed by this loop's failure branches wakes it the same way,
+    so ``status/claims`` never asserts a confident reason over a charger the
+    tracker has flagged offline (the offline fact folds into
+    ``reason: "unknown"``; ``reachable`` tracks the endpoint, not the
+    tracker). No new poller: the claims fetch rides this loop's cadence.
     """
     sink = sink or StatusSink(
         db,
@@ -1206,7 +1264,7 @@ def status_loop(
                 elif mqtt_ready:
                     reconcile_failures += 1
                     if _escalate_reconcile_failure(
-                        sink, mqtt_snapshots, reconcile_failures, exc
+                        sink, mqtt_snapshots, reconcile_failures, exc, claims
                     ):
                         mqtt_snapshots = mqtt.snapshots
                         reconcile_failures = 0
@@ -1215,7 +1273,13 @@ def status_loop(
                     # through the sink lock, so the tracker and document
                     # writes cannot interleave with an MQTT apply. Journal
                     # and push once per outage.
-                    sink.apply_offline(_offline_reason(exc))
+                    if sink.apply_offline(_offline_reason(exc)) and claims is not None:
+                        # The landed offline transition is claims-relevant
+                        # too: the loop must never assert a confident
+                        # reason over a charger the tracker just flagged
+                        # offline, not wait out the safety cadence (#159).
+                        # The debounce bounds the extra fetch.
+                        claims.wake()
                 # Only a successful HTTP poll clears the streak, so a
                 # failure still means what it always meant to the watchdog.
                 watchdog.observe_failure(tracker.state == 3)
@@ -1230,6 +1294,12 @@ def status_loop(
                         observations.note_status(
                             fields, parse_fault_counters(payload)
                         )
+                    if claims is not None:
+                        # This applied observation is one reconcile tick for
+                        # the claims loop: hand it the reply's claims_version
+                        # and state, then wake the fetch (#159).
+                        claims.note_status(fields, payload)
+                        claims.wake()
                 watchdog.record_success(payload)
         _publish_due_heartbeat(sink, heartbeat, watermark)
         _status_scheduler_tick(sink)
@@ -1856,13 +1926,24 @@ def command_loop(
 
 
 def schedule_loop(
-    db, host, auth, transport, interval, reconcile_interval, sink, initial_delay=0
+    db,
+    host,
+    auth,
+    transport,
+    interval,
+    reconcile_interval,
+    sink,
+    initial_delay=0,
+    claims=None,
 ):
     """Mirror schedule/current into the firmware and publish the live window.
 
     ``sink`` is the run's :class:`StatusSink`: the firmware's active window
     reaches ``status/current.schedule`` only through its write policy (issue
-    #95), never a write of this loop's own.
+    #95), never a write of this loop's own. ``claims`` (optional) is the run's
+    claims holder and receives the same window dict, so a timer claim's reason
+    can name the active schedule rule (#159) without a second ``/schedule/plan``
+    fetch.
     """
     last_hash = None
     synced_event_rules = {}
@@ -1931,7 +2012,10 @@ def schedule_loop(
         # republish is gone; an unchanged window costs zero writes.
         try:
             plan = _schedule_plan(transport, host, auth)
-            sink.note_schedule(schedule_state(plan, synced_event_rules))
+            window = schedule_state(plan, synced_event_rules)
+            sink.note_schedule(window)
+            if claims is not None:
+                claims.note_schedule(window)
         except (CommandError, requests.RequestException, ValueError) as exc:
             log(f"schedule plan failed ({exc.__class__.__name__}: {exc})")
 
@@ -2129,6 +2213,208 @@ def notifications_loop(
     run_loop("notifications", one_tick, lambda: _stop.wait(interval))
 
 
+def _seed_claims(doc):
+    """Read the stored claims projection once: its content fields, or None.
+
+    A restart seeds ``last_stable`` from the stored document, so a claims
+    answer identical to the one the previous run wrote costs no write -- and
+    a read failure is a log line, never a crash: the first successful poll
+    rewrites the document anyway.
+    """
+    try:
+        snapshot = doc.get()
+        data = snapshot.to_dict() if snapshot.exists else None
+    except Exception as exc:
+        log(f"claims seed read failed ({exc.__class__.__name__}: {exc})")
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {key: data.get(key) for key in CLAIMS_CONTENT_FIELDS}
+
+
+def _unanswered_claims(source):
+    """The content of a poll that produced no authoritative answer.
+
+    ``reason: "unknown"`` is the answer itself (#159: unavailable target =>
+    unknown, never a guess from retained evidence), so the failure
+    transitions write it beside the source word; the merge leaves the last
+    known winners in the document under it, exactly like the health loop's
+    unreachable projection keeps its last gates.
+    """
+    return {"reachable": False, "source": source, "reason": "unknown"}
+
+
+def claims_loop(
+    db,
+    host,
+    auth,
+    transport,
+    observations,
+    *,
+    tracker=None,
+    counter=None,
+    clock=time.time,
+    monotonic=time.monotonic,
+    interval=CLAIMS_INTERVAL_SEC,
+    debounce=CLAIMS_DEBOUNCE_SEC,
+    tick=CLAIMS_TICK_SEC,
+    initial_delay=0,
+):
+    """Fetch the gateway's claim arbitration; project ``status/claims``.
+
+    One pass is one ``GET /claims/target``. The loop has no polling cadence
+    of its own: ``observations.trigger`` is set by the loops that already
+    observed something claims-relevant (every applied ``/status`` observation
+    is a reconcile tick; a ``claims_version`` move, a ``state``/
+    ``state_label`` transition, or a charger-offline transition the status
+    loop landed is an immediate tick), with ``debounce`` the
+    floor between two fetches and ``interval`` the safety cadence that
+    refreshes the document even if no trigger ever fires. Not a second
+    poller: one loop, woken by the trigger flag. The debounce is
+    trailing-edge: a trigger that lands inside the window stays armed, so
+    the first tick after the window closes fetches -- a transition is
+    answered within ``debounce`` plus one tick, never left for the next
+    trigger or the safety cadence.
+
+    The projection is compared with the last one written and only a content
+    change reaches Firestore, so a steady charger adds **zero** writes; the
+    comparison is :func:`claims.comparable`, which drops the write stamps and
+    the boost countdown (a retained boost ticks its ``remaining`` down on its
+    own). ``checked_at`` records the observation that produced the last
+    write, it is not a heartbeat.
+
+    A failed poll projects ``reason: "unknown"`` under ``reachable: false``
+    and is written on its transition only. A 404 (firmware below 4.1.5, no
+    such endpoint) is ``source: "unsupported"``, as is a 200 that is not the
+    claims contract. ``tracker`` supplies the process's charger-online fact:
+    a gateway that answers while the charger is flagged offline still cannot
+    make a stale arbitration current.
+    """
+    doc = db.collection("status").document("claims")
+    counter = counter or WriteCounter()
+    stored = _seed_claims(doc)
+    last_stable = claims_comparable(stored)
+    # The detail keys the stored document carries, as of the last write (or
+    # the seed). A loop-level baseline, not a view of ``last_stable``: a
+    # failure write carries no ``detail`` (it deliberately leaves the last
+    # known winners in the document), so deriving the baseline from
+    # ``last_stable`` would lose it across every failure transition and the
+    # recovery write could no longer name the departed keys.
+    last_detail = stored.get("detail") if isinstance(stored, dict) else None
+    last_fetch = None
+    trigger = getattr(observations, "trigger", None)
+    if initial_delay:
+        # Offset from the other pollers; only the first iteration is delayed.
+        _stop.wait(initial_delay)
+
+    def one_tick():
+        nonlocal last_stable, last_fetch, last_detail
+
+        now = monotonic()
+        since = None if last_fetch is None else now - last_fetch
+        forced = trigger is not None and trigger.is_set()
+        if since is not None and since < debounce:
+            # Trailing-edge debounce: a trigger inside the window stays
+            # armed, so the first tick past the window close fetches -- a
+            # transition is answered within the debounce, never parked for
+            # the next trigger or the safety cadence.
+            return
+        if not forced and since is not None and since < interval:
+            return
+        if trigger is not None:
+            # Consume the trigger only as the fetch it woke begins: a wake
+            # landing beside it either precedes the request (the fetch
+            # reflects it) or re-arms the event for a later tick.
+            trigger.clear()
+        last_fetch = now
+
+        checked_at = int(clock())
+        try:
+            resp = transport.get(
+                f"{host.base}/claims/target", auth=auth, timeout=HTTP_TIMEOUT
+            )
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            # 404: the firmware has no such endpoint (below 4.1.5).
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            log(f"claims poll failed ({_offline_reason(exc)})")
+            content = _unanswered_claims("unsupported" if code == 404 else "http")
+        except requests.RequestException as exc:
+            log(f"claims poll failed ({_offline_reason(exc)})")
+            content = _unanswered_claims("http")
+        else:
+            try:
+                payload = resp.json()
+            except ValueError:
+                # The charger answered, so this is not a transport failure:
+                # the body is not the claims contract.
+                payload = None
+            target = normalize_target(payload)
+            if target is None:
+                log("claims poll unsupported (payload is not the claims contract)")
+                content = _unanswered_claims("unsupported")
+            else:
+                facts = observations.snapshot()
+                if tracker is not None:
+                    facts["charger_online"] = getattr(
+                        tracker, "charger_online", None
+                    )
+                content = claims_project(target, facts)
+        stable = claims_comparable(content)
+        if stable == last_stable:
+            return
+        write = {
+            **content,
+            "checked_at": checked_at,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        # A merge write deep-merges maps, so a detail key carried by the
+        # previous reason would survive the transition in the stored
+        # document -- evidence for a restriction that no longer explains
+        # the reason, and (because the seed reads it back) one write per
+        # restart that still cannot drop it. The same holds one level
+        # down: a retained document that keeps its detail key but drops a
+        # subkey (a limit that loses ``auto_release``) would keep the
+        # stale leaf deep-merged for the life of the install. Name each
+        # departed leaf -- top-level key or subkey -- with the delete
+        # sentinel, the only way a merge write drops one entry of a
+        # stored map. A map that empties outright needs none -- an
+        # empty map replaces the stored value.
+        detail = content.get("detail")
+        previous = last_detail if isinstance(last_detail, dict) else None
+        if detail and isinstance(previous, dict):
+            departed = {}
+            for key, old in previous.items():
+                if key not in detail:
+                    departed[key] = firestore.DELETE_FIELD
+                elif isinstance(old, dict) and isinstance(detail[key], dict):
+                    gone = {
+                        sub: firestore.DELETE_FIELD
+                        for sub in old
+                        if sub not in detail[key]
+                    }
+                    if gone:
+                        departed[key] = {**detail[key], **gone}
+            if departed:
+                write["detail"] = {**detail, **departed}
+        try:
+            counter.counted("claims", doc.set, write, merge=True)
+        except Exception as exc:
+            # Keep the projection unwritten so the next poll retries it.
+            log(f"claims write failed ({exc.__class__.__name__}: {exc})")
+        else:
+            last_stable = stable
+            # The baseline tracks the stored document. A write that carried
+            # ``detail`` leaves the stored map equal to it (the sentinels
+            # above delete the departed keys); a write with no ``detail``
+            # key -- a failure transition -- leaves the stored map alone,
+            # and so must the baseline.
+            if detail is not None:
+                last_detail = dict(detail)
+
+    run_loop("claims", one_tick, lambda: _stop.wait(tick))
+
+
 def run(
     db,
     host,
@@ -2177,6 +2463,9 @@ def run(
     # status and config loops, read by the notifications loop -- no extra charger
     # GET and no new ``status/current`` field.
     observations = LiveObservations()
+    # The claims facts (#159): the same holder pattern, fed by the status,
+    # schedule and MQTT loops, read by the claims loop beside its own fetch.
+    claims = ClaimsObservations()
     tracker = StatusTracker(
         db,
         history=HistoryAccumulator(
@@ -2206,6 +2495,7 @@ def run(
             announce_topic=mqtt.announce_topic,
             on_status=lambda record: enqueue_latest(snapshots, record),
             on_config_version=lambda _version: config_event.set(),
+            on_evidence=claims.note_evidence,
             log=log,
         )
     # Built after the source: the outage decision needs its arrival sequence,
@@ -2229,7 +2519,7 @@ def run(
         counter=counter,
     )
     if source is not None:
-        mqtt_status_args = (sink, snapshots)
+        mqtt_status_args = (sink, snapshots, claims)
 
     status_args = (
         db,
@@ -2247,7 +2537,7 @@ def run(
     threading.Thread(
         target=status_loop,
         args=status_args,
-        kwargs={"observations": observations},
+        kwargs={"observations": observations, "claims": claims},
         daemon=True,
     ).start()
     config_args = (
@@ -2281,7 +2571,12 @@ def run(
         sink,
         SCHEDULE_INITIAL_DELAY,
     )
-    threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
+    threading.Thread(
+        target=schedule_loop,
+        args=schedule_args,
+        kwargs={"claims": claims},
+        daemon=True,
+    ).start()
     notifications_args = (
         db,
         host,
@@ -2300,6 +2595,19 @@ def run(
             "notifier": notifier,
             "initial_delay": NOTIFICATIONS_INITIAL_DELAY,
             "counter": counter,
+        },
+        daemon=True,
+    ).start()
+    claims_thread_args = (db, host, auth, transport, claims)
+    # ``tracker`` binds by keyword: the claims loop derives its offline
+    # precedence from the tracker's own online fact.
+    threading.Thread(
+        target=claims_loop,
+        args=claims_thread_args,
+        kwargs={
+            "tracker": tracker,
+            "counter": counter,
+            "initial_delay": CLAIMS_INITIAL_DELAY,
         },
         daemon=True,
     ).start()

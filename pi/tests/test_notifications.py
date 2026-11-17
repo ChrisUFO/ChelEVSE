@@ -178,6 +178,46 @@ class NotificationsLoopTests(unittest.TestCase):
         db, _ = self.run_loop([FakeResponse(200, LIVE_PAYLOAD)], polls=1)
         self.assertNotIn("current", db.data.get("status", {}))
 
+    def test_the_write_carries_the_ack_command_capability_fact(self):
+        # Issue #159: the web's ack control must fail closed against an older
+        # bridge, so the document itself states the capability. Constant, so
+        # the first write carries it and an unchanged poll adds nothing.
+        db, _ = self.run_loop(
+            [FakeResponse(200, LIVE_PAYLOAD), FakeResponse(200, LIVE_PAYLOAD)],
+            polls=2,
+        )
+
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 1, "steady state must add zero writes")
+        self.assertIs(writes[0][3]["ack_command"], True)
+        # An older bridge's stored document (no fact) is upgraded by the first
+        # poll of this bridge: the seed comparison sees the new field.
+        db = FakeDB(
+            {
+                "status": {
+                    "notifications": {
+                        "reachable": True,
+                        "source": "http",
+                        "gates": {
+                            "settings_known": True,
+                            "relay_health_known": False,
+                        },
+                        "counters": COUNTERS,
+                        "advisories": [],
+                        "alerted": {},
+                    }
+                }
+            }
+        )
+        db, _ = self.run_loop(
+            [FakeResponse(200, LIVE_PAYLOAD), FakeResponse(200, LIVE_PAYLOAD)],
+            polls=2,
+            db=db,
+        )
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 1, "only the capability upgrade writes")
+        self.assertIs(db.data["status"]["notifications"]["ack_command"], True)
+
     def test_a_moving_last_seen_alone_is_not_a_change(self):
         # The gateway re-stamps `last_seen` every ~5 s for every live advisory, so
         # two polls of one unchanged advisory differ in exactly that field.
@@ -545,6 +585,9 @@ class SeedTests(unittest.TestCase):
                 }
             ],
             "alerted": {"fault.no_ground|7": 1234},
+            # The capability fact is part of the content this bridge writes;
+            # a stored document that already carries it is identical content.
+            "ack_command": True,
         }
         db = FakeDB({"status": {"notifications": stored}})
         notifier = _RecordingNotifier()

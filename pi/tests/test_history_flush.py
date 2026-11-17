@@ -440,6 +440,8 @@ class ShutdownDrainTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "notifications_loop"
         ), mock.patch.object(
+            bridge, "claims_loop"
+        ), mock.patch.object(
             bridge, "command_loop", side_effect=stopped_charging
         ):
             bridge.run(

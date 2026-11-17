@@ -2054,6 +2054,8 @@ class LoopWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "notifications_loop", spy("notifications")
         ), mock.patch.object(
+            bridge, "claims_loop", spy("claims")
+        ), mock.patch.object(
             bridge.threading, "Thread", _ThreadSpy
         ), mock.patch.object(
             bridge, "StatusTracker"
@@ -2071,7 +2073,15 @@ class LoopWiringTests(unittest.TestCase):
 
         self.assertEqual(
             set(calls),
-            {"status", "config", "schedule", "command", "settings", "notifications"},
+            {
+                "status",
+                "config",
+                "schedule",
+                "command",
+                "settings",
+                "notifications",
+                "claims",
+            },
         )
         for name, args in calls.items():
             self.assertIs(args[1], host, f"{name} loop got another charger host")
@@ -2080,8 +2090,11 @@ class LoopWiringTests(unittest.TestCase):
         # #95: the schedule loop feeds the same sink the status loop
         # schedules writes through -- one write policy, one document owner.
         self.assertIs(calls["schedule"][6], calls["status"][10])
+        # #159: the claims loop reads the same claims holder the trigger
+        # sources feed.
+        self.assertIsInstance(calls["claims"][4], bridge.ClaimsObservations)
         self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
-        self.assertEqual(len(threads), 5)
+        self.assertEqual(len(threads), 6)
         for thread in threads:
             self.assertIs(thread.args[1], host)
             self.assertTrue(thread.daemon)

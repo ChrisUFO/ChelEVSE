@@ -30,6 +30,15 @@ Design notes:
 - **Config is not read from MQTT.** ``<base>/config`` is retained, but the bridge
   keeps ``/config`` as the single redaction/coercion path: a change of
   ``config_version`` only triggers one HTTP sync.
+- **Claim-family topics are evidence, not answers.** ``<base>/claim``,
+  ``<base>/limit`` and ``<base>/boost`` are retained, but they carry no
+  authoritative freshness: each delivery is decoded and handed to
+  ``on_evidence`` (the claims holder), never applied as status and never
+  allowed to answer "why isn't it charging?" -- that is
+  ``GET /claims/target`` (#159). The retained ``<base>/schedule`` event list
+  is not evidence either -- the schedule reason's rule id comes from the
+  schedule loop's ``/schedule/plan`` window -- so it is ignored like any
+  other unmapped retained document.
 - **Announce/LWT is the gateway's own presence.** The firmware publishes a
   retained ``openevse/announce/<id>`` document (``{"state": "connected"}`` on
   connect, and the broker publishes ``{"state": "disconnected"}`` as its Last
@@ -72,8 +81,11 @@ RECONNECT_MIN_SEC = 1
 RECONNECT_MAX_SEC = 30
 
 # Topic leaf -> /status key. Only the curated status fields the bridge stores
-# are mapped; command/retained-JSON topics (override, claim, schedule, config,
-# rapi/…, */set) are ignored by construction because they are not listed here.
+# are mapped; command/retained-JSON topics (override, config, rapi/…, */set)
+# are ignored by construction because they are not listed here. The retained
+# claim-family documents (claim/limit/boost) are below: they are not status
+# fields either, but they feed the claims pipeline's evidence holder
+# instead of being dropped (issue #159).
 TOPIC_FIELDS = {
     "amp": "amp",
     "voltage": "voltage",
@@ -95,6 +107,15 @@ CONFIG_VERSION_TOPIC = "config_version"
 # {"state": "disabled", "auto_release": …} for pause, and
 # {"state": "active", "charge_current": N, "max_current": N, …} for a hold.
 OVERRIDE_TOPIC = "override"
+# Retained claim-family documents, supporting evidence for the claims
+# pipeline (#159): the gateway's own claim state (``claim``), the charge
+# limit (``limit``) and a running boost (``boost``). Decoded here, parsed
+# defensively by the claims module via ``on_evidence``; never authoritative
+# -- the reason comes from ``GET /claims/target`` -- and never a status
+# field, so none feed the debounced snapshot. The retained ``schedule``
+# event list is deliberately absent: nothing consumes it (the schedule
+# reason's rule id arrives via the schedule loop's plan window instead).
+CLAIM_EVIDENCE_TOPICS = frozenset({"claim", "limit", "boost"})
 # RAPI replies arrive with no correlation id, so the bridge must serialise
 # commands and match the next one itself.
 RAPI_OUT_TOPIC = "rapi/out"
@@ -125,7 +146,15 @@ def _default_client_factory(client_id):
 
 
 def _decode(payload):
-    """Topic payload -> JSON value (number/bool/None), or the raw string."""
+    """Topic payload -> JSON value (number/bool/None), or the raw string.
+
+    A payload nested past the interpreter's recursion limit raises
+    ``RecursionError``, not ``ValueError`` -- and this runs on the paho
+    network thread, where an escapee would end ``loop_start()``'s thread
+    while ``connected`` still reads healthy, silently degrading the bridge
+    to the HTTP reconcile. Both are the same "not decodable" fact, so both
+    take the raw-string fallback.
+    """
     if isinstance(payload, bytes):
         text = payload.decode("utf-8", "replace")
     else:
@@ -133,7 +162,7 @@ def _decode(payload):
     text = text.strip()
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return text
 
 
@@ -211,6 +240,7 @@ class MqttSource:
         client_id=None,
         on_status=None,
         on_config_version=None,
+        on_evidence=None,
         announce_topic=DEFAULT_ANNOUNCE_TOPIC,
         debounce=DEBOUNCE_SEC,
         client_factory=None,
@@ -225,6 +255,7 @@ class MqttSource:
         self.client_id = client_id or "chelevse-bridge"
         self.on_status = on_status
         self.on_config_version = on_config_version
+        self.on_evidence = on_evidence
         self.debounce = max(0.0, float(debounce))
         self.subscription = f"{self.base}/#" if self.base else "#"
         self.log = log or _default_log
@@ -618,6 +649,22 @@ class MqttSource:
         if leaf == RAPI_OUT_TOPIC:
             self._rapi_out(_decode(getattr(message, "payload", b"")))
             return
+        if leaf in CLAIM_EVIDENCE_TOPICS:
+            # Supporting evidence for the claims pipeline (#159): decoded
+            # here on the network thread, parsed and held by the callback.
+            # An escapee here would end loop_start()'s thread while
+            # ``connected`` still reads healthy (the decode's own docstring),
+            # and a retained payload redelivers the kill on every reconnect,
+            # so the dispatch is guarded whatever a future parser raises.
+            if self.on_evidence is not None:
+                try:
+                    self.on_evidence(leaf, _decode(getattr(message, "payload", b"")))
+                except Exception as exc:
+                    self.log(
+                        f"mqtt evidence callback failed "
+                        f"({exc.__class__.__name__}: {exc})"
+                    )
+            return
         field = TOPIC_FIELDS.get(leaf)
         if field is None:  # retained JSON, commands, rapi/in, deprecated topics
             return
@@ -687,4 +734,15 @@ class MqttSource:
             return
         self.config_version = value
         if self.on_config_version is not None:
-            self.on_config_version(value)
+            # Same exposure as the evidence dispatch in ``_on_message``:
+            # this runs on the paho network thread, an escapee would end
+            # loop_start()'s thread while ``connected`` still reads
+            # healthy, and the retained ``config_version`` redelivers the
+            # kill on every reconnect.
+            try:
+                self.on_config_version(value)
+            except Exception as exc:
+                self.log(
+                    f"mqtt config-version callback failed "
+                    f"({exc.__class__.__name__}: {exc})"
+                )

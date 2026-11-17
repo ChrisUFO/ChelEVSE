@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests  # noqa: E402
 
 import bridge  # noqa: E402
+import claims  # noqa: E402
 from fakes import FakeDB, FakeMqttFactory, FakeResponse, FakeSession  # noqa: E402
 from mqtt_source import MqttSource, Snapshot, TOPIC_FIELDS  # noqa: E402
 
@@ -272,6 +273,7 @@ class MqttSourceTests(MqttSourceBase):
             "chelevse/override/set",
             "chelevse/rapi/out",
             "chelevse/limit",
+            "chelevse/schedule",  # retained event list: not evidence (#159)
             "chelevse/elapsed",  # deprecated; session_elapsed is the source
             "othertopic/amp",
         ):
@@ -288,6 +290,38 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.versions, [3, 4])
         self.assertEqual(self.source.config_version, 4)
         self.assertEqual(self.source.messages, 0)
+
+    def test_a_raising_config_version_consumer_never_escapes_the_network_thread(
+        self,
+    ):
+        # The same exposure the evidence dispatch guards: the consumer
+        # runs on the paho network thread, an escapee would end
+        # loop_start()'s thread while ``connected`` still reads healthy,
+        # and the retained ``config_version`` redelivers the kill on every
+        # reconnect. The guard keeps the worst case to one log line.
+        logs = []
+
+        def explodes(_value):
+            raise RuntimeError("boom")
+
+        factory = FakeMqttFactory()
+        source = MqttSource(
+            "192.168.0.224",
+            topic="chelevse",
+            on_config_version=explodes,
+            debounce=60,
+            client_factory=factory,
+            log=logs.append,
+        )
+        self.addCleanup(source.stop)
+        source.start()
+        factory.client.connect()
+        # The delivery returns normally, the version moved, and the
+        # failure is on the record.
+        factory.client.deliver("chelevse/config_version", 7)
+        self.assertEqual(source.config_version, 7)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("boom", logs[0])
 
     def test_the_last_will_marks_the_gateway_gone_and_a_reconnect_clears_it(self):
         client = self.connect()
@@ -1122,7 +1156,14 @@ class StatusLoopMqttTests(unittest.TestCase):
         return client
 
     def run_loop(
-        self, session, polls, on_wait=None, reconcile=3600, sink=None, interval=10
+        self,
+        session,
+        polls,
+        on_wait=None,
+        reconcile=3600,
+        sink=None,
+        interval=10,
+        claims_holder=None,
     ):
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
@@ -1138,6 +1179,7 @@ class StatusLoopMqttTests(unittest.TestCase):
                 self.source,
                 reconcile,
                 sink,
+                claims=claims_holder,
             )
         return session
 
@@ -1550,6 +1592,55 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.run_loop(session, polls=2, reconcile=0)
         self.assertFalse(self.tracker.charger_online)
         self.assertEqual(self.notifier.bodies, ["Charger offline"])
+
+    def test_an_unconfirmed_outage_does_not_wake_the_claims_loop(self):
+        # One failed reconcile beside a silent idle charger is not an outage:
+        # no transition landed, so the claims loop is not woken either.
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("idle blip")])
+        self.run_loop(session, polls=1, reconcile=0, claims_holder=holder)
+        self.assertFalse(holder.trigger.is_set())
+
+    def test_the_escalated_outage_wakes_the_claims_loop(self):
+        # The MQTT-mode offline decision is the same claims-relevant fact as
+        # the plain fallback's: the transition the escalation writes must
+        # wake the loop, or status/claims keeps reachable: true over a dead
+        # charger for up to the 300 s safety cadence (#159).
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        self.run_loop(session, polls=2, reconcile=0, claims_holder=holder)
+        self.assertFalse(self.tracker.charger_online)  # the transition landed
+        self.assertTrue(holder.trigger.is_set())
+
+    def test_a_refailure_over_the_escalated_outage_does_not_rewake(self):
+        # The escalation's wake is the offline *edge*, not every re-apply:
+        # once the tracker is offline, the failed reconciles that follow
+        # add no claims fact, and re-waking would fetch /claims/target
+        # once per 60 s reconcile at a gateway that is already failing.
+        # The on_wait clear stands in for the claims loop consuming each
+        # landed trigger -- except after the final tick, so a wake there
+        # is left visible to the test.
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        waits = []
+
+        def on_wait():
+            waits.append(None)
+            if len(waits) < 3:
+                holder.trigger.clear()
+
+        self.run_loop(
+            session,
+            polls=3,
+            reconcile=0,
+            claims_holder=holder,
+            on_wait=on_wait,
+        )
+        self.assertFalse(self.tracker.charger_online)  # the outage landed
+        self.assertFalse(holder.trigger.is_set(), "a re-apply is not an edge")
 
     def test_a_flush_in_the_offline_gap_refuses_the_outage(self):
         # The second failed reconcile has already decided "no snapshot since
@@ -1964,6 +2055,8 @@ class RunWiringTests(unittest.TestCase):
         ), mock.patch.object(
             bridge, "notifications_loop", spy("notifications_loop")
         ), mock.patch.object(
+            bridge, "claims_loop", spy("claims_loop")
+        ), mock.patch.object(
             bridge, "mqtt_status_loop", spy("mqtt_status_loop")
         ), mock.patch.object(
             bridge, "MqttSource", return_value=source
@@ -1995,8 +2088,9 @@ class RunWiringTests(unittest.TestCase):
         self.assertEqual(calls["config_loop"][0][6], source)
         worker = [args for name, args in threads if name == "mqtt_status_loop"]
         self.assertEqual(len(worker), 1)
-        self.assertEqual(len(worker[0]), 2)  # (sink, queue); the record has the rest
+        self.assertEqual(len(worker[0]), 3)  # (sink, queue, claims); rest by keyword
         self.assertIsInstance(worker[0][1], bridge.queue.Queue)
+        self.assertIsInstance(worker[0][2], bridge.ClaimsObservations)
         self.assertEqual(
             [name for name, _args in threads],
             [
@@ -2005,6 +2099,7 @@ class RunWiringTests(unittest.TestCase):
                 "settings_loop",
                 "schedule_loop",
                 "notifications_loop",
+                "claims_loop",
                 "mqtt_status_loop",
             ],
         )
@@ -2045,6 +2140,7 @@ class RunWiringTests(unittest.TestCase):
                 bridge.settings_loop,
                 bridge.schedule_loop,
                 bridge.notifications_loop,
+                bridge.claims_loop,
             ],
         )
 

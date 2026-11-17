@@ -23,10 +23,20 @@ def log(message):
 # Observability constants, deliberately not env tunables: counting is not
 # policy. Kinds: the five the issue names -- status (status/current), history
 # (history/<day>), session (sessions/<id>), config (status/config), command
-# (commands/<id>) -- plus health (status/health, its own transition cadence)
-# and fcm (token-prune deletes, which Firestore bills as writes), so the
-# total matches what the console reports.
-WRITE_KINDS = ("status", "history", "session", "config", "command", "health", "fcm")
+# (commands/<id>) -- plus health (status/health, its own transition cadence),
+# claims (status/claims, the claims projection's change-only writes) and fcm
+# (token-prune deletes, which Firestore bills as writes), so the total
+# matches what the console reports.
+WRITE_KINDS = (
+    "status",
+    "history",
+    "session",
+    "config",
+    "command",
+    "health",
+    "claims",
+    "fcm",
+)
 _WRITE_KINDS = frozenset(WRITE_KINDS)
 # The rolling window the budget is judged over, matching the quota's day.
 WRITE_WINDOW_SEC = 24 * 3600

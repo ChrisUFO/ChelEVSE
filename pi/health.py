@@ -112,7 +112,19 @@ RELAY_HEALTH_UNSUPPORTED_FIRMWARE = frozenset({"8.2.3"})
 COUNTER_FIELDS = ("nogndcount", "gfcicount", "stuckcount")
 # The projection's top-level content fields: everything a merge write carries
 # that a change test compares (``checked_at``/``updated_at`` are write stamps).
-CONTENT_FIELDS = ("reachable", "source", "gates", "counters", "advisories", "alerted")
+# ``ack_command`` is a bridge-build capability fact, not an observation: it is
+# constant for the life of the process (a bridge that can acknowledge over
+# HTTP, D4), so it never moves the change test after the one write that adds
+# it to an older stored document.
+CONTENT_FIELDS = (
+    "reachable",
+    "source",
+    "gates",
+    "counters",
+    "advisories",
+    "alerted",
+    "ack_command",
+)
 # ``over_temp_shutdown`` is only emitted on D9+ controllers and defaults to 72
 # (``app_config.cpp``); the advisory starts 5 °C below the panic temperature
 # (``NOTIFICATION_HIGH_TEMP_MARGIN_C``).
@@ -305,6 +317,11 @@ def project(notifications, facts, first_observed, observed_at, alerted):
         "counters": counter_view(facts.get("counters")),
         "advisories": entries,
         "alerted": dict(alerted or {}),
+        # A bridge-build capability fact for the web (issue #159: the ack
+        # control must fail closed against an older bridge that cannot
+        # acknowledge over HTTP): additive, absent on documents written by
+        # those older bridges, so ``=== true`` is the gate.
+        "ack_command": True,
     }
     return content, observed
 
