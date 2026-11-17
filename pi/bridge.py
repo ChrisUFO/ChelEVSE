@@ -1067,9 +1067,11 @@ def _escalate_reconcile_failure(
     from this snapshot.
 
     ``claims`` (the run's claims holder) is woken when the offline
-    transition is written: ``status/claims`` must stop asserting
+    *transition* is written: ``status/claims`` must stop asserting
     ``reachable`` over a charger the tracker just flagged offline (#159),
-    not wait out the safety cadence.
+    not wait out the safety cadence. A re-apply over an already-offline
+    charger is not that transition and wakes nothing: the reconciles that
+    follow a landed outage add no claims fact.
     """
     if reconcile_failures < MQTT_OUTAGE_FAILURES:
         log(
@@ -1077,15 +1079,18 @@ def _escalate_reconcile_failure(
             "no mqtt snapshot, outage unconfirmed"
         )
         return False
-    if sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc)):
-        if claims is not None:
-            claims.wake()
-        return False
-    log(
-        f"status reconcile failed ({_offline_reason(exc)}); "
-        "mqtt snapshot arrived, outage refused"
+    landed = sink.apply_offline_if_no_snapshot(
+        mqtt_snapshots, _offline_reason(exc)
     )
-    return True
+    if landed is None:
+        log(
+            f"status reconcile failed ({_offline_reason(exc)}); "
+            "mqtt snapshot arrived, outage refused"
+        )
+        return True
+    if landed and claims is not None:
+        claims.wake()
+    return False
 
 
 def _apply_http_status(sink, mqtt, fields, payload, mqtt_mark, mqtt_arrivals):
@@ -2353,6 +2358,26 @@ def claims_loop(
             "checked_at": checked_at,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
+        # A merge write deep-merges maps, so a detail key carried by the
+        # previous reason would survive the transition in the stored
+        # document -- evidence for a restriction that no longer explains
+        # the reason, and (because the seed reads it back) one write per
+        # restart that still cannot drop it. Name each departed key with
+        # the delete sentinel, the only way a merge write drops one entry
+        # of a stored map. A map that empties outright needs none -- an
+        # empty map replaces the stored value.
+        detail = content.get("detail")
+        previous = (
+            last_stable.get("detail") if isinstance(last_stable, dict) else None
+        )
+        if detail and isinstance(previous, dict):
+            departed = {
+                key: firestore.DELETE_FIELD
+                for key in previous
+                if key not in detail
+            }
+            if departed:
+                write["detail"] = {**detail, **departed}
         try:
             counter.counted("claims", doc.set, write, merge=True)
         except Exception as exc:

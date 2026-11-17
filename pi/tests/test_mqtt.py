@@ -1582,6 +1582,34 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.assertFalse(self.tracker.charger_online)  # the transition landed
         self.assertTrue(holder.trigger.is_set())
 
+    def test_a_refailure_over_the_escalated_outage_does_not_rewake(self):
+        # The escalation's wake is the offline *edge*, not every re-apply:
+        # once the tracker is offline, the failed reconciles that follow
+        # add no claims fact, and re-waking would fetch /claims/target
+        # once per 60 s reconcile at a gateway that is already failing.
+        # The on_wait clear stands in for the claims loop consuming each
+        # landed trigger -- except after the final tick, so a wake there
+        # is left visible to the test.
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        waits = []
+
+        def on_wait():
+            waits.append(None)
+            if len(waits) < 3:
+                holder.trigger.clear()
+
+        self.run_loop(
+            session,
+            polls=3,
+            reconcile=0,
+            claims_holder=holder,
+            on_wait=on_wait,
+        )
+        self.assertFalse(self.tracker.charger_online)  # the outage landed
+        self.assertFalse(holder.trigger.is_set(), "a re-apply is not an edge")
+
     def test_a_flush_in_the_offline_gap_refuses_the_outage(self):
         # The second failed reconcile has already decided "no snapshot since
         # the last one" when a flush lands, before the offline write. The sink

@@ -183,16 +183,16 @@ class StatusSink:
         alert. A flush after this point is simply the newer observation and
         restores the online state by applying.
 
-        Returns True when the offline transition was written, False when a
-        fresh arrival refused it.
+        Returns True when the offline *transition* was written, False when
+        it re-applied an already-offline charger, and None when a fresh
+        arrival refused the outage.
         """
         if self.arrivals is None:
             raise RuntimeError("offline guard needs an MQTT arrival source")
         with self._lock:
             if self.arrivals() != expected_arrival:
-                return False
-            self._apply_offline(reason)
-            return True
+                return None
+            return self._apply_offline(reason)
 
     def _apply_offline(self, reason):
         """The offline transition; the caller holds the apply lock.

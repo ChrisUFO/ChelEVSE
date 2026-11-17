@@ -555,6 +555,11 @@ class _Monotonic:
 
 
 class ClaimsLoopTests(unittest.TestCase):
+    def setUp(self):
+        # One WriteCounter per run_loop call, in order: the tests assert
+        # the claims write kind at the boundary the loop advertises.
+        self.counters = []
+
     def run_loop(
         self,
         responses,
@@ -579,6 +584,8 @@ class ClaimsLoopTests(unittest.TestCase):
                 on_wait()
 
         session = FakeSession(responses)
+        counter = bridge.WriteCounter()
+        self.counters.append(counter)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, between_ticks)):
             bridge.claims_loop(
                 db,
@@ -587,7 +594,7 @@ class ClaimsLoopTests(unittest.TestCase):
                 bridge.ChargerTransport(session),
                 holder,
                 tracker=tracker,
-                counter=bridge.WriteCounter(),
+                counter=counter,
                 clock=clock,
                 monotonic=monotonic,
             )
@@ -628,6 +635,13 @@ class ClaimsLoopTests(unittest.TestCase):
         )
         # The stored document is exactly what was written.
         self.assertEqual(db.data["status"]["claims"]["reason"], "manual_override")
+        # Every claims write is counted under its own kind: a wrong kind
+        # string would raise only *after* the Firestore write landed and
+        # turn the loop into a silent rewrite loop.
+        self.assertEqual(
+            self.counters[-1].health_fields()["writes_by_kind"]["claims"],
+            len(writes),
+        )
 
     def test_a_reason_change_writes_once(self):
         db, _ = self.run_loop(
@@ -701,6 +715,45 @@ class ClaimsLoopTests(unittest.TestCase):
         self.assertEqual(writes[1][3]["detail"]["limit"]["value"], 60)
         self.assertEqual(
             db.data["status"]["claims"]["detail"]["limit"]["value"], 60
+        )
+        self.assertEqual(
+            sum(
+                counter.health_fields()["writes_by_kind"]["claims"]
+                for counter in self.counters
+            ),
+            len(writes),
+        )
+
+    def test_a_reason_transition_drops_the_departed_detail_keys(self):
+        # A merge write deep-merges maps: without the delete sentinel the
+        # stored document would keep the previous reason's evidence -- a
+        # ``limit`` beside a ``boost`` reason -- and, because the restart
+        # seed reads that stale detail back, pay one write per restart
+        # that still cannot drop it.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence("limit", {"type": "soc", "value": 80})
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(current_claim=LIMIT, charge_current=16))],
+            polls=1,
+            holder=holder,
+        )
+        holder.note_evidence(
+            "boost", {"type": "energy", "value": 10, "remaining": 90}
+        )
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(state_claim=BOOST))],
+            polls=1,
+            db=db,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(writes[1][3]["detail"]["limit"], firestore.DELETE_FIELD)
+        self.assertEqual(db.data["status"]["claims"]["reason"], "boost")
+        # The stored document carries only the new reason's evidence: the
+        # fake's merge honours the sentinel, as the server's does.
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"],
+            {"boost": {"type": "energy", "value": 10, "remaining": 90}},
         )
 
     def test_a_restart_seed_writes_nothing_for_an_identical_answer(self):
