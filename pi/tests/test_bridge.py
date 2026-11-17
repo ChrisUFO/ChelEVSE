@@ -1669,6 +1669,22 @@ class AckCommandLoopTests(unittest.TestCase):
         self.assertEqual(order, [("status", "notifications"), ("commands", "cmd")])
 
 
+class FakeMergeTests(unittest.TestCase):
+    """Pin the fake's ``merge=True`` semantics against the SDK's write mask."""
+
+    def test_an_empty_map_replaces_the_stored_map(self):
+        # The mask names the empty map's own path, so the server clears the
+        # field; modelling it as a no-op would hide a clearing writer's bug.
+        db = FakeDB({"d": {"doc": {"m": {"a": 1}, "keep": 2}}})
+        db.collection("d").document("doc").set({"m": {}}, merge=True)
+        self.assertEqual(db.data["d"]["doc"], {"m": {}, "keep": 2})
+
+    def test_a_non_empty_nested_map_still_deep_merges(self):
+        db = FakeDB({"d": {"doc": {"m": {"a": 1}}}})
+        db.collection("d").document("doc").set({"m": {"b": 2}}, merge=True)
+        self.assertEqual(db.data["d"]["doc"]["m"], {"a": 1, "b": 2})
+
+
 class SyncScheduleTests(unittest.TestCase):
     def test_only_changed_events_are_posted_and_surplus_deleted(self):
         matching = {
