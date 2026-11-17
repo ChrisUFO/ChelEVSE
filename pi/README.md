@@ -807,7 +807,12 @@ firmware's own words (`manual`, `timer`, `limit`, …); `detail` carries the
 evidence for the reason — the retained documents for the claim/limit/boost
 reasons, the schedule loop's active rule id for `schedule` (the key is absent
 when none resolves); `checked_at` is the
-observation that produced the last write, not a heartbeat. Failure transitions
+observation that produced the last write, not a heartbeat. `reachable` is
+endpoint reachability — whether this loop's own `GET /claims/target` answered —
+not the tracker's charger-online verdict: a charger the tracker flags offline
+whose endpoint still answers writes `reachable: true` beside
+`reason: "unknown"` (the offline fact folds into the reason), and only a
+failed fetch writes `reachable: false`. Failure transitions
 write `{reachable: false, source: "http"|"unsupported", reason: "unknown"}` once
 per transition and merge over the last known winners — a 404 (old firmware) or a
 200 that is not the claims contract is `source: "unsupported"`. `status/claims`

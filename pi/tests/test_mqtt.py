@@ -291,6 +291,38 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.source.config_version, 4)
         self.assertEqual(self.source.messages, 0)
 
+    def test_a_raising_config_version_consumer_never_escapes_the_network_thread(
+        self,
+    ):
+        # The same exposure the evidence dispatch guards: the consumer
+        # runs on the paho network thread, an escapee would end
+        # loop_start()'s thread while ``connected`` still reads healthy,
+        # and the retained ``config_version`` redelivers the kill on every
+        # reconnect. The guard keeps the worst case to one log line.
+        logs = []
+
+        def explodes(_value):
+            raise RuntimeError("boom")
+
+        factory = FakeMqttFactory()
+        source = MqttSource(
+            "192.168.0.224",
+            topic="chelevse",
+            on_config_version=explodes,
+            debounce=60,
+            client_factory=factory,
+            log=logs.append,
+        )
+        self.addCleanup(source.stop)
+        source.start()
+        factory.client.connect()
+        # The delivery returns normally, the version moved, and the
+        # failure is on the record.
+        factory.client.deliver("chelevse/config_version", 7)
+        self.assertEqual(source.config_version, 7)
+        self.assertEqual(len(logs), 1)
+        self.assertIn("boom", logs[0])
+
     def test_the_last_will_marks_the_gateway_gone_and_a_reconnect_clears_it(self):
         client = self.connect()
         client.ack_subscribe([0])

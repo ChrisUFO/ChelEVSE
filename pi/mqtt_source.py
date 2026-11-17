@@ -734,4 +734,15 @@ class MqttSource:
             return
         self.config_version = value
         if self.on_config_version is not None:
-            self.on_config_version(value)
+            # Same exposure as the evidence dispatch in ``_on_message``:
+            # this runs on the paho network thread, an escapee would end
+            # loop_start()'s thread while ``connected`` still reads
+            # healthy, and the retained ``config_version`` redelivers the
+            # kill on every reconnect.
+            try:
+                self.on_config_version(value)
+            except Exception as exc:
+                self.log(
+                    f"mqtt config-version callback failed "
+                    f"({exc.__class__.__name__}: {exc})"
+                )

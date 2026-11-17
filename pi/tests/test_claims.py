@@ -477,6 +477,41 @@ class EvidenceParserTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIsNone(claims.parse_boost(value))
 
+    def test_out_of_int64_numbers_never_become_evidence(self):
+        # Firestore stores integers as int64 and rejects an out-of-range
+        # value while building the write, before any RPC: a retained
+        # 20-digit number (a firmware arithmetic slip's UINT64_MAX "no
+        # limit" sentinel, say) must not survive into ``detail`` and freeze
+        # the document's writes. The bound lives in ``as_int``, so every
+        # numeric field of every evidence parser takes it: an optional
+        # field is dropped from the kept subset, and limit's required
+        # ``value`` rejects the whole document.
+        self.assertEqual(
+            claims.parse_claim(
+                {
+                    "state": "active",
+                    "priority": 2**63,
+                    "charge_current": 9223372036854775808,
+                    "max_current": 18446744073709551615,
+                }
+            ),
+            {"state": "active"},
+        )
+        self.assertIsNone(
+            claims.parse_limit({"type": "time", "value": 18446744073709551615})
+        )
+        self.assertEqual(
+            claims.parse_boost(
+                {
+                    "type": "energy",
+                    "value": 10,
+                    "remaining": 18446744073709551615,
+                    "started": "2026-11-17T09:00:00Z",
+                }
+            ),
+            {"type": "energy", "value": 10, "started": "2026-11-17T09:00:00Z"},
+        )
+
 
 class ClaimsObservationsTests(unittest.TestCase):
     def setUp(self):
@@ -942,6 +977,33 @@ class ClaimsLoopTests(unittest.TestCase):
             document["detail"],
             {"boost": {"type": "energy", "value": 10, "remaining": 90}},
         )
+
+    def test_out_of_int64_evidence_does_not_freeze_the_document(self):
+        # The merge write is built client-side: an out-of-int64 number in
+        # ``detail`` makes the SDK reject it before any RPC, and the loop
+        # -- by design -- does not advance past a failed write, so every
+        # later trigger would retry the identical failing write and the
+        # stored reason would freeze for as long as the evidence sits in
+        # ``detail``. The as_int bound keeps the field out of the subset,
+        # so the reason transition still writes.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence(
+            "boost", {"type": "energy", "value": 10, "remaining": 2**63}
+        )
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, target(state_claim=BOOST)),
+                FakeResponse(200, target(state_claim=MANUAL)),
+                FakeResponse(200, target(state_claim=MANUAL)),
+            ],
+            polls=3,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 2, "the reason change must still write")
+        self.assertEqual(writes[0][3]["detail"], {"boost": {"type": "energy", "value": 10}})
+        self.assertEqual(writes[1][3]["reason"], "manual_override")
+        self.assertEqual(writes[1][3]["detail"], {})
 
 
 class ClaimsCadenceTests(unittest.TestCase):

@@ -1067,8 +1067,10 @@ def _escalate_reconcile_failure(
     from this snapshot.
 
     ``claims`` (the run's claims holder) is woken when the offline
-    *transition* is written: ``status/claims`` must stop asserting
-    ``reachable`` over a charger the tracker just flagged offline (#159),
+    *transition* is written: ``status/claims`` must never assert a
+    confident reason over a charger the tracker just flagged offline
+    (#159) -- the fetch that follows fails outright (``reachable: false``)
+    or answers with the offline fact folded in (``reason: "unknown"``) --
     not wait out the safety cadence. A re-apply over an already-offline
     charger is not that transition and wakes nothing: the reconciles that
     follow a landed outage add no claims fact.
@@ -1190,9 +1192,10 @@ def status_loop(
     holder records the reply's ``claims_version`` and the state, then wakes the
     claims loop, which fetches ``/claims/target`` debounced. A charger-offline
     transition landed by this loop's failure branches wakes it the same way,
-    so ``status/claims`` never keeps ``reachable: true`` over a charger the
-    tracker has flagged offline. No new poller: the claims fetch rides this
-    loop's cadence.
+    so ``status/claims`` never asserts a confident reason over a charger the
+    tracker has flagged offline (the offline fact folds into
+    ``reason: "unknown"``; ``reachable`` tracks the endpoint, not the
+    tracker). No new poller: the claims fetch rides this loop's cadence.
     """
     sink = sink or StatusSink(
         db,
@@ -1272,10 +1275,10 @@ def status_loop(
                     # and push once per outage.
                     if sink.apply_offline(_offline_reason(exc)) and claims is not None:
                         # The landed offline transition is claims-relevant
-                        # too: the loop must stop asserting ``reachable``
-                        # over a charger the tracker just flagged offline,
-                        # not wait out the safety cadence (#159). The
-                        # debounce bounds the extra fetch.
+                        # too: the loop must never assert a confident
+                        # reason over a charger the tracker just flagged
+                        # offline, not wait out the safety cadence (#159).
+                        # The debounce bounds the extra fetch.
                         claims.wake()
                 # Only a successful HTTP poll clears the streak, so a
                 # failure still means what it always meant to the watchdog.
