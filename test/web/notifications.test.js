@@ -70,6 +70,13 @@ test('notificationState covers every permission state without asking', () => {
   const initial = notificationState({ supported: true, permission: 'default' });
   assert.equal(initial.kind, 'default');
   assert.equal(initial.action, 'enable');
+  // #158: the card advertises the health alert and the offline notice, not the
+  // start/stop pushes the bridge no longer sends.
+  assert.match(initial.title, /charger alerts/);
+  assert.match(initial.detail, /health alert/);
+  assert.match(initial.detail, /critical fault/);
+  assert.match(initial.detail, /offline/);
+  assert.doesNotMatch(initial.detail, /starts or stops/);
   // Unsupported outranks a blocked permission: there is nothing to unblock.
   assert.equal(notificationState({ supported: false, permission: 'denied' }).kind, 'unsupported');
 });

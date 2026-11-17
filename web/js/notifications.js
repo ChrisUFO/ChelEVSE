@@ -77,9 +77,9 @@ export function notificationState({
   }
   return {
     kind: 'default',
-    title: 'Get charging alerts',
+    title: 'Get charger alerts',
     detail:
-      'Enable notifications to hear when charging starts or stops, even when the app is closed.',
+      'Enable notifications to get a health alert when the charger records a critical fault, plus an offline alert — even when the app is closed.',
     action: 'enable',
   };
 }
