@@ -367,6 +367,45 @@
             </p>
             <p class="feedback" id="feedback" aria-live="polite"></p>
           </section>
+
+          <!-- Charger health (#158): the gateway's own advisory list, projected
+               by the bridge into three facts per entry — its severity, whether
+               the owner acknowledged it, and whether a live signal corroborates
+               it now. The card is deliberately never green: a complete report
+               with no advisories is neutral, not a safety statement, and an open
+               firmware gate makes even silence incomplete. Bridge liveness stays
+               with #banner above — this card adds no second verdict (D8). -->
+          <section
+            class="card-block health-card"
+            id="health-card"
+            style="--i: 4"
+            data-state="unknown"
+            data-tone="muted"
+            aria-labelledby="health-heading"
+          >
+            <div class="block-head">
+              <div class="head-row">
+                <h2 id="health-heading">Health</h2>
+                <span class="section-note" id="health-meta"></span>
+              </div>
+              <p class="block-sub">
+                Advisories the charger records, and whether it reports them now.
+              </p>
+            </div>
+            <!-- A polite live region, the notification card's convention: the
+                 summary changes when the advisory list changes, so a new entry
+                 is announced without interrupting the live figures above. The
+                 title takes focus after a retry (tabindex="-1"). -->
+            <div class="health-copy" role="status" aria-live="polite">
+              <p class="health-title" id="health-title" tabindex="-1">Health unknown</p>
+              <p class="block-sub" id="health-detail">
+                The charger hasn’t reported its health yet.
+              </p>
+            </div>
+            <p class="health-caveat" id="health-caveat" hidden></p>
+            <ul class="health-list" id="health-list" hidden></ul>
+            <button id="health-retry" class="btn small" type="button" hidden>Try again</button>
+          </section>
         </section>
 
         <section

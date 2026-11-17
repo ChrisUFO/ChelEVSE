@@ -27,6 +27,7 @@ let unsubStatus = null;
 let unsubCmds = null;
 let unsubSettings = null;
 let unsubConfig = null;
+let unsubNotifications = null;
 let unsubSchedule = null;
 let unsubRapi = null;
 let unsubPending = null;
@@ -44,6 +45,8 @@ export function startStore(options) {
     onSettingsError,
     onConfig,
     onConfigError,
+    onNotifications,
+    onNotificationsError,
     onSchedule,
     onScheduleError,
     onRapiCommands,
@@ -129,6 +132,15 @@ export function startStore(options) {
     (data) => onConfig && onConfig(data),
     (err) => onConfigError && onConfigError(err),
   );
+  // Charger health (#158): one document, so no query and no index. It is
+  // written only when the advisory projection changes — an absent document is a
+  // real answer ("health unknown"), which is why the callback carries null
+  // through instead of being dropped.
+  unsubNotifications = watch(
+    'status/notifications',
+    (data) => onNotifications && onNotifications(data),
+    (err) => onNotificationsError && onNotificationsError(err),
+  );
   // Schedule metadata travels with the data: a write still queued in the
   // persistent cache across a reload is durable but unacknowledged, and the
   // editor labels it instead of trusting the cached document as server truth.
@@ -169,6 +181,7 @@ export function stopStore() {
     unsubCmds,
     unsubSettings,
     unsubConfig,
+    unsubNotifications,
     unsubSchedule,
     unsubRapi,
     unsubPending,
@@ -179,6 +192,7 @@ export function stopStore() {
     unsubCmds =
     unsubSettings =
     unsubConfig =
+    unsubNotifications =
     unsubSchedule =
     unsubRapi =
     unsubPending =

@@ -2,7 +2,7 @@
 // oriented pause/resume/set-current controls. All rendering and status-specific
 // state lives here so the screen survives tab switches intact.
 
-import { $, focusAfterRetry, setText } from '../ui.js';
+import { $, el, focusAfterRetry, setText } from '../ui.js';
 import {
   elapsedClock,
   fmtK,
@@ -27,6 +27,7 @@ import {
 } from '../cost.js';
 import { retryStore, sendCommand as postCommand } from '../store.js';
 import { currentCapability } from '../current.js';
+import { healthState } from '../health.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -47,6 +48,15 @@ let status = null;
 // both, but only this one owes the owner an error and a way back. Cleared by
 // any snapshot, so recovery needs no other bookkeeping.
 let statusError = false;
+// status/notifications — the charger-health projection, kept apart from the
+// listener's failure for the same reason: an absent document ("health unknown")
+// and a failed read are different facts, and only the second owes a Retry.
+let health = null;
+let healthError = false;
+let healthRetryRequested = false;
+// What the advisory list currently shows, so a snapshot that only moves the
+// document's write stamp does not rebuild the rows under a text selection.
+let healthSignature = null;
 // Set when the owner activates Retry. The render that clears the failure hides
 // the control that had their focus, so that render — and only a render a retry
 // preceded — has to put focus somewhere useful. Any snapshot moves nothing.
@@ -275,6 +285,68 @@ function renderStatus() {
   renderScheduleBadge();
   renderFreshness();
   renderStatusError();
+  renderHealth();
+}
+
+// ---------- charger health (#158) ----------
+//
+// The projection, the ordering, the severity pass-through and every string the
+// card shows come from health.js; this paint is deliberately dumb, so the whole
+// state machine is unit-tested without a DOM. The card adds no staleness verdict
+// of its own — the doc is written only on change, and #banner above already owns
+// bridge liveness (D8).
+
+function healthRow(row) {
+  const item = el('li', 'health-item');
+  item.setAttribute('data-presentation', row.presentation);
+  if (row.severity) item.setAttribute('data-severity', row.severity);
+  const head = el('div', 'health-item-head');
+  head.append(el('span', 'health-name', row.name));
+  head.append(el('span', 'health-chip health-state', row.presentationLabel));
+  if (row.severityLabel) {
+    const severity = el('span', 'health-chip health-severity', row.severityLabel);
+    severity.setAttribute('data-severity', row.severity);
+    head.append(severity);
+  }
+  item.append(head);
+  // The raw id rides the meta line: the owner cross-references it in the
+  // Advanced console and the firmware's own docs, where the friendly name
+  // does not exist.
+  const meta = el('p', 'health-meta');
+  meta.textContent = [row.id, row.seen].filter(Boolean).join(' · ');
+  item.append(meta);
+  return item;
+}
+
+function renderHealth() {
+  const state = healthState({ doc: health, error: healthError, nowMs: Date.now() });
+  const card = $('health-card');
+  card.setAttribute('data-state', state.state);
+  card.setAttribute('data-tone', state.tone);
+  setText($('health-meta'), state.meta);
+  // The summary is a polite live region: written on every render, so a changed
+  // state is a fresh mutation the region can announce, and an unchanged one is
+  // a no-op (setText compares first).
+  setText($('health-title'), state.title);
+  setText($('health-detail'), state.detail);
+  const caveat = $('health-caveat');
+  caveat.hidden = !state.caveat;
+  setText(caveat, state.caveat);
+  const signature = state.advisories
+    .map((row) => `${row.id}|${row.presentation}|${row.severity}|${row.name}|${row.seen}`)
+    .join(';');
+  if (signature !== healthSignature) {
+    healthSignature = signature;
+    $('health-list').replaceChildren(...state.advisories.map(healthRow));
+  }
+  $('health-list').hidden = state.advisories.length === 0;
+  const retry = $('health-retry');
+  retry.hidden = state.reason !== 'error';
+  // Recovery lands on the card the retry refilled, not at the top of the page.
+  if (retry.hidden && healthRetryRequested) {
+    healthRetryRequested = false;
+    focusAfterRetry(retry, 'health-title');
+  }
 }
 
 function setBusy(busy) {
@@ -433,6 +505,13 @@ export function initStatus() {
     setText($('status-error'), '');
     retryStore();
   });
+  // Health's listener shares the one re-subscribe path, and its failure line is
+  // the card's own state — so the click clears the detail for the same reason.
+  $('health-retry').addEventListener('click', () => {
+    healthRetryRequested = true;
+    setText($('health-detail'), '');
+    retryStore();
+  });
 }
 
 export function enterStatus() {
@@ -461,6 +540,10 @@ export function leaveStatus() {
   // from a failure that belonged to the session that just ended.
   statusError = false;
   retryRequested = false;
+  health = null;
+  healthError = false;
+  healthRetryRequested = false;
+  healthSignature = null;
   schedule = null;
   settings = null;
   showTemperature = true;
@@ -525,6 +608,24 @@ export function showStatusError() {
 
 export function showCommands(cmds) {
   renderCommands(cmds);
+}
+
+// status/notifications — the health projection. A null document is a real
+// answer ("health unknown"), never a reason to keep the previous card on screen:
+// the bridge only writes this document when the advisory list changes, and an
+// absent one means it has not reported health at all.
+export function showHealth(data) {
+  health = data && typeof data === 'object' ? data : null;
+  healthError = false;
+  renderHealth();
+}
+
+export function showHealthError() {
+  // A failed listener has no projection left to show, and the card must not go
+  // on presenting the last one as if it were current.
+  health = null;
+  healthError = true;
+  renderHealth();
 }
 
 // settings/current — null until an owner saves a rate. The whole document is

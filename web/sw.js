@@ -12,7 +12,7 @@
 //
 // A rotated push subscription (`pushsubscriptionchange`) is handed to the open
 // pages: only the page can re-acquire an FCM token and re-save it.
-const CACHE = 'chelevse-v84';
+const CACHE = 'chelevse-v85';
 const SHELL = [
   './',
   './index.html',
@@ -22,6 +22,7 @@ const SHELL = [
   './js/auth.js',
   './js/store.js',
   './js/format.js',
+  './js/health.js',
   './js/cost.js',
   './js/push.js',
   './js/history.js',
