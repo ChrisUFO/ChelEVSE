@@ -388,8 +388,8 @@ def alert_plan(advisories, alerted, observed_at):
 
     Pure (no I/O). The caller writes the returned map in the same
     ``status/notifications`` pass that persists the projection, so the push and
-    its dedupe watermark cannot drift; a restart seeds the written map and sends
-    nothing.
+    its dedupe watermark cannot drift; a restart that seeds the written map
+    sends nothing.
 
     One push per advisory the firmware rated ``critical``, that is not
     acknowledged, and whose D3 watermark key is absent. Everything else is
