@@ -89,6 +89,7 @@ from parsing import (  # noqa: E402
 from health import (  # noqa: E402
     CONTENT_FIELDS,
     LiveObservations,
+    alert_plan,
     comparable,
     project,
 )
@@ -1963,6 +1964,7 @@ def notifications_loop(
     transport,
     interval,
     observations,
+    notifier,
     initial_delay=0,
     counter=None,
     clock=time.time,
@@ -1990,9 +1992,18 @@ def notifications_loop(
     faults". A 404 (endpoint absent) is recorded as ``source: "unsupported"``,
     and a 200 that is not the notification contract the same way.
 
-    ``alerted`` (PR-7's alert watermark) and each advisory's ``first_observed``
+    ``alerted`` (the alert watermark, D3) and each advisory's ``first_observed``
     are seeded from the stored document before the first poll, so a restart
-    neither forgets a watermark nor re-stamps an observation.
+    neither forgets a watermark nor re-stamps an observation -- which is exactly
+    why a restart sends no alert for an advisory the previous run already
+    announced.
+
+    This loop is also the push site for that one alert (D9): a newly observed
+    ``critical`` unacknowledged advisory gets one body, and the watermark that
+    silences it is carried by the **same** write pass. The enqueue happens only
+    after that write landed, so a crash, a failed write or a repeat poll can
+    never push twice for one advisory; the worst a crash can do is delay a push
+    to the next successful pass. Watchdog and offline pushes are not this loop's.
     """
     doc = db.collection("status").document("notifications")
     counter = counter or WriteCounter()
@@ -2003,9 +2014,11 @@ def notifications_loop(
         _stop.wait(initial_delay)
 
     def one_tick():
-        nonlocal last_stable, first_observed
+        nonlocal last_stable, first_observed, alerted
 
         checked_at = int(clock())
+        alerts = []
+        watermark = alerted
         try:
             resp = transport.get(
                 f"{host.base}/notifications", auth=auth, timeout=HTTP_TIMEOUT
@@ -2045,6 +2058,15 @@ def notifications_loop(
                     checked_at,
                     alerted,
                 )
+                # The one alert (D9): one body per newly observed critical
+                # unacknowledged advisory, decided from the projection and
+                # written into it, so this pass's write is the watermark's
+                # write. `alert_plan` also prunes keys whose advisory left the
+                # ring, which keeps the map bounded.
+                alerts, watermark = alert_plan(
+                    content["advisories"], content["alerted"], checked_at
+                )
+                content["alerted"] = watermark
         stable = comparable(content)
         if stable == last_stable:
             return
@@ -2058,10 +2080,15 @@ def notifications_loop(
         except Exception as exc:
             # Keep the projection unwritten so the next poll retries it; the
             # loop already read the charger, so this is a stale write, not a
-            # stale observation.
+            # stale observation. The alerts stay unsent with it: their
+            # watermark never landed, and the next poll re-decides them.
             log(f"notifications write failed ({exc.__class__.__name__}: {exc})")
         else:
             last_stable = stable
+            alerted = watermark
+            # Only now, with the watermark durable, may the pushes go out.
+            for alert in alerts:
+                notifier.enqueue(alert["body"])
 
     run_loop("notifications", one_tick, lambda: _stop.wait(interval))
 
@@ -2226,6 +2253,7 @@ def run(
         transport,
         notifications_interval,
         observations,
+        notifier,
     )
     threading.Thread(
         target=notifications_loop,

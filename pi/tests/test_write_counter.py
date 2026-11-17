@@ -659,6 +659,11 @@ class RunWiringTests(unittest.TestCase):
         self.assertIs(status["watchdog"].counter, shared)
         self.assertIs(self.loops()["config_loop"]["counter"], shared)
         self.assertIs(self.loops()["notifications_loop"]["counter"], shared)
+        # The health loop pushes the one alert (#158): it binds the process's
+        # notifier, so a forgotten wiring cannot silently drop it.
+        self.assertIs(
+            self.loops()["notifications_loop"]["notifier"], status["notifier"]
+        )
         self.assertIs(self.command.arguments["counter"], shared)
         self.assertIs(self.command.arguments["sink"], status["sink"])
 
