@@ -784,8 +784,23 @@ export function showSettings(data) {
   renderCost();
 }
 
+// The nodes the fail-closed render takes away: the Hold trigger and anything
+// focusable inside the panel it opens. A focus anywhere else was not displaced
+// by this render.
+function displacedByClose(node) {
+  if (!node) return false;
+  if (node === $('hold') || node === $('amps') || node === $('apply')) return true;
+  const panel = $('hold-panel');
+  return Boolean(panel && typeof panel.contains === 'function' && panel.contains(node));
+}
+
 // status/config — the device name is the header's first consumer.
 export function showConfig(config) {
+  // Focus this render may displace: the close hides the panel and `setBusy`
+  // disables its controls, and the browser drops a focused control the moment
+  // it becomes unfocusable — down to <body>. Recorded before either runs, the
+  // same way `ackFocusId` records a disabled row's focus.
+  const displaced = document.activeElement;
   const raw = config && typeof config.hostname === 'string' ? config.hostname.trim() : '';
   setText($('device-name'), raw || 'ChelEVSE');
   $('device-name').title = raw || 'ChelEVSE';
@@ -796,14 +811,16 @@ export function showConfig(config) {
   } else {
     // Fail closed: the panel loses its capability with `current`, so it closes
     // without handing focus to a control this same path disables. `setBusy`
-    // below does the disabling, and the browser drops a control the moment it
-    // becomes unfocusable — down to <body> — so a focus the close displaced
-    // (or one already nowhere) lands on Stop, the first command that stays
-    // usable. Focus still sitting on a live element is left where it is.
+    // below does the disabling; the redirect after it lands only a focus this
+    // render actually displaced, on a command that stays usable.
     setHoldOpen(false, { focus: false });
   }
   setBusy(commandsBusy);
-  if (!current && focusFellAway()) {
+  // "Any snapshot moves nothing" holds here too: a config event that fails
+  // closed while focus rests on <body> — a listener error, an unreadable doc —
+  // displaced nothing, so it must move nothing. Focus still on a live element
+  // is where the owner put it and is left alone as well.
+  if (displacedByClose(displaced) && focusFellAway()) {
     const pause = $('pause');
     // A command in flight disables Stop too; then the panel is the one live
     // landing place left, the same target the shared Retry policy uses.

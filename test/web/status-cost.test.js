@@ -666,6 +666,34 @@ test('an invalid config closes the panel and lands focus on a live control', () 
   assert.equal(document.activeElement.disabled, false, 'and Stop stays usable');
 });
 
+// The same rule every other snapshot follows: "Any snapshot moves nothing."
+// A fail-closed config that displaces no focus — the owner resting on <body>,
+// as after any click on non-focusable content — must not pull focus onto the
+// command buttons.
+test('a fail-closed config leaves focus where the owner left it', () => {
+  leaveStatus();
+  showConfig({ hostname: 'x', max_current_soft: 16, max_current_hard: 24 });
+  document.activeElement = document.body;
+  const pauseFocus = element('pause').focusCalls;
+  const panelFocus = element('panel-status').focusCalls;
+  showConfig(null);
+  assert.equal(element('hold').disabled, true, 'the fail-closed render still ran');
+  assert.equal(document.activeElement, document.body, 'focus stays where the owner left it');
+  assert.equal(element('pause').focusCalls, pauseFocus, 'and Stop is never focused');
+  assert.equal(element('panel-status').focusCalls, panelFocus, 'nor is the panel');
+
+  // Same with the panel open and focus on the page rather than in the panel.
+  openHold();
+  document.activeElement = document.body;
+  const pauseFocus2 = element('pause').focusCalls;
+  const panelFocus2 = element('panel-status').focusCalls;
+  showConfig({ hostname: 'x', max_current_soft: 25, max_current_hard: 24 });
+  assert.equal(element('hold-panel').hidden, true, 'the panel still closes');
+  assert.equal(document.activeElement, document.body, 'focus still stays put');
+  assert.equal(element('pause').focusCalls, pauseFocus2, 'Stop is never focused');
+  assert.equal(element('panel-status').focusCalls, panelFocus2, 'nor is the panel');
+});
+
 for (const [id, type] of [
   ['resume', 'auto'],
   ['pause', 'stop'],
