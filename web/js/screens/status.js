@@ -472,6 +472,15 @@ function renderHealth() {
   }
 }
 
+// The controls note under the buttons. Its standing line describes the three
+// controls; when they lose their capability that line cannot explain a dimmed
+// Hold, and a `title` on a disabled control is skipped by the keyboard and most
+// AT — so the one reachable place says why instead. The title stays as the
+// mouse affordance.
+const NOTE_DEFAULT =
+  'Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.';
+const NOTE_UNAVAILABLE = 'Hold needs the charger’s limits · open Config to retry.';
+
 // `current` is the capability view the current controls need: null until a
 // status/config snapshot yields a usable pair of limits, so the same test makes
 // them disabled before that first snapshot and after one that fails closed.
@@ -485,6 +494,7 @@ function setBusy(busy) {
   $('hold').title = unavailable
     ? 'Current setting is unavailable until charger limits are verified.'
     : '';
+  setText($('controls-note'), unavailable ? NOTE_UNAVAILABLE : NOTE_DEFAULT);
 }
 
 function renderCommands(cmds) {

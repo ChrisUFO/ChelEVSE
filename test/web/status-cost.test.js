@@ -197,6 +197,28 @@ test('current controls fail closed while stop and auto remain available', () => 
   assert.equal(element('resume').disabled, false);
 });
 
+// A dimmed control explains itself only through `title`, which the keyboard and
+// most AT never reach. The visible note carries the reason instead, and the
+// ordinary description returns with the capability.
+test('the controls note says why the current controls are unavailable', () => {
+  showConfig(null);
+  assert.equal(
+    element('controls-note').textContent,
+    'Hold needs the charger’s limits · open Config to retry.',
+  );
+  assert.equal(
+    element('hold').title,
+    'Current setting is unavailable until charger limits are verified.',
+  );
+
+  showConfig({ max_current_soft: 16, max_current_hard: 24 });
+  assert.equal(
+    element('controls-note').textContent,
+    'Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.',
+  );
+  assert.equal(element('hold').title, '');
+});
+
 test('verified config caps current and status pilot seeds the slider', () => {
   showStatus(snapshot({ pilot: 12 }));
   showConfig({ hostname: 'driveway', max_current_soft: 16, max_current_hard: 80 });
