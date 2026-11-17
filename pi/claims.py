@@ -161,7 +161,7 @@ def _detail(reason, evidence, schedule):
     if reason == "schedule":
         window = schedule if isinstance(schedule, dict) else {}
         rule_id = window.get("active_rule_id")
-        if rule_id is not None:
+        if isinstance(rule_id, str) and rule_id and len(rule_id) <= RULE_ID_MAX:
             detail["schedule_rule_id"] = rule_id
     return detail
 
@@ -324,6 +324,16 @@ def parse_limit(value):
 # magnitude beyond anything the firmware writes.
 BOOST_TYPE_MAX = 32
 BOOST_STARTED_MAX = 64
+
+# The schedule window's rule id is owner-authored (the local
+# ``schedule/current`` document mirrored through the schedule loop), not
+# retained evidence -- but it rides ``detail`` into the same merge write,
+# so it gets the same treatment: an oversized id cannot be allowed to
+# cross Firestore's ~1 MiB write limit, because a claims write that
+# cannot land is retried on every later trigger (the loop never advances
+# past a failed write). Drop-the-key, the boost-cap semantics;
+# ``status/current``'s schedule window keeps carrying the id verbatim.
+RULE_ID_MAX = 64
 
 
 def parse_boost(value):

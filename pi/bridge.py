@@ -2372,18 +2372,29 @@ def claims_loop(
         # previous reason would survive the transition in the stored
         # document -- evidence for a restriction that no longer explains
         # the reason, and (because the seed reads it back) one write per
-        # restart that still cannot drop it. Name each departed key with
-        # the delete sentinel, the only way a merge write drops one entry
-        # of a stored map. A map that empties outright needs none -- an
+        # restart that still cannot drop it. The same holds one level
+        # down: a retained document that keeps its detail key but drops a
+        # subkey (a limit that loses ``auto_release``) would keep the
+        # stale leaf deep-merged for the life of the install. Name each
+        # departed leaf -- top-level key or subkey -- with the delete
+        # sentinel, the only way a merge write drops one entry of a
+        # stored map. A map that empties outright needs none -- an
         # empty map replaces the stored value.
         detail = content.get("detail")
         previous = last_detail if isinstance(last_detail, dict) else None
         if detail and isinstance(previous, dict):
-            departed = {
-                key: firestore.DELETE_FIELD
-                for key in previous
-                if key not in detail
-            }
+            departed = {}
+            for key, old in previous.items():
+                if key not in detail:
+                    departed[key] = firestore.DELETE_FIELD
+                elif isinstance(old, dict) and isinstance(detail[key], dict):
+                    gone = {
+                        sub: firestore.DELETE_FIELD
+                        for sub in old
+                        if sub not in detail[key]
+                    }
+                    if gone:
+                        departed[key] = {**detail[key], **gone}
             if departed:
                 write["detail"] = {**detail, **departed}
         try:

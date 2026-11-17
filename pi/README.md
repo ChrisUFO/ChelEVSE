@@ -777,11 +777,12 @@ its own — it is woken by a trigger the other loops set: every applied `/status
 observation (the reconcile tick, HTTP or heartbeat-forced), a `claims_version`
 move in an observed `/status` reply, a `state`/`state_label` transition
 arriving over either transport, or a charger-offline transition the status loop
-landed (under MQTT that answers a stop — or an outage — within the 5 s debounce
-plus one 1 s tick instead of the 60 s reconcile / 300 s safety cadence — a
-trigger landing inside the window is deferred to its close, never dropped for
-the reconcile). A 300 s safety cadence refreshes the document even if no
-trigger ever fires. One `GET /claims/target` per fetched tick, debounced ≥ 5 s.
+landed (under MQTT that answers a stop — or an outage, once its
+two-failed-reconcile landing fires — within the 5 s debounce plus one 1 s tick
+instead of the 60 s reconcile / 300 s safety cadence — a trigger landing inside
+the window is deferred to its close, never dropped for the reconcile). A 300 s
+safety cadence refreshes the document even if no trigger ever fires. One `GET
+/claims/target` per fetched tick, debounced ≥ 5 s.
 
 **Document.** `status/claims`, merge writes only when the comparable content
 changes (the change test drops the write stamps and the moving boost countdown,
@@ -1280,9 +1281,9 @@ clobber an acknowledgement nor be clobbered by one, and no read-modify-write of
 the `advisories` list is needed. `ack_command` is a bridge-build capability
 fact, not an observation: `true` on every projection this bridge writes, absent
 on documents written by an older bridge that cannot acknowledge over HTTP, so
-the web's ack control gates on `=== true` (fail closed). The map is bounded by
-the firmware's 15 advisory
-ids, so it is never pruned. The write is counted as `health` (no new kind).
+the web's ack control will gate on `=== true` (fail closed; that gate lands
+with PR-4). The map is bounded by the firmware's 15 advisory ids, so it is
+never pruned. The write is counted as `health` (no new kind).
 
 **Ordering: charger → Firestore → command doc.** The acknowledgement is written
 _before_ the command document is settled, so a charger 2xx that cannot reach

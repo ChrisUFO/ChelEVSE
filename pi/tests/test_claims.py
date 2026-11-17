@@ -348,6 +348,25 @@ class EvidenceCanNotChangeTheReasonTests(unittest.TestCase):
         )
         self.assertEqual(derived["detail"], {})
 
+    def test_an_unbounded_rule_id_stays_out_of_the_detail(self):
+        # The rule id is owner-authored, not firmware evidence, but it
+        # rides the same merge write: an oversized or non-string id
+        # cannot be allowed to cross Firestore's ~1 MiB write limit,
+        # because a claims write that cannot land is retried on every
+        # later trigger. Drop-the-key, the boost-cap semantics; the
+        # boundary is pinned on both sides.
+        for rule_id in ("X" * 65, 5, True, ""):
+            derived = claims.derive_reason(
+                claims.normalize_target(target(state_claim=TIMER)),
+                facts(schedule={"in_window": True, "active_rule_id": rule_id}),
+            )
+            self.assertEqual(derived["detail"], {})
+        derived = claims.derive_reason(
+            claims.normalize_target(target(state_claim=TIMER)),
+            facts(schedule={"in_window": True, "active_rule_id": "r" * 64}),
+        )
+        self.assertEqual(derived["detail"], {"schedule_rule_id": "r" * 64})
+
 
 class ProjectAndComparableTests(unittest.TestCase):
     def test_project_shapes_the_document_content(self):
@@ -823,6 +842,51 @@ class ClaimsLoopTests(unittest.TestCase):
             {"boost": {"type": "energy", "value": 10, "remaining": 90}},
         )
 
+    def test_a_dropped_evidence_subkey_is_deleted_from_the_stored_detail(self):
+        # The departure mask is leaf-aware: a retained limit that first
+        # reports ``auto_release`` and later does not keeps the same
+        # top-level detail key, so a top-level-only mask would leave the
+        # stale leaf deep-merged into the stored document -- evidence
+        # that no longer matches the live document, and (because the
+        # seed reads it back) one write per restart that still cannot
+        # drop it.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence(
+            "limit", {"type": "soc", "value": 80, "auto_release": True}
+        )
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(current_claim=LIMIT, charge_current=16))],
+            polls=1,
+            holder=holder,
+        )
+        holder.note_evidence("limit", {"type": "soc", "value": 80})
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(current_claim=LIMIT, charge_current=16))],
+            polls=1,
+            db=db,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 2)
+        # The second write names the departed leaf inside the surviving
+        # document, beside the values that stay.
+        self.assertEqual(
+            writes[1][3]["detail"],
+            {
+                "limit": {
+                    "type": "soc",
+                    "value": 80,
+                    "auto_release": firestore.DELETE_FIELD,
+                }
+            },
+        )
+        # The stored document carries only the live evidence: the fake's
+        # merge honours the leaf sentinel, as the server's does.
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"],
+            {"limit": {"type": "soc", "value": 80}},
+        )
+
     def test_a_reason_transition_across_a_failure_write_still_drops_the_departed_keys(
         self,
     ):
@@ -1014,6 +1078,58 @@ class ClaimsLoopTests(unittest.TestCase):
             on_wait=lambda: setattr(db, "fail_writes", False),
         )
         self.assertEqual(len(self.claims_writes(db)), 1)
+
+    def test_a_failed_write_retries_with_the_same_departed_sentinels(self):
+        # The retry contract's detail half: the departure baseline must
+        # not advance past a failed write. ``last_detail`` updates only
+        # on success, so the retry names the same ``limit: DELETE_FIELD``
+        # sentinel the failed write carried -- a baseline consumed by the
+        # failure would arrive at the retry empty-handed and the old
+        # reason's evidence would deep-merge into the recovered document
+        # beside the new reason's.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence("limit", {"type": "soc", "value": 80})
+        holder.note_evidence(
+            "boost", {"type": "energy", "value": 10, "remaining": 90}
+        )
+        db = FakeDB()
+        waits = []
+
+        def fail_the_boost_write_only():
+            # After the limit write has landed (first tick), fail exactly
+            # the boost-transition write; the third tick's retry succeeds.
+            waits.append(None)
+            db.fail_writes = len(waits) == 1
+
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, target(current_claim=LIMIT, charge_current=16)),
+                FakeResponse(200, target(state_claim=BOOST)),
+                FakeResponse(200, target(state_claim=BOOST)),
+            ],
+            polls=3,
+            db=db,
+            holder=holder,
+            on_wait=fail_the_boost_write_only,
+        )
+        writes = self.claims_writes(db)  # the failed write never lands
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[1][3]["reason"], "boost")
+        self.assertEqual(writes[1][3]["detail"]["limit"], firestore.DELETE_FIELD)
+        self.assertEqual(db.data["status"]["claims"]["reason"], "boost")
+        # The stored document carries only the new reason's evidence.
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"],
+            {"boost": {"type": "energy", "value": 10, "remaining": 90}},
+        )
+        # The counter sees the two successful writes only.
+        self.assertEqual(
+            sum(
+                counter.health_fields()["writes_by_kind"]["claims"]
+                for counter in self.counters
+            ),
+            2,
+        )
 
     def test_the_tracker_offline_fact_derives_unknown(self):
         tracker = bridge.StatusTracker(FakeDB())
