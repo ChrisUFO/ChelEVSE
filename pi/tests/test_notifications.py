@@ -60,6 +60,8 @@ RELAY_CONFIG = {
     "relay_stuck_recovery_count": 0,
 }
 COUNTERS = {"nogndcount": 7, "gfcicount": 0, "stuckcount": 0}
+RECORDED_BODY = "Charger health: No ground recorded — see Health. Not a live fault."
+ACTIVE_BODY = "Charger health: No ground active now — see Health."
 
 
 def payload(notifications=None):
@@ -198,12 +200,19 @@ class NotificationsLoopTests(unittest.TestCase):
     def test_first_seen_acked_and_a_counter_move_each_still_write(self):
         # The stability view drops `last_seen` only: every other projected field
         # is still a change, whatever the payload's `last_seen` did.
-        for field, changed in (
-            ("first_seen", advisory(first_seen=1794177200)),
-            ("acked", advisory(acked=True)),
+        for field, changed, bodies in (
+            # `first_seen` moves the content without moving the key, so the
+            # second write re-decides the alert: only the watermark advance can
+            # keep it silent.
+            ("first_seen", advisory(first_seen=1794177200), [RECORDED_BODY]),
+            # An ack flips the content (and so writes) but is never a new push;
+            # the one alert came from the unacked first pass.
+            ("acked", advisory(acked=True), [RECORDED_BODY]),
         ):
             with self.subTest(field=field):
-                db, _ = self.run_loop(
+                db = FakeDB()
+                notifier = _CountingNotifier(db)
+                self.run_loop(
                     [
                         FakeResponse(200, payload([advisory(last_seen=1794868200)])),
                         FakeResponse(
@@ -212,8 +221,11 @@ class NotificationsLoopTests(unittest.TestCase):
                         ),
                     ],
                     polls=2,
+                    db=db,
+                    notifier=notifier,
                 )
                 self.assertEqual(len(self.health_writes(db)), 2)
+                self.assertEqual(notifier.bodies, bodies)
 
         live = observations()
 
@@ -543,8 +555,8 @@ class _CountingNotifier:
 class AlertTests(unittest.TestCase):
     """The one push (#158, D9): critical, unacknowledged, newly observed only."""
 
-    RECORDED = "Charger health: No ground recorded — see Health. Not a live fault."
-    ACTIVE = "Charger health: No ground active now — see Health."
+    RECORDED = RECORDED_BODY
+    ACTIVE = ACTIVE_BODY
 
     def run_loop(
         self,
@@ -772,6 +784,9 @@ class AlertTests(unittest.TestCase):
         )
 
         self.assertEqual(notifier.bodies, [self.RECORDED])
+        # Nothing was queued from the failed pass: the one push left only after
+        # the retried write had landed.
+        self.assertEqual(notifier.writes_at_enqueue, [1])
         self.assertEqual(self.health_writes(db)[0][3]["alerted"], {"fault.no_ground|7": 1000})
 
     def test_a_failed_poll_keeps_the_watermark_and_pushes_nothing(self):
