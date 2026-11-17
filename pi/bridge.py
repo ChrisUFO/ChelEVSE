@@ -1964,6 +1964,7 @@ def notifications_loop(
     transport,
     interval,
     observations,
+    *,
     notifier,
     initial_delay=0,
     counter=None,
@@ -2270,12 +2271,18 @@ def run(
         transport,
         notifications_interval,
         observations,
-        notifier,
     )
+    # ``notifier`` binds by keyword: it is keyword-only, after the defaulted
+    # parameters, so a future caller adding a positional argument cannot land it
+    # in ``initial_delay`` and lose the first push (the ``config_loop`` lesson).
     threading.Thread(
         target=notifications_loop,
         args=notifications_args,
-        kwargs={"initial_delay": NOTIFICATIONS_INITIAL_DELAY, "counter": counter},
+        kwargs={
+            "notifier": notifier,
+            "initial_delay": NOTIFICATIONS_INITIAL_DELAY,
+            "counter": counter,
+        },
         daemon=True,
     ).start()
     if mqtt_status_args is not None:

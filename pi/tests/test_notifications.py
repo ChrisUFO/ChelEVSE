@@ -120,7 +120,7 @@ class NotificationsLoopTests(unittest.TestCase):
                 transport,
                 300,
                 live or observations(),
-                notifier or _RecordingNotifier(),
+                notifier=notifier or _RecordingNotifier(),
                 counter=bridge.WriteCounter(),
                 clock=clock,
             )
@@ -338,7 +338,7 @@ class FailurePathTests(unittest.TestCase):
                 bridge.ChargerTransport(session),
                 300,
                 live or observations(),
-                _RecordingNotifier(),
+                notifier=_RecordingNotifier(),
                 counter=bridge.WriteCounter(),
                 clock=lambda: 2000.0,
             )
@@ -447,7 +447,7 @@ class SeedTests(unittest.TestCase):
                 bridge.ChargerTransport(session),
                 300,
                 observations(),
-                notifier or _RecordingNotifier(),
+                notifier=notifier or _RecordingNotifier(),
                 counter=bridge.WriteCounter(),
                 clock=lambda: 5000.0,
             )
@@ -592,7 +592,7 @@ class AlertTests(unittest.TestCase):
                 bridge.ChargerTransport(session),
                 300,
                 live or observations(),
-                notifier,
+                notifier=notifier,
                 counter=bridge.WriteCounter(),
                 clock=clock,
             )
