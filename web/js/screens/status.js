@@ -25,9 +25,9 @@ import {
   statusCostLabel,
   statusCostUncovered,
 } from '../cost.js';
-import { retryStore, sendCommand as postCommand } from '../store.js';
+import { retryStore, ackNotification, sendCommand as postCommand } from '../store.js';
 import { currentCapability } from '../current.js';
-import { healthState } from '../health.js';
+import { ackControlState, createAckTracker, healthState } from '../health.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -57,6 +57,23 @@ let healthRetryRequested = false;
 // What the advisory list currently shows, so a snapshot that only moves the
 // document's write stamp does not rebuild the rows under a text selection.
 let healthSignature = null;
+// The last projection the card painted: the control repaint reads the same rows
+// the list was built from.
+let healthView = null;
+// The acknowledgement controls themselves (`id → {area, button, message}`), so a
+// busy row repaints in place instead of rebuilding the list under the pointer.
+let ackNodes = new Map();
+// The acknowledgement state machine (health.js, unit-tested): one click writes
+// one command, the snapshot settles it, and every completion repaints only the
+// row it belongs to.
+const acks = createAckTracker({
+  write: (id) => ackNotification(id),
+  onChange: (id) => {
+    if (!healthView) return;
+    const row = healthView.advisories.find((candidate) => candidate.id === id);
+    if (row) paintAckRow(row);
+  },
+});
 // Set when the owner activates Retry. The render that clears the failure hides
 // the control that had their focus, so that render — and only a render a retry
 // preceded — has to put focus somewhere useful. Any snapshot moves nothing.
@@ -295,7 +312,20 @@ function renderStatus() {
 // state machine is unit-tested without a DOM. The card adds no staleness verdict
 // of its own — the doc is written only on change, and #banner above already owns
 // bridge liveness (D8).
+//
+// The acknowledgement control is the one write this card makes, and it is never
+// optimistic: the click sets a busy state on that row, and the row keeps reading
+// Recorded/Active until the health snapshot lists the advisory as acknowledged
+// (`acks[<id>]`, written by the bridge only after the charger's 2xx — D5 — or
+// the gateway's own `acked` flag at the next 300 s poll). Four things end the
+// wait, and only the first is success: the snapshot, the command settling
+// `failed`, a rejected write, or the bounded wait. A failure paints a short
+// reason and leaves the row exactly as it was.
 
+// One row: the three facts, and — while the advisory is not acknowledged — the
+// control that mutes it. The button is built once per row and repainted in place
+// (`paintAckRow`), so a click never loses the control it started on while the
+// acknowledgement is in flight.
 function healthRow(row) {
   const item = el('li', 'health-item');
   item.setAttribute('data-presentation', row.presentation);
@@ -315,11 +345,48 @@ function healthRow(row) {
   const meta = el('p', 'health-meta');
   meta.textContent = [row.id, row.seen].filter(Boolean).join(' · ');
   item.append(meta);
+  const control = ackControlState(row);
+  if (control.show) {
+    const area = el('div', 'health-ack');
+    const button = el('button', 'btn small', control.label);
+    button.type = 'button';
+    button.setAttribute('aria-label', control.ariaLabel);
+    button.disabled = control.disabled;
+    button.addEventListener('click', () => acks.start(row));
+    // The failure line is its own polite region: it appears while the row stays
+    // exactly where it was — still unacknowledged — so it has to be announced.
+    const message = el('p', 'health-ack-message');
+    message.setAttribute('role', 'status');
+    message.hidden = !control.message;
+    message.textContent = control.message;
+    area.append(button, message);
+    item.append(area);
+    ackNodes.set(row.id, { area, button, message });
+  }
   return item;
+}
+
+// Busy and failure, painted onto the control the row already has. Nothing here
+// can change the row's presentation: only the health snapshot does that.
+function paintAckRow(row) {
+  const nodes = ackNodes.get(row.id);
+  if (!nodes) return;
+  const control = ackControlState(row, acks.state(row.id));
+  nodes.area.hidden = !control.show;
+  nodes.button.textContent = control.label;
+  nodes.button.disabled = control.disabled;
+  nodes.button.setAttribute('aria-label', control.ariaLabel);
+  nodes.message.hidden = !control.message;
+  setText(nodes.message, control.message);
 }
 
 function renderHealth() {
   const state = healthState({ doc: health, error: healthError, nowMs: Date.now() });
+  // The snapshot is the only success signal: an advisory it no longer lists as
+  // acknowledgeable ends whatever acknowledgement was waiting on it, and the
+  // row's own rebuild is what makes it read "Acknowledged".
+  acks.snapshot(state.advisories);
+  healthView = state;
   const card = $('health-card');
   card.setAttribute('data-state', state.state);
   card.setAttribute('data-tone', state.tone);
@@ -337,9 +404,20 @@ function renderHealth() {
     .join(';');
   if (signature !== healthSignature) {
     healthSignature = signature;
+    // A rebuild recreates every row, so a control the owner's focus is on will
+    // not survive it — this is the acknowledgement's own success path, where the
+    // control disappears because the row now reads Acknowledged. Hand the focus
+    // to the card's title (the retry's target, and the summary the live region
+    // announces) rather than letting the browser drop it to <body>.
+    const focusedControl = [...ackNodes.values()].some(
+      (nodes) => nodes.button === document.activeElement,
+    );
+    ackNodes = new Map();
     $('health-list').replaceChildren(...state.advisories.map(healthRow));
+    if (focusedControl) $('health-title').focus({ preventScroll: true });
   }
   $('health-list').hidden = state.advisories.length === 0;
+  for (const row of state.advisories) paintAckRow(row);
   const retry = $('health-retry');
   retry.hidden = state.reason !== 'error';
   // Recovery lands on the card the retry refilled, not at the top of the page.
@@ -544,6 +622,12 @@ export function leaveStatus() {
   healthError = false;
   healthRetryRequested = false;
   healthSignature = null;
+  // Sign-out teardown: no acknowledgement may outlive the session that started
+  // it — its timers are cancelled and the generation bump drops any settlement
+  // still in flight.
+  acks.reset();
+  ackNodes = new Map();
+  healthView = null;
   schedule = null;
   settings = null;
   showTemperature = true;
@@ -608,6 +692,7 @@ export function showStatusError() {
 
 export function showCommands(cmds) {
   renderCommands(cmds);
+  acks.command(cmds);
 }
 
 // status/notifications — the health projection. A null document is a real

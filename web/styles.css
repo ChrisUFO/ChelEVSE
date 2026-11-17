@@ -987,6 +987,31 @@ input[type='range']::-moz-range-thumb {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* The acknowledgement control (#158): one button per unacknowledged row, on its
+   own line so it never competes with the three chips for width. It is the
+   row's one action — `.btn.small` already gives it the 44 px touch target — and
+   its failure line sits under it in place of a toast, so the row itself never
+   moves. */
+.health-ack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 8px;
+}
+.health-ack[hidden] {
+  display: none;
+}
+.health-ack-message {
+  flex: 1 1 160px;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--err);
+}
+.health-ack-message[hidden] {
+  display: none;
+}
 
 /* ---------- shared section bits ---------- */
 .sr-only {
