@@ -653,17 +653,22 @@ function openHold() {
 
 // The fail-closed branch used to close the panel with focus on Hold, then
 // disable Hold: the browser dropped focus to <body>. The close now leaves focus
-// alone unless it displaced it, and then lands it on Stop — the first command
-// that stays live — rather than on a control this same path disables.
-test('an invalid config closes the panel and lands focus on a live control', () => {
+// alone unless it displaced it, and then lands it on the panel the snapshot
+// refilled — the shared Retry policy's target, never a command button a stray
+// Space/Enter would fire.
+test('an invalid config closes the panel and lands focus on the panel', () => {
   openHold();
   assert.equal(document.activeElement, element('amps'), 'the open panel owns focus');
+  const holdFocus = element('hold').focusCalls;
 
   showConfig({ hostname: 'x', max_current_soft: 25, max_current_hard: 24 });
   assert.equal(element('hold-panel').hidden, true);
   assert.equal(element('hold').disabled, true);
-  assert.equal(document.activeElement, element('pause'), 'focus moves to Stop');
-  assert.equal(document.activeElement.disabled, false, 'and Stop stays usable');
+  // The end-state check below cannot see this half: the browser's focus fix-up
+  // and the redirect both end focus somewhere observable either way, so
+  // reverting the no-focus close has to fail here.
+  assert.equal(element('hold').focusCalls, holdFocus, 'the close must not focus Hold');
+  assert.equal(document.activeElement, element('panel-status'), 'focus moves to the panel');
 });
 
 // The same rule every other snapshot follows: "Any snapshot moves nothing."

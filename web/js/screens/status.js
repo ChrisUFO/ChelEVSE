@@ -812,7 +812,7 @@ export function showConfig(config) {
     // Fail closed: the panel loses its capability with `current`, so it closes
     // without handing focus to a control this same path disables. `setBusy`
     // below does the disabling; the redirect after it lands only a focus this
-    // render actually displaced, on a command that stays usable.
+    // render actually displaced.
     setHoldOpen(false, { focus: false });
   }
   setBusy(commandsBusy);
@@ -820,12 +820,12 @@ export function showConfig(config) {
   // closed while focus rests on <body> — a listener error, an unreadable doc —
   // displaced nothing, so it must move nothing. Focus still on a live element
   // is where the owner put it and is left alone as well.
+  //
+  // Recovery lands on the panel, the shared Retry policy's target — never on a
+  // command button: a stray Space/Enter on Stop would send a command the owner
+  // never asked for.
   if (displacedByClose(displaced) && focusFellAway()) {
-    const pause = $('pause');
-    // A command in flight disables Stop too; then the panel is the one live
-    // landing place left, the same target the shared Retry policy uses.
-    const target = pause.disabled ? $('panel-status') : pause;
-    if (target) target.focus({ preventScroll: true });
+    $('panel-status').focus({ preventScroll: true });
   }
 }
 
