@@ -472,6 +472,10 @@ function renderHealth() {
   }
 }
 
+// `current` is the capability view the current controls need: null until a
+// status/config snapshot yields a usable pair of limits, so the same test makes
+// them disabled before that first snapshot and after one that fails closed.
+// Stop and Auto need no limits, so they only follow a command in flight.
 function setBusy(busy) {
   commandsBusy = busy;
   $('pause').disabled = busy;
@@ -566,8 +570,12 @@ function paintSlider() {
   setText($('amps-out'), `${v} A`);
   const min = current ? current.min : 6;
   const max = current ? current.max : 48;
+  // A range whose ends meet has no partial state: min == max means the one
+  // value is the whole track, and a 0% fill would read as "empty" instead of
+  // "fixed at the only value". Every other range keeps the plain ratio.
   const span = Math.max(1, max - min);
-  $('amps').style.setProperty('--fill', `${((v - min) / span) * 100}%`);
+  const fill = max === min ? 100 : ((v - min) * 100) / span;
+  $('amps').style.setProperty('--fill', `${fill}%`);
 }
 
 // Hold reveals the set-current editor; it does not claim a mode is active.
@@ -598,6 +606,11 @@ function stopTicker() {
 // ---------- screen lifecycle ----------
 
 export function initStatus() {
+  // First paint: no status/config snapshot has been applied yet, so the
+  // current controls start disabled rather than looking usable for the round
+  // trip that fills them. `current` is null here, which is the same
+  // fail-closed test an unusable snapshot hits; Stop and Auto stay live.
+  setBusy(false);
   $('pause').addEventListener('click', () => {
     // Hold the clock where it is on screen: the last snapshot still says
     // "charging" until the bridge reports the new state, and extrapolating past
@@ -781,9 +794,22 @@ export function showConfig(config) {
     const next = ampsTouched ? holdAmps : currentSeed();
     setAmps(next);
   } else {
-    setHoldOpen(false);
+    // Fail closed: the panel loses its capability with `current`, so it closes
+    // without handing focus to a control this same path disables. `setBusy`
+    // below does the disabling, and the browser drops a control the moment it
+    // becomes unfocusable — down to <body> — so a focus the close displaced
+    // (or one already nowhere) lands on Stop, the first command that stays
+    // usable. Focus still sitting on a live element is left where it is.
+    setHoldOpen(false, { focus: false });
   }
   setBusy(commandsBusy);
+  if (!current && focusFellAway()) {
+    const pause = $('pause');
+    // A command in flight disables Stop too; then the panel is the one live
+    // landing place left, the same target the shared Retry policy uses.
+    const target = pause.disabled ? $('panel-status') : pause;
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 
 // schedule/current — used only to resolve the active rule's window.
