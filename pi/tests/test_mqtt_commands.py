@@ -339,10 +339,12 @@ class MqttOverrideCommandTests(unittest.TestCase):
     def test_a_hold_above_the_evse_maximum_confirms_at_the_clamp(self):
         # Live 8.2.3: command 32 A on a 16 A EVSE -> pilot 16, max_current 16.
         # The `amps > cap` branch of `_setpoint_matches` is a defensive
-        # predicate, not live-path behaviour: the command loop rejects a hold
-        # above the /config soft limit before any publish (#163, #168), so this
-        # seed is a hand-built status view whose `max_current` sits below the
-        # policy ceiling (a config/status divergence).
+        # predicate, not live-path behaviour: this seed pairs a 32 A command
+        # with a 16 A status cap, and production rejects that command on the
+        # policy before any publish (#163, #168). The only policy-valid route
+        # to the branch is a `/status.max_current` below
+        # `/config.max_current_soft` (firmware derating), which this seed does
+        # not reproduce.
         source, client = make_source()
         source.seed(
             {
@@ -373,10 +375,11 @@ class MqttOverrideCommandTests(unittest.TestCase):
         # The clamp branch reads the shape a real /status reply carries:
         # `max_current` is present there (live: 16 A soft limit while /config
         # spells max_current_soft 16 / max_current_hard 24), so a lost
-        # retained-document broadcast still confirms instead of failing. The
-        # 32 A command is above that soft limit, so the policy would reject it
-        # first: like the test above, this seed stands in for a status whose
-        # `max_current` sits below the config ceiling (#168).
+        # retained-document broadcast still confirms instead of failing. As in
+        # the test above, the 32 A command paired with the 16 A status cap is
+        # rejected on the policy in production; the only policy-valid route to
+        # this branch is a `/status.max_current` below `/config.max_current_soft`
+        # (derating), which this seed does not reproduce (#168).
         source, client = make_source()
         session = FakeSession(
             [
@@ -738,6 +741,41 @@ class CommandLoopTransportTests(unittest.TestCase):
         self.assertNotIn("transport", doc)
         self.assertEqual(client.published, [])
         # Only the policy read reached the charger; the publish path did not.
+        self.assertEqual([call[1] for call in session.calls], [f"{BASE}/config"])
+
+    def test_a_policy_valid_current_settles_acked_over_mqtt(self):
+        # The positive half of the policy on the path the test name claims: a
+        # 10 A hold within the /config soft limit is published once over MQTT
+        # and settles acked with its transport. The publish, the doc's
+        # `transport` and the config-only HTTP call together tie this fixture
+        # to the publish path: with MQTT unselected it cannot pass (#168).
+        source, client = make_source()
+        self.assertTrue(source.ready)
+        ack_override(
+            client, {"state": "active", "charge_current": 10, "max_current": 10}
+        )
+        db = FakeDB({"commands": {"cmd": self.command("set_current", amps=10)}})
+        session = self.run_loop(
+            db,
+            source,
+            session=FakeSession(
+                [FakeResponse(200, {"max_current_soft": 16, "max_current_hard": 24})]
+            ),
+        )
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "acked")
+        self.assertEqual(doc["transport"], "mqtt")
+        self.assertEqual(
+            client.published,
+            [
+                (
+                    f"{TOPIC}/override/set",
+                    '{"state": "active", "charge_current": 10, "max_current": 10}',
+                    1,
+                )
+            ],
+        )
+        # The policy read is the only charger request: no HTTP fallback ran.
         self.assertEqual([call[1] for call in session.calls], [f"{BASE}/config"])
 
     def test_a_failed_status_write_does_not_republish_over_mqtt(self):
