@@ -472,6 +472,19 @@ function renderHealth() {
   }
 }
 
+// The controls note under the buttons. Its standing line describes the three
+// controls; when they lose their capability that line cannot explain a dimmed
+// Hold, and a `title` on a disabled control is skipped by the keyboard and most
+// AT — so the one reachable place says why instead. The title stays as the
+// mouse affordance.
+const NOTE_DEFAULT =
+  'Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.';
+const NOTE_UNAVAILABLE = 'Hold needs the charger’s limits.';
+
+// `current` is the capability view the current controls need: null until a
+// status/config snapshot yields a usable pair of limits, so the same test makes
+// them disabled before that first snapshot and after one that fails closed.
+// Stop and Auto need no limits, so they only follow a command in flight.
 function setBusy(busy) {
   commandsBusy = busy;
   $('pause').disabled = busy;
@@ -481,6 +494,7 @@ function setBusy(busy) {
   $('hold').title = unavailable
     ? 'Current setting is unavailable until charger limits are verified.'
     : '';
+  setText($('controls-note'), unavailable ? NOTE_UNAVAILABLE : NOTE_DEFAULT);
 }
 
 function renderCommands(cmds) {
@@ -566,8 +580,12 @@ function paintSlider() {
   setText($('amps-out'), `${v} A`);
   const min = current ? current.min : 6;
   const max = current ? current.max : 48;
+  // A range whose ends meet has no partial state: min == max means the one
+  // value is the whole track, and a 0% fill would read as "empty" instead of
+  // "fixed at the only value". Every other range keeps the plain ratio.
   const span = Math.max(1, max - min);
-  $('amps').style.setProperty('--fill', `${((v - min) / span) * 100}%`);
+  const fill = max === min ? 100 : ((v - min) * 100) / span;
+  $('amps').style.setProperty('--fill', `${fill}%`);
 }
 
 // Hold reveals the set-current editor; it does not claim a mode is active.
@@ -598,6 +616,11 @@ function stopTicker() {
 // ---------- screen lifecycle ----------
 
 export function initStatus() {
+  // First paint: no status/config snapshot has been applied yet, so the
+  // current controls start disabled rather than looking usable for the round
+  // trip that fills them. `current` is null here, which is the same
+  // fail-closed test an unusable snapshot hits; Stop and Auto stay live.
+  setBusy(false);
   $('pause').addEventListener('click', () => {
     // Hold the clock where it is on screen: the last snapshot still says
     // "charging" until the bridge reports the new state, and extrapolating past
@@ -771,8 +794,23 @@ export function showSettings(data) {
   renderCost();
 }
 
+// The nodes the fail-closed render takes away: the Hold trigger and anything
+// focusable inside the panel it opens. A focus anywhere else was not displaced
+// by this render.
+function displacedByClose(node) {
+  if (!node) return false;
+  if (node === $('hold') || node === $('amps') || node === $('apply')) return true;
+  const panel = $('hold-panel');
+  return Boolean(panel && typeof panel.contains === 'function' && panel.contains(node));
+}
+
 // status/config — the device name is the header's first consumer.
 export function showConfig(config) {
+  // Focus this render may displace: the close hides the panel and `setBusy`
+  // disables its controls, and the browser drops a focused control the moment
+  // it becomes unfocusable — down to <body>. Recorded before either runs, the
+  // same way `ackFocusId` records a disabled row's focus.
+  const displaced = document.activeElement;
   const raw = config && typeof config.hostname === 'string' ? config.hostname.trim() : '';
   setText($('device-name'), raw || 'ChelEVSE');
   $('device-name').title = raw || 'ChelEVSE';
@@ -781,9 +819,24 @@ export function showConfig(config) {
     const next = ampsTouched ? holdAmps : currentSeed();
     setAmps(next);
   } else {
-    setHoldOpen(false);
+    // Fail closed: the panel loses its capability with `current`, so it closes
+    // without handing focus to a control this same path disables. `setBusy`
+    // below does the disabling; the redirect after it lands only a focus this
+    // render actually displaced.
+    setHoldOpen(false, { focus: false });
   }
   setBusy(commandsBusy);
+  // "Any snapshot moves nothing" holds here too: a config event that fails
+  // closed while focus rests on <body> — a listener error, an unreadable doc —
+  // displaced nothing, so it must move nothing. Focus still on a live element
+  // is where the owner put it and is left alone as well.
+  //
+  // Recovery lands on the panel, the shared Retry policy's target — never on a
+  // command button: a stray Space/Enter on Stop would send a command the owner
+  // never asked for.
+  if (displacedByClose(displaced) && focusFellAway()) {
+    $('panel-status').focus({ preventScroll: true });
+  }
 }
 
 // schedule/current — used only to resolve the active rule's window.

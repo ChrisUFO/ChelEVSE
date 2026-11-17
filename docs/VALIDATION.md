@@ -588,3 +588,20 @@ Do them last; each is a single observation plus evidence.
 
 A release is validated when every row is filled in, or the exception is
 recorded with a reason and a follow-up issue.
+
+## Local verification
+
+The suites a change must leave green. Run them from the repository root; none
+needs a deployed stack or a charger.
+
+| Command                                                  | Preconditions                                                                                                                                                 |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node --test test/web/*.test.js`                         | Node only; these tests need no install step.                                                                                                                  |
+| `python -m unittest discover -s pi/tests -p "test_*.py"` | A virtualenv with `pi/requirements.txt` installed — the bridge modules import `firebase_admin`. No credentials and no network: the tests use in-memory fakes. |
+| `npm run test:rules`                                     | `npm ci` (Firebase CLI, SDK and rules-testing package) and Java for the Firestore emulator. Runs against the local `demo-chelevse` project.                   |
+| `npx prettier --check .`                                 | A checkout with the devDependencies installed (`npm ci`). The pre-push hook runs the same check.                                                              |
+
+**Line endings.** `.gitattributes` pins `* text=auto eol=lf`, so every checkout
+must be LF. A Windows tree checked out or written with CRLF fails the
+source-text tests and the pre-push formatting check; `git ls-files --eol` shows
+which files disagree. See #171 and #166.

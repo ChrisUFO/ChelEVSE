@@ -344,12 +344,15 @@
             <div class="modes" role="group" aria-label="Charge mode commands">
               <button class="mode-btn stop" id="pause" type="button">Stop</button>
               <button class="mode-btn auto" id="resume" type="button">Auto</button>
+              <!-- Current control needs a verified status/config snapshot;
+                   disabled until one lands (status.js setBusy owns the state). -->
               <button
                 class="mode-btn hold"
                 id="hold"
                 type="button"
                 aria-expanded="false"
                 aria-controls="hold-panel"
+                disabled
               >
                 Hold
               </button>
@@ -359,10 +362,10 @@
                 <label for="amps">Hold at</label>
                 <output id="amps-out">32 A</output>
               </div>
-              <input type="range" id="amps" min="6" max="48" step="1" value="32" />
-              <button id="apply" type="button">Apply current</button>
+              <input type="range" id="amps" min="6" max="48" step="1" value="32" disabled />
+              <button id="apply" type="button" disabled>Apply current</button>
             </div>
-            <p class="controls-note">
+            <p class="controls-note" id="controls-note">
               Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.
             </p>
             <p class="feedback" id="feedback" aria-live="polite"></p>

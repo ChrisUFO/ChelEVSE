@@ -8,22 +8,41 @@ function stubElement() {
   const classes = new Set();
   const attrs = new Map();
   const listeners = new Map();
-  return {
+  // Style properties the screen writes (the slider's --fill), and the disabled
+  // state the focus assertions depend on.
+  const props = new Map();
+  let disabled = false;
+  const el = {
     classes,
     attrs,
+    props,
     classList: {
       toggle(name, on) {
         if (on) classes.add(name);
         else classes.delete(name);
       },
     },
-    style: { setProperty() {} },
+    style: {
+      setProperty(name, value) {
+        props.set(name, String(value));
+      },
+    },
     textContent: '',
     title: '',
     hidden: false,
     value: '',
     children: [],
     focusCalls: 0,
+    get disabled() {
+      return disabled;
+    },
+    // A browser refuses to focus a disabled control, and drops focus from one
+    // the moment it becomes unfocusable (down to <body>). The screen's focus
+    // choices are exactly about surviving that, so the stub models both.
+    set disabled(next) {
+      disabled = Boolean(next);
+      if (disabled && document.activeElement === el) document.activeElement = document.body;
+    },
     replaceChildren(...nodes) {
       this.children = nodes;
       this.textContent = nodes.map((node) => node.textContent || '').join('');
@@ -46,8 +65,10 @@ function stubElement() {
     },
     focus() {
       this.focusCalls += 1;
+      document.activeElement = this.disabled ? document.body : this;
     },
   };
+  return el;
 }
 
 const elements = new Map();
@@ -63,6 +84,8 @@ function element(id) {
 
 globalThis.document = {
   documentElement: { style: { setProperty() {} } },
+  body: {},
+  activeElement: null,
   getElementById: (id) => element(id),
   createElement: () => stubElement(),
   createTextNode: (text) => ({ textContent: text }),
@@ -74,6 +97,11 @@ process.env.TZ = 'America/Denver';
 
 const { showStatus, showSettings, showConfig, leaveStatus, initStatus } =
   await import('../../web/js/screens/status.js');
+
+// The one init the page runs: it wires the click handlers and paints the
+// controls' pre-snapshot state. Run it before any test, so the first test can
+// assert that paint and the later click fixtures dispatch the real wiring.
+initStatus();
 
 function at(year, month, day, hours, minutes) {
   const ms = new Date(year, month - 1, day, hours, minutes).getTime();
@@ -141,6 +169,25 @@ const HOUR = 60 * 60 * 1000;
 const cost = () => element('fig-cost').textContent;
 const sub = () => element('cost-sub');
 
+// Nothing may look usable before the capability is known: `current` stays null
+// until showConfig applies a status/config snapshot, and the same path enables
+// the controls once that snapshot verifies the limits.
+test('current controls start disabled until a config snapshot is applied', () => {
+  assert.equal(element('hold').disabled, true);
+  assert.equal(element('amps').disabled, true);
+  assert.equal(element('apply').disabled, true);
+  // Stop and Auto need no limits, so first paint leaves them usable.
+  assert.equal(element('pause').disabled, false);
+  assert.equal(element('resume').disabled, false);
+
+  showConfig({ hostname: 'x', max_current_soft: 16, max_current_hard: 24 });
+  assert.equal(element('hold').disabled, false);
+  assert.equal(element('amps').disabled, false);
+  assert.equal(element('apply').disabled, false);
+  assert.equal(element('pause').disabled, false);
+  assert.equal(element('resume').disabled, false);
+});
+
 test('current controls fail closed while stop and auto remain available', () => {
   showConfig(null);
   assert.equal(element('hold').disabled, true);
@@ -148,6 +195,25 @@ test('current controls fail closed while stop and auto remain available', () => 
   assert.equal(element('apply').disabled, true);
   assert.equal(element('pause').disabled, false);
   assert.equal(element('resume').disabled, false);
+});
+
+// A dimmed control explains itself only through `title`, which the keyboard and
+// most AT never reach. The visible note carries the reason instead, and the
+// ordinary description returns with the capability.
+test('the controls note says why the current controls are unavailable', () => {
+  showConfig(null);
+  assert.equal(element('controls-note').textContent, 'Hold needs the charger’s limits.');
+  assert.equal(
+    element('hold').title,
+    'Current setting is unavailable until charger limits are verified.',
+  );
+
+  showConfig({ max_current_soft: 16, max_current_hard: 24 });
+  assert.equal(
+    element('controls-note').textContent,
+    'Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.',
+  );
+  assert.equal(element('hold').title, '');
 });
 
 test('verified config caps current and status pilot seeds the slider', () => {
@@ -163,6 +229,23 @@ test('verified config caps current and status pilot seeds the slider', () => {
 
   showConfig({ max_current_soft: 25, max_current_hard: 24 });
   assert.equal(element('hold').disabled, true);
+});
+
+// A range whose ends meet has one value and no partial state: the track must
+// read as fixed (full), not as 0% — "empty" — which is what a soft limit of
+// 6 A used to paint.
+test('a single-value slider reads as fixed instead of empty', () => {
+  leaveStatus();
+  showStatus(snapshot({ pilot: 6 }));
+  showConfig({ max_current_soft: 6, max_current_hard: 6 });
+  assert.equal(element('amps').min, '6');
+  assert.equal(element('amps').max, '6');
+  assert.equal(element('amps').props.get('--fill'), '100%', 'the only value fills the track');
+
+  // Every other range keeps the plain ratio: 12 A across 6–16 A is 60%.
+  showStatus(snapshot({ pilot: 12 }));
+  showConfig({ max_current_soft: 16, max_current_hard: 16 });
+  assert.equal(element('amps').props.get('--fill'), '60%');
 });
 
 test('the cost tile shows the live window while charging', () => {
@@ -565,9 +648,9 @@ test('flat pricing is unaffected by the stop stamp', () => {
 
 // ---------- Hold closes when Auto/Stop takes the mode ----------
 
-// The click handlers live in initStatus; the stub records them so a test can
-// dispatch the same click the screen wires.
-initStatus();
+// The click handlers live in initStatus, which already ran at the top of the
+// file; the stub records them so a test can dispatch the same click the screen
+// wires.
 
 // A real click focuses its button before the handler runs, so the stub models
 // that — the closing panel must not move focus off the button just pressed.
@@ -586,6 +669,54 @@ function openHold() {
   assert.equal(element('hold-panel').hidden, false);
   assert.equal(element('hold').getAttribute('aria-expanded'), 'true');
 }
+
+// The fail-closed branch used to close the panel with focus on Hold, then
+// disable Hold: the browser dropped focus to <body>. The close now leaves focus
+// alone unless it displaced it, and then lands it on the panel the snapshot
+// refilled — the shared Retry policy's target, never a command button a stray
+// Space/Enter would fire.
+test('an invalid config closes the panel and lands focus on the panel', () => {
+  openHold();
+  assert.equal(document.activeElement, element('amps'), 'the open panel owns focus');
+  const holdFocus = element('hold').focusCalls;
+
+  showConfig({ hostname: 'x', max_current_soft: 25, max_current_hard: 24 });
+  assert.equal(element('hold-panel').hidden, true);
+  assert.equal(element('hold').disabled, true);
+  // The end-state check below cannot see this half: the browser's focus fix-up
+  // and the redirect both end focus somewhere observable either way, so
+  // reverting the no-focus close has to fail here.
+  assert.equal(element('hold').focusCalls, holdFocus, 'the close must not focus Hold');
+  assert.equal(document.activeElement, element('panel-status'), 'focus moves to the panel');
+});
+
+// The same rule every other snapshot follows: "Any snapshot moves nothing."
+// A fail-closed config that displaces no focus — the owner resting on <body>,
+// as after any click on non-focusable content — must not pull focus onto the
+// command buttons.
+test('a fail-closed config leaves focus where the owner left it', () => {
+  leaveStatus();
+  showConfig({ hostname: 'x', max_current_soft: 16, max_current_hard: 24 });
+  document.activeElement = document.body;
+  const pauseFocus = element('pause').focusCalls;
+  const panelFocus = element('panel-status').focusCalls;
+  showConfig(null);
+  assert.equal(element('hold').disabled, true, 'the fail-closed render still ran');
+  assert.equal(document.activeElement, document.body, 'focus stays where the owner left it');
+  assert.equal(element('pause').focusCalls, pauseFocus, 'and Stop is never focused');
+  assert.equal(element('panel-status').focusCalls, panelFocus, 'nor is the panel');
+
+  // Same with the panel open and focus on the page rather than in the panel.
+  openHold();
+  document.activeElement = document.body;
+  const pauseFocus2 = element('pause').focusCalls;
+  const panelFocus2 = element('panel-status').focusCalls;
+  showConfig({ hostname: 'x', max_current_soft: 25, max_current_hard: 24 });
+  assert.equal(element('hold-panel').hidden, true, 'the panel still closes');
+  assert.equal(document.activeElement, document.body, 'focus still stays put');
+  assert.equal(element('pause').focusCalls, pauseFocus2, 'Stop is never focused');
+  assert.equal(element('panel-status').focusCalls, panelFocus2, 'nor is the panel');
+});
 
 for (const [id, type] of [
   ['resume', 'auto'],
