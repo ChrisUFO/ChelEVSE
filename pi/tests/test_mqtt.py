@@ -924,7 +924,7 @@ class MqttWorkerTests(MqttWorkerBase):
         # when the charger starts and stops: both edges arrive while it is
         # busy, and coalescing to the newest snapshot would leave only state=1.
         # The tracker would then never see the start, and the stop could not
-        # finalize the session or notify.
+        # finalize the session.
         self.source.seed(status_payload(state=1, session_energy=0, elapsed=0))
         busy = threading.Event()
         release = threading.Event()

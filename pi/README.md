@@ -4,7 +4,8 @@ A small Python service that bridges the OpenEVSE charger to Firebase: it polls
 the charger's local HTTP API, mirrors status and config into Firestore
 (`status/current`, `status/config`), derives daily energy history and completed
 sessions, mirrors `schedule/current` into the charger's own scheduler, sends FCM
-push notifications on charging/offline transitions, and applies pending
+push notifications for charger-health alerts, outages and watchdog restarts, and
+applies pending
 `commands/*` documents back to the charger, and restarts a charger that stops
 answering (see [Watchdog](#watchdog-charger-health)). Status can also arrive
 over MQTT from a broker on the LAN (see [MQTT status
@@ -216,7 +217,7 @@ parser sees the fields MQTT never publishes (`comm_sent`, `comm_success`,
 null `voltage`, and before the first successful `/status` seed a snapshot is a
 **field update, not an observation**: its fields are merged into
 `status/current` (and `total_energy` still feeds history), but the charging
-state machine, sessions and transition pushes only run once a snapshot is
+state machine and sessions only run once a snapshot is
 complete — it was flushed from a seeded source and carries a numeric `state`.
 Completeness is a **flush-time** fact carried with the snapshot, so a seed that
 lands while it waits in the queue does not promote it. Without that gate a
@@ -231,7 +232,7 @@ seeded-at-flush flag, so the worker never re-reads state that has moved on.
 Telemetry that repeats the queued `state` coalesces to the newest field set, so a
 slow Firestore write never builds a backlog of stale snapshots; a snapshot that
 _changes_ `state` is an edge, though — the start or stop of a charging session
-and its notification — so it is kept in order behind the queued ones rather than
+— so it is kept in order behind the queued ones rather than
 discarded, in the reserved edge capacity. Only a hostile burst of more than 32
 queued transitions drops the oldest, and that loss is logged
 (`mqtt snapshot backlog over capacity …`), never silent.
@@ -427,7 +428,7 @@ is disabled, so no restart allowance is consumed.
 
 **Disabling.** `WATCHDOG_ENABLED=false` stops all probes, restarts, health writes
 and watchdog pushes, and the failure counter is not kept; `status/health` is then
-left exactly as it was (possibly stale). Charging/offline notifications are
+left exactly as it was (possibly stale). Offline and health notifications are
 unaffected.
 
 ## What the bridge writes
