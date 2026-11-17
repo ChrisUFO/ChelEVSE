@@ -382,6 +382,11 @@ test('an advisory id the bridge would refuse is never written', () => {
     'Fault.No_Ground',
     'fault no_ground',
     'fault..no_ground',
+    // Trailing line terminators the rules' end-of-text `$` refuses.
+    'fault.no_ground\n',
+    'fault.no_ground\r',
+    'fault.no_ground\u2028',
+    'fault.no_ground\u2029',
     '',
     'a'.repeat(65),
     null,

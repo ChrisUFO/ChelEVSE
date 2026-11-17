@@ -534,6 +534,13 @@ test('the acknowledgement id grammar is the bridge’s own', () => {
     '1fault',
     '_fault',
     'fault.no-ground',
+    // Trailing line terminators: the bridge's `\Z`, the rules' RE2 `$` and
+    // JavaScript's `$` are all end-of-input, so none of the four may pass
+    // (PR #177 pinned the same set on the bridge/rules side).
+    'fault.no_ground\n',
+    'fault.no_ground\r',
+    'fault.no_ground\u2028',
+    'fault.no_ground\u2029',
     'a'.repeat(ACK_ID_MAX + 1),
     null,
     undefined,

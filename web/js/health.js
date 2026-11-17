@@ -63,6 +63,11 @@ const ORDER = { active: 0, recorded: 1, acknowledged: 2 };
 export const ACK_CONFIRM_MS = 15000;
 // The grammar the bridge validates `notification_id` against, and that
 // firestore.rules accepts: a firmware rule name such as `fault.no_ground`.
+//
+// `$` is end-of-input in JavaScript — unlike Python's, which also stops before a
+// trailing newline (why pi/transport.py anchors with `\Z`) — so this already
+// refuses every trailing line terminator the bridge and the rules refuse. The
+// four cases are pinned in test/web/health.test.js.
 export const ACK_ID_MAX = 64;
 const ACK_ID_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$/;
 
