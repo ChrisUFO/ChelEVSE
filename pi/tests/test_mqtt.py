@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests  # noqa: E402
 
 import bridge  # noqa: E402
+import claims  # noqa: E402
 from fakes import FakeDB, FakeMqttFactory, FakeResponse, FakeSession  # noqa: E402
 from mqtt_source import MqttSource, Snapshot, TOPIC_FIELDS  # noqa: E402
 
@@ -1123,7 +1124,14 @@ class StatusLoopMqttTests(unittest.TestCase):
         return client
 
     def run_loop(
-        self, session, polls, on_wait=None, reconcile=3600, sink=None, interval=10
+        self,
+        session,
+        polls,
+        on_wait=None,
+        reconcile=3600,
+        sink=None,
+        interval=10,
+        claims_holder=None,
     ):
         transport = bridge.ChargerTransport(session)
         with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
@@ -1139,6 +1147,7 @@ class StatusLoopMqttTests(unittest.TestCase):
                 self.source,
                 reconcile,
                 sink,
+                claims=claims_holder,
             )
         return session
 
@@ -1551,6 +1560,27 @@ class StatusLoopMqttTests(unittest.TestCase):
         self.run_loop(session, polls=2, reconcile=0)
         self.assertFalse(self.tracker.charger_online)
         self.assertEqual(self.notifier.bodies, ["Charger offline"])
+
+    def test_an_unconfirmed_outage_does_not_wake_the_claims_loop(self):
+        # One failed reconcile beside a silent idle charger is not an outage:
+        # no transition landed, so the claims loop is not woken either.
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("idle blip")])
+        self.run_loop(session, polls=1, reconcile=0, claims_holder=holder)
+        self.assertFalse(holder.trigger.is_set())
+
+    def test_the_escalated_outage_wakes_the_claims_loop(self):
+        # The MQTT-mode offline decision is the same claims-relevant fact as
+        # the plain fallback's: the transition the escalation writes must
+        # wake the loop, or status/claims keeps reachable: true over a dead
+        # charger for up to the 300 s safety cadence (#159).
+        self.connect()
+        holder = claims.ClaimsObservations()
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        self.run_loop(session, polls=2, reconcile=0, claims_holder=holder)
+        self.assertFalse(self.tracker.charger_online)  # the transition landed
+        self.assertTrue(holder.trigger.is_set())
 
     def test_a_flush_in_the_offline_gap_refuses_the_outage(self):
         # The second failed reconcile has already decided "no snapshot since

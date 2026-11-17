@@ -164,10 +164,13 @@ class StatusSink:
 
         The tracker and document writes happen under the apply lock, so an MQTT
         snapshot arriving now cannot leave the tracker online with an offline
-        document (or a "Charger offline" push racing live data).
+        document (or a "Charger offline" push racing live data). Returns True
+        when the offline *transition* landed (the tracker was not already
+        offline) -- the edge a caller wakes other loops on; a re-apply over an
+        already-offline charger is not one.
         """
         with self._lock:
-            self._apply_offline(reason)
+            return self._apply_offline(reason)
 
     def apply_offline_if_no_snapshot(self, expected_arrival, reason):
         """Flag offline only while no MQTT snapshot arrived since ``expected``.
@@ -192,7 +195,11 @@ class StatusSink:
             return True
 
     def _apply_offline(self, reason):
-        """The offline transition; the caller holds the apply lock."""
+        """The offline transition; the caller holds the apply lock.
+
+        Returns True when this call landed the transition (the tracker was not
+        already offline), False when it re-applied an existing one.
+        """
         edge = self.tracker.charger_online is not False
         if edge:
             self.tracker.charger_online = False
@@ -210,6 +217,7 @@ class StatusSink:
             # Journal and notify once per outage, on the edge.
             log(f"charger offline ({reason})")
             self.notifier.enqueue("Charger offline")
+        return edge
 
     def maybe_seed(self):
         """Retry the stored baseline under the same lock as the applies."""

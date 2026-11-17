@@ -552,7 +552,7 @@ summary once an hour (the first line right after start, proving the counter is
 alive):
 
 ```
-firestore writes: 318 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 claims=1 fcm=0)
+firestore writes: 319 in 24h (status=276 history=12 session=1 config=0 command=27 health=2 claims=1 fcm=0)
 ```
 
 `status/health` carries the same counts as `writes_24h` and `writes_by_kind`
@@ -775,12 +775,13 @@ fact beside its own fetch, so a stale arbitration never reads as current.
 **Cadence.** The claims loop (`bridge.claims_loop`) has no polling interval of
 its own — it is woken by a trigger the other loops set: every applied `/status`
 observation (the reconcile tick, HTTP or heartbeat-forced), a `claims_version`
-move in an observed `/status` reply, or a `state`/`state_label` transition
-arriving over either transport (under MQTT that answers a stop within the 5 s
-debounce instead of the 60 s reconcile — a trigger landing inside the window is
-deferred to its close, never dropped for the reconcile). A 300 s safety cadence
-refreshes the document even if no trigger ever fires. One `GET /claims/target`
-per fetched tick, debounced ≥ 5 s.
+move in an observed `/status` reply, a `state`/`state_label` transition
+arriving over either transport, or a charger-offline transition the status loop
+landed (under MQTT that answers a stop — or an outage — within the 5 s debounce
+plus one 1 s tick instead of the 60 s reconcile / 300 s safety cadence — a
+trigger landing inside the window is deferred to its close, never dropped for
+the reconcile). A 300 s safety cadence refreshes the document even if no
+trigger ever fires. One `GET /claims/target` per fetched tick, debounced ≥ 5 s.
 
 **Document.** `status/claims`, merge writes only when the comparable content
 changes (the change test drops the write stamps and the moving boost countdown,
@@ -804,8 +805,8 @@ redelivery costs **zero** writes — the same economy as
 `winner_state`/`winner_current` name the gateway's winning clients in the
 firmware's own words (`manual`, `timer`, `limit`, …); `detail` carries the
 evidence for the reason — the retained documents for the claim/limit/boost
-reasons, the schedule loop's active rule id for `schedule` (empty when none
-parses); `checked_at` is the
+reasons, the schedule loop's active rule id for `schedule` (the key is absent
+when none resolves); `checked_at` is the
 observation that produced the last write, not a heartbeat. Failure transitions
 write `{reachable: false, source: "http"|"unsupported", reason: "unknown"}` once
 per transition and merge over the last known winners — a 404 (old firmware) or a

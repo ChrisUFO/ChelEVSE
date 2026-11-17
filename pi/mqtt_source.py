@@ -146,7 +146,15 @@ def _default_client_factory(client_id):
 
 
 def _decode(payload):
-    """Topic payload -> JSON value (number/bool/None), or the raw string."""
+    """Topic payload -> JSON value (number/bool/None), or the raw string.
+
+    A payload nested past the interpreter's recursion limit raises
+    ``RecursionError``, not ``ValueError`` -- and this runs on the paho
+    network thread, where an escapee would end ``loop_start()``'s thread
+    while ``connected`` still reads healthy, silently degrading the bridge
+    to the HTTP reconcile. Both are the same "not decodable" fact, so both
+    take the raw-string fallback.
+    """
     if isinstance(payload, bytes):
         text = payload.decode("utf-8", "replace")
     else:
@@ -154,7 +162,7 @@ def _decode(payload):
     text = text.strip()
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return text
 
 

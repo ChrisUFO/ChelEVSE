@@ -1054,7 +1054,9 @@ def _snapshot_arrived(mqtt, mqtt_ready, mqtt_snapshots):
     return mqtt_ready and mqtt.snapshots != mqtt_snapshots
 
 
-def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
+def _escalate_reconcile_failure(
+    sink, mqtt_snapshots, reconcile_failures, exc, claims=None
+):
     """Escalate one failed reconcile with no snapshot since the last one.
 
     The charger may be idle (normal) or gone, and one failed poll cannot
@@ -1063,6 +1065,11 @@ def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
     comparison and the offline decision — the same proof of life a fresh
     snapshot is, so the caller refuses the outage and restarts the streak
     from this snapshot.
+
+    ``claims`` (the run's claims holder) is woken when the offline
+    transition is written: ``status/claims`` must stop asserting
+    ``reachable`` over a charger the tracker just flagged offline (#159),
+    not wait out the safety cadence.
     """
     if reconcile_failures < MQTT_OUTAGE_FAILURES:
         log(
@@ -1071,6 +1078,8 @@ def _escalate_reconcile_failure(sink, mqtt_snapshots, reconcile_failures, exc):
         )
         return False
     if sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc)):
+        if claims is not None:
+            claims.wake()
         return False
     log(
         f"status reconcile failed ({_offline_reason(exc)}); "
@@ -1174,8 +1183,11 @@ def status_loop(
     ``claims`` is the run's :class:`claims.ClaimsObservations`: every applied
     HTTP observation is a reconcile tick for the claims loop too (#159) -- the
     holder records the reply's ``claims_version`` and the state, then wakes the
-    claims loop, which fetches ``/claims/target`` debounced. No new poller: the
-    claims fetch rides this loop's cadence.
+    claims loop, which fetches ``/claims/target`` debounced. A charger-offline
+    transition landed by this loop's failure branches wakes it the same way,
+    so ``status/claims`` never keeps ``reachable: true`` over a charger the
+    tracker has flagged offline. No new poller: the claims fetch rides this
+    loop's cadence.
     """
     sink = sink or StatusSink(
         db,
@@ -1244,7 +1256,7 @@ def status_loop(
                 elif mqtt_ready:
                     reconcile_failures += 1
                     if _escalate_reconcile_failure(
-                        sink, mqtt_snapshots, reconcile_failures, exc
+                        sink, mqtt_snapshots, reconcile_failures, exc, claims
                     ):
                         mqtt_snapshots = mqtt.snapshots
                         reconcile_failures = 0
@@ -1253,7 +1265,13 @@ def status_loop(
                     # through the sink lock, so the tracker and document
                     # writes cannot interleave with an MQTT apply. Journal
                     # and push once per outage.
-                    sink.apply_offline(_offline_reason(exc))
+                    if sink.apply_offline(_offline_reason(exc)) and claims is not None:
+                        # The landed offline transition is claims-relevant
+                        # too: the loop must stop asserting ``reachable``
+                        # over a charger the tracker just flagged offline,
+                        # not wait out the safety cadence (#159). The
+                        # debounce bounds the extra fetch.
+                        claims.wake()
                 # Only a successful HTTP poll clears the streak, so a
                 # failure still means what it always meant to the watchdog.
                 watchdog.observe_failure(tracker.state == 3)
@@ -2239,8 +2257,9 @@ def claims_loop(
     One pass is one ``GET /claims/target``. The loop has no polling cadence
     of its own: ``observations.trigger`` is set by the loops that already
     observed something claims-relevant (every applied ``/status`` observation
-    is a reconcile tick; a ``claims_version`` move or a ``state``/
-    ``state_label`` transition is an immediate tick), with ``debounce`` the
+    is a reconcile tick; a ``claims_version`` move, a ``state``/
+    ``state_label`` transition, or a charger-offline transition the status
+    loop landed is an immediate tick), with ``debounce`` the
     floor between two fetches and ``interval`` the safety cadence that
     refreshes the document even if no trigger ever fires. Not a second
     poller: one loop, woken by the trigger flag. The debounce is

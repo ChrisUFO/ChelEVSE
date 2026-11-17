@@ -376,6 +376,32 @@ class ProjectAndComparableTests(unittest.TestCase):
         # ...but the change test does not see it.
         self.assertEqual(claims.comparable(running), claims.comparable(ticked))
 
+    def test_comparable_still_sees_a_changed_limit_value(self):
+        # The positive direction of the countdown drop: a limit document
+        # genuinely republished at a new value is a content change, not a
+        # value that moves on its own -- the change test must see it.
+        first = claims.project(
+            claims.normalize_target(target(current_claim=LIMIT, charge_current=16)),
+            facts(evidence={"limit": {"type": "soc", "value": 80}}),
+        )
+        second = claims.project(
+            claims.normalize_target(target(current_claim=LIMIT, charge_current=16)),
+            facts(evidence={"limit": {"type": "soc", "value": 60}}),
+        )
+        self.assertNotEqual(claims.comparable(first), claims.comparable(second))
+
+    def test_comparable_still_sees_a_changed_boost_type(self):
+        # Only the countdown is dropped; the boost's own content is not.
+        first = claims.project(
+            claims.normalize_target(target(state_claim=BOOST)),
+            facts(evidence={"boost": {"type": "energy", "value": 10}}),
+        )
+        second = claims.project(
+            claims.normalize_target(target(state_claim=BOOST)),
+            facts(evidence={"boost": {"type": "time", "value": 10}}),
+        )
+        self.assertNotEqual(claims.comparable(first), claims.comparable(second))
+
 
 class EvidenceParserTests(unittest.TestCase):
     def test_the_claim_document(self):
@@ -650,6 +676,33 @@ class ClaimsLoopTests(unittest.TestCase):
             db.data["status"]["claims"]["detail"]["boost"]["remaining"], 90
         )
 
+    def test_a_changed_retained_evidence_value_writes_again(self):
+        # The positive direction of the identical-redelivery test: the limit
+        # document genuinely changed (80 -> 60) while the target stayed
+        # identical, and detail is part of the change test -- the next
+        # fetched tick writes the new value instead of freezing the first.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence("limit", {"type": "soc", "value": 80})
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(current_claim=LIMIT, charge_current=16))],
+            polls=1,
+            holder=holder,
+        )
+        holder.note_evidence("limit", {"type": "soc", "value": 60})
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(current_claim=LIMIT, charge_current=16))],
+            polls=1,
+            db=db,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 2)
+        self.assertEqual(writes[1][3]["reason"], "current_limit")
+        self.assertEqual(writes[1][3]["detail"]["limit"]["value"], 60)
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"]["limit"]["value"], 60
+        )
+
     def test_a_restart_seed_writes_nothing_for_an_identical_answer(self):
         stored = {
             "reachable": True,
@@ -843,18 +896,26 @@ class ClaimsCadenceTests(unittest.TestCase):
 
 
 class StatusLoopTriggerTests(unittest.TestCase):
-    def run_status(self, payloads, holder, polls=None):
+    def run_status(self, payloads, holder, polls=None, on_wait=None):
+        """Drive ``status_loop`` over payloads (dicts) or failures (exceptions)."""
         db = FakeDB()
-        session = FakeSession([FakeResponse(200, item) for item in payloads])
+        session = FakeSession(
+            [
+                item if isinstance(item, Exception) else FakeResponse(200, item)
+                for item in payloads
+            ]
+        )
+        tracker = bridge.StatusTracker(db)
         notifier = _RecordingNotifier()
-        with mock.patch.object(bridge, "_stop", _StopAfter(polls or len(payloads))):
+        stop = _StopAfter(polls or len(payloads), on_wait)
+        with mock.patch.object(bridge, "_stop", stop):
             bridge.status_loop(
                 db,
                 _host(),
                 None,
                 bridge.ChargerTransport(session),
                 10,
-                bridge.StatusTracker(db),
+                tracker,
                 notifier,
                 bridge.Watchdog(
                     db,
@@ -866,7 +927,7 @@ class StatusLoopTriggerTests(unittest.TestCase):
                 ),
                 claims=holder,
             )
-        return db, session
+        return db, session, tracker
 
     def test_every_applied_observation_feeds_the_holder_and_wakes_the_loop(self):
         holder = claims.ClaimsObservations()
@@ -885,6 +946,33 @@ class StatusLoopTriggerTests(unittest.TestCase):
         self.run_status([_status_payload(state=1)], holder)
         self.assertIsNone(holder.snapshot()["claims_version"])
         self.assertTrue(holder.trigger.is_set())
+
+    def test_a_landed_offline_transition_wakes_the_loop(self):
+        # The failure direction of the applied-observation wake: an outage
+        # that lands charger_online: false is exactly when a user asks "why
+        # isn't it charging?", and the loop must answer reachable: false
+        # within the debounce, not hold a stale reason for the 300 s safety
+        # cadence (#159). Nothing else wakes it: no observation applied.
+        holder = claims.ClaimsObservations()
+        db, _, tracker = self.run_status(
+            [requests.ConnectionError("gone")], holder
+        )
+        self.assertFalse(tracker.charger_online)  # the transition landed
+        self.assertFalse(db.data["status"]["current"]["charger_online"])
+        self.assertTrue(holder.trigger.is_set(), "the offline edge is a wake")
+
+    def test_a_refailure_over_an_offline_charger_does_not_rewake(self):
+        # Only the landed transition is claims-relevant: a charger already
+        # flagged offline adds no new fact, so the re-failures that follow
+        # leave the trigger alone (the on_wait clear stands in for the
+        # claims loop consuming each tick's trigger).
+        holder = claims.ClaimsObservations()
+        self.run_status(
+            [requests.ConnectionError("gone")] * 3,
+            holder,
+            on_wait=holder.trigger.clear,
+        )
+        self.assertFalse(holder.trigger.is_set())
 
 
 class MqttWorkerTriggerTests(unittest.TestCase):
@@ -1030,6 +1118,17 @@ class EvidenceIngestionTests(unittest.TestCase):
         self.client.deliver("chelevse/claim", "not json at all")
         self.client.deliver("chelevse/limit", '{"type":"bogus","value":1}')
         self.client.deliver("chelevse/boost", "{}")
+        self.assertEqual(self.holder.snapshot()["evidence"], {})
+
+    def test_a_deeply_nested_payload_is_not_a_thread_killer(self):
+        # json.loads raises RecursionError -- not ValueError -- past the
+        # interpreter's recursion limit, and the decode runs on the paho
+        # network thread: an escapee would end loop_start()'s thread while
+        # ``connected`` still reads healthy, silently degrading the bridge
+        # to the HTTP reconcile. The raw-string fallback keeps the delivery
+        # a non-event: not a claim document, so no evidence.
+        deep = "[" * 50000 + "]" * 50000
+        self.client.deliver("chelevse/claim", deep)
         self.assertEqual(self.holder.snapshot()["evidence"], {})
 
     def test_evidence_is_never_status(self):

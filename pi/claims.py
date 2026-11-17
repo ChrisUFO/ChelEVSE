@@ -108,10 +108,14 @@ def normalize_target(payload):
 
     Returns None when the payload is not the claims contract at all -- not an
     object, no ``properties`` object -- which the caller records as
-    unsupported rather than guessing. Everything inside is tolerated: an
-    absent ``claims`` object is no winners, an absent key never wins, an
-    unknown state word is None, ids and currents coerce to int or None, and a
-    non-boolean ``auto_release`` is None.
+    unsupported rather than guessing. ``claims`` is the part the derivation
+    reads; the ``properties`` subset alongside it is deliberate shape-pinning,
+    not projection: the state/currents/auto_release are validated (coerced or
+    None) here and nowhere else, so a contract drift surfaces at
+    normalization, once -- nothing downstream reads them. Everything inside
+    is tolerated: an absent ``claims`` object is no winners, an absent key
+    never wins, an unknown state word is None, ids and currents coerce to
+    int or None, and a non-boolean ``auto_release`` is None.
     """
     if not isinstance(payload, dict):
         return None
