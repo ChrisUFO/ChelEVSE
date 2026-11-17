@@ -260,6 +260,17 @@ test('index.html ships the line inside the hero badge row', () => {
   );
 });
 
+test('styles.css keeps a colour consumer for every painted tone', () => {
+  // The paint tests above assert the attribute, but a stub element never
+  // resolves CSS: deleting the rules would pass the suite while the tone
+  // distinction went invisible — the exact gap the harden stage once found
+  // and closed (918fb22). The consumers are pinned from source, the same
+  // convention as the index.html placement pin above.
+  const source = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+  assert.match(source, /#claims-line\[data-tone='warn'\] \{\s*color: var\(--warn\);/);
+  assert.match(source, /#claims-line\[data-tone='accent'\] \{\s*color: var\(--accent\);/);
+});
+
 test('the claims document is one subscription through the shared watch path', () => {
   // The same pin as the health document (test/web/store.test.js): one
   // `watch` call — no query, no index — so the denied() gate stays in one
