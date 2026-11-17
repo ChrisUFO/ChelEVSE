@@ -197,8 +197,11 @@ export function createAckTracker({
     // One click, one command. Returns false for a row that offers no control and
     // for a repeated click while an attempt is in flight — the control is
     // disabled too, but a held Enter or a synthetic click must not write twice.
+    // The id is re-checked here so nothing outside the projection can hand the
+    // store an advisory name it would refuse.
     start(row) {
       if (!row || row.canAcknowledge !== true) return false;
+      if (!acknowledgeableId(row.id)) return false;
       if (inFlight.has(row.id)) return false;
       if (typeof write !== 'function') return false;
       const id = row.id;

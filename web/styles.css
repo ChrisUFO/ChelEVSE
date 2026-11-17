@@ -846,8 +846,8 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* ---------- health (#158) ---------- */
-/* The card that will carry the advisory list, its severities and — from PR-6 —
-   the acknowledgement control. Its marker is toned by health.js: a live
+/* The card that carries the advisory list, its severities and the
+   acknowledgement control. Its marker is toned by health.js: a live
    corroborated condition takes its severity, an incomplete check takes amber,
    and everything else (including a complete report with no advisories) stays
    muted. Green is never used: this card reports what the charger recorded, and
