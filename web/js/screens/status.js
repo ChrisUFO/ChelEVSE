@@ -168,67 +168,6 @@ function renderStatusError() {
 // device's clock is behind Firestore and cannot rewind on schedule-only merges.
 // A stop command freezes the displayed value until the charger reports a new
 // status write, so the clock cannot overshoot and then snap back.
-// ---------- charger health (#158) ----------
-//
-// The projection, the ordering, the severity pass-through and every string the
-// card shows come from health.js; this paint is deliberately dumb, so the whole
-// state machine is unit-tested without a DOM. The card adds no staleness verdict
-// of its own — the doc is written only on change, and #banner above already owns
-// bridge liveness (D8).
-
-function healthRow(row) {
-  const item = el('li', 'health-item');
-  item.setAttribute('data-presentation', row.presentation);
-  if (row.severity) item.setAttribute('data-severity', row.severity);
-  const head = el('div', 'health-item-head');
-  head.append(el('span', 'health-name', row.name));
-  head.append(el('span', 'health-chip health-state', row.presentationLabel));
-  if (row.severityLabel) {
-    const severity = el('span', 'health-chip health-severity', row.severityLabel);
-    severity.setAttribute('data-severity', row.severity);
-    head.append(severity);
-  }
-  item.append(head);
-  // The raw id rides the meta line: the owner cross-references it in the
-  // Advanced console and the firmware's own docs, where the friendly name
-  // does not exist.
-  const meta = el('p', 'health-meta');
-  meta.textContent = [row.id, row.seen].filter(Boolean).join(' · ');
-  item.append(meta);
-  return item;
-}
-
-function renderHealth() {
-  const state = healthState({ doc: health, error: healthError, nowMs: Date.now() });
-  const card = $('health-card');
-  card.setAttribute('data-state', state.state);
-  card.setAttribute('data-tone', state.tone);
-  setText($('health-meta'), state.meta);
-  // The summary is a polite live region: written on every render, so a changed
-  // state is a fresh mutation the region can announce, and an unchanged one is
-  // a no-op (setText compares first).
-  setText($('health-title'), state.title);
-  setText($('health-detail'), state.detail);
-  const caveat = $('health-caveat');
-  caveat.hidden = !state.caveat;
-  setText(caveat, state.caveat);
-  const signature = state.advisories
-    .map((row) => `${row.id}|${row.presentation}|${row.severity}|${row.name}|${row.seen}`)
-    .join(';');
-  if (signature !== healthSignature) {
-    healthSignature = signature;
-    $('health-list').replaceChildren(...state.advisories.map(healthRow));
-  }
-  $('health-list').hidden = state.advisories.length === 0;
-  const retry = $('health-retry');
-  retry.hidden = state.reason !== 'error';
-  // Recovery lands on the card the retry refilled, not at the top of the page.
-  if (retry.hidden && healthRetryRequested) {
-    healthRetryRequested = false;
-    focusAfterRetry(retry, 'health-title');
-  }
-}
-
 function renderElapsed() {
   const step = elapsedClock(clock, status, Date.now());
   clock = step.clock;
@@ -347,6 +286,67 @@ function renderStatus() {
   renderFreshness();
   renderStatusError();
   renderHealth();
+}
+
+// ---------- charger health (#158) ----------
+//
+// The projection, the ordering, the severity pass-through and every string the
+// card shows come from health.js; this paint is deliberately dumb, so the whole
+// state machine is unit-tested without a DOM. The card adds no staleness verdict
+// of its own — the doc is written only on change, and #banner above already owns
+// bridge liveness (D8).
+
+function healthRow(row) {
+  const item = el('li', 'health-item');
+  item.setAttribute('data-presentation', row.presentation);
+  if (row.severity) item.setAttribute('data-severity', row.severity);
+  const head = el('div', 'health-item-head');
+  head.append(el('span', 'health-name', row.name));
+  head.append(el('span', 'health-chip health-state', row.presentationLabel));
+  if (row.severityLabel) {
+    const severity = el('span', 'health-chip health-severity', row.severityLabel);
+    severity.setAttribute('data-severity', row.severity);
+    head.append(severity);
+  }
+  item.append(head);
+  // The raw id rides the meta line: the owner cross-references it in the
+  // Advanced console and the firmware's own docs, where the friendly name
+  // does not exist.
+  const meta = el('p', 'health-meta');
+  meta.textContent = [row.id, row.seen].filter(Boolean).join(' · ');
+  item.append(meta);
+  return item;
+}
+
+function renderHealth() {
+  const state = healthState({ doc: health, error: healthError, nowMs: Date.now() });
+  const card = $('health-card');
+  card.setAttribute('data-state', state.state);
+  card.setAttribute('data-tone', state.tone);
+  setText($('health-meta'), state.meta);
+  // The summary is a polite live region: written on every render, so a changed
+  // state is a fresh mutation the region can announce, and an unchanged one is
+  // a no-op (setText compares first).
+  setText($('health-title'), state.title);
+  setText($('health-detail'), state.detail);
+  const caveat = $('health-caveat');
+  caveat.hidden = !state.caveat;
+  setText(caveat, state.caveat);
+  const signature = state.advisories
+    .map((row) => `${row.id}|${row.presentation}|${row.severity}|${row.name}|${row.seen}`)
+    .join(';');
+  if (signature !== healthSignature) {
+    healthSignature = signature;
+    $('health-list').replaceChildren(...state.advisories.map(healthRow));
+  }
+  $('health-list').hidden = state.advisories.length === 0;
+  const retry = $('health-retry');
+  retry.hidden = state.reason !== 'error';
+  // Recovery lands on the card the retry refilled, not at the top of the page.
+  if (retry.hidden && healthRetryRequested) {
+    healthRetryRequested = false;
+    focusAfterRetry(retry, 'health-title');
+  }
 }
 
 function setBusy(busy) {
