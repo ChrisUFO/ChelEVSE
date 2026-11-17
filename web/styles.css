@@ -845,6 +845,174 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
+/* ---------- health (#158) ---------- */
+/* The card that carries the advisory list, its severities and the
+   acknowledgement control. Its marker is toned by health.js: a live
+   corroborated condition takes its severity, an incomplete check takes amber,
+   and everything else (including a complete report with no advisories) stays
+   muted. Green is never used: this card reports what the charger recorded, and
+   the app has no basis for a safety verdict. */
+.health-card {
+  margin-top: 20px;
+}
+.health-copy {
+  display: grid;
+  gap: 4px;
+}
+.health-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.health-title::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--faint);
+  vertical-align: 1px;
+}
+.health-card[data-tone='warn'] .health-title {
+  color: var(--warn);
+}
+.health-card[data-tone='warn'] .health-title::before {
+  background: var(--warn);
+}
+.health-card[data-tone='err'] .health-title {
+  color: var(--err);
+}
+.health-card[data-tone='err'] .health-title::before {
+  background: var(--err);
+}
+.health-card[data-tone='accent'] .health-title {
+  color: var(--accent);
+}
+.health-card[data-tone='accent'] .health-title::before {
+  background: var(--accent);
+}
+/* An open gate beside a listed advisory: a caveat, not a verdict — the amber
+   rule keeps it visible without competing with the list it qualifies. */
+.health-caveat {
+  margin: 10px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid color-mix(in oklab, var(--warn) 55%, var(--line));
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.health-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+/* One row per advisory: the left rule carries liveness (a live condition wears
+   its severity's colour and a tint; a record stays neutral), while the chips
+   carry the three facts. Severity colour never depends on liveness, so a
+   recorded critical still reads "Critical". */
+.health-item {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+.health-item[data-presentation='recorded'] {
+  border-left-color: color-mix(in oklab, var(--muted) 55%, var(--line));
+}
+.health-item[data-presentation='active'][data-severity='critical'] {
+  border-left-color: var(--err);
+  background: color-mix(in oklab, var(--err) 7%, var(--bg));
+}
+.health-item[data-presentation='active'][data-severity='warning'] {
+  border-left-color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 7%, var(--bg));
+}
+.health-item[data-presentation='active'][data-severity='info'] {
+  border-left-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 7%, var(--bg));
+}
+.health-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.health-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.health-item[data-presentation='acknowledged'] .health-name {
+  color: var(--muted);
+}
+.health-chip {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.health-item[data-presentation='active'] .health-state {
+  border-color: color-mix(in oklab, var(--text) 32%, var(--line));
+  color: var(--text);
+}
+.health-severity[data-severity='critical'] {
+  border-color: color-mix(in oklab, var(--err) 45%, var(--line));
+  color: var(--err);
+}
+.health-severity[data-severity='warning'] {
+  border-color: color-mix(in oklab, var(--warn) 45%, var(--line));
+  color: var(--warn);
+}
+.health-severity[data-severity='info'] {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+/* The raw id and the record's date, in the mono face: the id is what the
+   Advanced console and the firmware docs call it (`overflow-wrap` keeps a long
+   `wear.*` id inside a 390 px card). */
+.health-meta {
+  margin: 5px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+/* The acknowledgement control (#158): one button per unacknowledged row, on its
+   own line so it never competes with the three chips for width. It is the
+   row's one action — `.btn.small` already gives it the 44 px touch target — and
+   its failure line sits under it in place of a toast, so the row itself never
+   moves. */
+.health-ack {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 8px;
+}
+.health-ack[hidden] {
+  display: none;
+}
+.health-ack-message {
+  flex: 1 1 160px;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--err);
+}
+.health-ack-message[hidden] {
+  display: none;
+}
+
 /* ---------- shared section bits ---------- */
 .sr-only {
   position: absolute;
@@ -884,6 +1052,7 @@ input[type='range']::-moz-range-thumb {
 /* Informational notes added with the Config/Advanced screens need AA contrast
    on the dark surfaces; the older History/Schedule counters keep --faint. */
 #config-updated,
+#health-meta,
 .advanced-note {
   color: var(--muted);
 }
@@ -922,7 +1091,8 @@ input[type='range']::-moz-range-thumb {
    the inline styles in index.html are animation stagger only. */
 #schedule-retry,
 #config-retry,
-#rapi-log-retry {
+#rapi-log-retry,
+#health-retry {
   margin-top: 8px;
 }
 

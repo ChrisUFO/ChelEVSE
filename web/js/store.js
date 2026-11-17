@@ -22,11 +22,13 @@ import {
 } from './firebase.js';
 import { settingsPayload } from './settings.js';
 import { SESSION_LIMIT } from './history.js';
+import { acknowledgeableId } from './health.js';
 
 let unsubStatus = null;
 let unsubCmds = null;
 let unsubSettings = null;
 let unsubConfig = null;
+let unsubNotifications = null;
 let unsubSchedule = null;
 let unsubRapi = null;
 let unsubPending = null;
@@ -44,6 +46,8 @@ export function startStore(options) {
     onSettingsError,
     onConfig,
     onConfigError,
+    onNotifications,
+    onNotificationsError,
     onSchedule,
     onScheduleError,
     onRapiCommands,
@@ -129,6 +133,15 @@ export function startStore(options) {
     (data) => onConfig && onConfig(data),
     (err) => onConfigError && onConfigError(err),
   );
+  // Charger health (#158): one document, so no query and no index. It is
+  // written only when the advisory projection changes — an absent document is a
+  // real answer ("health unknown"), which is why the callback carries null
+  // through instead of being dropped.
+  unsubNotifications = watch(
+    'status/notifications',
+    (data) => onNotifications && onNotifications(data),
+    (err) => onNotificationsError && onNotificationsError(err),
+  );
   // Schedule metadata travels with the data: a write still queued in the
   // persistent cache across a reload is durable but unacknowledged, and the
   // editor labels it instead of trusting the cached document as server truth.
@@ -169,6 +182,7 @@ export function stopStore() {
     unsubCmds,
     unsubSettings,
     unsubConfig,
+    unsubNotifications,
     unsubSchedule,
     unsubRapi,
     unsubPending,
@@ -179,6 +193,7 @@ export function stopStore() {
     unsubCmds =
     unsubSettings =
     unsubConfig =
+    unsubNotifications =
     unsubSchedule =
     unsubRapi =
     unsubPending =
@@ -205,6 +220,19 @@ export function sendCommand(payload) {
     status: 'pending',
     created_at: serverTimestamp(),
   });
+}
+
+// Acknowledge one charger-health advisory (#158). The id is checked against the
+// firmware's rule-name grammar before anything is written — the bridge and
+// firestore.rules both refuse a document outside it, so sending one would only
+// leave a failed command nobody can act on. Everything else is the one command
+// path: `sendCommand` stamps `status: pending` and `created_at`, and the bridge
+// POSTs the charger and settles the document. `write` is the test seam the
+// history range read already uses (`fetchSessionsInRange`): the call under test
+// is the shipping one.
+export function ackNotification(id, write = sendCommand) {
+  if (!acknowledgeableId(id)) throw new Error('invalid notification id');
+  return write({ type: 'ack_notification', notification_id: id });
 }
 
 // The Advanced console's scrollback depth.

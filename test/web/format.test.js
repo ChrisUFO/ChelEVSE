@@ -6,6 +6,7 @@ import {
   IDLE_STALE_AFTER_MS,
   STALE_AFTER_MS,
   STATES,
+  dateLabel,
   displayElapsed,
   elapsedClock,
   fmtCost,
@@ -70,6 +71,25 @@ test('relTime switches units at the boundaries', () => {
   assert.equal(relTime(-5000), '0 s ago');
   assert.equal(relTime(Number.POSITIVE_INFINITY), '—');
   assert.equal(relTime(Number.NaN), '—');
+});
+
+test('dateLabel labels epoch seconds locally, with the year only when needed', () => {
+  // The health document stamps its times as epoch seconds (never a Firestore
+  // Timestamp), and the label is built from local parts so it agrees with the
+  // History screen's dates.
+  const local = (year, month, day, hour = 12) => new Date(year, month - 1, day, hour).getTime();
+  const now = local(2026, 11, 16);
+  const seconds = (ms) => Math.floor(ms / 1000);
+  assert.equal(dateLabel(seconds(local(2026, 11, 8)), now), '8 Nov');
+  // Both edges of the local day still name that day.
+  assert.equal(dateLabel(seconds(local(2026, 11, 8, 0)), now), '8 Nov');
+  assert.equal(dateLabel(seconds(local(2026, 11, 8, 23)), now), '8 Nov');
+  assert.equal(dateLabel(seconds(local(2025, 12, 30)), now), '30 Dec 2025');
+  assert.equal(dateLabel(seconds(local(2026, 12, 31)), now), '31 Dec');
+  // Anything that is not a positive epoch second has no label at all.
+  for (const bad of [null, undefined, 0, -5, Number.NaN, 'yesterday', {}, []]) {
+    assert.equal(dateLabel(bad, now), '');
+  }
 });
 
 test('stateFor falls back to the unknown state', () => {

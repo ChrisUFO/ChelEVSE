@@ -55,6 +55,24 @@ export function relTime(ms) {
   return `${Math.floor(s / 86400)} d ago`;
 }
 
+// Local calendar label for an epoch-seconds value — the way the bridge stamps
+// the health document's `checked_at` and `first_seen` (never a Firestore
+// Timestamp). "8 Nov", with the year only when it is not the current one, so a
+// record keeps its place in time without the noise of a full date. The month
+// vocabulary matches the History labels, so one screen's dates read like
+// another's. Returns '' for anything that is not a positive epoch second.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+export function dateLabel(epochSeconds, nowMs = Date.now()) {
+  const seconds = typeof epochSeconds === 'number' ? epochSeconds : Number.NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return '';
+  const now = new Date(nowMs);
+  const base = `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+  return date.getFullYear() === now.getFullYear() ? base : `${base} ${date.getFullYear()}`;
+}
+
 // Session clock: always HH:MM:SS, with hours allowed to grow past two digits.
 export function formatElapsed(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return '—';

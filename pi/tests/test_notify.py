@@ -35,7 +35,7 @@ class NotifyEdgeTests(unittest.TestCase):
         db.fail_reads = True
         send = mock.Mock()
         with mock.patch.object(bridge.messaging, "send", send):
-            bridge.notify(db, "Charging started")
+            bridge.notify(db, "Charger offline")
         send.assert_not_called()
         self.assertEqual(
             self.logs, ["fcm token read failed (RuntimeError: read failed)"]
@@ -54,7 +54,7 @@ class NotifyEdgeTests(unittest.TestCase):
         with mock.patch.object(
             bridge.messaging, "send", side_effect=fake_send
         ) as send:
-            bridge.notify(db, "Charging stopped")
+            bridge.notify(db, "Charger offline")
         # One attempt per token: a failed push is log-and-drop, never retried.
         self.assertEqual(send.call_count, 2)
         self.assertEqual(self.logs, ["fcm send failed (TimeoutError: fcm timeout)"])
@@ -71,7 +71,7 @@ class NotifyEdgeTests(unittest.TestCase):
                 counter = bridge.WriteCounter()
                 self.logs.clear()
                 with mock.patch.object(bridge.messaging, "send", side_effect=gone):
-                    bridge.notify(db, "Charging stopped", counter=counter)
+                    bridge.notify(db, "Charger offline", counter=counter)
                 self.assertEqual(set(db.data["fcmTokens"]), set())
                 # The prune is a billed write (issue #96).
                 self.assertEqual(counter.snapshot()[1]["fcm"], 1)
@@ -86,7 +86,7 @@ class NotifyEdgeTests(unittest.TestCase):
             "send",
             side_effect=bridge.messaging.UnregisteredError("gone"),
         ):
-            bridge.notify(db, "Charging stopped", counter=counter)
+            bridge.notify(db, "Charger offline", counter=counter)
         (failure,) = counter.note_failure.call_args.args
         self.assertIsInstance(failure, RuntimeError)
         self.assertEqual(

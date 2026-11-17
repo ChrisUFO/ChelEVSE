@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   TOKEN_TIMEOUT_MESSAGE,
@@ -70,8 +71,24 @@ test('notificationState covers every permission state without asking', () => {
   const initial = notificationState({ supported: true, permission: 'default' });
   assert.equal(initial.kind, 'default');
   assert.equal(initial.action, 'enable');
+  // #158: the card advertises the health alert and the offline notice, not the
+  // start/stop pushes the bridge no longer sends.
+  assert.match(initial.title, /charger alerts/);
+  assert.match(initial.detail, /health alert/);
+  assert.match(initial.detail, /critical fault/);
+  assert.match(initial.detail, /offline/);
+  assert.doesNotMatch(initial.detail, /starts or stops/);
   // Unsupported outranks a blocked permission: there is nothing to unblock.
   assert.equal(notificationState({ supported: false, permission: 'denied' }).kind, 'unsupported');
+});
+
+test('index.html advertises the health and offline alerts, not charge edges', () => {
+  // The card's sub-line is static markup, so a revert to the old "Charging
+  // started, stopped…" copy would pass every behavioural test: pin it from
+  // source (the health-card convention).
+  const source = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+  assert.match(source, /Critical charger-health and charger-offline alerts\./);
+  assert.doesNotMatch(source, /Charging (started|stopped)/);
 });
 
 test('vapidConfigured ignores the template placeholder and empty values', () => {

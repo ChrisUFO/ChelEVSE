@@ -30,18 +30,24 @@ export function el(tag, className, text) {
 // Retry), so the policy cannot drift per screen.
 export function focusAfterRetry(retry, panelId) {
   if (!retry || !retry.hidden) return;
-  const active = document.activeElement;
-  const fellAway =
+  if (!focusFellAway()) return;
+  const panel = $(panelId);
+  if (panel) panel.focus({ preventScroll: true });
+}
+
+// The "focus fell away" test itself, shared by every caller that has to decide
+// whether focus is still where the owner put it: nowhere, on <body>/<html>, or
+// on a node the document no longer contains.
+export function focusFellAway(active = document.activeElement) {
+  return (
     !active ||
     active === document.body ||
     active === document.documentElement ||
     // A node the document no longer contains is not somewhere the owner chose to
     // be. A DOM without `contains` cannot prove detachment, so there the
     // narrower <body>/<html> rule stands.
-    (typeof document.contains === 'function' && !document.contains(active));
-  if (!fellAway) return;
-  const panel = $(panelId);
-  if (panel) panel.focus({ preventScroll: true });
+    (typeof document.contains === 'function' && !document.contains(active))
+  );
 }
 
 // Toggle one weekday in an editor's `days` array: the result keeps the array

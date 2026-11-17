@@ -7,6 +7,7 @@ that charging state, `/status.flags` and the firmware's `sticky` flag never
 change what the advisory means.
 """
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -415,6 +416,95 @@ class ProjectionTests(unittest.TestCase):
     def test_the_alert_watermark_is_carried_through_unchanged(self):
         content, _ = project([], facts(), alerted={"fault.no_ground|7": 1000})
         self.assertEqual(content["alerted"], {"fault.no_ground|7": 1000})
+
+
+class AlertPlanTests(unittest.TestCase):
+    """The pure alert decision (#158, D9): one push per new critical key.
+
+    The end-to-end paths live in ``test_notifications``; these pin the decision
+    itself -- names, the per-pass loop, the pruned map and the two tolerances a
+    hand-edited or older document can present.
+    """
+
+    WEB_HEALTH = Path(__file__).resolve().parents[2] / "web" / "js" / "health.js"
+
+    @staticmethod
+    def entry(
+        advisory_id="fault.no_ground",
+        token=7,
+        severity="critical",
+        acked=False,
+        classification="historical",
+    ):
+        return {
+            "id": advisory_id,
+            "severity": severity,
+            "acked": acked,
+            "classification": classification,
+            "counter_token": token,
+        }
+
+    def test_rule_name_falls_back_to_the_id_tail(self):
+        # An id outside the firmware's 15-entry table still names itself in the
+        # body rather than pushing an empty name.
+        self.assertEqual(health.rule_name("fault.new_gateway_rule"), "New gateway rule")
+        self.assertEqual(health.rule_name("weird"), "Weird")
+        self.assertEqual(health.rule_name(None), "Advisory")
+        self.assertEqual(health.rule_name(""), "Advisory")
+
+    def test_a_non_fault_critical_rule_reads_from_its_own_name(self):
+        self.assertEqual(
+            health.alert_body(self.entry("thermal.high_temp")),
+            "Charger health: High temperature recorded — see Health. Not a live fault.",
+        )
+        self.assertEqual(
+            health.alert_body(self.entry("thermal.high_temp", classification="active")),
+            "Charger health: High temperature active now — see Health.",
+        )
+
+    def test_a_two_advisory_pass_alerts_both_and_keeps_both_keys(self):
+        # The first-boot burst: one pass, one body per advisory, both keys
+        # carried (a per-pass loop that stopped at the first would fail here).
+        messages, watermark = health.alert_plan(
+            [self.entry(), self.entry("fault.gfci_tripped", token=0)], {}, 1000
+        )
+        self.assertEqual(
+            [message["key"] for message in messages],
+            ["fault.no_ground|7", "fault.gfci_tripped|0"],
+        )
+        self.assertEqual(
+            watermark, {"fault.no_ground|7": 1000, "fault.gfci_tripped|0": 1000}
+        )
+
+    def test_an_unknown_token_is_deferred_and_prunes_nothing(self):
+        # A state without a stable key cannot be deduped: silence now, and the
+        # map this pass cannot re-derive is carried forward whole.
+        seeded = {"fault.no_ground|7": 500}
+        messages, watermark = health.alert_plan([self.entry(token=None)], seeded, 1000)
+        self.assertEqual(messages, [])
+        self.assertEqual(watermark, seeded)
+
+    def test_a_known_key_is_silent_and_a_departed_key_is_pruned(self):
+        messages, watermark = health.alert_plan(
+            [self.entry()], {"fault.no_ground|7": 500, "fault.stuck_relay|1": 500}, 1000
+        )
+        self.assertEqual(messages, [])
+        self.assertEqual(watermark, {"fault.no_ground|7": 500})
+
+    def test_non_dict_inputs_are_tolerated(self):
+        self.assertEqual(health.alert_plan(None, "not-a-map", 1000), ([], {}))
+        self.assertEqual(health.alert_plan([None, 3, "x"], None, 1000), ([], {}))
+
+    def test_the_rule_name_table_matches_the_web_health_card(self):
+        # Two runtimes, one table (the firmware's bounded 15 ids): a drift would
+        # make a push name a condition differently from the Health card.
+        source = self.WEB_HEALTH.read_text(encoding="utf-8")
+        block = source.split("const NAMES = {", 1)[1].split("};", 1)[0]
+        names = {
+            match.group(1): match.group(2)
+            for match in re.finditer(r"'([^']+)': '([^']+)',", block)
+        }
+        self.assertEqual(names, health.RULE_NAMES)
 
 
 class ParsingTests(unittest.TestCase):

@@ -1397,12 +1397,6 @@ class MergeIntervalTests(unittest.TestCase):
 
 
 class FcmTests(unittest.TestCase):
-    def test_transition_edges(self):
-        self.assertIsNone(bridge._transition_body(False, False, True))
-        self.assertEqual(bridge._transition_body(True, False, True), "Charging started")
-        self.assertEqual(bridge._transition_body(True, True, False), "Charging stopped")
-        self.assertIsNone(bridge._transition_body(True, True, True))
-
     def test_notify_prunes_dead_tokens_and_keeps_good_ones(self):
         db = FakeDB(
             {
@@ -1422,16 +1416,16 @@ class FcmTests(unittest.TestCase):
             return "ok"
 
         with mock.patch.object(bridge.messaging, "send", side_effect=fake_send):
-            bridge.notify(db, "Charging started")
+            bridge.notify(db, "Charger offline")
         self.assertEqual(set(db.data["fcmTokens"]), {"good"})
 
     def test_notifier_sends_on_a_background_worker(self):
         db = FakeDB()
         notifier = bridge.Notifier(db)
         with mock.patch.object(bridge, "notify") as fake_notify:
-            notifier.enqueue("Charging stopped")
+            notifier.enqueue("Charger offline")
             notifier.queue.join()
-        fake_notify.assert_called_once_with(db, "Charging stopped", counter=notifier.counter)
+        fake_notify.assert_called_once_with(db, "Charger offline", counter=notifier.counter)
 
 
 class CommandTests(unittest.TestCase):
@@ -1554,6 +1548,175 @@ class CommandLoopTests(unittest.TestCase):
         self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
         self.assertFalse([line for line in logs if "command transport" in line], logs)
         self.assertFalse([line for line in logs if "mqtt unavailable" in line], logs)
+
+
+class AckCommandLoopTests(unittest.TestCase):
+    """A successful ack command writes ``status/notifications.acks`` (D5)."""
+
+    def command(self, notification_id="fault.no_ground"):
+        return {
+            "status": "pending",
+            "type": "ack_notification",
+            "notification_id": notification_id,
+            "created_at": datetime.now(UTC),
+        }
+
+    def run_loop(self, db, responses, polls=1, on_wait=None):
+        session = FakeSession(responses)
+        transport = bridge.ChargerTransport(session)
+        with mock.patch.object(bridge, "_stop", _StopAfter(polls, on_wait)):
+            bridge.command_loop(db, _host(), None, transport, 0)
+        return session
+
+    def test_a_successful_ack_posts_once_and_records_the_ack(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        session = self.run_loop(db, [FakeResponse(200, text="acknowledged")])
+
+        self.assertEqual(len(session.calls), 1)
+        method, url, kwargs = session.calls[0]
+        self.assertEqual(method, "post")
+        self.assertEqual(url, "http://charger/notifications/ack")
+        self.assertEqual(kwargs["params"], {"id": "fault.no_ground"})
+
+        acks = db.data["status"]["notifications"]["acks"]
+        self.assertEqual(list(acks), ["fault.no_ground"])
+        self.assertIsInstance(acks["fault.no_ground"], int)
+        self.assertLess(abs(acks["fault.no_ground"] - int(time.time())), 60)
+
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "acked")
+        self.assertEqual(doc["transport"], "http")
+
+    def test_the_ack_write_is_a_nested_merge_that_spares_the_health_doc(self):
+        seed = {
+            "reachable": True,
+            "source": "http",
+            "gates": {"settings_known": True, "relay_health_known": True},
+            "counters": {"nogndcount": 7, "gfcicount": 0, "stuckcount": 0},
+            "advisories": [{"id": "fault.no_ground", "acked": False}],
+            "alerted": {"fault.no_ground:7": 1794177153},
+            "checked_at": 1794177153,
+            "updated_at": "stamp",
+        }
+        db = FakeDB(
+            {
+                "commands": {"cmd": self.command()},
+                "status": {"notifications": dict(seed)},
+            }
+        )
+        self.run_loop(db, [FakeResponse(200)])
+
+        stored = db.data["status"]["notifications"]
+        self.assertEqual(list(stored["acks"]), ["fault.no_ground"])
+        for key, value in seed.items():
+            self.assertEqual(stored[key], value, key)
+        # A nested merge, not a list-element write: one set(), merge=True.
+        write = [w for w in db.writes if w[1] == "status"][0]
+        self.assertEqual(write[0], "set")
+        self.assertEqual(list(write[3]), ["acks"])
+        self.assertEqual(list(write[3]["acks"]), ["fault.no_ground"])
+        self.assertIs(write[4], True)
+
+    def test_two_acks_for_different_ids_both_survive(self):
+        # Firestore deep-merges a nested map, so successive acks accumulate:
+        # the second write must add to the first, not replace the acks map.
+        first = self.command("fault.no_ground")
+        second = self.command("wear.relay_cold_open")
+        second["created_at"] = first["created_at"] + timedelta(seconds=1)
+        db = FakeDB({"commands": {"one": first, "two": second}})
+
+        session = self.run_loop(db, [FakeResponse(200), FakeResponse(200)])
+
+        self.assertEqual(
+            [call[2]["params"]["id"] for call in session.calls],
+            ["fault.no_ground", "wear.relay_cold_open"],
+        )
+        acks = db.data["status"]["notifications"]["acks"]
+        self.assertEqual(set(acks), {"fault.no_ground", "wear.relay_cold_open"})
+        self.assertTrue(all(isinstance(value, int) for value in acks.values()))
+        self.assertEqual(
+            len([w for w in db.writes if w[1] == "status"]),
+            2,
+        )
+
+    def test_a_404_writes_no_ack_and_fails_with_the_reason(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        self.run_loop(db, [FakeResponse(404)])
+
+        self.assertNotIn("status", db.data)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertEqual(doc["error"], "no such active notification")
+        self.assertEqual(doc["transport"], "http")
+
+    def test_a_400_writes_no_ack_and_fails_with_the_reason(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        self.run_loop(db, [FakeResponse(400)])
+        self.assertNotIn("status", db.data)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertEqual(doc["error"], "id required")
+
+    def test_a_405_writes_no_ack_and_fails_with_the_reason(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        self.run_loop(db, [FakeResponse(405, text="Method Not Allowed")])
+        self.assertNotIn("status", db.data)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertIn("acknowledgement refused", doc["error"])
+
+    def test_an_unreachable_charger_writes_no_ack(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        self.run_loop(db, [requests.ConnectionError("unreachable")])
+        self.assertNotIn("status", db.data)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertIn("ConnectionError", doc["error"])
+
+    def test_a_malformed_id_fails_before_any_request_or_write(self):
+        db = FakeDB({"commands": {"cmd": self.command("Fault.No_Ground")}})
+        session = self.run_loop(db, [])
+        self.assertEqual(session.calls, [])
+        self.assertNotIn("status", db.data)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertEqual(doc["error"], "invalid notification id")
+        self.assertNotIn("transport", doc)
+
+    def test_a_failed_ack_write_still_settles_the_command_acked(self):
+        # The charger acknowledged; only Firestore failed. The command is acked
+        # and the next poll repairs the visible state from the gateway's flag.
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        db.fail_writes = True
+
+        def recover():
+            db.fail_writes = False
+
+        session = self.run_loop(db, [FakeResponse(200)], polls=2, on_wait=recover)
+        self.assertEqual([call[0] for call in session.calls], ["post"])
+        self.assertEqual(db.data["commands"]["cmd"]["status"], "acked")
+
+    def test_the_ack_write_precedes_the_command_settlement(self):
+        db = FakeDB({"commands": {"cmd": self.command()}})
+        self.run_loop(db, [FakeResponse(200)])
+        order = [(w[1], w[2]) for w in db.writes]
+        self.assertEqual(order, [("status", "notifications"), ("commands", "cmd")])
+
+
+class FakeMergeTests(unittest.TestCase):
+    """Pin the fake's ``merge=True`` semantics against the SDK's write mask."""
+
+    def test_an_empty_map_replaces_the_stored_map(self):
+        # The mask names the empty map's own path, so the server clears the
+        # field; modelling it as a no-op would hide a clearing writer's bug.
+        db = FakeDB({"d": {"doc": {"m": {"a": 1}, "keep": 2}}})
+        db.collection("d").document("doc").set({"m": {}}, merge=True)
+        self.assertEqual(db.data["d"]["doc"], {"m": {}, "keep": 2})
+
+    def test_a_non_empty_nested_map_still_deep_merges(self):
+        db = FakeDB({"d": {"doc": {"m": {"a": 1}}}})
+        db.collection("d").document("doc").set({"m": {"b": 2}}, merge=True)
+        self.assertEqual(db.data["d"]["doc"]["m"], {"a": 1, "b": 2})
 
 
 class SyncScheduleTests(unittest.TestCase):

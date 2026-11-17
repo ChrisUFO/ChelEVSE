@@ -499,15 +499,17 @@ class StatusSinkTests(unittest.TestCase):
     def apply(self, payload, source):
         self.sink.apply_status(bridge.parse_status(payload), source)
 
-    def test_same_transition_from_both_sources_notifies_once(self):
+    def test_a_charge_edge_pushes_nothing_from_either_source(self):
+        # #158/D9: the two start/stop bodies are gone. A charge-state edge is a
+        # session, not a push; the health alert (pi/health.py) is the only
+        # advisory push and the watchdog/offline pushes are the remainder.
         self.apply(status_payload(state=3, total_energy=100), "http")
         self.apply(status_payload(state=3, total_energy=110), "mqtt")
-        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.notifier.bodies, [])
         self.apply(status_payload(state=1, total_energy=110), "mqtt")
         self.apply(status_payload(state=1, total_energy=110), "http")
-        self.assertEqual(
-            self.notifier.bodies, ["Charging started", "Charging stopped"]
-        )
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertEqual(self.tracker.state, 1)
 
     def test_a_repeated_snapshot_does_not_double_count_history(self):
         self.apply(status_payload(total_energy=100), "http")
@@ -532,9 +534,7 @@ class StatusSinkTests(unittest.TestCase):
             mqtt_mark=mark,
         )
         self.assertFalse(applied)
-        self.assertEqual(
-            self.notifier.bodies, ["Charging started", "Charging stopped"]
-        )
+        self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(len(self.db.data["sessions"]), 1)
         self.assertEqual(self.tracker.state, 1)
 
@@ -544,7 +544,7 @@ class StatusSinkTests(unittest.TestCase):
             bridge.parse_status(status_payload(state=3)), "http", mqtt_mark=mark
         )
         self.assertTrue(applied)
-        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.notifier.bodies, [])
 
     def test_consecutive_http_applies_with_a_quiet_source_all_apply(self):
         # The HTTP path passes the arrival it read before its GET as its own
@@ -672,8 +672,9 @@ class StatusSinkTests(unittest.TestCase):
         self.assertEqual(seeds, ["seed"])
         self.assertEqual(outcome, [True])
         # The HTTP reply was applied first (its seed was still current), then
-        # the live snapshot: exactly one edge, no torn ordering.
-        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        # the live snapshot: one state, no torn ordering, and no push (a charge
+        # edge is not a notification, #158/D9).
+        self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(self.tracker.state, 3)
 
     def test_the_offline_edge_cannot_interleave_with_an_apply(self):
@@ -818,7 +819,7 @@ class MqttWorkerTests(MqttWorkerBase):
             "mqtt_connected",
         ):
             self.assertNotIn(key, doc)
-        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.notifier.bodies, [])
 
     def test_an_unseeded_partial_snapshot_only_merges_fields(self):
         # Bridge restarted while the charger's HTTP is wedged: the tracker is
@@ -861,7 +862,7 @@ class MqttWorkerTests(MqttWorkerBase):
         self.client.deliver("chelevse/state", 3)
         self.source.flush()
         self.run_worker()
-        self.assertEqual(self.notifier.bodies, ["Charging started"])
+        self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(self.tracker.state, 3)
 
     def test_a_pre_seed_snapshot_is_not_promoted_by_a_later_seed(self):
@@ -923,7 +924,7 @@ class MqttWorkerTests(MqttWorkerBase):
         # when the charger starts and stops: both edges arrive while it is
         # busy, and coalescing to the newest snapshot would leave only state=1.
         # The tracker would then never see the start, and the stop could not
-        # finalize the session or notify.
+        # finalize the session.
         self.source.seed(status_payload(state=1, session_energy=0, elapsed=0))
         busy = threading.Event()
         release = threading.Event()
@@ -961,19 +962,16 @@ class MqttWorkerTests(MqttWorkerBase):
                 stop.set()
                 thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(
-            self.notifier.bodies, ["Charging started", "Charging stopped"]
-        )
+        self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(len(self.db.data["sessions"]), 1)
         self.assertEqual(self.tracker.state, 1)
 
     def test_every_session_edge_survives_a_blocked_worker(self):
         # Three complete sessions -- six state changes, more than the telemetry
         # capacity -- arrive while the worker is blocked in its first write.
-        # Coalescing may drop only repeated telemetry: each transition is one
-        # session record and one notification, so truncating the backlog to the
-        # telemetry bound would lose whole sessions even though the final state
-        # is right.
+        # Coalescing may drop only repeated telemetry: each start-stop pair is
+        # one session record, so truncating the backlog to the telemetry bound
+        # would lose whole sessions even though the final state is right.
         self.source.seed(status_payload(state=1, session_energy=0, elapsed=0))
         busy = threading.Event()
         release = threading.Event()
@@ -1016,17 +1014,8 @@ class MqttWorkerTests(MqttWorkerBase):
                 stop.set()
                 thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(
-            self.notifier.bodies,
-            [
-                "Charging started",
-                "Charging stopped",
-                "Charging started",
-                "Charging stopped",
-                "Charging started",
-                "Charging stopped",
-            ],
-        )
+        # No push on any of the six edges (a charge edge is not a notification).
+        self.assertEqual(self.notifier.bodies, [])
         # Every stop wrote its session with the energy that session used: no
         # transition was evicted, so no session was folded into another.
         self.assertEqual(
@@ -1361,7 +1350,7 @@ class StatusLoopMqttTests(unittest.TestCase):
 
     def test_a_reconcile_in_flight_during_an_mqtt_stop_is_discarded(self):
         # Charging; the reconcile GET is in flight when the MQTT stop lands, so
-        # the reply (state=3) predates it. Exactly one "Charging stopped".
+        # the reply (state=3) predates it: exactly one session close, no push.
         self.tracker.seeded = True
         self.tracker.has_state = True
         self.tracker.state = 3
@@ -1389,7 +1378,7 @@ class StatusLoopMqttTests(unittest.TestCase):
             stop_while_in_flight,
         )
         self.run_loop(session, polls=2, sink=sink)
-        self.assertEqual(self.notifier.bodies, ["Charging stopped"])
+        self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(self.tracker.state, 1)
         self.assertEqual(len(self.db.data["sessions"]), 1)
         # The stale reply is still a successful charger poll for the watchdog.

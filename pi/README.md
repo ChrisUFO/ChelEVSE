@@ -4,7 +4,8 @@ A small Python service that bridges the OpenEVSE charger to Firebase: it polls
 the charger's local HTTP API, mirrors status and config into Firestore
 (`status/current`, `status/config`), derives daily energy history and completed
 sessions, mirrors `schedule/current` into the charger's own scheduler, sends FCM
-push notifications on charging/offline transitions, and applies pending
+push notifications for charger-health alerts, outages and watchdog restarts, and
+applies pending
 `commands/*` documents back to the charger, and restarts a charger that stops
 answering (see [Watchdog](#watchdog-charger-health)). Status can also arrive
 over MQTT from a broker on the LAN (see [MQTT status
@@ -153,13 +154,12 @@ below changes.
 The firmware publishes one topic per value (`<base>/amp`, `<base>/state`, …)
 when its EVSE poll reports a change. Topic values are handed over in their raw
 units and every snapshot runs through the same `parse_status` / `apply_status`
-path as an HTTP poll, so the document shape, unit conversions, history,
-sessions and notifications are shared — a second source describing the same
-state cannot fire a second transition, ring up history twice, or write a
-second session. `status/current` therefore carries only the curated fields
-listed under [What the bridge writes](#what-the-bridge-writes); the raw
-`/status` keys (`comm_*`, `ipaddress`, `macaddress`, `mqtt_connected`, …) never
-reach it.
+path as an HTTP poll, so the document shape, unit conversions, history and
+sessions are shared — a second source describing the same state cannot ring up
+history twice or write a second session. `status/current` therefore carries
+only the curated fields listed under
+[What the bridge writes](#what-the-bridge-writes); the raw `/status` keys
+(`comm_*`, `ipaddress`, `macaddress`, `mqtt_connected`, …) never reach it.
 
 | Topic                     | `status/current` field | Notes                                               |
 | ------------------------- | ---------------------- | --------------------------------------------------- |
@@ -216,7 +216,7 @@ parser sees the fields MQTT never publishes (`comm_sent`, `comm_success`,
 null `voltage`, and before the first successful `/status` seed a snapshot is a
 **field update, not an observation**: its fields are merged into
 `status/current` (and `total_energy` still feeds history), but the charging
-state machine, sessions and transition pushes only run once a snapshot is
+state machine and sessions only run once a snapshot is
 complete — it was flushed from a seeded source and carries a numeric `state`.
 Completeness is a **flush-time** fact carried with the snapshot, so a seed that
 lands while it waits in the queue does not promote it. Without that gate a
@@ -231,7 +231,7 @@ seeded-at-flush flag, so the worker never re-reads state that has moved on.
 Telemetry that repeats the queued `state` coalesces to the newest field set, so a
 slow Firestore write never builds a backlog of stale snapshots; a snapshot that
 _changes_ `state` is an edge, though — the start or stop of a charging session
-and its notification — so it is kept in order behind the queued ones rather than
+— so it is kept in order behind the queued ones rather than
 discarded, in the reserved edge capacity. Only a hostile burst of more than 32
 queued transitions drops the oldest, and that loss is logged
 (`mqtt snapshot backlog over capacity …`), never silent.
@@ -427,7 +427,7 @@ is disabled, so no restart allowance is consumed.
 
 **Disabling.** `WATCHDOG_ENABLED=false` stops all probes, restarts, health writes
 and watchdog pushes, and the failure counter is not kept; `status/health` is then
-left exactly as it was (possibly stale). Charging/offline notifications are
+left exactly as it was (possibly stale). Offline and health notifications are
 unaffected.
 
 ## What the bridge writes
@@ -448,6 +448,7 @@ timestamped line and the loop carries on at its next interval.
 | Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                                                                 |
 | Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                                                                    |
 | Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                                                                       |
+| Commands      | `status/notifications` | `acks.<notification_id> = <epoch seconds>` after a 2xx `POST /notifications/ack` — a nested map merge the health poll never writes, so the two cannot clobber each other (see [Commands](#commands))       |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -708,8 +709,10 @@ incomplete**, never "no faults".
   classification, `counter_token`, `first_observed`, the gates, the counters and
   the reachability/source transition — and each write stores that poll's fresh
   `last_seen`.
-- `alerted` is reserved for the health alert's dedupe watermark and is carried
-  across every write; the ingest does not populate it.
+- `alerted` is the health alert's dedupe watermark (D3): `{<id>|<counter_token>:
+<epoch seconds>}` for every critical, unacknowledged advisory this bridge has
+  already pushed, written by the loop in the same pass that decides the push and
+  pruned to the current ring. See [Push notifications](#push-notifications-fcm).
 - The advisory list mirrors the gateway's live ring exactly — an entry that
   leaves the ring disappears (no synthetic history), and an acknowledged entry
   stays listed while the gateway still holds it.
@@ -786,14 +789,15 @@ The write is a **field-path merge**,
 segment is backtick-quoted (``hours.`<HH>` ``) because the SDK's field-path
 parser rejects a bare numeric segment (`hours.21` is a syntax error, not a nested
 path), and `pi/tests/fakes.py` enforces the same rule so a regression fails in
-tests. Two simpler forms do not work. `merge=True` merges top-level keys only, so
-a dotted `"hours.21"` key is stored as a literal field name rather than a bucket —
-the SDK expands dotted keys in `update()` only. `update()` cannot create the
-document: it defaults to `exists=True` and raises `NotFound` on the first write
-of a new day. The merge list emits one write whose mask and transforms touch
-exactly `kwh`, that one hour bucket and `updated_at`, so sibling hours and every
-other field in the document survive. `Increment` on a missing field creates it,
-so no read-before-write or transaction is needed. Elsewhere in these notes a stored
+tests. Two simpler forms do not work. `merge=True` merges every leaf field path,
+so nested maps deep-merge; it does **not** expand dots in keys (only `update()`
+does), so a dotted `"hours.21"` key is stored as one literal field name rather
+than a bucket. `update()` cannot create the document: it defaults to
+`exists=True` and raises `NotFound` on the first write of a new day. The merge
+list emits one write whose mask and transforms touch exactly `kwh`, that one
+hour bucket and `updated_at`, so sibling hours and every other field in the
+document survive. `Increment` on a missing field creates it, so no
+read-before-write or transaction is needed. Elsewhere in these notes a stored
 map key is written `hours["<HH>"]`, while the backticked dotted form
 ``hours.`<HH>` `` is reserved for the Firestore field path in a merge mask.
 
@@ -975,28 +979,64 @@ mean.
 
 ### Push notifications (FCM)
 
-The status loop queues one push per state transition, and a single background
-daemon worker performs the sends via the Admin SDK:
+A single background daemon worker performs every send via the Admin SDK. Three
+sources queue a push, and only three (#158, D9):
 
-| Event                                                                | Body                                                                                                             |
-| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Charger enters `state: 3`                                            | `Charging started`                                                                                               |
-| Charger leaves `state: 3`                                            | `Charging stopped`                                                                                               |
-| Charger stops answering (first failed poll of an outage)             | `Charger offline`                                                                                                |
-| Watchdog restarts a gateway / controller                             | `Charger gateway unresponsive — restart attempted` / `Charger controller unresponsive — restart attempted`       |
-| Restart attempted and the charger is still down (or allowance spent) | `Recovery failed — power cycle may be required`                                                                  |
-| Unhealthy but a guard blocked the restart                            | `Charger unresponsive — restart blocked (…)` (names the guard; charging names `WATCHDOG_RESTART_WHILE_CHARGING`) |
-| Charger answers again after an unhealthy episode                     | `Charger recovered`                                                                                              |
+| Event                                                                                                       | Body                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| A newly observed advisory the firmware rated `critical`, unacknowledged, not yet alerted (one per advisory) | `Charger health: No ground recorded — see Health. Not a live fault.` / `Charger health: No ground active now — see Health.` |
+| Charger stops answering (first failed poll of an outage)                                                    | `Charger offline`                                                                                                           |
+| Watchdog restarts a gateway / controller                                                                    | `Charger gateway unresponsive — restart attempted` / `Charger controller unresponsive — restart attempted`                  |
+| Restart attempted and the charger is still down (or allowance spent)                                        | `Recovery failed — power cycle may be required`                                                                             |
+| Unhealthy but a guard blocked the restart                                                                   | `Charger unresponsive — restart blocked (…)` (names the guard; charging names `WATCHDOG_RESTART_WHILE_CHARGING`)            |
+| Charger answers again after an unhealthy episode                                                            | `Charger recovered`                                                                                                         |
 
-The title is always `ChelEVSE`. The transition is computed from the tracker's
-pre-tick state, so each edge produces exactly one notification. The first tick
-after a start with no seeded state only establishes state and never notifies; a
-state seeded from `status/current` is a real baseline, so a change that happened
-while the bridge was down notifies once. `charger offline` / `charger online`
-are also journaled only on those edges, and the offline reason includes the HTTP
-status (401/403/5xx) or transport exception so auth failures are distinguishable
-from an unreachable charger. Watchdog pushes follow the same edge-only rule — see
-[Watchdog](#watchdog-charger-health).
+The title is always `ChelEVSE`.
+
+**What no longer pushes.** A charge start or stop is a `status/current` write and
+a `sessions/*` record, not a notification. The two `Charging started` /
+`Charging stopped` bodies are gone; the health alert below replaced them.
+
+**The health alert's copy.** The body names the advisory with the same rule names
+the web Health card uses (`pi/health.py` mirrors `web/js/health.js`; the two
+runtimes share no module, and the table is the firmware's bounded 15-id set). The
+wording follows the classification, never the severity alone: a
+counter-derived advisory keeps the firmware's `critical` rating after the
+condition cleared, so it reads _recorded — Not a live fault_, and only a
+corroborated entry reads _active now_. Nothing in the body infers safety, and
+anything the firmware rated below `critical` never pushes.
+
+**The watermark (D3).** The dedupe key is `(id, counter_token)`, rendered as one
+map key — `fault.no_ground|7` — where the token is the controller counter for
+`fault.*` and the counter-backed `wear.*` rules, the settings word for
+`safety.*`, the severity step for `wear.relay_life`, the `$GL` level for
+`thermal.relay_thermal`, and `first_seen` for everything else. The map lives in
+`status/notifications.alerted` as `{<key>: <epoch seconds>}` and is written by
+the health loop's **own projection write**, in the same pass that decides the
+push: the body is enqueued only after that write landed, so a repeat poll or a
+failed write cannot push twice for one advisory — the watermark makes a repeat
+impossible whenever both the decision and the write complete. Delivery is at most
+once, and the loss side stays open: a crash between the write and the enqueue, or
+a full notifier queue, can drop that one alert (it can never duplicate it). On
+start-up the loop seeds the map from the stored document **before** its first
+poll, so a restart whose seed read succeeds sends nothing; a failed seed read
+starts from an empty watermark, so that restart re-alerts each live critical
+advisory once. A key is pruned when its advisory leaves the live ring, so on a
+pass that keys every entry the map stays bounded by the ring (the firmware's 15
+ids). An advisory whose token has not been observed yet — no applied `/status`
+counters, say — has no key to compare: that pass pushes nothing and leaves the
+map whole, and the first pass with the facts decides once, on the real key. A
+new trip moves the controller counter — which also voids the firmware's own ack
+— so the key changes and the same advisory alerts again; an acknowledged
+advisory never alerts.
+
+`charger offline` / `charger online` are journaled only on their edges, and the
+offline reason includes the HTTP status (401/403/5xx) or transport exception so
+auth failures are distinguishable from an unreachable charger. Watchdog pushes
+follow the same edge-only rule — see [Watchdog](#watchdog-charger-health); the
+first tick after a start with no seeded state only establishes state and never
+notifies, while a state seeded from `status/current` is a real baseline, so a
+change that happened while the bridge was down notifies once.
 
 On the offline edge the bridge writes `charger_online: false` **before**
 queueing `Charger offline`, so the app sees the outage even if FCM is slow.
@@ -1100,12 +1140,13 @@ command older than **10 minutes** is not applied: it is marked `failed` with
 command queued while the Pi was offline cannot start or stop a charge hours
 later.
 
-| `type`        | Charger request                                                          | Meaning                                                                             |
-| ------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                                       |
-| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes                      |
-| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps, only after `/config` verifies `N` is 6 through `max_current_soft` |
-| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                                          |
+| `type`             | Charger request                                                          | Meaning                                                                             |
+| ------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `pause`            | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                                       |
+| `resume`           | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes                      |
+| `set_current`      | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps, only after `/config` verifies `N` is 6 through `max_current_soft` |
+| `rapi`             | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                                          |
+| `ack_notification` | `POST /notifications/ack?id=<notification_id>`                           | Acknowledge one charger-health advisory (HTTP only — see below)                     |
 
 `rapi.command` must be a string starting with `$` and at most 32 characters;
 anything else is marked `failed` with `error: "invalid rapi"` without contacting
@@ -1114,6 +1155,48 @@ the charger. On a 2xx reply the document becomes `acked` and gets
 if absent). Non-2xx replies and request errors are marked `failed` with a short
 reason containing the HTTP status/body snippet or the exception class. Unknown
 `type` values fail with `unsupported type`.
+
+### Acknowledging a health advisory
+
+`ack_notification` carries one `notification_id` — a firmware rule name such as
+`fault.no_ground` — validated against `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$` with a
+64-character cap. Anything else fails with `error: "invalid notification id"`
+before any request is sent (and with no `transport`, since nothing was). The
+same grammar and cap are enforced by `firestore.rules`, so a doc the bridge
+would refuse cannot be created.
+
+It is **HTTP-only, deliberately** (D4): the gateway publishes no per-advisory
+MQTT surface — only the `{count, severity}` rollup on `<base>/notifications` —
+so there is nothing to publish. `apply_command` routes it to the HTTP path
+before the MQTT-ready check, even when the broker is connected and subscribed,
+and there is no MQTT arm to fall back from.
+
+Success is **2xx only**; the firmware's answers are mapped to plain reasons:
+
+| Charger reply | Command outcome                                                       |
+| ------------- | --------------------------------------------------------------------- |
+| `2xx`         | `acked` (`transport: "http"`) and the Firestore acknowledgement below |
+| `404`         | `failed`, `error: "no such active notification"` (not currently live) |
+| `400`         | `failed`, `error: "id required"`                                      |
+| `403`/`405`   | `failed`, `error: "acknowledgement refused by the charger (HTTP …)"`  |
+| other non-2xx | `failed` with `HTTP <status>: <body snippet>`                         |
+
+On a 2xx the bridge merges `acks: {<notification_id>: <epoch seconds>}` into
+`status/notifications` with `set(..., merge=True)` — a **nested map merge**, and
+the only field family the command writes there. The health loop's own merges
+project their content fields (`reachable`, `source`, `gates`, `counters`,
+`advisories`, `alerted`) and never `acks`, so a poll can neither clobber an
+acknowledgement nor be clobbered by one, and no read-modify-write of the
+`advisories` list is needed. The map is bounded by the firmware's 15 advisory
+ids, so it is never pruned. The write is counted as `health` (no new kind).
+
+**Ordering: charger → Firestore → command doc.** The acknowledgement is written
+_before_ the command document is settled, so a charger 2xx that cannot reach
+Firestore still settles `acked` (the charger really did acknowledge it) and the
+next 300 s health poll repairs the visible state from the gateway's own `acked`
+flag. A failed or 404 ack writes nothing at all, so the previous state stays
+intact. The settled-command retry memory is unchanged: it retries the command
+document's status write, never the acknowledgement.
 
 Applying a command and writing its `acked` status are separate steps. If the
 ack write fails, the bridge remembers that command id in memory and retries the

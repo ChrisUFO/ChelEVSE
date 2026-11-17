@@ -11,6 +11,7 @@ that ``schedule.py`` and the facade import from here.
 
 import json
 import math
+import re
 import threading
 
 import requests
@@ -34,7 +35,14 @@ PAUSED_STATES = frozenset({254, 255})
 MIN_AMPS, MAX_AMPS = 6, 48
 # Command types the bridge applies; anything else fails before a transport is
 # chosen.
-COMMAND_TYPES = frozenset({"pause", "resume", "set_current", "rapi"})
+COMMAND_TYPES = frozenset({"pause", "resume", "set_current", "rapi", "ack_notification"})
+# Advisory ids are firmware rule names: a lowercase dotted path ("fault.no_ground").
+# The same grammar the Firestore rules and the app enforce, so a doc created
+# before the rules shipped is still bounded here. ``\Z`` is strict end-of-text;
+# Python's ``$`` would also accept one trailing newline, which RE2 (the rules)
+# rejects.
+NOTIFICATION_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*\Z")
+NOTIFICATION_ID_MAX = 64
 class ChargerTransport:
     """The process's one charger Session, serialised by a lock.
 
@@ -91,6 +99,28 @@ def _require_command_ok(resp):
     except CommandError as exc:
         exc.transport = "http"
         raise
+
+
+def _require_ack_ok(resp):
+    """``_require_command_ok`` for ``POST /notifications/ack``.
+
+    The firmware's answers get the command's own words instead of a bare
+    status: ``404`` means the advisory is no longer live (the ack is persisted
+    on the gateway, so an id absent from the ring cannot be acknowledged),
+    ``400`` means the request carried no usable id, and ``403``/``405`` are a
+    refusal of the method rather than of this advisory.
+    """
+    if resp.status_code == 404:
+        exc = CommandError("no such active notification")
+    elif resp.status_code == 400:
+        exc = CommandError("id required")
+    elif resp.status_code in (403, 405):
+        exc = CommandError(f"acknowledgement refused by the charger ({_http_reason(resp)})")
+    else:
+        _require_command_ok(resp)
+        return
+    exc.transport = "http"
+    raise exc
 
 
 def _rapi_result(resp):
@@ -164,6 +194,18 @@ def _command_rapi(cmd):
     return command
 
 
+def _command_notification_id(cmd):
+    """The validated advisory id, or CommandError before anything is sent."""
+    notification_id = cmd.get("notification_id")
+    if (
+        not isinstance(notification_id, str)
+        or len(notification_id) > NOTIFICATION_ID_MAX
+        or not NOTIFICATION_ID_RE.match(notification_id)
+    ):
+        raise CommandError("invalid notification id")
+    return notification_id
+
+
 def mqtt_command_ready(source):
     """True when MQTT may carry a command: connected **and** subscribed."""
     return bool(source is not None and getattr(source, "ready", False))
@@ -223,6 +265,20 @@ def _apply_command_http(transport, host, auth, cmd):
         result = _rapi_result(resp)
         log(f"rapi {command}: ret={result!r}")
         return {"result": result}
+    if ctype == "ack_notification":
+        # The id is validated here, before the request, so a malformed command
+        # fails with no transport named and nothing sent (D4: HTTP-only, there
+        # is no MQTT arm to fall back from).
+        notification_id = _command_notification_id(cmd)
+        resp = transport.post(
+            f"{host.base}/notifications/ack",
+            params={"id": notification_id},
+            auth=auth,
+            timeout=HTTP_TIMEOUT,
+        )
+        _require_ack_ok(resp)
+        log(f"acknowledged notification {notification_id}")
+        return {}
     raise CommandError("unsupported type")
 
 
@@ -402,10 +458,17 @@ def apply_command(transport, host, auth, cmd, source=None, confirm_sec=None):
     it out, as it always has, and the loop supplies the default. Failures carry
     their transport on ``CommandError.transport`` — unset when the command was
     rejected before anything was sent.
+
+    ``ack_notification`` is HTTP-only (D4): the firmware publishes no
+    per-advisory MQTT surface, only the ``{count,severity}`` rollup, so there is
+    nothing to publish and it never takes the MQTT branch — even when the source
+    is ready and subscribed.
     """
     ctype = cmd.get("type")
     if ctype not in COMMAND_TYPES:
         raise CommandError("unsupported type")
+    if ctype == "ack_notification":
+        return _apply_command_http(transport, host, auth, cmd)
     if confirm_sec is None:
         import bridge  # seam: tests patch bridge.COMMAND_CONFIRM_SEC (PLAN.md facade rule)
 

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   COMMAND_LIMIT,
+  ackNotification,
   RANGE_SESSION_LIMIT,
   RAPI_LIMIT,
   SESSION_LIMIT,
@@ -305,6 +306,34 @@ test('stopStore drops the retained options with the listener handles', () => {
   assert.match(body, /lastOptions = null;/);
 });
 
+test('the health document is one subscription through the shared watch path', () => {
+  // #158 adds `status/notifications`: a single document, so no query and no
+  // index — and one `watch` call, which is also what keeps the denied() gate in
+  // one place (it routes a revoked grant to onAccessDenied before any screen
+  // sees the error).
+  const body = startStoreBody();
+  assert.match(
+    body,
+    /unsubNotifications = watch\( 'status\/notifications', \(data\) => onNotifications && onNotifications\(data\), \(err\) => onNotificationsError && onNotificationsError\(err\), \);/,
+    'the health listener mirrors the status/config watch idiom',
+  );
+
+  // Sign-out teardown must drop it with the rest: a handle left behind would
+  // keep a session's listener alive after stopStore.
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export function stopStore(');
+  assert.ok(start >= 0, 'store.js declares stopStore');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes stopStore');
+  const stopBody = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  assert.match(
+    stopBody,
+    /unsubConfig, unsubNotifications, unsubSchedule/,
+    'torn down with its siblings',
+  );
+  assert.match(stopBody, /unsubNotifications = unsubSchedule/, 'the handle is cleared');
+});
+
 test('every listener error path still asks denied() first', () => {
   // R7: `permission-denied` routes to onAccessDenied and offers no Retry. A
   // retry refactor is exactly the kind of change that could reorder this, so
@@ -324,4 +353,51 @@ test('every listener error path still asks denied() first', () => {
   assert.equal(gated.length, 4, 'the four inline error callbacks all gate on denied(err)');
   const handed = body.match(/denied,/g) || [];
   assert.equal(handed.length, 2, 'both command windows pass denied as the error handler');
+});
+
+test('an acknowledgement is one command doc carrying the validated advisory id', () => {
+  // `ackNotification` routes through `sendCommand` (which stamps `status` and
+  // `created_at`); the injected write is the seam the history range read already
+  // uses, so the payload asserted here is the one the shipping call builds.
+  const payloads = [];
+  const created = { id: 'cmd-7' };
+  const write = (payload) => {
+    payloads.push(payload);
+    return created;
+  };
+  assert.equal(
+    ackNotification('fault.no_ground', write),
+    created,
+    'the write’s result passes through',
+  );
+  assert.deepEqual(payloads, [{ type: 'ack_notification', notification_id: 'fault.no_ground' }]);
+  assert.deepEqual(Object.keys(payloads[0]).sort(), ['notification_id', 'type']);
+});
+
+test('an advisory id the bridge would refuse is never written', () => {
+  // The bridge fails such a command with "invalid notification id" and the
+  // rules refuse the document, so the client stops before either: a rejected
+  // id must not reach Firestore at all.
+  for (const id of [
+    'Fault.No_Ground',
+    'fault no_ground',
+    'fault..no_ground',
+    // Trailing line terminators the rules' end-of-text `$` refuses.
+    'fault.no_ground\n',
+    'fault.no_ground\r',
+    'fault.no_ground\u2028',
+    'fault.no_ground\u2029',
+    '',
+    'a'.repeat(65),
+    null,
+    undefined,
+    42,
+  ]) {
+    let written = false;
+    const write = () => {
+      written = true;
+    };
+    assert.throws(() => ackNotification(id, write), /invalid notification id/, String(id));
+    assert.equal(written, false, `nothing is written for ${String(id)}`);
+  }
 });
