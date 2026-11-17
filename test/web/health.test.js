@@ -212,6 +212,88 @@ test('an open gate beside a listed advisory rides the caveat line', () => {
   assert.equal(state.tone, 'warn');
 });
 
+test('a firmware that never reports relay health is a neutral fact, not an amber gap', () => {
+  // `relay_health_supported: false` is the bridge's capability fact (#181):
+  // this generation's silence is permanent, so the card says so plainly
+  // instead of waiting for it forever.
+  const state = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: false, relay_health_supported: false },
+    }),
+  );
+  assert.equal(state.state, 'incomplete');
+  assert.equal(state.incomplete, true);
+  assert.equal(state.title, 'Health incomplete');
+  assert.equal(state.tone, 'muted', 'a capability fact is not a warning');
+  assert.equal(state.detail, 'Relay health isn’t reported by this firmware.');
+  assert.equal(state.caveat, '', 'the headline sentence is not repeated as a caveat');
+  assert.notEqual(state.title, 'No advisories');
+  assert.doesNotMatch(copyOf(state), /listed none|may be missing/);
+
+  // An explicit `true` is "may report": today's amber gap, unchanged — as is
+  // the field's absence everywhere else in this file.
+  const mayReport = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: false, relay_health_supported: true },
+    }),
+  );
+  assert.equal(mayReport.tone, 'warn');
+  assert.equal(
+    mayReport.detail,
+    'Relay health isn’t reported, so some advisory checks may be missing.',
+  );
+});
+
+test('an unknown safety gate beside an unsupported relay gate warns on safety alone', () => {
+  const state = visit(
+    report({
+      gates: { settings_known: false, relay_health_known: false, relay_health_supported: false },
+    }),
+  );
+  assert.equal(state.state, 'incomplete');
+  assert.equal(state.tone, 'warn', 'the safety gate is still an open question');
+  assert.equal(
+    state.detail,
+    'Safety checks aren’t reported, so some advisory checks may be missing. Relay health isn’t reported by this firmware.',
+  );
+});
+
+test('an unsupported relay gate rides the caveat line neutrally beside advisories', () => {
+  const entry = {
+    id: 'fault.no_ground',
+    severity: 'critical',
+    acked: false,
+    first_seen: seconds(at(2026, 11, 8)),
+    classification: 'historical',
+    corroborated: false,
+  };
+  const state = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: false, relay_health_supported: false },
+      advisories: [entry],
+    }),
+  );
+  assert.equal(state.state, 'advisories');
+  assert.equal(state.incomplete, true);
+  assert.equal(state.caveat, 'Relay health isn’t reported by this firmware.');
+  assert.equal(state.tone, 'muted');
+
+  // The same composition with the safety gate open too: the amber sentence
+  // first, the neutral one appended — never merged into one amber claim.
+  const mixed = visit(
+    report({
+      gates: { settings_known: false, relay_health_known: false, relay_health_supported: false },
+      advisories: [entry],
+    }),
+  );
+  assert.equal(mixed.state, 'advisories');
+  assert.equal(mixed.tone, 'warn');
+  assert.equal(
+    mixed.caveat,
+    'Safety checks aren’t reported, so some advisory checks may be missing. Relay health isn’t reported by this firmware.',
+  );
+});
+
 test('a counter-derived critical is recorded, and stays critical', () => {
   // The live shape on this charger: `fault.no_ground` from a real trip, its
   // counter at 7, acknowledged on the gateway. The card must present a record —
