@@ -193,6 +193,12 @@ class ApplyCommandTests(unittest.TestCase):
             bridge.apply_command(session, _host(), None, {"type": "resume"})
 
     def test_set_current_clamps_to_firmware_limits(self):
+        # `_command_amps` is a defensive bound on the send path, not the range
+        # check the command loop relies on: `_command_outcome` applies
+        # `enforce_current_policy` first and rejects anything outside
+        # 6..soft (#163), so 1 A and 99 A never reach this clamp through the
+        # loop. The assertions therefore pin a predicate reached only by a
+        # hand-built `apply_command` call that skips the policy (#168).
         session = FakeSession([FakeResponse(200), FakeResponse(200)])
         bridge.apply_command(
             session, _host(), None, {"type": "set_current", "amps": 99}
@@ -1514,6 +1520,40 @@ class CommandLoopTests(unittest.TestCase):
         session = self.run_loop(db, polls=2, on_wait=recover)
         self.assertEqual([call[0] for call in session.calls], ["post"])
         self.assertEqual(db.data["commands"]["cmd"]["status"], "acked")
+
+
+    def test_a_failed_config_read_settles_failed_without_a_transport(self):
+        # The current policy reads /config before any send. That read raising
+        # must not settle like a failed send: no `transport` field, and so no
+        # "command transport: http (mqtt unavailable before publish)" line for
+        # a request that never left the bridge (#168).
+        db = FakeDB(
+            {
+                "commands": {
+                    "cmd": {
+                        "status": "pending",
+                        "type": "set_current",
+                        "amps": 16,
+                        "created_at": datetime.now(UTC),
+                    }
+                }
+            }
+        )
+        session = FakeSession([requests.ConnectionError("config down")])
+        transport = bridge.ChargerTransport(session)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append), mock.patch.object(
+            bridge, "_stop", _StopAfter(1)
+        ):
+            bridge.command_loop(db, _host(), None, transport, 0)
+        doc = db.data["commands"]["cmd"]
+        self.assertEqual(doc["status"], "failed")
+        self.assertNotIn("transport", doc)
+        self.assertIn("config read failed (ConnectionError)", doc["error"])
+        # Only the policy read reached the charger; no command was sent.
+        self.assertEqual([call[1] for call in session.calls], ["http://charger/config"])
+        self.assertFalse([line for line in logs if "command transport" in line], logs)
+        self.assertFalse([line for line in logs if "mqtt unavailable" in line], logs)
 
 
 class SyncScheduleTests(unittest.TestCase):
