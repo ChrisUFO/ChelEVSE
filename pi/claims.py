@@ -177,7 +177,12 @@ def derive_reason(target, observations):
     ``detail`` -- structurally incapable of moving ``reason``.
     """
     observations = observations if isinstance(observations, dict) else {}
-    derived = {"reason": None, "winner_state": None, "winner_current": None}
+    derived = {
+        "reason": None,
+        "winner_state": None,
+        "winner_current": None,
+        "detail": {},
+    }
     # 1. No authoritative target: retained evidence never yields a confident
     #    reason, whatever it claims.
     if target is None:
@@ -190,6 +195,16 @@ def derive_reason(target, observations):
     claims = target["claims"]
     state_winner = claims.get("state")
     current_winners = (claims.get("charge_current"), claims.get("max_current"))
+    # The current winner the document names: the restriction when it is the
+    # limit client, otherwise the first current claim that wins.
+    current_winner = claims.get("charge_current")
+    if current_winner is None:
+        current_winner = claims.get("max_current")
+    if LIMIT_CLIENT in current_winners:
+        current_winner = LIMIT_CLIENT
+    derived["winner_current"] = (
+        client_name(current_winner) if current_winner is not None else None
+    )
     # 3. The state winner decides, mapped by id; an unmapped winner is a
     #    restriction this vocabulary cannot name.
     if state_winner is not None:
@@ -199,7 +214,6 @@ def derive_reason(target, observations):
     #    the restriction.
     elif LIMIT_CLIENT in current_winners:
         derived["reason"] = "current_limit"
-        derived["winner_current"] = client_name(LIMIT_CLIENT)
     else:
         vehicle = observations.get("vehicle")
         # 5. No winner at all and the vehicle is known disconnected: the
@@ -207,7 +221,7 @@ def derive_reason(target, observations):
         #    guesses "not connected".
         if (
             state_winner is None
-            and not any(winner is not None for winner in current_winners)
+            and current_winner is None
             and vehicle is not None
             and as_int(vehicle) != 1
         ):
