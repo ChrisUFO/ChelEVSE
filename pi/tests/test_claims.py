@@ -439,26 +439,6 @@ class EvidenceParserTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertIsNone(claims.parse_boost(value))
 
-    def test_the_schedule_document(self):
-        events = claims.parse_schedule(
-            [
-                {"id": 1, "state": "active", "time": "13:00:00", "days": ["mon"]},
-                {"id": 2, "state": "disabled", "time": "16:00:00", "days": []},
-                {"id": "one", "state": "active"},
-                {"id": 3, "state": "banana"},
-                "junk",
-            ]
-        )
-        self.assertEqual(
-            events,
-            [
-                {"id": 1, "state": "active", "time": "13:00:00", "days": ["mon"]},
-                {"id": 2, "state": "disabled", "time": "16:00:00", "days": []},
-            ],
-        )
-        self.assertIsNone(claims.parse_schedule({"id": 1}))
-        self.assertEqual(claims.parse_schedule([]), [])
-
 
 class ClaimsObservationsTests(unittest.TestCase):
     def setUp(self):
@@ -812,7 +792,7 @@ class ClaimsCadenceTests(unittest.TestCase):
             )
         return session
 
-    def test_a_trigger_inside_the_debounce_window_is_dropped(self):
+    def test_a_trigger_inside_the_debounce_window_is_deferred_to_its_close(self):
         clock = _Monotonic()
         holder = claims.ClaimsObservations()
         holder.wake()
@@ -820,11 +800,14 @@ class ClaimsCadenceTests(unittest.TestCase):
             FakeDB(),
             holder,
             clock,
-            [(0.0, False), (3.0, True), (3.0, True), (0.0, False)],
+            [(0.0, False), (3.0, True), (3.0, False), (0.0, False)],
         )
-        # t=1000 forced -> fetch; t=1003 forced but 3 s since the last fetch
-        # (< 5 s debounce) -> dropped; t=1006 forced -> fetch; t=1006 idle,
-        # 0 s since the last fetch, no trigger -> skip.
+        # t=1000 forced -> fetch. t=1003 forced but 3 s since the last fetch
+        # (< 5 s debounce) -> deferred, the trigger stays armed; t=1006 no
+        # new wake, yet the closed window (6 s since) plus the still-armed
+        # trigger -> fetch; t=1006 idle, 0 s since the last fetch, no
+        # trigger -> skip. A dropped trigger would leave t=1006 unfetched
+        # until the safety cadence.
         self.assertEqual(len(session.calls), 2)
 
     def test_without_a_trigger_only_the_safety_cadence_fetches(self):
@@ -1018,10 +1001,6 @@ class EvidenceIngestionTests(unittest.TestCase):
             '{"type":"energy","value":10,"remaining":3500,'
             '"started":"2026-11-17T09:00:00Z"}',
         )
-        self.client.deliver(
-            "chelevse/schedule",
-            '[{"id":1,"state":"active","time":"13:00:00","days":["mon","tue"]}]',
-        )
         evidence = self.holder.snapshot()["evidence"]
         self.assertEqual(
             evidence["claim"],
@@ -1035,14 +1014,22 @@ class EvidenceIngestionTests(unittest.TestCase):
         )
         self.assertEqual(evidence["limit"], {"type": "soc", "value": 80})
         self.assertEqual(evidence["boost"]["remaining"], 3500)
-        self.assertEqual(evidence["schedule"][0]["id"], 1)
+
+    def test_the_retained_schedule_event_list_is_not_evidence(self):
+        # Nothing consumes the retained event list: the schedule reason's
+        # rule id comes from the schedule loop's plan window, so a valid
+        # delivery is ignored rather than ingested.
+        self.client.deliver(
+            "chelevse/schedule",
+            '[{"id":1,"state":"active","time":"13:00:00","days":["mon","tue"]}]',
+        )
+        self.assertEqual(self.holder.snapshot()["evidence"], {})
 
     def test_malformed_documents_are_ignored(self):
         self.holder.note_evidence("claim", {"state": "active"})
         self.client.deliver("chelevse/claim", "not json at all")
         self.client.deliver("chelevse/limit", '{"type":"bogus","value":1}')
         self.client.deliver("chelevse/boost", "{}")
-        self.client.deliver("chelevse/schedule", '{"id": 1}')
         self.assertEqual(self.holder.snapshot()["evidence"], {})
 
     def test_evidence_is_never_status(self):

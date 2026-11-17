@@ -31,10 +31,14 @@ Design notes:
   keeps ``/config`` as the single redaction/coercion path: a change of
   ``config_version`` only triggers one HTTP sync.
 - **Claim-family topics are evidence, not answers.** ``<base>/claim``,
-  ``<base>/limit``, ``<base>/boost`` and ``<base>/schedule`` are retained, but
-  they carry no authoritative freshness: each delivery is decoded and handed to
-  ``on_evidence`` (the claims holder), never applied as status and never allowed
-  to answer "why isn't it charging?" -- that is ``GET /claims/target`` (#159).
+  ``<base>/limit`` and ``<base>/boost`` are retained, but they carry no
+  authoritative freshness: each delivery is decoded and handed to
+  ``on_evidence`` (the claims holder), never applied as status and never
+  allowed to answer "why isn't it charging?" -- that is
+  ``GET /claims/target`` (#159). The retained ``<base>/schedule`` event list
+  is not evidence either -- the schedule reason's rule id comes from the
+  schedule loop's ``/schedule/plan`` window -- so it is ignored like any
+  other unmapped retained document.
 - **Announce/LWT is the gateway's own presence.** The firmware publishes a
   retained ``openevse/announce/<id>`` document (``{"state": "connected"}`` on
   connect, and the broker publishes ``{"state": "disconnected"}`` as its Last
@@ -79,8 +83,8 @@ RECONNECT_MAX_SEC = 30
 # Topic leaf -> /status key. Only the curated status fields the bridge stores
 # are mapped; command/retained-JSON topics (override, config, rapi/…, */set)
 # are ignored by construction because they are not listed here. The retained
-# claim-family documents (claim/limit/boost/schedule) are below: they are not
-# status fields either, but they feed the claims pipeline's evidence holder
+# claim-family documents (claim/limit/boost) are below: they are not status
+# fields either, but they feed the claims pipeline's evidence holder
 # instead of being dropped (issue #159).
 TOPIC_FIELDS = {
     "amp": "amp",
@@ -105,12 +109,13 @@ CONFIG_VERSION_TOPIC = "config_version"
 OVERRIDE_TOPIC = "override"
 # Retained claim-family documents, supporting evidence for the claims
 # pipeline (#159): the gateway's own claim state (``claim``), the charge
-# limit (``limit``), a running boost (``boost``) and the event list
-# (``schedule``). Decoded here, parsed defensively by the claims module via
-# ``on_evidence``; never authoritative -- the reason comes from
-# ``GET /claims/target`` -- and never a status field, so none feed the
-# debounced snapshot.
-CLAIM_EVIDENCE_TOPICS = frozenset({"claim", "limit", "boost", "schedule"})
+# limit (``limit``) and a running boost (``boost``). Decoded here, parsed
+# defensively by the claims module via ``on_evidence``; never authoritative
+# -- the reason comes from ``GET /claims/target`` -- and never a status
+# field, so none feed the debounced snapshot. The retained ``schedule``
+# event list is deliberately absent: nothing consumes it (the schedule
+# reason's rule id arrives via the schedule loop's plan window instead).
+CLAIM_EVIDENCE_TOPICS = frozenset({"claim", "limit", "boost"})
 # RAPI replies arrive with no correlation id, so the bridge must serialise
 # commands and match the next one itself.
 RAPI_OUT_TOPIC = "rapi/out"

@@ -8,14 +8,16 @@ winning client id per property, and this module maps those ids to a bounded
 seven-token vocabulary. The ids are treated as opaque names (priorities are
 compile-time and version-dependent; never hardcode an order).
 
-Retained MQTT documents (``<base>/claim``, ``<base>/limit``, ``<base>/boost``,
-``<base>/schedule``) are **supporting evidence, never an answer**: they carry
-no authoritative freshness, so they enrich the ``detail`` of a reason the
-gateway already gave (boost remaining, limit type/value, the schedule's active
-rule id) and corroborate it, but can never change the reason. When the
-authoritative target is unavailable -- firmware below 4.1.5 answers 404, the
-fetch can fail, the bridge may have just started -- the derived reason is
-``unknown``: no retained document may yield a confident reason on its own
+Retained MQTT documents (``<base>/claim``, ``<base>/limit``, ``<base>/boost``)
+are **supporting evidence, never an answer**: they carry no authoritative
+freshness, so they enrich the ``detail`` of a reason the gateway already gave
+(boost remaining, limit type/value) and corroborate it, but can never change
+the reason. The retained ``<base>/schedule`` event list is not evidence and is
+not ingested: the ``schedule`` reason's active rule id comes from the schedule
+loop's ``/schedule/plan`` window, a fresher source than a retained document.
+When the authoritative target is unavailable -- firmware below 4.1.5 answers
+404, the fetch can fail, the bridge may have just started -- the derived reason
+is ``unknown``: no retained document may yield a confident reason on its own
 (fail-closed).
 
 The reason vocabulary and its precedence (each step is decided only when the
@@ -78,8 +80,6 @@ STATE_CLIENT_REASONS = {
 LIMIT_CLIENT = 65542
 # The resolved target's own state words (``properties.state``).
 TARGET_STATES = ("active", "disabled", "none")
-# The retained-evidence topic leaves and their defensive parsers.
-EVIDENCE_LEAVES = ("claim", "limit", "boost", "schedule")
 LIMIT_TYPES = ("time", "energy", "soc", "range")
 
 # The projection's content fields: everything a merge write carries that a
@@ -334,38 +334,15 @@ def parse_boost(value):
     return subset
 
 
-def parse_schedule(value):
-    """The retained ``<base>/schedule`` document -> the event list, or None.
-
-    The firmware publishes its event array; each entry is kept only when it
-    has a usable id and state word, and malformed entries are skipped.
-    """
-    if not isinstance(value, list):
-        return None
-    events = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        event_id = as_int(entry.get("id"))
-        state = entry.get("state")
-        if event_id is None or state not in ("active", "disabled"):
-            continue
-        event = {"id": event_id, "state": state}
-        event_time = entry.get("time")
-        if isinstance(event_time, str):
-            event["time"] = event_time
-        days = entry.get("days")
-        if isinstance(days, list):
-            event["days"] = [day for day in days if isinstance(day, str)]
-        events.append(event)
-    return events
-
-
+# The retained evidence topic leaves and their defensive parsers. The
+# retained ``<base>/schedule`` event list is deliberately absent: nothing
+# consumes it (the ``schedule`` reason's rule id comes from the schedule
+# loop's window, :meth:`ClaimsObservations.note_schedule`), so a delivery of
+# it is not evidence at all.
 EVIDENCE_PARSERS = {
     "claim": parse_claim,
     "limit": parse_limit,
     "boost": parse_boost,
-    "schedule": parse_schedule,
 }
 
 

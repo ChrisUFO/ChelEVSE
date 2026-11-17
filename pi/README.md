@@ -175,12 +175,15 @@ only the curated fields listed under
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
 Everything else on the base topic (retained `config`, availability counters) is
-ignored by the status path. The retained `claim`, `limit`, `boost` and
-`schedule` documents are **ingested as claims evidence** (#159): each delivery
-is decoded and handed to the claims holder, parsed defensively (malformed →
-ignored), and used for `status/claims` detail enrichment and corroboration
-only — never as a status field, and never as the reason (that is
-`GET /claims/target`; see [Claims reason](#claims-reason-issue-159)). The
+ignored by the status path. The retained `claim`, `limit` and `boost` documents
+are **ingested as claims evidence** (#159): each delivery is decoded and handed
+to the claims holder, parsed defensively (malformed → ignored), and used for
+`status/claims` detail enrichment and corroboration only — never as a status
+field, and never as the reason (that is `GET /claims/target`; see
+[Claims reason](#claims-reason-issue-159)). The retained `schedule` event list
+is not ingested: nothing consumes it (the schedule reason's rule id comes from
+the schedule loop's `/schedule/plan` window), so it is ignored like any other
+unmapped retained document. The
 retained `override` document and `rapi/out` feed the command acknowledgements
 ([Commands over MQTT](#commands-over-mqtt-issue-46)); `override/set` and
 `rapi/in` are our own publishes; LWT handling is #45.
@@ -759,11 +762,13 @@ priorities are compile-time and version-dependent) onto a bounded vocabulary:
 **Fail-closed.** When `/claims/target` is unavailable — firmware below 4.1.5
 answers 404, the fetch can fail, the bridge may have just started — the derived
 reason is `unknown`, and retained MQTT evidence **never** yields a confident
-reason on its own: the retained `claim`/`limit`/`boost`/`schedule` documents
-carry no authoritative freshness, so they are ingested as supporting evidence
+reason on its own: the retained `claim`/`limit`/`boost` documents carry no
+authoritative freshness, so they are ingested as supporting evidence
 (`ClaimsObservations`, the same locked-holder pattern as the health facts) that
-enriches `detail` (boost type/value/remaining, limit type/value, the schedule's
-active rule id) and corroborates, but structurally cannot move `reason`. The
+enriches `detail` (boost type/value/remaining, limit type/value) and
+corroborates, but structurally cannot move `reason`. The `schedule` reason's
+active rule id is not retained evidence: it comes from the schedule loop's
+`/schedule/plan` window, so the retained event list is not ingested at all. The
 charger being offline is also `unknown`: the loop reads the tracker's online
 fact beside its own fetch, so a stale arbitration never reads as current.
 
@@ -772,9 +777,10 @@ its own — it is woken by a trigger the other loops set: every applied `/status
 observation (the reconcile tick, HTTP or heartbeat-forced), a `claims_version`
 move in an observed `/status` reply, or a `state`/`state_label` transition
 arriving over either transport (under MQTT that answers a stop within the 5 s
-debounce instead of the 60 s reconcile). A 300 s safety cadence refreshes the
-document even if no trigger ever fires. One `GET /claims/target` per fetched
-tick, debounced ≥ 5 s.
+debounce instead of the 60 s reconcile — a trigger landing inside the window is
+deferred to its close, never dropped for the reconcile). A 300 s safety cadence
+refreshes the document even if no trigger ever fires. One `GET /claims/target`
+per fetched tick, debounced ≥ 5 s.
 
 **Document.** `status/claims`, merge writes only when the comparable content
 changes (the change test drops the write stamps and the moving boost countdown,
@@ -797,7 +803,9 @@ redelivery costs **zero** writes — the same economy as
 
 `winner_state`/`winner_current` name the gateway's winning clients in the
 firmware's own words (`manual`, `timer`, `limit`, …); `detail` carries the
-retained evidence for the reason (empty when none parses); `checked_at` is the
+evidence for the reason — the retained documents for the claim/limit/boost
+reasons, the schedule loop's active rule id for `schedule` (empty when none
+parses); `checked_at` is the
 observation that produced the last write, not a heartbeat. Failure transitions
 write `{reachable: false, source: "http"|"unsupported", reason: "unknown"}` once
 per transition and merge over the last known winners — a 404 (old firmware) or a

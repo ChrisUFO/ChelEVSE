@@ -152,8 +152,9 @@ SCHEDULE_INITIAL_DELAY = 7
 NOTIFICATIONS_INITIAL_DELAY = 15
 # The claims loop has no cadence of its own: it is woken by the status loop's
 # trigger (every applied observation is a reconcile tick, #159) and answers a
-# claims_version/state transition at most this often, so a flapping state
-# cannot turn it into a hot loop against the gateway.
+# claims_version/state transition at most this often -- a trigger inside the
+# window is deferred to its close, not dropped -- so a flapping state cannot
+# turn it into a hot loop against the gateway.
 CLAIMS_DEBOUNCE_SEC = 5.0
 # Safety cadence only: with no trigger ever firing (a wiring bug, or a status
 # loop that never applies), the claims document still refreshes this often.
@@ -2242,7 +2243,11 @@ def claims_loop(
     ``state_label`` transition is an immediate tick), with ``debounce`` the
     floor between two fetches and ``interval`` the safety cadence that
     refreshes the document even if no trigger ever fires. Not a second
-    poller: one loop, woken by the trigger flag.
+    poller: one loop, woken by the trigger flag. The debounce is
+    trailing-edge: a trigger that lands inside the window stays armed, so
+    the first tick after the window closes fetches -- a transition is
+    answered within ``debounce`` plus one tick, never left for the next
+    trigger or the safety cadence.
 
     The projection is compared with the last one written and only a content
     change reaches Firestore, so a steady charger adds **zero** writes; the
@@ -2272,16 +2277,21 @@ def claims_loop(
         nonlocal last_stable, last_fetch
 
         now = monotonic()
-        forced = trigger is not None and trigger.is_set()
-        if trigger is not None:
-            trigger.clear()
         since = None if last_fetch is None else now - last_fetch
+        forced = trigger is not None and trigger.is_set()
         if since is not None and since < debounce:
-            # A trigger inside the debounce window is dropped, not queued:
-            # the next trigger or the safety cadence re-reads the target.
+            # Trailing-edge debounce: a trigger inside the window stays
+            # armed, so the first tick past the window close fetches -- a
+            # transition is answered within the debounce, never parked for
+            # the next trigger or the safety cadence.
             return
         if not forced and since is not None and since < interval:
             return
+        if trigger is not None:
+            # Consume the trigger only as the fetch it woke begins: a wake
+            # landing beside it either precedes the request (the fetch
+            # reflects it) or re-arms the event for a later tick.
+            trigger.clear()
         last_fetch = now
 
         checked_at = int(clock())

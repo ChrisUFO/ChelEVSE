@@ -272,6 +272,7 @@ class MqttSourceTests(MqttSourceBase):
             "chelevse/override/set",
             "chelevse/rapi/out",
             "chelevse/limit",
+            "chelevse/schedule",  # retained event list: not evidence (#159)
             "chelevse/elapsed",  # deprecated; session_elapsed is the source
             "othertopic/amp",
         ):
