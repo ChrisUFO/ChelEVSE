@@ -34,7 +34,7 @@ from fakes import (  # noqa: E402
     _host,
     _status_payload,
 )
-from mqtt_source import MqttSource, Snapshot  # noqa: E402
+from mqtt_source import CLAIM_EVIDENCE_TOPICS, MqttSource, Snapshot  # noqa: E402
 from test_mqtt import _RecordingNotifier  # noqa: E402
 
 MANUAL = 65537
@@ -152,7 +152,11 @@ class NormalizeTargetTests(unittest.TestCase):
                     "max_current": None,
                     "auto_release": "yes",
                 },
-                "claims": {"state": True, "charge_current": "65537"},
+                "claims": {
+                    "state": True,
+                    "charge_current": "65537",
+                    "max_current": float("inf"),
+                },
             }
         )
         self.assertIsNone(normalized["state"])
@@ -161,6 +165,11 @@ class NormalizeTargetTests(unittest.TestCase):
         # A bool is not a client id; a numeric string is tolerated.
         self.assertIsNone(normalized["claims"]["state"])
         self.assertEqual(normalized["claims"]["charge_current"], 65537)
+        # ``json.loads`` accepts ``Infinity``/``1e999`` as float inf, and
+        # int(inf) raises OverflowError -- the one numeric input int() will
+        # not coerce -- so it takes the None every other non-numeric takes,
+        # never an escape onto whatever thread runs the coercion.
+        self.assertIsNone(normalized["claims"]["max_current"])
 
 
 class DeriveReasonTests(unittest.TestCase):
@@ -243,13 +252,16 @@ class DeriveReasonTests(unittest.TestCase):
         self.assertIsNotNone(derived["winner_current"])
 
     def test_no_winners_and_a_disconnected_vehicle(self):
-        for vehicle in (0, 2):
+        for vehicle in (0, 2, "2"):
             with self.subTest(vehicle=vehicle):
                 derived = reason(target(), facts(vehicle=vehicle))
                 self.assertEqual(derived["reason"], "not_connected")
 
     def test_no_winners_and_a_connected_or_unknown_vehicle(self):
-        for vehicle in (1, None):
+        # The docstring invariant: an unknown vehicle never guesses "not
+        # connected" (fail-closed) -- unknown is any value int() will not
+        # coerce, bools included, exactly like the claim ids.
+        for vehicle in (1, "1", None, "banana", True, float("inf")):
             with self.subTest(vehicle=vehicle):
                 derived = reason(target(), facts(vehicle=vehicle))
                 self.assertIsNone(derived["reason"])
@@ -756,6 +768,46 @@ class ClaimsLoopTests(unittest.TestCase):
             {"boost": {"type": "energy", "value": 10, "remaining": 90}},
         )
 
+    def test_a_reason_transition_across_a_failure_write_still_drops_the_departed_keys(
+        self,
+    ):
+        # The departure baseline must survive a failure transition: an
+        # unanswered poll carries no ``detail`` (it deliberately keeps the
+        # last known winners in the document), so a baseline derived from
+        # the last written content would arrive at the recovery write
+        # empty-handed and the old reason's evidence would deep-merge into
+        # the recovered document beside the new reason's, for the rest of
+        # the run.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence("limit", {"type": "soc", "value": 80})
+        holder.note_evidence(
+            "boost", {"type": "energy", "value": 10, "remaining": 90}
+        )
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, target(current_claim=LIMIT, charge_current=16)),
+                requests.ConnectionError("down"),
+                FakeResponse(200, target(state_claim=BOOST)),
+            ],
+            polls=3,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 3)  # the limit write, the failure, the boost
+        self.assertEqual(
+            writes[0][3]["detail"], {"limit": {"type": "soc", "value": 80}}
+        )
+        self.assertEqual(writes[1][3]["reason"], "unknown")
+        self.assertNotIn("detail", writes[1][3])
+        self.assertEqual(writes[2][3]["detail"]["limit"], firestore.DELETE_FIELD)
+        self.assertEqual(db.data["status"]["claims"]["reason"], "boost")
+        # The stored document carries only the new reason's evidence, the
+        # same guarantee the direct transition gives.
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"],
+            {"boost": {"type": "energy", "value": 10, "remaining": 90}},
+        )
+
     def test_a_restart_seed_writes_nothing_for_an_identical_answer(self):
         stored = {
             "reachable": True,
@@ -832,6 +884,27 @@ class ClaimsLoopTests(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         self.assertEqual(writes[0][3]["source"], "unsupported")
         self.assertEqual(writes[0][3]["reason"], "unknown")
+
+    def test_an_infinite_id_in_the_contract_never_kills_the_tick(self):
+        # ``json.loads`` accepts ``Infinity``/``1e999`` as float inf, and
+        # the coercion of an inf id is the None every other non-numeric
+        # takes -- int(inf) raises OverflowError, which would otherwise
+        # escape the tick and freeze the projection for as long as the
+        # charger serves the payload.
+        infinite = {
+            "properties": {"state": "none"},
+            "claims": {"state": float("inf")},
+        }
+        db, _ = self.run_loop(
+            [FakeResponse(200, infinite), FakeResponse(200, target(state_claim=MANUAL))],
+            polls=2,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 2)
+        self.assertTrue(writes[0][3]["reachable"])
+        self.assertEqual(writes[0][3]["source"], "http")
+        self.assertIsNone(writes[0][3]["winner_state"])
+        self.assertEqual(writes[1][3]["reason"], "manual_override")
 
     def test_a_failed_write_is_retried_on_the_next_poll(self):
         db = FakeDB()
@@ -1183,6 +1256,51 @@ class EvidenceIngestionTests(unittest.TestCase):
         deep = "[" * 50000 + "]" * 50000
         self.client.deliver("chelevse/claim", deep)
         self.assertEqual(self.holder.snapshot()["evidence"], {})
+
+    def test_an_infinite_number_is_not_a_thread_killer(self):
+        # ``1e999`` decodes to float inf, and the parser's int coercion
+        # takes it as absent: int(inf) raises OverflowError, which would
+        # escape on_evidence onto the paho network thread and end it (the
+        # delivery is a synchronous call in this harness, so the pin fails
+        # loudly) -- and a retained payload redelivers the kill on every
+        # reconnect.
+        self.client.deliver("chelevse/claim", '{"state":"active","priority":1e999}')
+        self.assertEqual(
+            self.holder.snapshot()["evidence"], {"claim": {"state": "active"}}
+        )
+
+    def test_a_raising_callback_never_escapes_the_network_thread(self):
+        # Belt-and-braces for any future parser defect: the dispatch is
+        # guarded, so the worst case is one log line per delivery, never a
+        # dead network thread.
+        logs = []
+
+        def explodes(_leaf, _value):
+            raise RuntimeError("boom")
+
+        factory = FakeMqttFactory()
+        source = MqttSource(
+            "192.168.0.224",
+            topic="chelevse",
+            on_evidence=explodes,
+            debounce=60,
+            client_factory=factory,
+            log=logs.append,
+        )
+        self.addCleanup(source.stop)
+        source.start()
+        factory.client.connect()
+        # The delivery returns normally and the failure is on the record.
+        factory.client.deliver("chelevse/claim", '{"state":"active"}')
+        self.assertEqual(len(logs), 1)
+        self.assertIn("boom", logs[0])
+
+    def test_the_parser_and_topic_tables_name_the_same_leaves(self):
+        # A leaf in one table but not the other is silently never delivered
+        # (the message handler drops it) or delivered to no parser (the
+        # holder ignores it); the pin keeps the two tables -- and their
+        # deliberate absences, ``schedule`` notably -- synchronized.
+        self.assertEqual(set(claims.EVIDENCE_PARSERS), set(CLAIM_EVIDENCE_TOPICS))
 
     def test_evidence_is_never_status(self):
         self.client.deliver("chelevse/claim", '{"state":"active"}')

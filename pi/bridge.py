@@ -2291,6 +2291,13 @@ def claims_loop(
     counter = counter or WriteCounter()
     stored = _seed_claims(doc)
     last_stable = claims_comparable(stored)
+    # The detail keys the stored document carries, as of the last write (or
+    # the seed). A loop-level baseline, not a view of ``last_stable``: a
+    # failure write carries no ``detail`` (it deliberately leaves the last
+    # known winners in the document), so deriving the baseline from
+    # ``last_stable`` would lose it across every failure transition and the
+    # recovery write could no longer name the departed keys.
+    last_detail = stored.get("detail") if isinstance(stored, dict) else None
     last_fetch = None
     trigger = getattr(observations, "trigger", None)
     if initial_delay:
@@ -2298,7 +2305,7 @@ def claims_loop(
         _stop.wait(initial_delay)
 
     def one_tick():
-        nonlocal last_stable, last_fetch
+        nonlocal last_stable, last_fetch, last_detail
 
         now = monotonic()
         since = None if last_fetch is None else now - last_fetch
@@ -2367,9 +2374,7 @@ def claims_loop(
         # of a stored map. A map that empties outright needs none -- an
         # empty map replaces the stored value.
         detail = content.get("detail")
-        previous = (
-            last_stable.get("detail") if isinstance(last_stable, dict) else None
-        )
+        previous = last_detail if isinstance(last_detail, dict) else None
         if detail and isinstance(previous, dict):
             departed = {
                 key: firestore.DELETE_FIELD
@@ -2385,6 +2390,13 @@ def claims_loop(
             log(f"claims write failed ({exc.__class__.__name__}: {exc})")
         else:
             last_stable = stable
+            # The baseline tracks the stored document. A write that carried
+            # ``detail`` leaves the stored map equal to it (the sentinels
+            # above delete the departed keys); a write with no ``detail``
+            # key -- a failure transition -- leaves the stored map alone,
+            # and so must the baseline.
+            if detail is not None:
+                last_detail = dict(detail)
 
     run_loop("claims", one_tick, lambda: _stop.wait(tick))
 

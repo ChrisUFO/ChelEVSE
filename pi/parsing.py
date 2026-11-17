@@ -206,7 +206,9 @@ def as_int(value):
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads accepts ``Infinity``/``1e999`` as float
+        # inf, and int(inf) overflows rather than failing to coerce.
         return None
 
 

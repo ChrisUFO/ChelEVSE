@@ -1270,9 +1270,13 @@ On a 2xx the bridge merges `acks: {<notification_id>: <epoch seconds>}` into
 `status/notifications` with `set(..., merge=True)` — a **nested map merge**, and
 the only field family the command writes there. The health loop's own merges
 project their content fields (`reachable`, `source`, `gates`, `counters`,
-`advisories`, `alerted`) and never `acks`, so a poll can neither clobber an
-acknowledgement nor be clobbered by one, and no read-modify-write of the
-`advisories` list is needed. The map is bounded by the firmware's 15 advisory
+`advisories`, `alerted`, `ack_command`) and never `acks`, so a poll can neither
+clobber an acknowledgement nor be clobbered by one, and no read-modify-write of
+the `advisories` list is needed. `ack_command` is a bridge-build capability
+fact, not an observation: `true` on every projection this bridge writes, absent
+on documents written by an older bridge that cannot acknowledge over HTTP, so
+the web's ack control gates on `=== true` (fail closed). The map is bounded by
+the firmware's 15 advisory
 ids, so it is never pruned. The write is counted as `health` (no new kind).
 
 **Ordering: charger → Firestore → command doc.** The acknowledgement is written

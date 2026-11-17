@@ -219,7 +219,9 @@ def derive_reason(target, observations):
     elif LIMIT_CLIENT in current_winners:
         derived["reason"] = "current_limit"
     else:
-        vehicle = observations.get("vehicle")
+        # ``vehicle`` is the raw status fact; coerce once, and an unknown
+        # value (non-numeric, a bool) stays unknown -- never a guess.
+        vehicle = as_int(observations.get("vehicle"))
         # 5. No winner at all and the vehicle is known disconnected: the
         #    charger has no restriction to name. An unknown vehicle never
         #    guesses "not connected".
@@ -227,7 +229,7 @@ def derive_reason(target, observations):
             state_winner is None
             and current_winner is None
             and vehicle is not None
-            and as_int(vehicle) != 1
+            and vehicle != 1
         ):
             derived["reason"] = "not_connected"
         # 6. Otherwise None: charging/ready with no restriction.

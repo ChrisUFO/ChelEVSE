@@ -652,8 +652,18 @@ class MqttSource:
         if leaf in CLAIM_EVIDENCE_TOPICS:
             # Supporting evidence for the claims pipeline (#159): decoded
             # here on the network thread, parsed and held by the callback.
+            # An escapee here would end loop_start()'s thread while
+            # ``connected`` still reads healthy (the decode's own docstring),
+            # and a retained payload redelivers the kill on every reconnect,
+            # so the dispatch is guarded whatever a future parser raises.
             if self.on_evidence is not None:
-                self.on_evidence(leaf, _decode(getattr(message, "payload", b"")))
+                try:
+                    self.on_evidence(leaf, _decode(getattr(message, "payload", b"")))
+                except Exception as exc:
+                    self.log(
+                        f"mqtt evidence callback failed "
+                        f"({exc.__class__.__name__}: {exc})"
+                    )
             return
         field = TOPIC_FIELDS.get(leaf)
         if field is None:  # retained JSON, commands, rapi/in, deprecated topics
