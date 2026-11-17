@@ -149,7 +149,12 @@ class NotificationsLoopTests(unittest.TestCase):
         self.assertEqual(document["source"], "http")
         self.assertEqual(document["counters"], COUNTERS)
         self.assertEqual(
-            document["gates"], {"settings_known": True, "relay_health_known": False}
+            document["gates"],
+            {
+                "settings_known": True,
+                "relay_health_known": False,
+                "relay_health_supported": True,
+            },
         )
         (entry,) = document["advisories"]
         self.assertEqual(entry["id"], "fault.no_ground")
@@ -322,7 +327,12 @@ class NotificationsLoopTests(unittest.TestCase):
 
         self.assertEqual(document["advisories"], [])
         self.assertEqual(
-            document["gates"], {"settings_known": False, "relay_health_known": False}
+            document["gates"],
+            {
+                "settings_known": False,
+                "relay_health_known": False,
+                "relay_health_supported": True,
+            },
         )
 
 
@@ -490,7 +500,11 @@ class SeedTests(unittest.TestCase):
         stored = {
             "reachable": True,
             "source": "http",
-            "gates": {"settings_known": True, "relay_health_known": False},
+            "gates": {
+                "settings_known": True,
+                "relay_health_known": False,
+                "relay_health_supported": True,
+            },
             "counters": COUNTERS,
             "advisories": [
                 {
@@ -607,7 +621,9 @@ class AlertTests(unittest.TestCase):
         ]
 
     def test_one_push_for_a_newly_observed_critical_unacked_advisory(self):
-        db, notifier = self.run_loop([FakeResponse(200, payload([advisory()]))], polls=1)
+        db, notifier = self.run_loop(
+            [FakeResponse(200, payload([advisory()]))], polls=1
+        )
 
         self.assertEqual(notifier.bodies, [self.RECORDED])
         (write,) = self.health_writes(db)
@@ -669,7 +685,9 @@ class AlertTests(unittest.TestCase):
         # The old key is gone from the write *and* from the stored map (the
         # merge would otherwise keep it forever).
         self.assertEqual(writes[1][3]["alerted"]["fault.no_ground|8"], 2000)
-        self.assertIs(writes[1][3]["alerted"]["fault.no_ground|7"], firestore.DELETE_FIELD)
+        self.assertIs(
+            writes[1][3]["alerted"]["fault.no_ground|7"], firestore.DELETE_FIELD
+        )
         self.assertEqual(
             db.data["status"]["notifications"]["alerted"],
             {"fault.no_ground|8": 2000},
@@ -784,7 +802,9 @@ class AlertTests(unittest.TestCase):
         # when it was queued: a crash after this point cannot alert twice.
         self.assertEqual(notifier.bodies, [self.RECORDED])
         self.assertEqual(notifier.writes_at_enqueue, [1])
-        self.assertEqual(self.health_writes(db)[0][3]["alerted"], {"fault.no_ground|7": 1000})
+        self.assertEqual(
+            self.health_writes(db)[0][3]["alerted"], {"fault.no_ground|7": 1000}
+        )
 
     def test_a_failed_write_sends_nothing_and_the_next_poll_alerts_once(self):
         db = FakeDB()
@@ -800,7 +820,9 @@ class AlertTests(unittest.TestCase):
         # Nothing was queued from the failed pass: the one push left only after
         # the retried write had landed.
         self.assertEqual(notifier.writes_at_enqueue, [1])
-        self.assertEqual(self.health_writes(db)[0][3]["alerted"], {"fault.no_ground|7": 1000})
+        self.assertEqual(
+            self.health_writes(db)[0][3]["alerted"], {"fault.no_ground|7": 1000}
+        )
 
     def test_a_failed_poll_keeps_the_watermark_and_pushes_nothing(self):
         db = FakeDB()
