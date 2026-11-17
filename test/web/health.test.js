@@ -242,6 +242,17 @@ test('a firmware that never reports relay health is a neutral fact, not an amber
     mayReport.detail,
     'Relay health isn’t reported, so some advisory checks may be missing.',
   );
+
+  // Data beats the table: a relay block that arrived closes the gate, and the
+  // capability fact neither re-opens it nor appends its sentence.
+  const known = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: true, relay_health_supported: false },
+    }),
+  );
+  assert.equal(known.state, 'none');
+  assert.equal(known.caveat, '');
+  assert.equal(known.tone, 'muted');
 });
 
 test('an unknown safety gate beside an unsupported relay gate warns on safety alone', () => {
@@ -292,6 +303,19 @@ test('an unsupported relay gate rides the caveat line neutrally beside advisorie
     mixed.caveat,
     'Safety checks aren’t reported, so some advisory checks may be missing. Relay health isn’t reported by this firmware.',
   );
+
+  // An active corroborated advisory beside the unsupported gate keeps its
+  // severity's tone: liveness outranks the capability fact, so the card is
+  // never muted below a live condition while the caveat stays neutral.
+  const active = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: false, relay_health_supported: false },
+      advisories: [{ ...entry, classification: 'active', corroborated: true }],
+    }),
+  );
+  assert.equal(active.state, 'advisories');
+  assert.equal(active.tone, 'err');
+  assert.equal(active.caveat, 'Relay health isn’t reported by this firmware.');
 });
 
 test('a counter-derived critical is recorded, and stays critical', () => {

@@ -319,6 +319,29 @@ class NotificationsLoopTests(unittest.TestCase):
         # A new counter is a new observation: the watermark moved with it.
         self.assertEqual(writes[1][3]["advisories"][0]["first_observed"], 2000)
 
+    def test_a_capability_flip_writes_once_and_then_goes_quiet(self):
+        # The #181 scenario end to end, through the loop: 8.2.3 never answers
+        # ``$GL`` so the first write projects the capability as unsupported, a
+        # mid-loop config poll reports newer firmware -- exactly one more write
+        # flips ``relay_health_supported``, and the steady poll after it writes
+        # nothing (the flip is never write-deduped, never re-announced).
+        live = observations(config={**CONFIG, "firmware": "8.2.3"})
+
+        def upgrade_firmware():
+            live.note_config({**CONFIG, "firmware": "9.0.0"})
+
+        db, _ = self.run_loop(
+            [FakeResponse(200, payload([advisory()]))] * 3,
+            polls=3,
+            live=live,
+            on_wait=upgrade_firmware,
+        )
+
+        writes = self.health_writes(db)
+        self.assertEqual(len(writes), 2, "the flip writes once, then quiet")
+        self.assertIs(writes[0][3]["gates"]["relay_health_supported"], False)
+        self.assertIs(writes[1][3]["gates"]["relay_health_supported"], True)
+
     def test_the_gate_says_incomplete_not_healthy(self):
         db, _ = self.run_loop(
             [FakeResponse(200, payload([]))], polls=1, live=observations(config=None)

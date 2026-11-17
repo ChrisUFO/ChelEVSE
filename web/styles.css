@@ -902,6 +902,11 @@ input[type='range']::-moz-range-thumb {
   font-size: 12.5px;
   line-height: 1.5;
 }
+/* The muted card's caveat is only ever the neutral capability sentence, so its
+   rail must not borrow the amber one. */
+.health-card[data-tone='muted'] .health-caveat {
+  border-left-color: var(--line);
+}
 .health-list {
   display: grid;
   gap: 8px;
