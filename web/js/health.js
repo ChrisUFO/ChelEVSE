@@ -341,16 +341,28 @@ function checkedLabel(seconds, nowMs) {
 // rules from caches that can still be unknown and stays silent while they are,
 // so silence under an open gate is a gap, never health (D7). "Safety" is the
 // `$GE` settings word (the `safety.*` family), "relay health" the `$GL` block
-// (`wear.*` and `thermal.relay_thermal`).
-function gateSentence(gates) {
+// (`wear.*` and `thermal.relay_thermal`). An open relay gate on a firmware the
+// bridge says never reports it is not a gap but a capability fact: its sentence
+// is neutral, appended beside — never inside — the amber one.
+const RELAY_UNSUPPORTED_DETAIL = 'Relay health isn’t reported by this firmware.';
+
+function gateSentence(gates, relaySupported) {
   const safety = gates.settings_known === true ? '' : 'safety';
-  const relay = gates.relay_health_known === true ? '' : 'relay';
+  // An unsupported relay gate never counts as amber: it is not a check that
+  // may be missing, but one this firmware never runs.
+  const relay = !relaySupported || gates.relay_health_known === true ? '' : 'relay';
+  const parts = [];
   if (safety && relay) {
-    return 'Safety and relay checks aren’t reported, so some advisory checks may be missing.';
+    parts.push('Safety and relay checks aren’t reported, so some advisory checks may be missing.');
+  } else if (safety) {
+    parts.push('Safety checks aren’t reported, so some advisory checks may be missing.');
+  } else if (relay) {
+    parts.push('Relay health isn’t reported, so some advisory checks may be missing.');
   }
-  if (safety) return 'Safety checks aren’t reported, so some advisory checks may be missing.';
-  if (relay) return 'Relay health isn’t reported, so some advisory checks may be missing.';
-  return '';
+  if (!relaySupported && gates.relay_health_known !== true) {
+    parts.push(RELAY_UNSUPPORTED_DETAIL);
+  }
+  return parts.join(' ');
 }
 
 function plural(count, one, many) {
@@ -473,10 +485,10 @@ function compareRows(a, b) {
 }
 
 // The card's marker colour: only a live corroborated condition (its severity)
-// or an incomplete check (amber) earns one. A complete report with no
-// advisories stays neutral — green would read as a safety verdict the app has
-// no basis for.
-function toneFor(rows, incomplete) {
+// or a transiently incomplete check (amber) earns one. A complete report with
+// no advisories stays neutral — green would read as a safety verdict the app
+// has no basis for.
+function toneFor(rows, transientIncomplete) {
   const actives = rows.filter((row) => row.presentation === 'active');
   if (actives.length) {
     const worst = actives.reduce(
@@ -486,7 +498,7 @@ function toneFor(rows, incomplete) {
     const severity = Object.keys(SEVERITY_RANK).find((key) => SEVERITY_RANK[key] === worst);
     return (severity && TONE[severity]) || 'warn';
   }
-  return incomplete ? 'warn' : 'muted';
+  return transientIncomplete ? 'warn' : 'muted';
 }
 
 function countRows(rows) {
@@ -531,8 +543,16 @@ export function healthState({ doc, error = false, nowMs = Date.now() } = {}) {
     settings_known: doc.gates && doc.gates.settings_known === true,
     relay_health_known: doc.gates && doc.gates.relay_health_known === true,
   };
+  // The bridge's capability fact, absent on an older bridge's document: only
+  // an explicit `false` says this firmware never reports relay health. Nothing
+  // here inspects the firmware string itself.
+  const relaySupported = doc.gates?.relay_health_supported !== false;
   const incomplete = !gates.settings_known || !gates.relay_health_known;
-  const caveat = gateSentence(gates);
+  // Only a relay gate that may still close keeps its amber meaning; an
+  // unsupported one is a permanent neutral fact, not an open question.
+  const transientIncomplete =
+    !gates.settings_known || (!gates.relay_health_known && relaySupported);
+  const caveat = gateSentence(gates, relaySupported);
   const acks = doc.acks && typeof doc.acks === 'object' ? doc.acks : null;
   const entries = Array.isArray(doc.advisories) ? doc.advisories : [];
   const advisories = entries
@@ -549,7 +569,9 @@ export function healthState({ doc, error = false, nowMs = Date.now() } = {}) {
     return {
       state: 'incomplete',
       reason: null,
-      tone: 'warn',
+      // Warn only while a gate may still close; an unsupported relay gate is
+      // incomplete but not a warning.
+      tone: transientIncomplete ? 'warn' : 'muted',
       title: 'Health incomplete',
       detail: caveat,
       meta,
@@ -565,7 +587,7 @@ export function healthState({ doc, error = false, nowMs = Date.now() } = {}) {
   return {
     state: advisories.length ? 'advisories' : 'none',
     reason: null,
-    tone: toneFor(advisories, incomplete),
+    tone: toneFor(advisories, transientIncomplete),
     title: said.title,
     detail: said.detail,
     meta,

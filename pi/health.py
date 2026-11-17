@@ -97,6 +97,16 @@ RELAY_HEALTH_KEYS = (
     "relay_thermal_warning_level",
     "relay_stuck_recovery_count",
 )
+# Firmware strings of controller generations that never answer ``$GL``, so
+# their relay-health gate is a capability fact rather than a transient one
+# (#181). Maintenance rule: exact-match, and a string is added only for a
+# verified fact -- a wrong "never reports" claim would mute a gate the firmware
+# may yet close, which is worse than the amber incomplete it replaces.
+# Everything not listed (``None`` before ``/config`` answers, ``"master"``, any
+# unlisted version) means *may report*, so the gate keeps its transient
+# meaning. Data still beats the table: a relay block that arrives closes the
+# gate regardless.
+RELAY_HEALTH_UNSUPPORTED_FIRMWARE = frozenset({"8.2.3"})
 # The projection's counter order, and the fault-counter names ``parse_status``
 # carries in the raw ``/status`` reply.
 COUNTER_FIELDS = ("nogndcount", "gfcicount", "stuckcount")
@@ -135,7 +145,7 @@ def _flag(value):
 
 
 def gates(config):
-    """The two firmware gates, as the projection reports them.
+    """The two firmware gates and the relay capability, as projected.
 
     The gateway evaluates its rules from caches that can still be unknown and
     stays silent while they are: the safety rules from the ``$GE`` settings word
@@ -143,6 +153,13 @@ def gates(config):
     ``thermal.relay_thermal``) until the relay block arrives. Silence under an
     open gate means "health incomplete", never "no faults" -- an empty advisory
     list is only evidence of health when both gates are closed *false*.
+
+    ``relay_health_supported`` is the capability fact beside them: whether this
+    firmware generation ever answers ``$GL`` at all, matched exactly against the
+    same written ``/config`` view's ``firmware`` string
+    (:data:`RELAY_HEALTH_UNSUPPORTED_FIRMWARE`). It never feeds
+    ``relay_health_known``, which stays pure parse presence -- data beats the
+    table.
     """
     config = config if isinstance(config, dict) else {}
     return {
@@ -152,6 +169,8 @@ def gates(config):
         "relay_health_known": all(
             config.get(key) is not None for key in RELAY_HEALTH_KEYS
         ),
+        "relay_health_supported": config.get("firmware")
+        not in RELAY_HEALTH_UNSUPPORTED_FIRMWARE,
     }
 
 

@@ -213,9 +213,7 @@ class SafetyCorroborationTests(unittest.TestCase):
 
     def test_the_settings_token_is_the_five_checks_together(self):
         live = facts(config={**CONFIG, "diode_check": False})
-        first, _ = project(
-            [advisory("safety.diode_check", category="safety")], live
-        )
+        first, _ = project([advisory("safety.diode_check", category="safety")], live)
         # `1` enabled, `0` disabled, in health.SAFETY_CHECKS order.
         self.assertEqual(first["advisories"][0]["counter_token"], "11011")
 
@@ -252,14 +250,24 @@ class GateTests(unittest.TestCase):
         content, _ = project([], facts(config=None))
 
         self.assertEqual(
-            content["gates"], {"settings_known": False, "relay_health_known": False}
+            content["gates"],
+            {
+                "settings_known": False,
+                "relay_health_known": False,
+                "relay_health_supported": True,
+            },
         )
 
     def test_a_known_charger_reports_both_gates_closed(self):
         content, _ = project([], facts(config={**CONFIG, **RELAY_BLOCK}))
 
         self.assertEqual(
-            content["gates"], {"settings_known": True, "relay_health_known": True}
+            content["gates"],
+            {
+                "settings_known": True,
+                "relay_health_known": True,
+                "relay_health_supported": True,
+            },
         )
 
     def test_a_safety_advisory_under_a_closed_gate_is_not_active(self):
@@ -276,11 +284,54 @@ class GateTests(unittest.TestCase):
         self.assertFalse(entry["corroborated"])
 
 
+class RelayCapabilityTests(unittest.TestCase):
+    """The relay gate's capability fact (#181): never-reports vs not-yet."""
+
+    def test_the_unsupported_generation_is_marked_so(self):
+        content, _ = project([], facts(config={**CONFIG, "firmware": "8.2.3"}))
+
+        self.assertFalse(content["gates"]["relay_health_known"])
+        self.assertFalse(content["gates"]["relay_health_supported"])
+
+    def test_relay_data_beats_the_capability_table(self):
+        content, _ = project(
+            [], facts(config={**CONFIG, **RELAY_BLOCK, "firmware": "8.2.3"})
+        )
+
+        self.assertTrue(content["gates"]["relay_health_known"])
+        self.assertFalse(content["gates"]["relay_health_supported"])
+
+    def test_every_other_firmware_may_still_report(self):
+        for firmware in (None, "5.1.5", "master", "9.0.0"):
+            with self.subTest(firmware=firmware):
+                content, _ = project([], facts(config={**CONFIG, "firmware": firmware}))
+
+                self.assertFalse(content["gates"]["relay_health_known"])
+                self.assertTrue(content["gates"]["relay_health_supported"])
+
+    def test_a_config_with_no_firmware_string_yet_defaults_to_supported(self):
+        # `CONFIG` carries no firmware key at all: the fresh-boot case, before
+        # `/config` has answered.
+        content, _ = project([], facts())
+
+        self.assertTrue(content["gates"]["relay_health_supported"])
+
+    def test_comparable_distinguishes_a_capability_flip(self):
+        unsupported, _ = project([], facts(config={**CONFIG, "firmware": "8.2.3"}))
+        supported, _ = project([], facts(config={**CONFIG, "firmware": "9.0.0"}))
+
+        self.assertNotEqual(
+            health.comparable(unsupported), health.comparable(supported)
+        )
+
+
 class ThermalTests(unittest.TestCase):
     def test_high_temp_is_active_within_the_margin_of_panic(self):
         entry, _ = one(
             [advisory("thermal.high_temp", category="thermal", severity="warning")],
-            facts(temps=(60.0, 67.0, None), config={**CONFIG, "over_temp_shutdown": 72}),
+            facts(
+                temps=(60.0, 67.0, None), config={**CONFIG, "over_temp_shutdown": 72}
+            ),
         )
         self.assertEqual(entry["classification"], "active")
         self.assertEqual(entry["counter_token"], 1794177153)
@@ -288,7 +339,9 @@ class ThermalTests(unittest.TestCase):
     def test_high_temp_is_historical_below_the_margin(self):
         entry, _ = one(
             [advisory("thermal.high_temp", category="thermal", severity="warning")],
-            facts(temps=(60.0, 66.0, None), config={**CONFIG, "over_temp_shutdown": 72}),
+            facts(
+                temps=(60.0, 66.0, None), config={**CONFIG, "over_temp_shutdown": 72}
+            ),
         )
         self.assertEqual(entry["classification"], "historical")
 
@@ -369,7 +422,9 @@ class ThermalTests(unittest.TestCase):
             facts(config=config),
         )
 
-        tokens = {entry["id"]: entry["counter_token"] for entry in content["advisories"]}
+        tokens = {
+            entry["id"]: entry["counter_token"] for entry in content["advisories"]
+        }
         self.assertEqual(tokens["wear.relay_cold_open"], 12)
         self.assertEqual(tokens["wear.stuck_relay_recovery"], 3)
 
@@ -600,7 +655,12 @@ class LiveObservationsTests(unittest.TestCase):
         live = health.LiveObservations()
         self.assertEqual(
             live.snapshot(),
-            {"state": None, "temps": (None, None, None), "counters": {}, "config": None},
+            {
+                "state": None,
+                "temps": (None, None, None),
+                "counters": {},
+                "config": None,
+            },
         )
 
         live.note_status(

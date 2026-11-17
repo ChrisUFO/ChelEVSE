@@ -672,8 +672,19 @@ concern, not a display field.
 and stays silent while they are: no `$GE` answer means no `safety.*` rules at
 all, no `$GL` answer means no `wear.*` / `thermal.relay_thermal` rules (and
 `/config` omits the relay block). The document therefore carries
-`gates: {settings_known, relay_health_known}`; a closed gate means **health
-incomplete**, never "no faults".
+`gates: {settings_known, relay_health_known, relay_health_supported}`; a closed
+gate means **health incomplete**, never "no faults".
+
+`relay_health_supported` is the _capability_ fact beside the two transient
+gates: some controller generations never answer `$GL` at all, so their relay
+gate is a permanent fact rather than a gap that may close. It is an exact-match
+table (`RELAY_HEALTH_UNSUPPORTED_FIRMWARE`) over the written `/config` view's
+`firmware` string — a string is added only for a verified fact, and anything
+unlisted (no firmware yet, `master`, any other version) means _may report_,
+keeping the transient meaning. Data beats the table: a relay block that does
+arrive closes `relay_health_known` whatever the table says. The web renders
+`false` neutrally (muted), never as the amber incomplete a still-waiting gate
+gets (#181).
 
 **Document.** Merge writes only, and only when the projected content changes:
 
@@ -682,7 +693,7 @@ incomplete**, never "no faults".
   "reachable": true,
   "checked_at": 1794870706,
   "source": "http",
-  "gates": { "settings_known": true, "relay_health_known": false },
+  "gates": { "settings_known": true, "relay_health_known": false, "relay_health_supported": false },
   "counters": { "nogndcount": 7, "gfcicount": 0, "stuckcount": 0 },
   "advisories": [
     {
