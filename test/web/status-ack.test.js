@@ -22,6 +22,7 @@ function stubElement(tag = '') {
   const classes = new Set();
   const listeners = new Map();
   const attrs = new Map();
+  let disabled = false;
   return {
     tag,
     classes,
@@ -42,10 +43,21 @@ function stubElement(tag = '') {
     textContent: '',
     value: '',
     hidden: false,
-    disabled: false,
     className: '',
     id: '',
     title: '',
+    // The browser's focus fix-up rule, which the real DOM implements: a focused
+    // control that becomes unfocusable loses focus to the nearest focusable
+    // ancestor — <body> here. Without it this harness would let a disabled button
+    // keep focus and hide the click→disable→rebuild timeline the screen exists to
+    // handle.
+    get disabled() {
+      return disabled;
+    },
+    set disabled(value) {
+      disabled = Boolean(value);
+      if (disabled && activeElement === this) activeElement = body;
+    },
     setAttribute(name, value) {
       attrs.set(name, String(value));
     },
@@ -215,13 +227,18 @@ test('a write that cannot leave says so and leaves the row unacknowledged', asyn
   assert.equal(element('health-title').textContent, '1 recorded advisory');
 });
 
-test('the snapshot acknowledging the row removes the control and moves focus to the card', () => {
+test('acknowledging from the control hands focus to the card, not to <body>', () => {
   showHealth(doc());
   const row = rowOf();
   const button = buttonOf(row);
-  // The owner activates the control: focus is on it when the snapshot lands.
+  // The owner activates the control: focus is on it when the click runs, and the
+  // synchronous disable takes it away inside that same dispatch (the stub models
+  // the browser's focus fix-up rule). The success snapshot lands seconds later,
+  // so `document.activeElement` is already <body> by then.
   button.focus({ preventScroll: true });
   assert.equal(document.activeElement, button);
+  click(button);
+  assert.equal(document.activeElement, body, 'the disable displaced the focus');
 
   showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
 
@@ -230,10 +247,41 @@ test('the snapshot acknowledging the row removes the control and moves focus to 
   assert.equal(chipOf(acked, 'health-state').textContent, 'Acknowledged');
   assert.equal(acked.children.length, 2, 'no control remains on an acknowledged row');
   assert.equal(buttonOf(acked), null);
-  // Focus did not fall to <body>: it moved to the card title the live region
-  // announces.
+  // Focus did not stay on <body>: it moved to the card title the live region
+  // announces, even though the browser had already dropped it at click time.
   assert.equal(focusLog.at(-1), 'health-title');
   assert.deepEqual(element('health-title').focused, { preventScroll: true });
+});
+
+test('a control the owner tabbed to hands focus over when a remote ack removes it', () => {
+  showHealth(doc());
+  const button = buttonOf(rowOf());
+  // Never pressed: the acknowledgement came from elsewhere, so nothing disabled
+  // the control and it still holds focus when the snapshot rebuilds the list.
+  button.focus({ preventScroll: true });
+  assert.equal(document.activeElement, button);
+
+  showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
+
+  assert.equal(buttonOf(rowOf()), null);
+  assert.equal(focusLog.at(-1), 'health-title');
+});
+
+test('a rebuild leaves focus alone when the owner has moved to another control', () => {
+  showHealth(doc());
+  const button = buttonOf(rowOf());
+  button.focus({ preventScroll: true });
+  click(button);
+  // The disable dropped focus to <body>; the owner went back to the charger
+  // controls while the acknowledgement was still in flight.
+  const elsewhere = element('pause');
+  elsewhere.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
+
+  assert.equal(document.activeElement, elsewhere, 'focus stays where the owner put it');
+  assert.deepEqual(focusLog, [], 'no hand-off steals a live focus');
 });
 
 test('an already acknowledged advisory and unknown health offer no control at all', () => {

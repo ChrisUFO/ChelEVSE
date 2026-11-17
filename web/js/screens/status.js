@@ -2,7 +2,7 @@
 // oriented pause/resume/set-current controls. All rendering and status-specific
 // state lives here so the screen survives tab switches intact.
 
-import { $, el, focusAfterRetry, setText } from '../ui.js';
+import { $, el, focusAfterRetry, focusFellAway, setText } from '../ui.js';
 import {
   elapsedClock,
   fmtK,
@@ -63,6 +63,12 @@ let healthView = null;
 // The acknowledgement controls themselves (`id → {area, button, message}`), so a
 // busy row repaints in place instead of rebuilding the list under the pointer.
 let ackNodes = new Map();
+// The row whose control held the owner's focus when it was disabled. The browser
+// blurs a control the instant it becomes unfocusable (HTML's focus fix-up rule,
+// down to <body> here), so by the time the success rebuild runs
+// `document.activeElement` no longer names it — this records the displacement
+// where it happens, and the next rebuild spends it.
+let ackFocusId = null;
 // The acknowledgement state machine (health.js, unit-tested): one click writes
 // one command, the snapshot settles it, and every completion repaints only the
 // row it belongs to.
@@ -374,6 +380,12 @@ function paintAckRow(row) {
   const control = ackControlState(row, acks.state(row.id));
   nodes.area.hidden = !control.show;
   nodes.button.textContent = control.label;
+  // Disabling the control the owner just activated takes their focus with it
+  // inside the same click dispatch: a focused element that becomes unfocusable
+  // loses focus to the nearest focusable ancestor — <body> here. Record that here,
+  // where it happens, because the rebuild that removes the control cannot see it
+  // any more (`document.activeElement` is already <body>).
+  if (control.disabled && nodes.button === document.activeElement) ackFocusId = row.id;
   nodes.button.disabled = control.disabled;
   nodes.button.setAttribute('aria-label', control.ariaLabel);
   nodes.message.hidden = !control.message;
@@ -404,17 +416,25 @@ function renderHealth() {
     .join(';');
   if (signature !== healthSignature) {
     healthSignature = signature;
-    // A rebuild recreates every row, so a control the owner's focus is on will
-    // not survive it — this is the acknowledgement's own success path, where the
-    // control disappears because the row now reads Acknowledged. Hand the focus
-    // to the card's title (the retry's target, and the summary the live region
-    // announces) rather than letting the browser drop it to <body>.
-    const focusedControl = [...ackNodes.values()].some(
+    // A rebuild recreates every row, so a control the owner was on will not
+    // survive it — this is the acknowledgement's own success path, where the
+    // control disappears because the row now reads Acknowledged. Two facts say
+    // their focus is about to be destroyed: a control that still holds it
+    // (`heldControl` — a remote ack, or a control tabbed to but never pressed),
+    // and the control whose disable displaced it (`ackFocusId`, because the
+    // browser had already dropped focus to <body> by now). Either hands focus to
+    // the card's title — the same fell-away policy the Retry screens use, so
+    // focus that is still on a live element is never stolen.
+    const heldControl = [...ackNodes.values()].some(
       (nodes) => nodes.button === document.activeElement,
     );
+    const displaced = ackFocusId;
+    ackFocusId = null;
     ackNodes = new Map();
     $('health-list').replaceChildren(...state.advisories.map(healthRow));
-    if (focusedControl) $('health-title').focus({ preventScroll: true });
+    if ((heldControl || displaced) && focusFellAway()) {
+      $('health-title').focus({ preventScroll: true });
+    }
   }
   $('health-list').hidden = state.advisories.length === 0;
   for (const row of state.advisories) paintAckRow(row);
@@ -627,6 +647,7 @@ export function leaveStatus() {
   // still in flight.
   acks.reset();
   ackNodes = new Map();
+  ackFocusId = null;
   healthView = null;
   schedule = null;
   settings = null;
