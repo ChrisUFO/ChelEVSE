@@ -641,7 +641,14 @@ class AlertTests(unittest.TestCase):
         writes = self.health_writes(db)
         self.assertEqual(len(writes), 2)
         self.assertEqual(writes[1][3]["advisories"][0]["counter_token"], 8)
-        self.assertEqual(writes[1][3]["alerted"], {"fault.no_ground|8": 2000})
+        # The old key is gone from the write *and* from the stored map (the
+        # merge would otherwise keep it forever).
+        self.assertEqual(writes[1][3]["alerted"]["fault.no_ground|8"], 2000)
+        self.assertIs(writes[1][3]["alerted"]["fault.no_ground|7"], firestore.DELETE_FIELD)
+        self.assertEqual(
+            db.data["status"]["notifications"]["alerted"],
+            {"fault.no_ground|8": 2000},
+        )
 
     def test_the_watermark_is_pruned_when_the_advisory_leaves_the_ring(self):
         db, notifier = self.run_loop(
@@ -706,6 +713,36 @@ class AlertTests(unittest.TestCase):
         self.assertEqual(cold["alerted"], {"fault.gfci_tripped|3": 500})
         self.assertEqual(
             db.data["status"]["notifications"]["alerted"]["fault.no_ground|7"], 3000
+        )
+
+    def test_a_partial_prune_deletes_the_stale_key_from_the_stored_document(self):
+        # `set(merge=True)` deep-merges maps, so a key omitted from `alerted`
+        # would stay in Firestore for the life of the install -- and a restart
+        # would seed it back, silencing a key the running bridge had pruned.
+        # The departed key is named by the delete sentinel, so the stored map
+        # stays bounded by the ring even when it does not empty outright.
+        other = advisory("fault.gfci_tripped")
+        db, notifier = self.run_loop(
+            [
+                FakeResponse(200, payload([advisory(), other])),
+                FakeResponse(200, payload([other])),
+            ],
+            polls=2,
+        )
+
+        self.assertEqual(len(notifier.bodies), 2, "one push per advisory")
+        writes = self.health_writes(db)
+        self.assertEqual(
+            writes[0][3]["alerted"],
+            {"fault.no_ground|7": 1000, "fault.gfci_tripped|0": 1000},
+        )
+        second = writes[1][3]["alerted"]
+        self.assertIs(second["fault.no_ground|7"], firestore.DELETE_FIELD)
+        self.assertEqual(second["fault.gfci_tripped|0"], 1000)
+        # What a restart would seed: only the live ring's key survives.
+        self.assertEqual(
+            db.data["status"]["notifications"]["alerted"],
+            {"fault.gfci_tripped|0": 1000},
         )
 
     def test_the_watermark_is_written_before_the_push(self):

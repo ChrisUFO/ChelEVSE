@@ -2075,6 +2075,19 @@ def notifications_loop(
             "checked_at": checked_at,
             "updated_at": firestore.SERVER_TIMESTAMP,
         }
+        # A merge write deep-merges maps, so a key `alert_plan` pruned would
+        # survive in the stored document for the life of the install: name each
+        # departed key with the delete sentinel, which is the only way a merge
+        # write drops one entry of a stored map. A map that empties outright
+        # needs none -- an empty map replaces the stored value.
+        if watermark:
+            departed = {
+                key: firestore.DELETE_FIELD
+                for key in alerted
+                if key not in watermark
+            }
+            if departed:
+                write["alerted"] = {**watermark, **departed}
         try:
             counter.counted("health", doc.set, write, merge=True)
         except Exception as exc:
