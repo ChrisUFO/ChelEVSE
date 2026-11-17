@@ -512,6 +512,26 @@ class EvidenceParserTests(unittest.TestCase):
             {"type": "energy", "value": 10, "started": "2026-11-17T09:00:00Z"},
         )
 
+    def test_hostile_strings_never_become_evidence(self):
+        # ``type`` and ``started`` are the only unbounded strings in the
+        # retained-evidence path (every number is int64-bounded, every other
+        # string a fixed vocabulary): a retained boost carrying a ≥1 MiB
+        # string would ride ``detail`` into the merge write and past
+        # Firestore's ~1 MiB document limit, and the server-side rejection
+        # would freeze every later write -- the int64 freeze's exact shape.
+        # A ``type`` past its cap is not a firmware word, so the document is
+        # not evidence; an oversized ``started`` is dropped alone.
+        self.assertIsNone(claims.parse_boost({"type": "X" * 33, "value": 10}))
+        self.assertEqual(
+            claims.parse_boost({"type": "energy", "value": 10, "started": "2" * 65}),
+            {"type": "energy", "value": 10},
+        )
+        # The caps are generous, not tight: boundary lengths pass.
+        self.assertEqual(
+            claims.parse_boost({"type": "t" * 32, "started": "2" * 64}),
+            {"type": "t" * 32, "started": "2" * 64},
+        )
+
 
 class ClaimsObservationsTests(unittest.TestCase):
     def setUp(self):
@@ -859,6 +879,49 @@ class ClaimsLoopTests(unittest.TestCase):
         )
         self.assertEqual(self.claims_writes(db), [])
 
+    def test_a_restart_seed_names_the_stored_departed_detail_keys(self):
+        # The departed-key sentinel's restart half: the seed feeds the
+        # stored document's ``detail`` into the loop-level baseline, so a
+        # reason change across a restart still drops the previous run's
+        # evidence -- the exact interplay the sentinel's comment promises.
+        # A regression to an empty seeded baseline would strand the stale
+        # key in the stored document for good: every later write
+        # deep-merges beside it, and each restart reads it back again.
+        stored = {
+            "reachable": True,
+            "source": "http",
+            "reason": "current_limit",
+            "winner_current": "limit",
+            "detail": {"limit": {"type": "soc", "value": 80}},
+            "checked_at": 500,
+        }
+        db = FakeDB({"status": {"claims": stored}})
+        holder = claims.ClaimsObservations()
+        holder.note_evidence(
+            "boost", {"type": "energy", "value": 10, "remaining": 90}
+        )
+        db, _ = self.run_loop(
+            [FakeResponse(200, target(state_claim=BOOST))],
+            polls=1,
+            db=db,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(
+            writes[0][3]["detail"],
+            {
+                "boost": {"type": "energy", "value": 10, "remaining": 90},
+                "limit": firestore.DELETE_FIELD,
+            },
+        )
+        # The fake's merge honours the sentinel, as the server's does: the
+        # stored document carries only the new reason's evidence.
+        self.assertEqual(
+            db.data["status"]["claims"]["detail"],
+            {"boost": {"type": "energy", "value": 10, "remaining": 90}},
+        )
+
     def test_a_404_is_unsupported_once_and_carries_unknown(self):
         db, _ = self.run_loop(
             [FakeResponse(404), FakeResponse(404), FakeResponse(404)], polls=3
@@ -1002,6 +1065,41 @@ class ClaimsLoopTests(unittest.TestCase):
         writes = self.claims_writes(db)
         self.assertEqual(len(writes), 2, "the reason change must still write")
         self.assertEqual(writes[0][3]["detail"], {"boost": {"type": "energy", "value": 10}})
+        self.assertEqual(writes[1][3]["reason"], "manual_override")
+        self.assertEqual(writes[1][3]["detail"], {})
+
+    def test_hostile_boost_strings_do_not_freeze_the_document(self):
+        # The string freeze's loop-level pin: a retained boost with
+        # megabyte ``type``/``started`` strings passes every numeric bound,
+        # so without the caps it would ride ``detail`` into the merge write
+        # and past Firestore's ~1 MiB document limit -- the SDK builds the
+        # write client-side and the server rejects the commit, so the loop
+        # -- by design -- would retry the identical doomed write on every
+        # later trigger and the stored reason would freeze for as long as
+        # the broker redelivers the payload. The caps keep the document out
+        # of ``detail``, so the reason transition still writes.
+        holder = claims.ClaimsObservations()
+        holder.note_evidence(
+            "boost",
+            {
+                "type": "X" * 1_200_000,
+                "value": 10,
+                "started": "2" * 1_200_000,
+            },
+        )
+        db, _ = self.run_loop(
+            [
+                FakeResponse(200, target(state_claim=BOOST)),
+                FakeResponse(200, target(state_claim=MANUAL)),
+                FakeResponse(200, target(state_claim=MANUAL)),
+            ],
+            polls=3,
+            holder=holder,
+        )
+        writes = self.claims_writes(db)
+        self.assertEqual(len(writes), 2, "the reason change must still write")
+        self.assertEqual(writes[0][3]["reason"], "boost")
+        self.assertEqual(writes[0][3]["detail"], {})
         self.assertEqual(writes[1][3]["reason"], "manual_override")
         self.assertEqual(writes[1][3]["detail"], {})
 
@@ -1330,6 +1428,19 @@ class EvidenceIngestionTests(unittest.TestCase):
         self.assertEqual(
             self.holder.snapshot()["evidence"], {"claim": {"state": "active"}}
         )
+
+    def test_a_megabyte_string_is_not_evidence_poison(self):
+        # The string sibling of the number hardening: ``type``/``started``
+        # are the only unbounded strings an evidence parser kept, and a
+        # hostile retained boost would redeliver its oversized document on
+        # every reconnect. The caps drop it on the network thread, before
+        # it can reach ``detail`` and the merge write's ~1 MiB limit.
+        self.client.deliver(
+            "chelevse/boost",
+            '{"type":"%s","value":10,"started":"%s"}'
+            % ("X" * 1_200_000, "2" * 1_200_000),
+        )
+        self.assertEqual(self.holder.snapshot()["evidence"], {})
 
     def test_a_raising_callback_never_escapes_the_network_thread(self):
         # Belt-and-braces for any future parser defect: the dispatch is

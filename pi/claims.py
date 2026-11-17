@@ -316,16 +316,33 @@ def parse_limit(value):
     return subset
 
 
+# A boost's ``type`` is a firmware word ("time"/"energy") and ``started`` an
+# ISO-8601 timestamp: caps turn the two only-unbounded strings in the
+# retained-evidence path into bounded ones, so a hostile retained document
+# cannot ride ``detail`` over Firestore's ~1 MiB write limit (drop-the-key,
+# the same semantics as ``as_int``'s int64 bound). Both are an order of
+# magnitude beyond anything the firmware writes.
+BOOST_TYPE_MAX = 32
+BOOST_STARTED_MAX = 64
+
+
 def parse_boost(value):
     """The retained ``<base>/boost`` document -> the boost subset, or None.
 
     ``{}`` is idle (no boost running). A running boost carries at least its
-    type; ``remaining`` and ``started`` are kept when present.
+    type; ``remaining`` and ``started`` are kept when present. Both strings
+    are length-bounded: a ``type`` past its cap is not a firmware word, so
+    the document is not evidence at all, and an oversized ``started`` is
+    dropped while the bounded fields stay.
     """
     if not isinstance(value, dict) or not value:
         return None
     boost_type = value.get("type")
-    if not isinstance(boost_type, str) or not boost_type:
+    if (
+        not isinstance(boost_type, str)
+        or not boost_type
+        or len(boost_type) > BOOST_TYPE_MAX
+    ):
         return None
     subset = {"type": boost_type}
     amount = as_int(value.get("value"))
@@ -335,7 +352,7 @@ def parse_boost(value):
     if remaining is not None:
         subset["remaining"] = remaining
     started = value.get("started")
-    if isinstance(started, str):
+    if isinstance(started, str) and len(started) <= BOOST_STARTED_MAX:
         subset["started"] = started
     return subset
 
