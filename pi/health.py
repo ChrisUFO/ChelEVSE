@@ -404,11 +404,14 @@ def alert_plan(advisories, alerted, observed_at):
     the facts decides -- once, on the real key -- so a cold observation window
     delays an alert instead of duplicating it.
 
-    The returned map keeps only the current ring's keys, so it stays bounded by
-    the ring (the firmware's own 15 ids) instead of growing for the life of the
-    bridge. That pruning never costs an alert: a re-raise is a *new* key by
-    construction (D3 -- a new trip moves the counter, a new settings word voids
-    the ack), so a key can only reappear with its own push.
+    On a pass that can key every entry, the returned map keeps only the current
+    ring's keys, so it stays bounded by the ring (the firmware's own 15 ids)
+    instead of growing for the life of the bridge; an undecided pass (above)
+    carries the map forward whole, so keys the ring no longer lists can linger
+    until the first pass with the facts, which prunes them. That pruning never
+    costs an alert: a re-raise is a *new* key by construction (D3 -- a new trip
+    moves the counter, a new settings word voids the ack), so a key can only
+    reappear with its own push.
     """
     known = alerted if isinstance(alerted, dict) else {}
     messages = []

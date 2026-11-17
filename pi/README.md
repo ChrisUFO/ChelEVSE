@@ -154,13 +154,12 @@ below changes.
 The firmware publishes one topic per value (`<base>/amp`, `<base>/state`, …)
 when its EVSE poll reports a change. Topic values are handed over in their raw
 units and every snapshot runs through the same `parse_status` / `apply_status`
-path as an HTTP poll, so the document shape, unit conversions, history,
-sessions and notifications are shared — a second source describing the same
-state cannot fire a second transition, ring up history twice, or write a
-second session. `status/current` therefore carries only the curated fields
-listed under [What the bridge writes](#what-the-bridge-writes); the raw
-`/status` keys (`comm_*`, `ipaddress`, `macaddress`, `mqtt_connected`, …) never
-reach it.
+path as an HTTP poll, so the document shape, unit conversions, history and
+sessions are shared — a second source describing the same state cannot ring up
+history twice or write a second session. `status/current` therefore carries
+only the curated fields listed under
+[What the bridge writes](#what-the-bridge-writes); the raw `/status` keys
+(`comm_*`, `ipaddress`, `macaddress`, `mqtt_connected`, …) never reach it.
 
 | Topic                     | `status/current` field | Notes                                               |
 | ------------------------- | ---------------------- | --------------------------------------------------- |
@@ -1022,13 +1021,14 @@ a full notifier queue, can drop that one alert (it can never duplicate it). On
 start-up the loop seeds the map from the stored document **before** its first
 poll, so a restart whose seed read succeeds sends nothing; a failed seed read
 starts from an empty watermark, so that restart re-alerts each live critical
-advisory once. A key is pruned when its advisory leaves the live ring, so the map
-stays bounded by the ring (the firmware's 15 ids). An advisory whose token has
-not been observed yet — no applied `/status` counters, say — has no key to
-compare: that pass pushes nothing and leaves the map whole, and the first pass
-with the facts decides once, on the real key. A new trip moves the controller
-counter — which also voids the firmware's own ack — so the key changes and the
-same advisory alerts again; an acknowledged advisory never alerts.
+advisory once. A key is pruned when its advisory leaves the live ring, so on a
+pass that keys every entry the map stays bounded by the ring (the firmware's 15
+ids). An advisory whose token has not been observed yet — no applied `/status`
+counters, say — has no key to compare: that pass pushes nothing and leaves the
+map whole, and the first pass with the facts decides once, on the real key. A
+new trip moves the controller counter — which also voids the firmware's own ack
+— so the key changes and the same advisory alerts again; an acknowledged
+advisory never alerts.
 
 `charger offline` / `charger online` are journaled only on their edges, and the
 offline reason includes the HTTP status (401/403/5xx) or transport exception so
