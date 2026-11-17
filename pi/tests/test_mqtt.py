@@ -1997,8 +1997,9 @@ class RunWiringTests(unittest.TestCase):
         self.assertEqual(calls["config_loop"][0][6], source)
         worker = [args for name, args in threads if name == "mqtt_status_loop"]
         self.assertEqual(len(worker), 1)
-        self.assertEqual(len(worker[0]), 2)  # (sink, queue); the record has the rest
+        self.assertEqual(len(worker[0]), 3)  # (sink, queue, claims); rest by keyword
         self.assertIsInstance(worker[0][1], bridge.queue.Queue)
+        self.assertIsInstance(worker[0][2], bridge.ClaimsObservations)
         self.assertEqual(
             [name for name, _args in threads],
             [

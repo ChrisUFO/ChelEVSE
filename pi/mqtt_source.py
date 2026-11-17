@@ -30,6 +30,11 @@ Design notes:
 - **Config is not read from MQTT.** ``<base>/config`` is retained, but the bridge
   keeps ``/config`` as the single redaction/coercion path: a change of
   ``config_version`` only triggers one HTTP sync.
+- **Claim-family topics are evidence, not answers.** ``<base>/claim``,
+  ``<base>/limit``, ``<base>/boost`` and ``<base>/schedule`` are retained, but
+  they carry no authoritative freshness: each delivery is decoded and handed to
+  ``on_evidence`` (the claims holder), never applied as status and never allowed
+  to answer "why isn't it charging?" -- that is ``GET /claims/target`` (#159).
 - **Announce/LWT is the gateway's own presence.** The firmware publishes a
   retained ``openevse/announce/<id>`` document (``{"state": "connected"}`` on
   connect, and the broker publishes ``{"state": "disconnected"}`` as its Last
@@ -72,8 +77,11 @@ RECONNECT_MIN_SEC = 1
 RECONNECT_MAX_SEC = 30
 
 # Topic leaf -> /status key. Only the curated status fields the bridge stores
-# are mapped; command/retained-JSON topics (override, claim, schedule, config,
-# rapi/…, */set) are ignored by construction because they are not listed here.
+# are mapped; command/retained-JSON topics (override, config, rapi/…, */set)
+# are ignored by construction because they are not listed here. The retained
+# claim-family documents (claim/limit/boost/schedule) are below: they are not
+# status fields either, but they feed the claims pipeline's evidence holder
+# instead of being dropped (issue #159).
 TOPIC_FIELDS = {
     "amp": "amp",
     "voltage": "voltage",
@@ -95,6 +103,14 @@ CONFIG_VERSION_TOPIC = "config_version"
 # {"state": "disabled", "auto_release": …} for pause, and
 # {"state": "active", "charge_current": N, "max_current": N, …} for a hold.
 OVERRIDE_TOPIC = "override"
+# Retained claim-family documents, supporting evidence for the claims
+# pipeline (#159): the gateway's own claim state (``claim``), the charge
+# limit (``limit``), a running boost (``boost``) and the event list
+# (``schedule``). Decoded here, parsed defensively by the claims module via
+# ``on_evidence``; never authoritative -- the reason comes from
+# ``GET /claims/target`` -- and never a status field, so none feed the
+# debounced snapshot.
+CLAIM_EVIDENCE_TOPICS = frozenset({"claim", "limit", "boost", "schedule"})
 # RAPI replies arrive with no correlation id, so the bridge must serialise
 # commands and match the next one itself.
 RAPI_OUT_TOPIC = "rapi/out"
@@ -211,6 +227,7 @@ class MqttSource:
         client_id=None,
         on_status=None,
         on_config_version=None,
+        on_evidence=None,
         announce_topic=DEFAULT_ANNOUNCE_TOPIC,
         debounce=DEBOUNCE_SEC,
         client_factory=None,
@@ -225,6 +242,7 @@ class MqttSource:
         self.client_id = client_id or "chelevse-bridge"
         self.on_status = on_status
         self.on_config_version = on_config_version
+        self.on_evidence = on_evidence
         self.debounce = max(0.0, float(debounce))
         self.subscription = f"{self.base}/#" if self.base else "#"
         self.log = log or _default_log
@@ -617,6 +635,12 @@ class MqttSource:
             return
         if leaf == RAPI_OUT_TOPIC:
             self._rapi_out(_decode(getattr(message, "payload", b"")))
+            return
+        if leaf in CLAIM_EVIDENCE_TOPICS:
+            # Supporting evidence for the claims pipeline (#159): decoded
+            # here on the network thread, parsed and held by the callback.
+            if self.on_evidence is not None:
+                self.on_evidence(leaf, _decode(getattr(message, "payload", b"")))
             return
         field = TOPIC_FIELDS.get(leaf)
         if field is None:  # retained JSON, commands, rapi/in, deprecated topics

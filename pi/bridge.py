@@ -370,7 +370,7 @@ def settings_loop(db, host, bootstrap, interval, initial_delay=0):
         _stop.wait(interval)
 
 
-def mqtt_status_loop(sink, snapshots):
+def mqtt_status_loop(sink, snapshots, claims=None):
     """Apply debounced MQTT snapshots as they arrive (state updates only).
 
     Runs on its own thread so a Firestore write never blocks paho's network
@@ -385,6 +385,12 @@ def mqtt_status_loop(sink, snapshots):
     publishes only when a first snapshot, a discrete trigger past its rate
     limit, or a forced write is due, and the status loop's scheduler tick
     resolves the rest.
+
+    ``claims`` (optional) is the run's claims holder: an applied snapshot that
+    transitions ``state``/``state_label`` wakes the claims loop immediately
+    (#159) -- under MQTT the 60 s reconcile is too slow to answer "why did it
+    stop?" -- while unchanged telemetry never does. The retained claim-family
+    documents this loop's source ingests are evidence and never wake it.
     """
     while not _stop.is_set():
         try:
@@ -394,10 +400,13 @@ def mqtt_status_loop(sink, snapshots):
         try:
             fields = parse_snapshot(record.fields)
             complete = bool(record.complete) and _is_number(fields.get("state"))
-            if not sink.apply_status(
+            applied = sink.apply_status(
                 fields, "mqtt", complete=complete, arrival=record.arrival
-            ):
+            )
+            if not applied:
                 log("mqtt snapshot dropped (a reconcile applied a newer view)")
+            elif claims is not None and claims.note_status(fields):
+                claims.wake()
         except Exception as exc:
             log(f"mqtt status apply failed ({exc.__class__.__name__}: {exc})")
 
@@ -1138,6 +1147,7 @@ def status_loop(
     reconcile_interval=MQTT_RECONCILE_SEC,
     sink=None,
     observations=None,
+    claims=None,
 ):
     """Poll /status and apply it; with MQTT, poll only to reconcile.
 
@@ -1159,6 +1169,12 @@ def status_loop(
     HTTP observation hands the health projection the controller state, the sensor
     temperatures and the ``$GF`` fault counters from the reply it already has --
     no second charger GET, and no new field on ``status/current`` (D6).
+
+    ``claims`` is the run's :class:`claims.ClaimsObservations`: every applied
+    HTTP observation is a reconcile tick for the claims loop too (#159) -- the
+    holder records the reply's ``claims_version`` and the state, then wakes the
+    claims loop, which fetches ``/claims/target`` debounced. No new poller: the
+    claims fetch rides this loop's cadence.
     """
     sink = sink or StatusSink(
         db,
@@ -1251,6 +1267,12 @@ def status_loop(
                         observations.note_status(
                             fields, parse_fault_counters(payload)
                         )
+                    if claims is not None:
+                        # This applied observation is one reconcile tick for
+                        # the claims loop: hand it the reply's claims_version
+                        # and state, then wake the fetch (#159).
+                        claims.note_status(fields, payload)
+                        claims.wake()
                 watchdog.record_success(payload)
         _publish_due_heartbeat(sink, heartbeat, watermark)
         _status_scheduler_tick(sink)
@@ -1877,13 +1899,24 @@ def command_loop(
 
 
 def schedule_loop(
-    db, host, auth, transport, interval, reconcile_interval, sink, initial_delay=0
+    db,
+    host,
+    auth,
+    transport,
+    interval,
+    reconcile_interval,
+    sink,
+    initial_delay=0,
+    claims=None,
 ):
     """Mirror schedule/current into the firmware and publish the live window.
 
     ``sink`` is the run's :class:`StatusSink`: the firmware's active window
     reaches ``status/current.schedule`` only through its write policy (issue
-    #95), never a write of this loop's own.
+    #95), never a write of this loop's own. ``claims`` (optional) is the run's
+    claims holder and receives the same window dict, so a timer claim's reason
+    can name the active schedule rule (#159) without a second ``/schedule/plan``
+    fetch.
     """
     last_hash = None
     synced_event_rules = {}
@@ -1952,7 +1985,10 @@ def schedule_loop(
         # republish is gone; an unchanged window costs zero writes.
         try:
             plan = _schedule_plan(transport, host, auth)
-            sink.note_schedule(schedule_state(plan, synced_event_rules))
+            window = schedule_state(plan, synced_event_rules)
+            sink.note_schedule(window)
+            if claims is not None:
+                claims.note_schedule(window)
         except (CommandError, requests.RequestException, ValueError) as exc:
             log(f"schedule plan failed ({exc.__class__.__name__}: {exc})")
 
@@ -2379,6 +2415,7 @@ def run(
             announce_topic=mqtt.announce_topic,
             on_status=lambda record: enqueue_latest(snapshots, record),
             on_config_version=lambda _version: config_event.set(),
+            on_evidence=claims.note_evidence,
             log=log,
         )
     # Built after the source: the outage decision needs its arrival sequence,
@@ -2402,7 +2439,7 @@ def run(
         counter=counter,
     )
     if source is not None:
-        mqtt_status_args = (sink, snapshots)
+        mqtt_status_args = (sink, snapshots, claims)
 
     status_args = (
         db,
@@ -2420,7 +2457,7 @@ def run(
     threading.Thread(
         target=status_loop,
         args=status_args,
-        kwargs={"observations": observations},
+        kwargs={"observations": observations, "claims": claims},
         daemon=True,
     ).start()
     config_args = (
@@ -2454,7 +2491,12 @@ def run(
         sink,
         SCHEDULE_INITIAL_DELAY,
     )
-    threading.Thread(target=schedule_loop, args=schedule_args, daemon=True).start()
+    threading.Thread(
+        target=schedule_loop,
+        args=schedule_args,
+        kwargs={"claims": claims},
+        daemon=True,
+    ).start()
     notifications_args = (
         db,
         host,
