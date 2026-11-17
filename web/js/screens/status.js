@@ -479,7 +479,7 @@ function renderHealth() {
 // mouse affordance.
 const NOTE_DEFAULT =
   'Stop pauses charging · Auto returns to the schedule · Hold sets a current limit.';
-const NOTE_UNAVAILABLE = 'Hold needs the charger’s limits · open Config to retry.';
+const NOTE_UNAVAILABLE = 'Hold needs the charger’s limits.';
 
 // `current` is the capability view the current controls need: null until a
 // status/config snapshot yields a usable pair of limits, so the same test makes

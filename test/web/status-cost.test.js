@@ -202,10 +202,7 @@ test('current controls fail closed while stop and auto remain available', () => 
 // ordinary description returns with the capability.
 test('the controls note says why the current controls are unavailable', () => {
   showConfig(null);
-  assert.equal(
-    element('controls-note').textContent,
-    'Hold needs the charger’s limits · open Config to retry.',
-  );
+  assert.equal(element('controls-note').textContent, 'Hold needs the charger’s limits.');
   assert.equal(
     element('hold').title,
     'Current setting is unavailable until charger limits are verified.',
