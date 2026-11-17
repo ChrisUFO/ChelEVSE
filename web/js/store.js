@@ -29,6 +29,7 @@ let unsubCmds = null;
 let unsubSettings = null;
 let unsubConfig = null;
 let unsubNotifications = null;
+let unsubClaims = null;
 let unsubSchedule = null;
 let unsubRapi = null;
 let unsubPending = null;
@@ -48,6 +49,8 @@ export function startStore(options) {
     onConfigError,
     onNotifications,
     onNotificationsError,
+    onClaims,
+    onClaimsError,
     onSchedule,
     onScheduleError,
     onRapiCommands,
@@ -142,6 +145,14 @@ export function startStore(options) {
     (data) => onNotifications && onNotifications(data),
     (err) => onNotificationsError && onNotificationsError(err),
   );
+  // The claims reason (#159) is the same kind of document: written only when
+  // the projection changes, so an absent document is a real answer (no
+  // confident reason yet) and travels to the screen as null.
+  unsubClaims = watch(
+    'status/claims',
+    (data) => onClaims && onClaims(data),
+    (err) => onClaimsError && onClaimsError(err),
+  );
   // Schedule metadata travels with the data: a write still queued in the
   // persistent cache across a reload is durable but unacknowledged, and the
   // editor labels it instead of trusting the cached document as server truth.
@@ -183,6 +194,7 @@ export function stopStore() {
     unsubSettings,
     unsubConfig,
     unsubNotifications,
+    unsubClaims,
     unsubSchedule,
     unsubRapi,
     unsubPending,
@@ -194,6 +206,7 @@ export function stopStore() {
     unsubSettings =
     unsubConfig =
     unsubNotifications =
+    unsubClaims =
     unsubSchedule =
     unsubRapi =
     unsubPending =

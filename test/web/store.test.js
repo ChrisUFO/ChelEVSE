@@ -328,10 +328,14 @@ test('the health document is one subscription through the shared watch path', ()
   const stopBody = source.slice(start, end + 2).replace(/\s+/g, ' ');
   assert.match(
     stopBody,
-    /unsubConfig, unsubNotifications, unsubSchedule/,
+    /unsubConfig, unsubNotifications, unsubClaims, unsubSchedule/,
     'torn down with its siblings',
   );
-  assert.match(stopBody, /unsubNotifications = unsubSchedule/, 'the handle is cleared');
+  assert.match(
+    stopBody,
+    /unsubNotifications = unsubClaims = unsubSchedule/,
+    'the handle is cleared',
+  );
 });
 
 test('every listener error path still asks denied() first', () => {

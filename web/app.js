@@ -20,6 +20,7 @@ import {
   blurStatus,
   initStatus,
   leaveStatus,
+  showClaims,
   showCommands,
   showConfig as showStatusConfig,
   showHealth,
@@ -291,6 +292,12 @@ function enterApp(user) {
     // screen owns how an absent document and a failed listener read on screen.
     onNotifications: showHealth,
     onNotificationsError: showHealthError,
+    // The claims reason line rides the same fan-out. A failed listener is a
+    // null document to the screen: the line hides rather than going on
+    // presenting the last reason as if it were current (retryStore re-subscribes
+    // every listener, so the screen's own Retry paths cover recovery).
+    onClaims: showClaims,
+    onClaimsError: () => showClaims(null),
     // The editor needs the write metadata; the status badge resolves only the
     // active window from the data.
     onSchedule: (data, meta) => {
