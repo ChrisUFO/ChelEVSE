@@ -137,6 +137,14 @@ service cloud.firestore {
     // Commands: allowlisted users may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
     // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.
+    //
+    // The set_current ceiling mirrors the charger's configured soft ceiling
+    // (status/config.max_current_soft, written by the bridge), not a UI range:
+    // it is a device limit, and 48 A — the app's setting range — is not it. The
+    // bridge remains the authority: it re-reads /config, also requires the soft
+    // and hard maxima to form a coherent capability view, and rejects before
+    // contacting the charger. An absent status/config (get() returns null, so
+    // .data errors) denies the create — fail-closed, never a fallback ceiling.
     match /commands/{cmd} {
       allow read: if allowed();
       allow create: if allowed()
@@ -145,9 +153,11 @@ service cloud.firestore {
              (request.resource.data.type == 'pause')
           || (request.resource.data.type == 'resume')
           || (request.resource.data.type == 'set_current'
-              && request.resource.data.amps is number
+              && request.resource.data.amps is int
               && request.resource.data.amps >= 6
-              && request.resource.data.amps <= 48)
+              && get(/databases/$(database)/documents/status/config).data.max_current_soft is number
+              && request.resource.data.amps
+                 <= get(/databases/$(database)/documents/status/config).data.max_current_soft)
           // RAPI commands start with a literal '$' (character class avoids
           // escaping ambiguity); the 32-char cap bounds what reaches the bridge.
           || (request.resource.data.type == 'rapi'
