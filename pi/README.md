@@ -448,6 +448,7 @@ timestamped line and the loop carries on at its next interval.
 | Schedule      | firmware               | `schedule/current` mirrored into the charger's event scheduler (see below)                                                                                                                                 |
 | Status        | `fcmTokens/{id}`       | Deleted when FCM reports the token unregistered/invalid                                                                                                                                                    |
 | Commands      | `commands/{id}`        | `status` set to `acked` or `failed` (plus `error` / `result` fields)                                                                                                                                       |
+| Commands      | `status/notifications` | `acks.<notification_id> = <epoch seconds>` after a 2xx `POST /notifications/ack` — a nested map merge the health poll never writes, so the two cannot clobber each other (see [Commands](#commands))       |
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
@@ -786,14 +787,15 @@ The write is a **field-path merge**,
 segment is backtick-quoted (``hours.`<HH>` ``) because the SDK's field-path
 parser rejects a bare numeric segment (`hours.21` is a syntax error, not a nested
 path), and `pi/tests/fakes.py` enforces the same rule so a regression fails in
-tests. Two simpler forms do not work. `merge=True` merges top-level keys only, so
-a dotted `"hours.21"` key is stored as a literal field name rather than a bucket —
-the SDK expands dotted keys in `update()` only. `update()` cannot create the
-document: it defaults to `exists=True` and raises `NotFound` on the first write
-of a new day. The merge list emits one write whose mask and transforms touch
-exactly `kwh`, that one hour bucket and `updated_at`, so sibling hours and every
-other field in the document survive. `Increment` on a missing field creates it,
-so no read-before-write or transaction is needed. Elsewhere in these notes a stored
+tests. Two simpler forms do not work. `merge=True` merges every leaf field path,
+so nested maps deep-merge; it does **not** expand dots in keys (only `update()`
+does), so a dotted `"hours.21"` key is stored as one literal field name rather
+than a bucket. `update()` cannot create the document: it defaults to
+`exists=True` and raises `NotFound` on the first write of a new day. The merge
+list emits one write whose mask and transforms touch exactly `kwh`, that one
+hour bucket and `updated_at`, so sibling hours and every other field in the
+document survive. `Increment` on a missing field creates it, so no
+read-before-write or transaction is needed. Elsewhere in these notes a stored
 map key is written `hours["<HH>"]`, while the backticked dotted form
 ``hours.`<HH>` `` is reserved for the Firestore field path in a merge mask.
 
@@ -1100,12 +1102,13 @@ command older than **10 minutes** is not applied: it is marked `failed` with
 command queued while the Pi was offline cannot start or stop a charge hours
 later.
 
-| `type`        | Charger request                                                          | Meaning                                                                             |
-| ------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `pause`       | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                                       |
-| `resume`      | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes                      |
-| `set_current` | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps, only after `/config` verifies `N` is 6 through `max_current_soft` |
-| `rapi`        | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                                          |
+| `type`             | Charger request                                                          | Meaning                                                                             |
+| ------------------ | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `pause`            | `POST /override` `{"state":"disabled"}`                                  | Stop charging                                                                       |
+| `resume`           | `DELETE /override`                                                       | Clear the manual override; the firmware scheduler/auto resumes                      |
+| `set_current`      | `POST /override` `{"state":"active","charge_current":N,"max_current":N}` | Hold at `N` amps, only after `/config` verifies `N` is 6 through `max_current_soft` |
+| `rapi`             | `POST /rapi` form body `rapi=<command>&json=1`                           | Advanced escape hatch for any RAPI command                                          |
+| `ack_notification` | `POST /notifications/ack?id=<notification_id>`                           | Acknowledge one charger-health advisory (HTTP only — see below)                     |
 
 `rapi.command` must be a string starting with `$` and at most 32 characters;
 anything else is marked `failed` with `error: "invalid rapi"` without contacting
@@ -1114,6 +1117,48 @@ the charger. On a 2xx reply the document becomes `acked` and gets
 if absent). Non-2xx replies and request errors are marked `failed` with a short
 reason containing the HTTP status/body snippet or the exception class. Unknown
 `type` values fail with `unsupported type`.
+
+### Acknowledging a health advisory
+
+`ack_notification` carries one `notification_id` — a firmware rule name such as
+`fault.no_ground` — validated against `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$` with a
+64-character cap. Anything else fails with `error: "invalid notification id"`
+before any request is sent (and with no `transport`, since nothing was). The
+same grammar and cap are enforced by `firestore.rules`, so a doc the bridge
+would refuse cannot be created.
+
+It is **HTTP-only, deliberately** (D4): the gateway publishes no per-advisory
+MQTT surface — only the `{count, severity}` rollup on `<base>/notifications` —
+so there is nothing to publish. `apply_command` routes it to the HTTP path
+before the MQTT-ready check, even when the broker is connected and subscribed,
+and there is no MQTT arm to fall back from.
+
+Success is **2xx only**; the firmware's answers are mapped to plain reasons:
+
+| Charger reply | Command outcome                                                       |
+| ------------- | --------------------------------------------------------------------- |
+| `2xx`         | `acked` (`transport: "http"`) and the Firestore acknowledgement below |
+| `404`         | `failed`, `error: "no such active notification"` (not currently live) |
+| `400`         | `failed`, `error: "id required"`                                      |
+| `403`/`405`   | `failed`, `error: "acknowledgement refused by the charger (HTTP …)"`  |
+| other non-2xx | `failed` with `HTTP <status>: <body snippet>`                         |
+
+On a 2xx the bridge merges `acks: {<notification_id>: <epoch seconds>}` into
+`status/notifications` with `set(..., merge=True)` — a **nested map merge**, and
+the only field family the command writes there. The health loop's own merges
+project their content fields (`reachable`, `source`, `gates`, `counters`,
+`advisories`, `alerted`) and never `acks`, so a poll can neither clobber an
+acknowledgement nor be clobbered by one, and no read-modify-write of the
+`advisories` list is needed. The map is bounded by the firmware's 15 advisory
+ids, so it is never pruned. The write is counted as `health` (no new kind).
+
+**Ordering: charger → Firestore → command doc.** The acknowledgement is written
+_before_ the command document is settled, so a charger 2xx that cannot reach
+Firestore still settles `acked` (the charger really did acknowledge it) and the
+next 300 s health poll repairs the visible state from the gateway's own `acked`
+flag. A failed or 404 ack writes nothing at all, so the previous state stays
+intact. The settled-command retry memory is unchanged: it retries the command
+document's status write, never the acknowledgement.
 
 Applying a command and writing its `acked` status are separate steps. If the
 ack write fails, the bridge remembers that command id in memory and retries the

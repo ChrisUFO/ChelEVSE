@@ -137,6 +137,9 @@ service cloud.firestore {
     // Commands: allowlisted users may create whitelisted, validated commands;
     // lifecycle (ack/fail/delete) belongs to the bridge only.
     // 'rapi' is the advanced escape hatch — RAPI commands start with '$'.
+    // 'ack_notification' carries one advisory id: the firmware rule-name
+    // grammar (lowercase dotted path) and the bridge's 64-char cap, so a client
+    // cannot write an id the bridge will refuse or a payload it cannot parse.
     //
     // The set_current ceiling mirrors the charger's configured soft ceiling
     // (status/config.max_current_soft, written by the bridge), not a UI range:
@@ -164,6 +167,13 @@ service cloud.firestore {
               && request.resource.data.command is string
               && request.resource.data.command.matches('^[$][A-Za-z0-9]{1,2}([ ].*)?$')
               && request.resource.data.command.size() <= 32)
+          // Advisory ids mirror the firmware's rule names: a lowercase dotted
+          // path ("fault.no_ground"), the same grammar the bridge validates.
+          || (request.resource.data.type == 'ack_notification'
+              && request.resource.data.notification_id is string
+              && request.resource.data.notification_id.size() >= 1
+              && request.resource.data.notification_id.size() <= 64
+              && request.resource.data.notification_id.matches('^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)*$'))
         );
       allow update, delete: if false;
     }

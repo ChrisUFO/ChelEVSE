@@ -283,6 +283,25 @@ Advanced console's recent-commands query fails with `failed-precondition` and
 the screen explains that the index is still building. Nothing is broken; reload
 once the console shows the index as enabled.
 
+### Rules deploys the command whitelist requires (#158)
+
+The `ack_notification` command type is a **rules** change, not a hosting one.
+After that change merges to `main`, deploy rules **before** the web build that
+offers the Ack control (PR-6) is released, and after the bridge is deployed
+(`sudo bash pi/install.sh`) — the bridge understands the type first, the rules
+then allow clients to create it:
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=private/chelevse-deploy-service-account.json npm run deploy:rules
+```
+
+Until rules are live, a client create of `commands/{id}` with
+`type: "ack_notification"` is refused (the whitelist is the gate), so an app
+build that offers the control before the deploy reports a permission error on
+acknowledging rather than stranding a pending command. `npm run test:rules`
+loads the same file into the emulator and covers the accept/deny shapes, so a
+green local run is the pre-deploy check.
+
 ## 9. First sign-in and the allowlist
 
 The allowlist is the only authorization layer, and a grant needs an existing

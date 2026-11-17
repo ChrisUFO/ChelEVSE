@@ -1638,8 +1638,44 @@ def _fail_stale_command(doc, counter):
     log(f"command {doc.id} failed: {reason}")
 
 
-def _command_outcome(transport, host, auth, cmd, source):
-    """Apply one command; the status fields to settle it with, either way."""
+def _record_notification_ack(db, counter, notification_id):
+    """Merge one acknowledgement into ``status/notifications`` (D5).
+
+    The write is a **nested map merge** -- ``{"acks": {<id>: <epoch seconds>}}``
+    with ``merge=True`` -- so it is additive by construction: the health loop
+    merges only its own content fields (``CONTENT_FIELDS``; ``acks`` is not one
+    of them), so a poll can never clobber an acknowledgement and no
+    read-modify-write of the ``advisories`` list is needed. The map is bounded
+    by the firmware's 15 advisory ids, so it is never pruned.
+
+    Called only after ``POST /notifications/ack`` answered 2xx. A failed write
+    is logged and dropped: the charger really did acknowledge the advisory, so
+    the command still settles ``acked``, and the next 300 s poll repairs the
+    visible state from the gateway's own ``acked`` flag.
+    """
+    write = {"acks": {notification_id: int(time.time())}}
+    doc = db.collection("status").document("notifications")
+    try:
+        counter.counted("health", doc.set, write, merge=True)
+    except Exception as exc:
+        counter.note_failure(exc)
+        log(
+            f"ack write for {notification_id} failed "
+            f"({exc.__class__.__name__}: {exc}); the next poll repairs it"
+        )
+    else:
+        log(f"acknowledgement of {notification_id} recorded")
+
+
+def _command_outcome(transport, host, auth, cmd, source, db=None, counter=None):
+    """Apply one command; the status fields to settle it with, either way.
+
+    ``db`` is where a successful ``ack_notification`` records the
+    acknowledgement (D5), before the command document is settled -- so a
+    charger 2xx that cannot reach Firestore still settles ``acked`` and lets
+    the next poll repair the visible state. It is ``None`` only in unit tests
+    that exercise the charger side alone.
+    """
     try:
         if cmd.get("type") == "set_current":
             cmd = validate_current_request(cmd)
@@ -1665,6 +1701,8 @@ def _command_outcome(transport, host, auth, cmd, source):
     else:
         extra.setdefault("transport", "http")
         fields = {"status": "acked", **extra}
+        if cmd.get("type") == "ack_notification" and db is not None:
+            _record_notification_ack(db, counter, cmd.get("notification_id"))
     return fields
 
 
@@ -1704,7 +1742,17 @@ def _complete_command(doc, cmd, fields, sink):
 
 
 def _settle_command_doc(
-    doc, settled, transport, host, auth, source, sink, counter, last_transport, selected
+    doc,
+    db,
+    settled,
+    transport,
+    host,
+    auth,
+    source,
+    sink,
+    counter,
+    last_transport,
+    selected,
 ):
     """Dispatch one pending command document.
 
@@ -1714,6 +1762,10 @@ def _settle_command_doc(
     single doc and tick, because the transport edge log compares against the
     previous command's transport and a retried settled doc reuses the last
     selection for its wording.
+
+    ``db`` reaches ``_command_outcome`` for the one command whose success also
+    writes to Firestore (``ack_notification``'s ``status/notifications.acks``),
+    and that write lands before this document is settled.
     """
     cmd = _command_data(doc)
     if doc.id in settled:
@@ -1726,7 +1778,7 @@ def _settle_command_doc(
         # Readiness from the command being picked up, used only to word the
         # transport edge log (a retried settled doc may reuse it).
         selected = "mqtt" if mqtt_command_ready(source) else "http"
-        fields = _command_outcome(transport, host, auth, cmd, source)
+        fields = _command_outcome(transport, host, auth, cmd, source, db, counter)
         settled[doc.id] = fields
         while len(settled) > COMMAND_ACK_MEMORY:
             settled.popitem(last=False)
@@ -1770,6 +1822,7 @@ def command_loop(
         for doc in pending_commands(db):
             last_transport, selected = _settle_command_doc(
                 doc,
+                db,
                 settled,
                 transport,
                 host,

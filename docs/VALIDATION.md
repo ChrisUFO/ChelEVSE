@@ -208,6 +208,7 @@ Commands are asynchronous: the app writes `commands/{id}` with
 while a command is pending. The checks below describe the HTTP shape; with
 `MQTT_ENABLED=true` and a ready source the same commands travel over MQTT —
 see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
+`ack_notification` is the exception: it is HTTP-only (§3.8).
 
 ### 3.1 Pause (stop)
 
@@ -234,9 +235,11 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 - **Expect:** the charger holds at that current (`charge_current`/`max_current`);
   feedback "Current set to N A."; doc `acked` with `amps: N`. The slider
   prefills from `pilot` (`/status`, the limit), not the live draw. The rules
-  reject a `set_current` above `status/config.max_current_soft` (and any create
-  while `status/config` is absent), so a hand-crafted command above the soft
-  maximum never reaches the bridge.
+  reject a `set_current` above `status/config.max_current_soft` (and any
+  `set_current` create while `status/config` is absent — the ceiling is read
+  from that document, so a missing one fails closed; `pause`/`resume`/`rapi`/
+  `ack_notification` creates never read it and still succeed), so a hand-crafted
+  command above the soft maximum never reaches the bridge.
 - **Evidence:** command doc with `amps`, screenshot showing the new setpoint.
 
 ### 3.4 RAPI console — valid
@@ -324,6 +327,25 @@ Notes:
   refused MQTT publish that falls back and then fails over HTTP records
   `"http"`. A command rejected before any send (validation, unsupported type)
   records no transport at all.
+
+### 3.8 Acknowledge a health advisory (#158)
+
+The `ack_notification` command carries one `notification_id` and is **HTTP-only**
+— the gateway publishes no per-advisory MQTT surface, so there is nothing to
+publish and the command never takes the MQTT branch. Run these with the advisory
+ring showing at least one entry (`GET http://<charger>/notifications`).
+
+| #   | Check                            | How                                                                                                                                                                        | Expected observation                                                                                                                                                                                                                                                                                                                                      | Evidence                                                           |
+| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| A.1 | Ack a live advisory              | Write a command doc by hand (`type: "ack_notification"`, `notification_id: "<id from /notifications>"`, `status: "pending"`), or use the app's Ack control once PR-6 lands | Exactly one `POST /notifications/ack?id=<id>` (the charger answers `200 acknowledged`); no MQTT publish; journal `acknowledged notification <id>` then `acknowledgement of <id> recorded`; `status/notifications.acks.<id>` is an epoch second; the command doc is `acked` with `transport: "http"`; `/notifications` now shows `acked: true` for that id | Command doc, journal, `status/notifications`, `GET /notifications` |
+| A.2 | Ack an advisory that is not live | Same doc with an id absent from `/notifications`                                                                                                                           | The charger answers `404`; **no** write to `status/notifications` (the last projection is untouched); the command doc is `failed` with `error: "no such active notification"` and `transport: "http"`                                                                                                                                                     | Command doc, journal, unchanged `status/notifications`             |
+| A.3 | Malformed id                     | Same doc with `notification_id: "Fault.No_Ground"` (or a 65-character id)                                                                                                  | The command is `failed` with `error: "invalid notification id"` and **no** `transport` field; the journal shows no charger request; the Firestore create is refused by the rules before that (client path)                                                                                                                                                | Command doc, journal                                               |
+| A.4 | Merge safety                     | Ack one advisory while the health poll runs (`NOTIFICATIONS_INTERVAL`, 300 s)                                                                                              | The next poll's merge leaves `acks` intact and the poll's own fields (`advisories`/`gates`/`counters`/`alerted`) keep their values; the advisory's own `acked` flag follows the gateway's ~5 s refresh                                                                                                                                                    | `status/notifications` before/after a poll                         |
+
+An acknowledgement that cannot be written to Firestore still settles the command
+`acked` (the charger really did acknowledge it); the next poll reports the
+gateway's own `acked` flag and repairs the visible state, so no manual repair is
+needed — check the journal for `ack write for <id> failed`.
 
 ## 4. Schedule round-trip
 

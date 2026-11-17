@@ -62,11 +62,23 @@ def _leaf_write(existing, value, field):
     return value
 
 
-def _merge_top_level(existing, data):
-    """``set(..., merge=True)``: merge top-level keys; nested maps replace."""
+def _merge_recursive(existing, data):
+    """``set(..., merge=True)``: Firestore's deep map merge.
+
+    Map values merge recursively, so ``{"acks": {"a": 1}}`` followed by
+    ``{"acks": {"b": 2}}`` keeps both entries. Lists, scalars and an empty map
+    replace the stored value outright, which is why the ack map (a non-empty
+    map, not a list) is the shape that accumulates: the SDK's mask names the
+    empty map's own path, so the server clears that field.
+    """
     merged = dict(existing)
     for key, value in data.items():
-        merged[key] = _leaf_write(merged.get(key), value, key)
+        current = merged.get(key)
+        if isinstance(value, dict) and value:
+            base = current if isinstance(current, dict) else {}
+            merged[key] = _merge_recursive(base, value)
+        else:
+            merged[key] = _leaf_write(current, value, key)
     return merged
 
 
@@ -144,9 +156,11 @@ class FakeDocument:
     def set(self, data, merge=False):
         """Model ``DocumentReference.set``, including the three merge forms.
 
-        ``merge=False`` replaces the document, ``merge=True`` merges top-level
-        keys only, and a list of field paths merges exactly those leaves
-        (creating the document when absent, with no existence precondition).
+        ``merge=False`` replaces the document, ``merge=True`` deep-merges maps
+        (Firestore merges nested maps recursively; lists, scalars and an empty
+        map replace),
+        and a list of field paths merges exactly those leaves (creating the
+        document when absent, with no existence precondition).
         ``Increment`` transforms resolve to numbers here, so ``db.data`` reads
         like a stored document; ``db.writes`` keeps the raw payload and the
         merge argument the caller passed, for payload/mask assertions.
@@ -159,13 +173,13 @@ class FakeDocument:
         store = self._db.data.setdefault(self.collection, {})
         existing = store.get(self.id)
         if merge is True:
-            store[self.id] = _merge_top_level(existing or {}, data)
+            store[self.id] = _merge_recursive(existing or {}, data)
         elif isinstance(merge, (list, tuple)):
             store[self.id] = _merge_field_paths(existing or {}, data, merge)
         elif merge:
             raise TypeError(f"unsupported merge argument {merge!r}")
         else:
-            store[self.id] = _merge_top_level({}, data)
+            store[self.id] = _merge_recursive({}, data)
 
     def update(self, data):
         if self._db.write_error is not None:
