@@ -787,14 +787,15 @@ The write is a **field-path merge**,
 segment is backtick-quoted (``hours.`<HH>` ``) because the SDK's field-path
 parser rejects a bare numeric segment (`hours.21` is a syntax error, not a nested
 path), and `pi/tests/fakes.py` enforces the same rule so a regression fails in
-tests. Two simpler forms do not work. `merge=True` merges top-level keys only, so
-a dotted `"hours.21"` key is stored as a literal field name rather than a bucket —
-the SDK expands dotted keys in `update()` only. `update()` cannot create the
-document: it defaults to `exists=True` and raises `NotFound` on the first write
-of a new day. The merge list emits one write whose mask and transforms touch
-exactly `kwh`, that one hour bucket and `updated_at`, so sibling hours and every
-other field in the document survive. `Increment` on a missing field creates it,
-so no read-before-write or transaction is needed. Elsewhere in these notes a stored
+tests. Two simpler forms do not work. `merge=True` merges every leaf field path,
+so nested maps deep-merge; it does **not** expand dots in keys (only `update()`
+does), so a dotted `"hours.21"` key is stored as one literal field name rather
+than a bucket. `update()` cannot create the document: it defaults to
+`exists=True` and raises `NotFound` on the first write of a new day. The merge
+list emits one write whose mask and transforms touch exactly `kwh`, that one
+hour bucket and `updated_at`, so sibling hours and every other field in the
+document survive. `Increment` on a missing field creates it, so no
+read-before-write or transaction is needed. Elsewhere in these notes a stored
 map key is written `hours["<HH>"]`, while the backticked dotted form
 ``hours.`<HH>` `` is reserved for the Firestore field path in a merge mask.
 

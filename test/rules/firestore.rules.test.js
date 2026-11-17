@@ -489,6 +489,9 @@ test('an ack_notification id with illegal characters is rejected', async () => {
     ['hyphen', 'fault.no-ground'],
     ['space', 'fault. no_ground'],
     ['slash', 'fault/no_ground'],
+    // RE2 `$` is end-of-text, not end-of-line, so a trailing newline is not a
+    // terminator the grammar accepts.
+    ['trailing-newline', 'fault.no_ground\n'],
   ]) {
     await assertFails(
       writeCommand(allowlisted(), `ack-bad-id-${id}`, ackCommand({ notification_id })),

@@ -66,14 +66,15 @@ def _merge_recursive(existing, data):
     """``set(..., merge=True)``: Firestore's deep map merge.
 
     Map values merge recursively, so ``{"acks": {"a": 1}}`` followed by
-    ``{"acks": {"b": 2}}`` keeps both entries. Lists and scalars replace the
-    stored value outright, which is why the ack map (a map, not a list) is the
-    shape that accumulates.
+    ``{"acks": {"b": 2}}`` keeps both entries. Lists, scalars and an empty map
+    replace the stored value outright, which is why the ack map (a non-empty
+    map, not a list) is the shape that accumulates: the SDK's mask names the
+    empty map's own path, so the server clears that field.
     """
     merged = dict(existing)
     for key, value in data.items():
         current = merged.get(key)
-        if isinstance(value, dict):
+        if isinstance(value, dict) and value:
             base = current if isinstance(current, dict) else {}
             merged[key] = _merge_recursive(base, value)
         else:
@@ -156,7 +157,8 @@ class FakeDocument:
         """Model ``DocumentReference.set``, including the three merge forms.
 
         ``merge=False`` replaces the document, ``merge=True`` deep-merges maps
-        (Firestore merges nested maps recursively; lists and scalars replace),
+        (Firestore merges nested maps recursively; lists, scalars and an empty
+        map replace),
         and a list of field paths merges exactly those leaves (creating the
         document when absent, with no existence precondition).
         ``Increment`` transforms resolve to numbers here, so ``db.data`` reads
