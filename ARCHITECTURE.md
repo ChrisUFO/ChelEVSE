@@ -348,7 +348,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 - **No CI.** Gates are local and operator-enforced: hooks (Prettier pre-commit/pre-push), full test runs, a reviewed head SHA, and squash merges with `--match-head-commit`.
 - The browser harness under `/tmp/opencode/chelevse-preview` is an ephemeral manual/preview tool; it is not part of the repo and must not be a merge dependency.
-- Rules coverage has gaps: `status`/`history`/`sessions` reads and `users` self-read are not directly tested; `settings` rate bounds are only partly covered; command-create coverage is concentrated on `rapi` and `ack_notification`, not `pause`/`resume`/`set_current`.
+- Rules coverage has gaps: `status`/`history`/`sessions` reads and `users` self-read are not directly tested; `settings` rate bounds are only partly covered; command-create coverage is concentrated on `rapi`, `ack_notification` and `set_current`'s device ceiling (accepted at the ceiling and the 6 A floor, rejected above it, at 48 A, fractional, with `status/config` absent, and with `max_current_soft` missing); `pause`/`resume` positive creates are covered, but only as the ceiling rule's bystanders — no negative case targets them.
 
 ## 10. Key decisions
 

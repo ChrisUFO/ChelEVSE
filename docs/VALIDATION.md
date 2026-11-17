@@ -235,9 +235,11 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 - **Expect:** the charger holds at that current (`charge_current`/`max_current`);
   feedback "Current set to N A."; doc `acked` with `amps: N`. The slider
   prefills from `pilot` (`/status`, the limit), not the live draw. The rules
-  reject a `set_current` above `status/config.max_current_soft` (and any create
-  while `status/config` is absent), so a hand-crafted command above the soft
-  maximum never reaches the bridge.
+  reject a `set_current` above `status/config.max_current_soft` (and any
+  `set_current` create while `status/config` is absent — the ceiling is read
+  from that document, so a missing one fails closed; `pause`/`resume`/`rapi`/
+  `ack_notification` creates never read it and still succeed), so a hand-crafted
+  command above the soft maximum never reaches the bridge.
 - **Evidence:** command doc with `amps`, screenshot showing the new setpoint.
 
 ### 3.4 RAPI console — valid
