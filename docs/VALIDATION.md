@@ -234,7 +234,10 @@ see [§3.7](#37-commands-over-mqtt-issue-46) for the transport-specific checks.
 - **Do:** confirm `/config` reports coherent soft/hard limits, tap **Hold**, move the slider up to the soft maximum, then tap **Apply**.
 - **Expect:** the charger holds at that current (`charge_current`/`max_current`);
   feedback "Current set to N A."; doc `acked` with `amps: N`. The slider
-  prefills from `pilot` (`/status`, the limit), not the live draw.
+  prefills from `pilot` (`/status`, the limit), not the live draw. The rules
+  reject a `set_current` above `status/config.max_current_soft` (and any create
+  while `status/config` is absent), so a hand-crafted command above the soft
+  maximum never reaches the bridge.
 - **Evidence:** command doc with `amps`, screenshot showing the new setpoint.
 
 ### 3.4 RAPI console — valid
