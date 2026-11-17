@@ -24,6 +24,12 @@ So an entry classifies as
 ``corroborated`` states the liveness fact on its own, independent of the ack: an
 acknowledged advisory whose condition is still present reports both.
 
+:func:`alert_plan` is the one push this project sends about charger health
+(#158, D9): one body per newly observed ``critical`` unacknowledged advisory,
+deduped on a persisted watermark (D3). It replaces the old "Charging started" /
+"Charging stopped" pushes; watchdog and offline pushes live in the watchdog and
+the status sink and are untouched.
+
 Nothing here does I/O. The module also carries :class:`LiveObservations`, the one
 piece of shared state (a lock and whole-dict swaps) through which the status loop
 hands its latest observation and the config loop the config view it wrote to the
@@ -311,6 +317,108 @@ def comparable(content):
             for entry in entries
         ]
     return stable
+
+
+# --- The one alert (issue #158, D9) ------------------------------------------
+# Human names for the firmware's rule ids, mirroring the web's table
+# (``web/js/health.js`` NAMES) so a push and the Health card name a condition the
+# same way. Duplicated rather than shared: the two runtimes share no module (an
+# ES module in the browser, Python on the Pi), and the table is the firmware's
+# bounded 15-id rule set -- a newer rule falls back to its id's tail.
+RULE_NAMES = {
+    "safety.ground_check": "Ground check",
+    "safety.relay_check": "Relay check",
+    "safety.diode_check": "Diode check",
+    "safety.vent_check": "Vent check",
+    "safety.temp_check": "Temperature check",
+    "fault.gfci_tripped": "GFCI tripped",
+    "fault.no_ground": "No ground",
+    "fault.stuck_relay": "Stuck relay",
+    "thermal.high_temp": "High temperature",
+    "thermal.relay_thermal": "Relay temperature",
+    "thermal.throttling": "Throttling",
+    "wear.relay_life": "Relay life",
+    "wear.relay_cold_open": "Relay cold open",
+    "wear.relay_transit_drift": "Relay transit drift",
+    "wear.stuck_relay_recovery": "Stuck relay recovery",
+}
+# Only the firmware's own top rating alerts: anything it rated below ``critical``
+# stays on the Health card and in the journal, never on a push.
+ALERT_SEVERITY = "critical"
+
+
+def rule_name(advisory_id):
+    """The English name of one firmware rule id (never empty)."""
+    if not isinstance(advisory_id, str) or not advisory_id:
+        return "Advisory"
+    name = RULE_NAMES.get(advisory_id)
+    if name:
+        return name
+    tail = advisory_id.rsplit(".", 1)[-1].replace("_", " ").strip()
+    return tail[:1].upper() + tail[1:] if tail else "Advisory"
+
+
+def watermark_key(advisory_id, counter_token):
+    """The alert watermark's one string key for an advisory (D3).
+
+    D3's key is ``(id, counter_token)``; a Firestore map key is a string, so the
+    pair renders as ``<id>|<token>`` (``fault.no_ground|7``). ``|`` cannot occur
+    in a firmware rule id, and the token is a counter, the settings word, a
+    severity step or ``first_seen``, so the rendering is unambiguous.
+    """
+    return f"{advisory_id}|{counter_token}"
+
+
+def alert_body(entry):
+    """The push body for one projected advisory entry.
+
+    The severity is the firmware's own, but liveness is not: a counter-derived
+    advisory keeps ``critical`` after the condition cleared, so the body calls it
+    *recorded* instead of claiming a live emergency, and only a corroborated
+    (``active``) entry may say the condition is present now.
+    """
+    name = rule_name(entry.get("id"))
+    if entry.get("classification") == "active":
+        return f"Charger health: {name} active now — see Health."
+    return f"Charger health: {name} recorded — see Health. Not a live fault."
+
+
+def alert_plan(advisories, alerted, observed_at):
+    """Which advisories owe one push, and the watermark to persist beside it.
+
+    Pure (no I/O). The caller writes the returned map in the same
+    ``status/notifications`` pass that persists the projection, so the push and
+    its dedupe watermark cannot drift; a restart seeds the written map and sends
+    nothing.
+
+    One push per advisory the firmware rated ``critical``, that is not
+    acknowledged, and whose D3 watermark key is absent. Everything else is
+    silent: a repeated poll, an acknowledged entry, a rating below ``critical``,
+    and an advisory this bridge already alerted all leave the map as it is.
+
+    The returned map keeps only the current ring's keys, so it stays bounded by
+    the ring (the firmware's own 15 ids) instead of growing for the life of the
+    bridge. That pruning never costs an alert: a re-raise is a *new* key by
+    construction (D3 -- a new trip moves the counter, a new settings word voids
+    the ack), so a key can only reappear with its own push.
+    """
+    known = alerted if isinstance(alerted, dict) else {}
+    messages = []
+    ring = []
+    for entry in advisories or []:
+        if not isinstance(entry, dict):
+            continue
+        key = watermark_key(entry.get("id"), entry.get("counter_token"))
+        ring.append(key)
+        if key in known or entry.get("acked"):
+            continue
+        if entry.get("severity") != ALERT_SEVERITY:
+            continue
+        messages.append({"key": key, "body": alert_body(entry)})
+    watermark = {key: known[key] for key in ring if key in known}
+    for message in messages:
+        watermark[message["key"]] = observed_at
+    return messages, watermark
 
 
 class LiveObservations:

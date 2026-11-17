@@ -411,7 +411,7 @@ class WriteSiteTests(unittest.TestCase):
             raise bridge.messaging.UnregisteredError("gone")
 
         with mock.patch.object(bridge.messaging, "send", side_effect=fake_send):
-            bridge.notify(self.db, "Charging stopped", counter=self.counter)
+            bridge.notify(self.db, "Charger offline", counter=self.counter)
         self.assertEqual(set(self.db.data["fcmTokens"]), set())
         self.assertEqual(self.kinds()["fcm"], 1)
 

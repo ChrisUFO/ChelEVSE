@@ -1391,12 +1391,6 @@ class MergeIntervalTests(unittest.TestCase):
 
 
 class FcmTests(unittest.TestCase):
-    def test_transition_edges(self):
-        self.assertIsNone(bridge._transition_body(False, False, True))
-        self.assertEqual(bridge._transition_body(True, False, True), "Charging started")
-        self.assertEqual(bridge._transition_body(True, True, False), "Charging stopped")
-        self.assertIsNone(bridge._transition_body(True, True, True))
-
     def test_notify_prunes_dead_tokens_and_keeps_good_ones(self):
         db = FakeDB(
             {
@@ -1416,16 +1410,16 @@ class FcmTests(unittest.TestCase):
             return "ok"
 
         with mock.patch.object(bridge.messaging, "send", side_effect=fake_send):
-            bridge.notify(db, "Charging started")
+            bridge.notify(db, "Charger offline")
         self.assertEqual(set(db.data["fcmTokens"]), {"good"})
 
     def test_notifier_sends_on_a_background_worker(self):
         db = FakeDB()
         notifier = bridge.Notifier(db)
         with mock.patch.object(bridge, "notify") as fake_notify:
-            notifier.enqueue("Charging stopped")
+            notifier.enqueue("Charger offline")
             notifier.queue.join()
-        fake_notify.assert_called_once_with(db, "Charging stopped", counter=notifier.counter)
+        fake_notify.assert_called_once_with(db, "Charger offline", counter=notifier.counter)
 
 
 class CommandTests(unittest.TestCase):

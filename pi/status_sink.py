@@ -13,7 +13,7 @@ import threading
 from firebase_admin import firestore
 
 from write_counter import WriteCounter
-from write_policy import WritePolicy, _transition_body
+from write_policy import WritePolicy
 
 
 def log(message):
@@ -27,10 +27,10 @@ OFFLINE = {"charger_online": False, "updated_at": firestore.SERVER_TIMESTAMP}
 # Telemetry capacity of the apply queue: only the newest field set of an
 # unchanged state matters, so repeated telemetry collapses into one record.
 MQTT_PENDING_SNAPSHOTS = 4
-# On top of that, every state change is kept in order: it is the edge sessions
-# and transition notifications run on, so it must never be evicted as if it were
-# redundant telemetry. This bounds a pathological burst of transitions while the
-# worker is stuck; exceeding it is logged loudly.
+# On top of that, every state change is kept in order: it is the edge the session
+# record runs on, so it must never be evicted as if it were redundant telemetry.
+# This bounds a pathological burst of transitions while the worker is stuck;
+# exceeding it is logged loudly.
 MQTT_PENDING_EDGES = 32
 # The queue's real bound: telemetry slots plus the reserved edge backlog.
 MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
@@ -45,10 +45,12 @@ TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
 class StatusSink:
     """The one status apply path, shared by the HTTP poll and MQTT snapshots.
 
-    Both transports describe the same charger state, so history, sessions and
-    transition notifications run here exactly once per real change: the edge is
-    computed against the tracker's pre-tick state, which the first source
-    advances, so a second source reporting the same state has no edge left.
+    Both transports describe the same charger state, so history and sessions run
+    here exactly once per real change: the edge is computed against the tracker's
+    pre-tick state, which the first source advances, so a second source reporting
+    the same state has no edge left. A charge-state edge is not a push (#158, D9):
+    the health alert in :mod:`health` owns the advisory pushes, so the status path
+    only pushes an outage (:meth:`apply_offline`) and whatever the watchdog sends.
 
     Applies never write ``status/current`` themselves (issue #93): each one
     updates the tracker, merges into the accumulated field view and hands the
@@ -405,9 +407,6 @@ class StatusSink:
             # is still running.
             tracker.record_history(fields.get("total_energy"))
         else:
-            had_state = tracker.has_state
-            was_charging = tracker.has_state and tracker.previous_state == 3
-            is_charging = fields.get("state") == 3
             tracker.record_history(fields.get("total_energy"))
             tracker.observe(fields)
             # The stop stamp rides the accumulated view (issue #122): the
@@ -431,9 +430,6 @@ class StatusSink:
                 # forced flag armed for the next tick's publish_pending.
                 tracker.stamp_write_pending = False
                 self.policy.forced = True
-            body = _transition_body(had_state, was_charging, is_charging)
-            if body is not None:
-                self.notifier.enqueue(body)
         self._applies += 1
         self._consider_publish()
         # The history accumulator's charging interval resolves on every apply
@@ -505,9 +501,9 @@ def enqueue_latest(snapshots, snapshot):
 
     Only the newest field set of an unchanged ``state`` is worth writing, so a
     snapshot that repeats the queued state replaces it. A snapshot that changes
-    ``state`` is an edge — the start or stop of a charging session and its
-    notification — so it is kept in order behind the queued ones instead of
-    being discarded while the worker is busy.
+    ``state`` is an edge — the start or stop of a charging session — so it is kept
+    in order behind the queued ones instead of being discarded while the worker is
+    busy.
 
     The bound reserves room for the edges: coalescing removes repeated telemetry
     only, and the queue holds ``MQTT_PENDING_SNAPSHOTS`` telemetry slots plus

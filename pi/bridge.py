@@ -53,7 +53,6 @@ from history_accumulator import HistoryAccumulator  # noqa: E402
 from write_policy import (  # noqa: E402
     WritePolicy,
     WritePolicyConfig,
-    _transition_body,
 )
 from notify import Notifier, notify  # noqa: E402
 from charger_host import (  # noqa: E402
