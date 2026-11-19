@@ -997,7 +997,9 @@ equality is _not_ universal:
   list — because the charger's own cumulative then covers only the last epoch
   (records written before #195 still carry the last epoch's cumulative, so
   their list can exceed it);
-- a **dropped implausible step** leaves the aggregate whole and the list short;
+- a **dropped implausible step** stays in the charger's cumulative: `wh` keeps
+  it in a plain plug-in while the list goes short, and in a reset-seen plug-in
+  `wh` drops it too — keeping the interval basis;
 - a **wall-clock step** with no measured span (below) leaves that interval's
   energy in `wh` and in no interval.
 
@@ -1044,7 +1046,8 @@ and each case has its own journal line:
   must never span two plug-ins.
 - `interval step dropped: <Δ> Wh in <gap> exceeds the <n> Wh the charger could
 deliver` — the step is physically impossible. The energy stays in the
-  aggregate and the interval stays short.
+  charger's cumulative and the interval stays short; in a reset-seen plug-in
+  `wh` drops it too, keeping the interval basis.
 - `interval span derived: wall clock moved back <step>s; <duration>s measured on
 CLOCK_BOOTTIME (<wh> Wh)` — the wall clock was corrected backwards while the
   interval was open. The interval is kept with the measured boottime span as its

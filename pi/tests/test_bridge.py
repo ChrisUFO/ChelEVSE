@@ -1127,6 +1127,34 @@ class IntervalTests(unittest.TestCase):
         # baseline caveat every first reading has.
         self.assertAlmostEqual(interval["wh"], 2000.0)
 
+    def test_a_zero_baseline_plug_in_does_not_inherit_the_dead_accumulator(self):
+        # The boundary the step < 0 restart cannot see (#195): an in-block
+        # reset lands session_energy exactly on 0 as the plug-in's last
+        # charging reading, the vehicle unplugs, and the next plug-in starts
+        # at the cleared 0 -- a step of 0 against the stale baseline, not a
+        # drop. The dead plug-in's accumulation must not leak into the new
+        # plug-in's wh: without the restart the repro's second plug-in
+        # records 8000 for the 3000 actually drawn.
+        self.tick(3, 0, 0)
+        self.tick(3, 5000, 3000)
+        self.tick(3, 0, 3600)  # reset lands on 0; charging never resumes
+        self.tick(1, 0, 3600)  # unplug ends the plug-in on the zeroed counter
+        self.tick(3, 0, 0)  # the next plug-in opens at its cleared counter
+        self.tick(3, 3000, 1800)
+        self.tick(1, 3000, 1800)
+        self.assertEqual(len(self.sessions()), 2)
+        first, second = sorted(
+            self.sessions().values(), key=lambda record: record["ended_at"]
+        )
+        self.assertAlmostEqual(first["wh"], 5000.0)
+        self.assertAlmostEqual(second["wh"], 3000.0)
+        # Both records reconcile with their own interval lists, so the web's
+        # guard prices the intervals instead of the fallback.
+        for record in (first, second):
+            self.assertAlmostEqual(
+                sum(entry["wh"] for entry in record["intervals"]), record["wh"]
+            )
+
     def test_a_seeded_session_attributes_its_first_step_without_a_gap(self):
         # The seeded baseline predates the tracker (the bridge was down), so the
         # first step has no measurable gap and must not be judged impossible:

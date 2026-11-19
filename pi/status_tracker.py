@@ -278,7 +278,11 @@ class StatusTracker:
         write an energy-complete ``wh`` once the charger's own cumulative
         covers only the last epoch (#195). A drop at a block boundary restarts
         the total instead: it is indistinguishable from a new plug-in's cleared
-        counter, and a total that spanned two plug-ins would double-count.
+        counter, and a total that spanned two plug-ins would double-count. So
+        does a new block that opens at a counter of exactly 0 while the total
+        is still loaded: a reset that landed on 0 makes the next plug-in's
+        cleared counter step 0, not backwards, so the drop test alone cannot
+        see that boundary (#195).
         """
         if not charging:
             return
@@ -319,9 +323,21 @@ class StatusTracker:
                     log(
                         f"interval step dropped: {step:.0f} Wh in "
                         f"{_gap_seconds(gap)} exceeds the {allowed:.0f} Wh the "
-                        f"charger could deliver; energy stays in the aggregate"
+                        f"charger could deliver; energy stays in the charger's "
+                        f"cumulative, and a reset-seen plug-in drops it from "
+                        f"wh too, keeping the interval basis"
                     )
         if self.open_interval is None:
+            # A plug-in boundary the step < 0 restart cannot see (#195): a
+            # reset that landed exactly on 0 as the plug-in's last charging
+            # reading leaves the next plug-in's cleared counter stepping 0
+            # against the stale baseline. A counter at 0 mid-accumulation
+            # means the firmware cleared it -- a disconnect by the counter's
+            # own contract -- so the accumulation restarts here too; with the
+            # accumulator empty the reset is a no-op.
+            if _is_number(current) and float(current) == 0.0 and self.session_wh:
+                self.session_wh = 0.0
+                self.session_wh_reset_seen = False
             # The wall clock anchors the stored bounds; the boottime stamp is the
             # same instant on the clock a wall-clock step cannot move, so an
             # interval whose endpoints a step inverts still has a measured span.
