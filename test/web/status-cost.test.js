@@ -163,6 +163,9 @@ const WINDOW_ONLY = {
     },
   ],
 };
+// The console-edited edge the same shape can reach: rows but no usable flat
+// rate, the only case an uncovered slice is genuinely 0.00 (#188).
+const WINDOW_ONLY_NO_FLAT = { currency: 'GBP', rates: WINDOW_ONLY.rates };
 const FLAT = { rate: 0.245, currency: 'GBP' };
 
 const HOUR = 60 * 60 * 1000;
@@ -389,9 +392,17 @@ test('flat configs price the session energy with no anchor at all', () => {
 });
 
 test('the understates-cost marker sits under the figure, live and held', () => {
+  // With a usable flat fallback (#188) the half-uncovered hour prices at that
+  // fallback for its uncovered half — the figure is policy-correct, so the
+  // marker never fires.
   showSettings(WINDOW_ONLY);
-  // The live hour ending 16:30 is half uncovered: the figure prices at 0.16
-  // and carries the marker with its tooltip.
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.31');
+  assert.equal(sub().textContent, '');
+  // Without a usable fallback the live hour ending 16:30 is half uncovered at
+  // a genuine 0.00: the figure prices at 0.16 and carries the marker with its
+  // tooltip.
+  showSettings(WINDOW_ONLY_NO_FLAT);
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.16');
   assert.equal(sub().textContent, 'understates cost');

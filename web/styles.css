@@ -2200,9 +2200,9 @@ input[aria-invalid='true'] {
 .strip-seg.window {
   background: color-mix(in oklab, var(--accent) 72%, var(--surface));
 }
-/* Uncovered is 0.00, not a price: the only band that is not a colour of the
-   plan. It reads as the warning it is, and grey no longer stands for both it and
-   a priced window. */
+/* Uncovered is priced by the stored flat rate rather than by a row (#188): the
+   only band that is not a colour of the plan. It reads as the warning it is,
+   and grey no longer stands for both it and a priced window. */
 .strip-seg.uncovered {
   background: color-mix(in oklab, var(--err) 22%, transparent);
   border: 1px dashed color-mix(in oklab, var(--err) 60%, var(--line));
@@ -2560,10 +2560,11 @@ input[aria-invalid='true'] {
   line-height: 1.45;
   color: var(--muted);
 }
-/* The mode switch seeds one month and leaves the rest of the year at 0.00, and
-   that plan can be saved as it stands: the note that explains the seed carries
-   the action that covers the gap, so the warning is not 11.5 px prose beside an
-   enabled Save. */
+/* The mode switch seeds one month and leaves the rest of the year uncovered —
+   it costs the stored flat rate (#188), 0.00 only when no usable One-rate is
+   stored — and that plan can be saved as it stands: the note that explains the
+   seed carries the action that covers the gap, so the warning is not 11.5 px
+   prose beside an enabled Save. */
 .plan-seed {
   display: flex;
   align-items: center;

@@ -37,7 +37,9 @@ function date(year, month, day, hours = 0, minutes = 0) {
 const FLAT = { rate: 0.245, currency: 'GBP' };
 
 // A nightly off-peak window (00:00–06:00) at 0.10 over a visible all-day base
-// at 0.30. The stored rate is no longer an invisible fallback.
+// at 0.30. The base row is the visible season price; the equal stored rate is
+// the #188 gap fallback for an instant no row matches — this plan has none,
+// the base covers the whole day.
 function nightly(overrides = {}) {
   return {
     rate: 0.3,
@@ -153,8 +155,11 @@ function liveStatus(state, updated, elapsed, wh = 1000, overrides = {}) {
   };
 }
 
-// A base-less season: the window prices 16:00–19:00 and every other hour of the
-// day prices 0.00, which is the slice the live marker reports.
+// A base-less season: the window prices 16:00–19:00. Every other hour of the
+// day prices at the stored flat fallback (#188), so with a usable `rate` the
+// marker never fires; `windowOnlyNoFlat` is the console-edited edge with no
+// usable flat rate, where those hours are genuinely 0.00 and the marker
+// reports them.
 function windowOnly(overrides = {}) {
   return {
     rate: 0.3,
@@ -173,19 +178,30 @@ function windowOnly(overrides = {}) {
   };
 }
 
+function windowOnlyNoFlat() {
+  const { rate: _rate, ...rest } = windowOnly();
+  return rest;
+}
+
 test('the live "understates cost" marker follows the interval it describes', () => {
   const inWindow = date(2026, 1, 5, 17, 0).getTime();
   const outside = date(2026, 1, 5, 12, 0).getTime();
   // A plan with a base prices every slice of the interval.
   assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), nightly()), false);
-  // A base-less window prices only its own hours.
+  // A base-less window prices only its own hours, but the stored flat rate
+  // prices the rest (#188): the figure is policy-correct, so the marker never
+  // fires — even on a straddling interval.
   assert.equal(statusCostUncovered(liveStatus(3, inWindow, 3600), windowOnly()), false);
-  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnly()), true);
-  // An interval that straddles the window edge includes an unpriced slice, and
-  // the figure it caveats is still shown: the marker never stands alone.
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnly()), false);
   const straddle = date(2026, 1, 5, 16, 30).getTime();
-  assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnly()), true);
+  assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnly()), false);
   assert.notEqual(statusCostLabel(liveStatus(3, straddle, 3600), windowOnly()), null);
+  // Without a usable flat rate the uncovered slice is genuinely 0.00 and the
+  // marker fires: outside the window, and on the straddling interval whose
+  // figure it caveats is still shown — the marker never stands alone.
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnlyNoFlat()), true);
+  assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnlyNoFlat()), true);
+  assert.notEqual(statusCostLabel(liveStatus(3, straddle, 3600), windowOnlyNoFlat()), null);
   // The marker shares the cost's gate: nothing to caveat when the figure is
   // hidden (not charging, missing write time or elapsed, flat config).
   for (const status of [
@@ -196,10 +212,10 @@ test('the live "understates cost" marker follows the interval it describes', () 
     liveStatus(3, outside, -60),
     liveStatus(3, outside, 3600, 1000, { charger_online: false }),
   ]) {
-    assert.equal(statusCostUncovered(status, windowOnly()), false);
+    assert.equal(statusCostUncovered(status, windowOnlyNoFlat()), false);
   }
   assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), FLAT), false);
-  assert.equal(statusCostUncovered(null, windowOnly()), false);
+  assert.equal(statusCostUncovered(null, windowOnlyNoFlat()), false);
 });
 
 test('live cost ends at the snapshot write, not the render instant', () => {
@@ -339,19 +355,24 @@ test('the held marker follows the frozen interval', () => {
   const noon = date(2026, 1, 5, 12, 0).getTime();
   const peak = date(2026, 1, 5, 17, 0).getTime();
   const edge = date(2026, 1, 5, 16, 30).getTime();
-  // A base-less window prices only its own hours; the frozen window decides.
-  assert.equal(heldCostUncovered(3600, noon, windowOnly()), true);
+  // A base-less window prices only its own hours, but the stored flat fallback
+  // prices the rest (#188), so the held marker never fires with a usable
+  // `rate`; the frozen window decides only in the no-fallback edge.
+  assert.equal(heldCostUncovered(3600, noon, windowOnly()), false);
   assert.equal(heldCostUncovered(3600, peak, windowOnly()), false);
-  assert.equal(heldCostUncovered(3600, edge, windowOnly()), true);
-  assert.notEqual(heldCostLabel(1000, 3600, edge, windowOnly()), null);
+  assert.equal(heldCostUncovered(3600, edge, windowOnly()), false);
+  assert.equal(heldCostUncovered(3600, noon, windowOnlyNoFlat()), true);
+  assert.equal(heldCostUncovered(3600, peak, windowOnlyNoFlat()), false);
+  assert.equal(heldCostUncovered(3600, edge, windowOnlyNoFlat()), true);
+  assert.notEqual(heldCostLabel(1000, 3600, edge, windowOnlyNoFlat()), null);
   // A schedule with a base covers every slice.
   assert.equal(heldCostUncovered(3600, noon, nightly()), false);
   // Flat configs and degenerate inputs never carry the marker.
   assert.equal(heldCostUncovered(3600, noon, FLAT), false);
   for (const elapsed of [null, 0, -60]) {
-    assert.equal(heldCostUncovered(elapsed, noon, windowOnly()), false, String(elapsed));
+    assert.equal(heldCostUncovered(elapsed, noon, windowOnlyNoFlat()), false, String(elapsed));
   }
-  assert.equal(heldCostUncovered(3600, null, windowOnly()), false);
+  assert.equal(heldCostUncovered(3600, null, windowOnlyNoFlat()), false);
 });
 
 test('heldAnchorAfter captures, holds, clears and re-anchors', () => {
@@ -801,25 +822,72 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
       },
     ],
   };
-  // The day before the season is outside every season and costs 0; the first
-  // day pays the season.
+  // The day before the season is outside every season and prices at the stored
+  // flat fallback (#188); the first day pays the season.
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 14, 12, 0), date(2026, 6, 14, 13, 0), 1000), summer),
-    'GBP 0.00',
+    'GBP 0.30',
   );
   assert.equal(
     sessionCostLabel(session(date(2026, 6, 15, 12, 0), date(2026, 6, 15, 13, 0), 1000), summer),
     'GBP 0.20',
   );
-  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge into
-  // the uncovered 0.00 hour.
+  // 15 September 23:00 → 16 September 01:00 pro-rates across the edge: the
+  // season hour pays 0.20, the uncovered hour the flat fallback 0.30.
   assert.equal(
     sessionCostLabel(session(date(2026, 9, 15, 23, 0), date(2026, 9, 16, 1, 0), 2000), summer),
-    'GBP 0.20',
+    'GBP 0.50',
   );
   // The season rate prices any hour, live included.
   assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.00');
+  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.30');
+});
+
+// The #188 defect: season rows scoped 15 June – 15 September expired in
+// October, and a November session priced ~80% low because the engine zeroed
+// every unmatched instant. The stored flat rate now prices it.
+test('an expired season scope prices a November session at the flat rate (#188)', () => {
+  const expired = {
+    rate: 0.12,
+    currency: 'GBP',
+    rates: [
+      {
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [6, 7, 8, 9],
+        from: '06-15',
+        to: '09-15',
+      },
+    ],
+  };
+  // The reported 19.6 kWh session on 18 November 2026: 0.12 × 19.6 = 2.352,
+  // not the 0.00 the old policy returned (≈ GBP 0.48 under it).
+  assert.equal(
+    sessionCostLabel(session(date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), 19600), expired),
+    'GBP 2.35',
+  );
+  // Live and held windows price at the fallback too, and no marker fires:
+  // with a usable fallback the figure is policy-correct.
+  const live = liveStatus(3, date(2026, 11, 18, 20, 0).getTime(), 3600, 19600);
+  assert.equal(statusCostLabel(live, expired), 'GBP 2.35');
+  assert.equal(statusCostUncovered(live, expired), false);
+  assert.equal(heldCostUncovered(3600, date(2026, 11, 18, 20, 0).getTime(), expired), false);
+  // The console-edited edge — the same rows with no usable flat rate — keeps
+  // the genuine 0.00 and its markers.
+  const { rate: _rate, ...expiredNoFlat } = expired;
+  const liveNoFlat = liveStatus(3, date(2026, 11, 18, 20, 0).getTime(), 3600, 19600);
+  assert.equal(
+    sessionCostLabel(
+      session(date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), 19600),
+      expiredNoFlat,
+    ),
+    'GBP 0.00',
+  );
+  assert.equal(statusCostUncovered(liveNoFlat, expiredNoFlat), true);
+  assert.equal(heldCostUncovered(3600, date(2026, 11, 18, 20, 0).getTime(), expiredNoFlat), true);
 });
 
 // ---------- schedule-priced hour buckets (the Day period's bars) ----------
@@ -863,8 +931,9 @@ test('hour buckets price season edges and the new-year tail from the day id', ()
     ],
   };
   assert.ok(Math.abs(hourCost('2026-06-15', '12', 1, summer) - 0.2) < 1e-9);
-  // The day before the season is outside every season: 0.00, not hidden.
-  assert.equal(hourCost('2026-06-14', '12', 1, summer), 0);
+  // The day before the season is outside every season: it prices at the stored
+  // flat fallback (#188), not hidden.
+  assert.ok(Math.abs(hourCost('2026-06-14', '12', 1, summer) - 0.3) < 1e-9);
   // A December-only 22:00–06:00 window covers the early hours of 1 January
   // (the tail of the window that started on 31 December), as any interval.
   const december = nightly({ start: '22:00', end: '06:00', months: [12] });
@@ -872,11 +941,15 @@ test('hour buckets price season edges and the new-year tail from the day id', ()
   assert.ok(Math.abs(hourCost('2026-01-01', '12', 1, december) - 0.3) < 1e-9);
 });
 
-test('hours no base or window covers price 0.00 (the plan-banner rule)', () => {
-  // windowOnly prices 16:00–19:00 and nothing else: noon is 0.00, 17:00 pays.
+test('hours no base or window covers price at the stored flat fallback', () => {
+  // windowOnly prices 16:00–19:00 and nothing else: noon prices at the stored
+  // flat fallback 0.30 (#188), 17:00 pays the window.
   const cost = hourCost('2026-01-05', '12', 1, windowOnly());
-  assert.ok(Math.abs(cost - 0) < 1e-9);
+  assert.ok(Math.abs(cost - 0.3) < 1e-9);
   assert.ok(Math.abs(hourCost('2026-01-05', '17', 1, windowOnly()) - 0.32) < 1e-9);
+  // With no usable flat rate stored, the same hour is genuinely 0.00 (the
+  // plan-banner rule).
+  assert.ok(Math.abs(hourCost('2026-01-05', '12', 1, windowOnlyNoFlat()) - 0) < 1e-9);
   // A zero-energy hour prices 0.00 rather than hiding.
   assert.equal(hourCost('2026-01-05', '12', 0, windowOnly()), 0);
 });

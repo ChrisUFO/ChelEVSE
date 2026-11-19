@@ -1459,9 +1459,10 @@ test('sectionView never presents an unreached read as current data', () => {
 });
 
 test('the plan banner appears exactly when a saved plan has an unpriced instant', () => {
-  // Gap 3: the banner is the only signal that a stored plan prices some hours or
-  // dates at 0.00 before the owner opens settings. Its condition is a pure
-  // predicate so it is covered without a DOM.
+  // Gap 3: the banner is the only signal that a stored plan has instants no
+  // rate row covers before the owner opens settings — each costs the stored
+  // flat rate (#188), 0.00 only when no usable flat rate is stored. Its
+  // condition is a pure predicate so it is covered without a DOM.
   const base = { id: 'b', rate: 0.3, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00' };
   const summer = {
     ...base,
@@ -1488,7 +1489,9 @@ test('the plan banner appears exactly when a saved plan has an unpriced instant'
   assert.equal(showPlanBanner(null), false);
   // A plan that covers the year with a base is priced everywhere.
   assert.equal(showPlanBanner(settings([base])), false);
-  // A base-less season leaves hours at 0.00 even though its dates are covered.
+  // A base-less season leaves hours no row covers even though its dates are
+  // covered: they cost the stored 0.3 flat rate (#188), not 0.00 — the banner
+  // fires on the gap itself.
   assert.equal(showPlanBanner(settings([peak])), true);
   // A date season leaves the rest of the year uncovered.
   assert.equal(showPlanBanner(settings([summer])), true);

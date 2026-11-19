@@ -155,13 +155,17 @@ export function statusCostLabel(status, settings) {
   );
 }
 
-// Whether the live cost interval includes a slice with no base/window price.
-// Only a non-empty schedule can have such a slice; the status screen adds the
-// marker beside the cost, not a second number.
+// Whether the live cost interval includes a slice no base/window prices at a
+// row. Only a non-empty schedule can have such a slice, and — since #188 — the
+// marker means the figure genuinely understates cost: the stored flat rate
+// prices the slice when one is usable, so the marker fires only when no usable
+// flat fallback exists. The status screen adds the marker beside the cost, not
+// a second number.
 export function statusCostUncovered(status, settings) {
   if (!status) return false;
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return false;
+  if (normalized.rate != null) return false;
   const updated = status.updated_at;
   const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
   const seconds = toNumber(status.elapsed);
@@ -248,11 +252,14 @@ export function heldCostLabel(wh, elapsed, anchorMs, settings) {
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Whether the held interval includes a slice with no base/window price — the
-// same marker the live figure carries, evaluated over the frozen window.
+// Whether the held interval includes a slice no base/window prices at a row —
+// the same marker the live figure carries, evaluated over the frozen window,
+// and gated the same way: with a usable flat fallback the slice prices at that
+// rate, so only a missing fallback makes the figure understate cost.
 export function heldCostUncovered(elapsed, anchorMs, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return false;
+  if (normalized.rate != null) return false;
   const seconds = toNumber(elapsed);
   const endMs = endMillis(anchorMs);
   if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
@@ -393,7 +400,8 @@ function bucketWindow(id) {
 // priced over its own wall-clock span by costForInterval. Returns `{cost, wh}`
 // for a contributing span, `undefined` when the span does not reach the window
 // (skip it), or null when the pricer cannot price the slice — unreachable under
-// a schedule (an uncovered slice prices 0.00), kept so a null from the engine
+// a schedule (a slice no row matches prices at the stored flat rate, 0.00 only
+// when no usable flat rate is stored), kept so a null from the engine
 // hides the bucket instead of half-pricing it.
 function bucketSlice(span, window, settings) {
   const spanStart = valueMillis(span.started_at);
@@ -625,7 +633,8 @@ function hourStartMs(start, hour) {
 
 // One hour bucket priced over its own span (kWh in, like the buckets
 // themselves; costForInterval takes Wh). An hour no base/window covers prices
-// 0.00 — the existing plan-banner rule — so under a schedule the null cases
+// at the stored flat rate — 0.00 only when no usable flat rate is stored, the
+// existing plan-banner rule — so under a schedule the null cases
 // are only the unusable-input guards.
 export function hourCost(dayId, hour, kwh, settings) {
   const normalized = costSettings(settings);

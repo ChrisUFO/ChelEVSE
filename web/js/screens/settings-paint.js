@@ -72,7 +72,7 @@ export function tierClass(tier) {
 }
 
 // The legend's order: base first, then the relative override tiers, then the
-// uncovered 0.00 slice.
+// uncovered slice (priced by the stored flat rate rather than by a row, #188).
 const LEGEND_ORDER = ['base', 'window', 'off', 'shoulder', 'peak', 'same', 'uncovered'];
 
 function segmentClass(segment, state) {
@@ -554,7 +554,8 @@ function periodName(period) {
 
 // The header tells the truth for the representative month: the price range
 // includes the effective bases/windows and sibling rows that apply there, while
-// the count stays the period's own rows. Unpriced hours show as 0.00.
+// the count stays the period's own rows. Unpriced hours cost the stored flat
+// rate (#188) — 0.00 only when none is stored.
 function paintPeriodHeader(card, state) {
   const period = card.period;
   setText(card.title, period.title);
@@ -953,10 +954,11 @@ function paintBaseBlock(card, state) {
     const covered = periodHasBaseOverlap(card.period, state.draftRates);
     card.addBaseButton.hidden = covered;
     if (card.baseWarning) {
-      // The base-less warning is about a plan that leaves hours at 0.00. A plan
-      // whose windows between them price the whole year has nothing to warn
-      // about, so the sentence states that instead of promising a gap that the
-      // strip, the table and History all deny.
+      // The base-less warning is about a plan that leaves hours no row covers:
+      // those hours cost the stored flat rate (#188) — 0.00 only when no usable
+      // flat rate is stored. A plan whose windows between them price the whole
+      // year has nothing to warn about, so the sentence states that instead of
+      // promising a gap that the strip, the table and History all deny.
       setText(
         card.baseWarning,
         covered
@@ -1358,19 +1360,22 @@ export function paintPlan(state) {
   }
 
   state.planPeriods = state.ratePeriodsForDraft();
-  // One walk of the draft per paint: the plan summary's 0.00 minimum and each
-  // base block's warning both ask whether any instant is unpriced.
+  // One walk of the draft per paint: each base block's warning asks whether
+  // any instant no row covers — such an instant costs the stored flat rate
+  // (#188), 0.00 only when no usable flat rate is stored. The summary's
+  // minimum comes from the fallback-aware range below.
   state.planUnpriced = planHasUnpriced(state.draftRates);
   // Only rows that can match and pass validation set a meaningful range; an
   // invalid row is shown and fixed but its price never applies. A base-less
-  // season and a date gap both put 0 in the range, so the plan cannot advertise
-  // a minimum it does not actually charge.
+  // season and a date gap price at the stored flat fallback, so that price
+  // joins the advertised range whenever gaps exist, and the minimum reaches
+  // 0.00 only when that fallback is unusable.
   const rateRows = state.planPeriods
     .filter((period) => period.kind !== 'invalid')
     .flatMap((period) => period.rows)
     .filter((entry) => Object.keys(state.rateValidation.rows[entry.index] || {}).length === 0)
     .map((entry) => entry.row);
-  const range = ratePlanRange(rateRows);
+  const range = ratePlanRange(rateRows, $('setting-rate').value);
   const problems = validationProblemCount(state.rateValidation, state.draftRates.length);
   const capped = state.draftRates.length > MAX_RATE_WINDOWS;
   const gaps = mergeDateRanges(uncoveredDateRanges(state.draftRates));

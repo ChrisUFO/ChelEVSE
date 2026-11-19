@@ -267,7 +267,8 @@ export function periodBaseRate(period) {
 }
 
 // Two modes only: no rows is One rate; any rows is Seasons & time-of-use. The
-// stored `rate` remains in both, but is ignored for pricing once rows exist.
+// stored `rate` remains in both; once rows exist it is the fallback price for
+// an instant no row matches (#188).
 export function rateEditorMode(value) {
   const rates = Array.isArray(value)
     ? value
@@ -352,15 +353,17 @@ export function periodHasBaseOverlap(period, rows) {
   });
 }
 
-// Whether a non-empty plan has any instant with no price. The engine prices an
-// instant from the union of the rows that match it: a row's season decides the
-// date, and its weekday segment decides the minutes — a window that wraps
-// midnight also prices the next day's early hours from the day it started. A
-// plan is therefore fully priced exactly when, for every date and weekday, the
-// matching segments cover the whole day. Counting base rows alone declared a
-// plan whose hours are all covered by overrides "unpriced"; a window-only
-// stretch of dates still is unpriced for the hours it does not cover. These are
-// warnings, not validation blockers.
+// Whether a non-empty plan has any instant no row matches. The rows price an
+// instant from the union that matches it: a row's season decides the date, and
+// its weekday segment decides the minutes — a window that wraps midnight also
+// prices the next day's early hours from the day it started. A plan's rows
+// therefore cover every instant exactly when, for every date and weekday, the
+// matching segments cover the whole day. Like `intervalUncovered` in rates.js,
+// this names "no row matched", not the price: since #188 such an instant prices
+// at the stored flat rate — 0.00 only when no usable flat rate is stored.
+// Counting base rows alone declared a plan whose hours are all covered by
+// overrides "unpriced"; a window-only stretch of dates still leaves the hours
+// it does not cover without a row. These are warnings, not validation blockers.
 const MINUTES_PER_DAY = 1440;
 // A leap reference year, so slot 59 is a real 29 February and every slot has a
 // well-defined weekday; only the month and day are read.
@@ -659,15 +662,19 @@ function rateRangeFor(rows) {
 }
 
 // The price range a plan summary advertises. Invalid rates are not allowed to
-// widen it; the row's own error says what is wrong.
-export function ratePlanRange(rows) {
+// widen it; the row's own error says what is wrong. `fallbackRate` is the
+// stored flat rate — the price an uncovered date or base-less hour resolves to.
+export function ratePlanRange(rows, fallbackRate) {
   const list = Array.isArray(rows) ? rows : [];
   const range = rateRangeFor(list);
   if (!range) return null;
-  // Uncovered dates and base-less hours price at 0, so an advertised minimum
-  // above 0 would hide the fact that some instants are free/stale rather than
-  // priced by the plan.
-  return planHasUnpriced(list) ? { ...range, min: 0 } : range;
+  // Since #188 gaps price at the stored flat fallback, so the fallback price
+  // joins the advertised range whenever gaps exist; the minimum reaches 0
+  // only when the fallback is unusable and the gap is genuinely unpriced.
+  if (!planHasUnpriced(list)) return range;
+  if (!rateIsUsable(fallbackRate)) return { ...range, min: 0 };
+  const flat = parseRateValue(fallbackRate);
+  return { min: Math.min(range.min, flat), max: Math.max(range.max, flat) };
 }
 
 function periodOrder(period) {
@@ -806,7 +813,8 @@ function periodAppliesOn(period, date) {
 // The effective price range a period header should advertise for its
 // representative sample (a month, or the dates of a date season): every base and
 // daily window that can apply there (own, inherited and all-year). An uncovered
-// hour is 0.00, never the stored flat rate; this answers "what could this season
+// hour resolves to the stored flat fallback (#188), 0.00 only when none is
+// stored; this answers "what could this season
 // cost", while the row count stays the period's own.
 export function periodEffectiveRange(rows, fallbackRate, period, year = new Date().getFullYear()) {
   const dated = Boolean(period && period.kind === 'dates');
@@ -814,7 +822,7 @@ export function periodEffectiveRange(rows, fallbackRate, period, year = new Date
   const month = dated ? (dates[0] ? dates[0].month : 1) : representativeMonth(period);
   // Resolve the representative sample from the whole plan, so a sibling base or
   // window that also prices these dates is included. Uncovered hours contribute
-  // 0.00 instead of a stored fallback.
+  // the stored flat fallback (0.00 only when none is stored).
   const week = dated
     ? rateWeekForDates(rows, fallbackRate, dates, year)
     : rateWeek(rows, fallbackRate, month, year);
@@ -1305,7 +1313,8 @@ function coverageCaption(period, month, dated, onlyDate) {
 
 // One period's own layer for a representative sample in its own scope. The table
 // is deliberately not the union: it shows this period's rows, prices an
-// uncovered hour at 0.00, and names the sibling periods that also apply in that
+// uncovered hour at the stored flat fallback (#188; 0.00 only when none is
+// stored), and names the sibling periods that also apply in that
 // sample. The checker is the place that resolves the union. For an all-year period the
 // representative month is January; otherwise it is the first month of the
 // scope; a date period is sampled at its own dates, so the caption can never
@@ -1336,7 +1345,8 @@ export function periodCoverage(
 }
 
 // The band name for a resolved segment. A base is named Base; an hour with no
-// row is Uncovered (0.00), not a fallback. Overrides keep their relative tier
+// row is Uncovered — priced by the engine at the stored flat fallback, 0.00 only
+// when none is stored. Overrides keep their relative tier
 // only when their season has a base to compare against.
 export function rateSegmentLabel(segment, windowRates, baseRate) {
   if (!segment || !segment.window) return 'Uncovered';
@@ -1425,8 +1435,9 @@ function previewDisplay(entry, tier, baseRate) {
 
 // The exact-date checker: the winning row for one local instant and why. A base
 // prices the season's ordinary hours, an override wins over it, and both
-// unmatched cases are 0: an uncovered date (no season) or an unpriced hour (a
-// season with neither a base nor a window for that time).
+// unmatched cases price at the stored flat rate (#188) — an uncovered date (no
+// season) or an unpriced hour (a season with neither a base nor a window for
+// that time) is 0 only when no usable flat rate is stored.
 export function previewRate(rows, fallbackRate, date) {
   const entry = previewEntry(rows, fallbackRate, date);
   if (!entry) return null;

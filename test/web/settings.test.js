@@ -1892,15 +1892,17 @@ test('the header range is effective for the representative month, not just the o
   // overrides its early hours.
   assert.deepEqual(periodEffectiveRange(rows, 0.31, summer), { min: 0.1, max: 0.2, month: 3 });
 
-  // A malformed row never widens an "effective" range.
+  // A malformed row never widens an "effective" range; its unpriced hours
+  // carry the 0.31 flat fallback (#188).
   const broken = [rateRowFields(nightEveryDay), rateRowFields({ ...winterPeak, rate: 9 })];
   assert.deepEqual(periodEffectiveRange(broken, 0.31, ratePeriods(broken)[0]), {
-    min: 0,
-    max: 0.1,
+    min: 0.1,
+    max: 0.31,
     month: 1,
   });
-  // No base means the uncovered hours are 0, but they are not in this window's
-  // own slices; the usable window rates still set the range.
+  // No base means the uncovered hours price at the flat fallback — genuinely 0
+  // only when none is stored (the empty-string case below), and they are not in
+  // this window's own slices; the usable window rates still set the range.
   assert.deepEqual(
     periodEffectiveRange(
       [rateRowFields(nightEveryDay)],
@@ -1934,10 +1936,11 @@ test('the exact-date checker names the winning row and the source of the price',
   assert.equal(noon.tier, 'Base');
   assert.equal(at(2026, 1, 15, 18, 59).rate, 0.32);
   assert.equal(at(2026, 1, 15, 19, 0).source, 'base');
-  // Month boundaries: 31 Dec is winter, 1 Mar leaves the winter base behind.
+  // Month boundaries: 31 Dec is winter, 1 Mar leaves the winter base behind —
+  // into the flat fallback 0.31 (#188), still flagged as uncovered.
   assert.equal(at(2026, 12, 31, 17, 0).rate, 0.32);
   const march = at(2027, 3, 1, 17, 0);
-  assert.equal(march.rate, 0);
+  assert.equal(march.rate, 0.31);
   assert.equal(march.source, 'uncovered');
   // The all-year night scope still covers the date, but not this hour.
   assert.equal(march.uncoveredDate, false);
@@ -1946,7 +1949,7 @@ test('the exact-date checker names the winning row and the source of the price',
   assert.equal(at(2026, 6, 15, 23, 0).rate, 0.1);
   assert.equal(at(2026, 6, 16, 5, 0).rate, 0.1);
   const hourGap = at(2026, 6, 16, 6, 0);
-  assert.equal(hourGap.rate, 0);
+  assert.equal(hourGap.rate, 0.31);
   assert.equal(hourGap.unpricedHour, true);
   assert.equal(hourGap.source, 'uncovered');
 
@@ -1954,7 +1957,7 @@ test('the exact-date checker names the winning row and the source of the price',
   const decemberWrap = [rateRowFields({ ...nightEveryDay, id: 'dec', months: [12] })];
   assert.equal(previewRate(decemberWrap, 0.31, new Date(2027, 0, 1, 5, 0)).rate, 0.1);
   const laterJanuary = previewRate(decemberWrap, 0.31, new Date(2027, 0, 2, 5, 0));
-  assert.equal(laterJanuary.rate, 0);
+  assert.equal(laterJanuary.rate, 0.31);
   assert.equal(laterJanuary.uncoveredDate, true);
 
   // An invalid row is dropped, leaving no schedule; the flat path remains for
@@ -1972,10 +1975,11 @@ test('the exact-date checker names the winning row and the source of the price',
 test('the checker tells a day with no season apart from an hour no window covers', () => {
   // No base is required to classify a miss: a date outside every scope is an
   // uncovered date; a date inside a scope with no hour price is an uncovered
-  // hour. Both are 0.00.
+  // hour. Both price at the flat fallback (#188) — 0.00 only when none is
+  // stored.
   const rows = [rateRowFields(nightEveryDay)];
   const noSeason = previewRate(rows, '0.31', new Date(2026, 6, 15, 12, 0));
-  assert.equal(noSeason.rate, 0);
+  assert.equal(noSeason.rate, 0.31);
   assert.equal(noSeason.source, 'uncovered');
   assert.equal(noSeason.uncoveredDate, false); // all-year night covers July
   assert.equal(noSeason.unpricedHour, true);
@@ -2339,8 +2343,10 @@ test('an all-day window is recognised from its stored start and end', () => {
 });
 
 test('the plan range ignores bad prices', () => {
-  // Bare rows have no scope, so the plan reports the uncovered 0.00 minimum;
-  // the malformed 9 and empty prices still do not widen the maximum.
+  // Bare rows have no scope, so the plan reports a 0 minimum; this call passes
+  // no usable flat fallback, so the gaps are genuinely unpriced (#188) — not a
+  // general rule. The malformed 9 and empty prices still do not widen the
+  // maximum.
   assert.deepEqual(ratePlanRange([{ rate: '0.1' }, { rate: 9 }, { rate: '' }, { rate: 0.32 }]), {
     min: 0,
     max: 0.32,
@@ -2919,9 +2925,10 @@ test('the checker names a date season and the price source', () => {
   assert.equal(inside.scopeText, 'Jun 15–Sep 15');
   assert.equal(inside.dateText, 'Jun 15–Sep 15');
   assert.equal(inside.summary, 'Every day · All day');
-  // Outside the season the date is uncovered and costs 0; there is no scope.
+  // Outside the season the date is uncovered — priced at the flat fallback
+  // 0.31 (#188), 0.00 only without one — and there is no scope.
   const outside = previewRate([seasonRateRow], '0.31', new Date(2026, 5, 14, 12, 0));
-  assert.equal(outside.rate, 0);
+  assert.equal(outside.rate, 0.31);
   assert.equal(outside.source, 'uncovered');
   assert.equal(outside.uncoveredDate, true);
   assert.equal(outside.scopeText, '');
@@ -3335,7 +3342,8 @@ test('rateEditorMode is derived from rows, and the flat seed is a workable seaso
   assert.equal(isBaseWindow(seed), true);
   assert.equal(isAllDayWindow(seed), true);
   // The rest of the year is an uncovered gap: it is where the next season goes,
-  // and the plan says the dates cost 0.00 until they are covered.
+  // and those dates price at the stored 0.31 flat rate (#188) — the seed's own
+  // source value — while the predicate still reports the gap.
   // October is covered, so the uncovered rest of the year reads as one wrapping
   // run rather than two fragments.
   assert.equal(dateSetText(uncoveredDateRanges([seed])), 'Nov–Sep');
@@ -3499,7 +3507,9 @@ test('a plan whose hours are all covered by overrides is priced everywhere', () 
   assert.equal(planHasUnpriced([weekdays, weekend]), false);
   assert.deepEqual(ratePlanRange([weekdays, weekend]), { min: 0.2, max: 0.3 });
 
-  // The hours a base-less window leaves open are still unpriced...
+  // The hours a base-less window leaves open still have no row — this call
+  // passes no usable flat fallback, so they are genuinely unpriced (#188),
+  // not a general rule...
   assert.equal(planHasUnpriced([dayEvening]), true);
   assert.deepEqual(ratePlanRange([dayEvening]), { min: 0, max: 0.3 });
   // ...and a base makes the same window fully priced.
@@ -3509,7 +3519,7 @@ test('a plan whose hours are all covered by overrides is priced everywhere', () 
   assert.equal(planHasUnpriced([rateRowFields(baseRateRow('empty', '', null, null))]), true);
 });
 
-test('the advertised plan range includes 0 exactly when some instant is unpriced', () => {
+test('the advertised plan range includes the gap price exactly when a gap exists', () => {
   const allYearBase = rateRowFields(baseRateRow('base', '0.3', null, null));
   const dateBase = rateRowFields({ ...summerDates, rate: 0.2 });
   const dateWindow = rateRowFields({
@@ -3524,9 +3534,24 @@ test('the advertised plan range includes 0 exactly when some instant is unpriced
     min: 0.3,
     max: 0.32,
   });
+  // A gap with no usable flat fallback is genuinely unpriced, so 0 stays in
+  // the advertised range.
   assert.deepEqual(ratePlanRange([dateBase]), { min: 0, max: 0.2 });
   assert.deepEqual(ratePlanRange([dateWindow]), { min: 0, max: 0.32 });
   assert.deepEqual(ratePlanRange([allYearBase, dateWindow]), { min: 0.3, max: 0.32 });
+  // With a usable flat fallback (#188) the same gaps price at that rate, so
+  // the fallback price joins the advertised range — widening the maximum
+  // when it sits above the rows' own prices...
+  assert.deepEqual(ratePlanRange([dateBase], 0.31), { min: 0.2, max: 0.31 });
+  // ...or the minimum when it sits below them (the #188 headline shape:
+  // a summer row of 0.20 with a 0.12 flat fallback).
+  assert.deepEqual(ratePlanRange([dateWindow], 0.31), { min: 0.31, max: 0.32 });
+  assert.deepEqual(ratePlanRange([dateBase], 0.12), { min: 0.12, max: 0.2 });
+  // A usable fallback of exactly 0 prices the gaps at zero, so the range
+  // reaches 0 through the union rather than the unusable special case.
+  assert.deepEqual(ratePlanRange([dateBase], 0), { min: 0, max: 0.2 });
+  // An unusable fallback value leaves the gap genuinely unpriced.
+  assert.deepEqual(ratePlanRange([dateBase], ''), { min: 0, max: 0.2 });
 });
 
 test('previewRate reports base, override, uncovered date and unpriced hour', () => {
@@ -3555,7 +3580,7 @@ test('previewRate reports base, override, uncovered date and unpriced hour', () 
   assert.match(peakHit.summary, /Every day · 16:00–19:00/);
 
   const offSeason = previewRate([base], '0.31', new Date(2026, 0, 15, 12, 0));
-  assert.equal(offSeason.rate, 0);
+  assert.equal(offSeason.rate, 0.31);
   assert.equal(offSeason.source, 'uncovered');
   assert.equal(offSeason.uncoveredDate, true);
   assert.equal(offSeason.unpricedHour, false);
@@ -3565,7 +3590,7 @@ test('previewRate reports base, override, uncovered date and unpriced hour', () 
     '0.31',
     new Date(2026, 0, 15, 12, 0),
   );
-  assert.equal(baseLess.rate, 0);
+  assert.equal(baseLess.rate, 0.31);
   assert.equal(baseLess.source, 'uncovered');
   assert.equal(baseLess.uncoveredDate, false);
   assert.equal(baseLess.unpricedHour, true);
