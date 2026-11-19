@@ -809,8 +809,9 @@ export function showClaims(data) {
 }
 
 // settings/current — null until an owner saves a rate. The whole document is
-// kept so the live cost can use the optional schedule; once it holds any row the
-// stored flat rate is ignored and an uncovered moment prices at 0.00.
+// kept so the live cost can use the optional schedule; an instant no row
+// matches costs the stored flat rate (#188) — 0.00 only when no usable flat
+// rate is stored.
 export function showSettings(data) {
   settings = costSettings(data);
   renderCost();

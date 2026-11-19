@@ -554,7 +554,8 @@ function periodName(period) {
 
 // The header tells the truth for the representative month: the price range
 // includes the effective bases/windows and sibling rows that apply there, while
-// the count stays the period's own rows. Unpriced hours show as 0.00.
+// the count stays the period's own rows. Unpriced hours cost the stored flat
+// rate (#188) — 0.00 only when none is stored.
 function paintPeriodHeader(card, state) {
   const period = card.period;
   setText(card.title, period.title);
