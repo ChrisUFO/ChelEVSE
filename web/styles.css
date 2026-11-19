@@ -2560,10 +2560,11 @@ input[aria-invalid='true'] {
   line-height: 1.45;
   color: var(--muted);
 }
-/* The mode switch seeds one month and leaves the rest of the year at 0.00, and
-   that plan can be saved as it stands: the note that explains the seed carries
-   the action that covers the gap, so the warning is not 11.5 px prose beside an
-   enabled Save. */
+/* The mode switch seeds one month and leaves the rest of the year uncovered —
+   it costs the stored flat rate (#188), 0.00 only when no usable One-rate is
+   stored — and that plan can be saved as it stands: the note that explains the
+   seed carries the action that covers the gap, so the warning is not 11.5 px
+   prose beside an enabled Save. */
 .plan-seed {
   display: flex;
   align-items: center;

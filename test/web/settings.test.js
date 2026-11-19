@@ -3340,7 +3340,8 @@ test('rateEditorMode is derived from rows, and the flat seed is a workable seaso
   assert.equal(isBaseWindow(seed), true);
   assert.equal(isAllDayWindow(seed), true);
   // The rest of the year is an uncovered gap: it is where the next season goes,
-  // and the plan says the dates cost 0.00 until they are covered.
+  // and those dates price at the stored 0.31 flat rate (#188) — the seed's own
+  // source value — while the predicate still reports the gap.
   // October is covered, so the uncovered rest of the year reads as one wrapping
   // run rather than two fragments.
   assert.equal(dateSetText(uncoveredDateRanges([seed])), 'Nov–Sep');

@@ -72,7 +72,7 @@ export function tierClass(tier) {
 }
 
 // The legend's order: base first, then the relative override tiers, then the
-// uncovered 0.00 slice.
+// uncovered slice (priced by the stored flat rate rather than by a row, #188).
 const LEGEND_ORDER = ['base', 'window', 'off', 'shoulder', 'peak', 'same', 'uncovered'];
 
 function segmentClass(segment, state) {
