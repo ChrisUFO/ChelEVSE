@@ -117,6 +117,12 @@ def parse_snapshot(data):
     did not carry, so only the fields the snapshot actually has are emitted.
     ``charger_online`` and ``updated_at`` are transport facts — a snapshot
     proves the charger is publishing — and are always set.
+
+    ``manual_override`` rides the merged data the same way (from the seed, or
+    from the retained override document the source maps onto it) and only
+    feeds the label: it is never an emitted field, so the curated document
+    keeps no second source of the 254 disambiguation — the label is the one
+    derived fact, from the firmware's own override state.
     """
     fields = parse_status(data)
     parsed = {

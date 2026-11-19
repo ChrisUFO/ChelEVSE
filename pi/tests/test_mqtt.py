@@ -228,6 +228,96 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.snapshots[0].fields, {"amp": 15400})
         self.assertEqual(self.source.arrival_generation(), 1)
 
+    def test_a_user_stop_via_mqtt_labels_stopped_not_sleeping(self):
+        # The 254 regression (#159): a Stop publishes state 254 while the
+        # seed's manual_override still says 0 (it predates the Stop), and no
+        # status topic publishes the flag. The retained override document --
+        # rewritten by the firmware on every override change -- is the one
+        # fresher fact, so with it in the same burst the snapshot's label is
+        # "stopped": the web never sees Sleeping for a user Stop.
+        client = self.connect()
+        self.source.seed(status_payload(state=3, manual_override=0))
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        client.deliver("chelevse/state", 254)
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        parsed = bridge.parse_snapshot(self.snapshots[0].fields)
+        self.assertEqual(parsed["state"], 254)
+        self.assertEqual(parsed["state_label"], "stopped")
+        # The flag feeds the label only; it never becomes a curated field.
+        self.assertNotIn("manual_override", parsed)
+
+    def test_state_254_without_any_override_fact_is_sleeping(self):
+        # Pinned as-is (#159): when no override document has ever been seen
+        # the snapshot cannot know the flag -- the seed said 0 before the
+        # burst -- and the label stays sleeping, honest about what is
+        # knowable. The HTTP reconcile is the cure, never a guess here.
+        client = self.connect()
+        self.source.seed(status_payload(state=3, manual_override=0))
+        client.deliver("chelevse/state", 254)
+        self.source.flush()
+        parsed = bridge.parse_snapshot(self.snapshots[0].fields)
+        self.assertEqual(parsed["state"], 254)
+        self.assertEqual(parsed["state_label"], "sleeping")
+
+    def test_an_override_change_after_the_state_flush_rederives_the_label(self):
+        # The retained document can land after the state burst's own flush
+        # (the firmware rewrites it on the command, the poll notices 254
+        # later). The change queues its own snapshot, which re-delivers the
+        # accumulated view -- state 254 rides the seed -- so the worker
+        # re-derives the label without waiting for an HTTP reconcile.
+        client = self.connect()
+        self.source.seed(status_payload(state=3, manual_override=0))
+        client.deliver("chelevse/state", 254)
+        self.source.flush()
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[0].fields)["state_label"],
+            "sleeping",
+        )
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 2)
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[1].fields)["state_label"],
+            "stopped",
+        )
+
+    def test_a_cleared_override_relabels_a_known_254_as_sleeping(self):
+        # The flag follows the firmware's own override document both ways: a
+        # resume clears it, and 254 with the override gone derives the same
+        # label the HTTP path would -- until the poll publishes the wake.
+        client = self.connect()
+        self.source.seed(status_payload(state=254, manual_override=1))
+        client.deliver("chelevse/override", '{"state": "null"}')
+        self.source.flush()
+        parsed = bridge.parse_snapshot(self.snapshots[0].fields)
+        self.assertEqual(parsed["state"], 254)
+        self.assertEqual(parsed["state_label"], "sleeping")
+
+    def test_an_unrecognised_override_document_states_no_fact(self):
+        # Only the observed vocabulary maps (null/disabled/active); anything
+        # else must leave the seed's fact standing and queue nothing.
+        client = self.connect()
+        self.source.seed(status_payload(state=3, manual_override=0))
+        for payload in ('{"state": "weird"}', "6", '"disabled"', "{}"):
+            with self.subTest(payload=payload):
+                client.deliver("chelevse/override", payload)
+        self.source.flush()
+        self.assertEqual(self.snapshots, [])
+        self.assertEqual(self.source.arrival_generation(), 0)
+
+    def test_a_restated_override_fact_does_not_flush(self):
+        # A retained redelivery (every reconnect) restates the known fact:
+        # queueing it would advance the arrival generation, which the outage
+        # classifier reads as the charger publishing -- a retained copy is
+        # broker-held, not fresh publishing.
+        client = self.connect()
+        self.source.seed(status_payload(state=254, manual_override=1))
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.source.flush()
+        self.assertEqual(self.snapshots, [])
+        self.assertEqual(self.source.arrival_generation(), 0)
+
     def test_a_temp_only_burst_flushes_through_the_debounce_timer(self):
         # The tests above flush by hand, which proves the liveness flag is
         # consumed but not that a temp delivery arms the timer at all: an
@@ -954,6 +1044,22 @@ class MqttWorkerTests(MqttWorkerBase):
         self.run_worker()
         self.assertEqual(self.notifier.bodies, [])
         self.assertEqual(self.tracker.state, 3)
+
+    def test_a_user_stop_via_mqtt_writes_stopped_not_sleeping(self):
+        # End-to-end 254 regression (#159): the burst carries state 254 and
+        # the retained override document supplies the flag the seed lacks
+        # (it predates the Stop). The document must read stopped -- never
+        # Sleeping -- for a user Stop, without waiting for a reconcile.
+        self.source.seed(status_payload(state=3, manual_override=0))
+        self.client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.client.deliver("chelevse/state", 254)
+        self.source.flush()
+        self.run_worker()
+        doc = self.current()
+        self.assertEqual(doc["state"], 254)
+        self.assertEqual(doc["state_label"], "stopped")
+        # The flag feeds the label only; it is not a curated field.
+        self.assertNotIn("manual_override", doc)
 
     def test_a_pre_seed_snapshot_is_not_promoted_by_a_later_seed(self):
         # Flushed before /status answered, seeded while it sat in the queue: its

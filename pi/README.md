@@ -197,7 +197,17 @@ the schedule loop's `/schedule/plan` window), so it is ignored like any other
 unmapped retained document. The
 retained `override` document and `rapi/out` feed the command acknowledgements
 ([Commands over MQTT](#commands-over-mqtt-issue-46)); `override/set` and
-`rapi/in` are our own publishes; LWT handling is #45.
+`rapi/in` are our own publishes; LWT handling is #45. The retained `override`
+document has one more role on the status path (#159): no status topic publishes
+`manual_override`, so it is the only fact fresher than the `/status` seed there,
+and the firmware rewrites it on every override change. A document that _changes_
+the flag (`{"state":"disabled"}` pause and `{"state":"active",…}` hold → 1,
+`{"state":"null"}` auto → 0; anything else states no fact) rides the same
+debounced snapshot as a burst, so a user Stop arriving as `state 254` over MQTT
+labels `stopped` immediately instead of `sleeping` until the next reconcile. A
+redelivery that restates the known flag queues nothing — a retained copy is
+broker-held, not the charger publishing, and must not advance the arrival
+generation the outage classifier reads.
 
 **Cadence.** While the broker is connected **and the subscription is granted**,
 `/status` is fetched once every `MQTT_RECONCILE_SEC` (60 s) and merged into the
