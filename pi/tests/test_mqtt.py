@@ -197,6 +197,37 @@ class MqttSourceTests(MqttSourceBase):
         for key in ("temp1", "temp2", "temp3", "temp_c"):
             self.assertNotIn(key, self.snapshots[0].fields)
 
+    def test_a_temp_only_burst_counts_as_liveness_without_ingest(self):
+        # An idle charger may publish nothing but a sensor change for minutes,
+        # so a temp-only burst is still the charger publishing: it must flush
+        # and advance the arrival generation (the outage classifier's proof of
+        # life) while never mapping a temp value into the snapshot (#159).
+        client = self.connect()
+        client.deliver("chelevse/temp1", 247)
+        client.deliver("chelevse/temp2", 251)
+        self.assertEqual(self.source.messages, 2)
+        self.assertEqual(self.snapshots, [])
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(self.snapshots[0].fields, {})  # transport facts only
+        self.assertEqual(self.snapshots[0].arrival, 1)
+        self.assertEqual(self.source.arrival_generation(), 1)
+        parsed = bridge.parse_snapshot(self.snapshots[0].fields)
+        self.assertEqual(set(parsed), {"charger_online", "updated_at"})
+
+    def test_a_mixed_burst_flushes_once_with_the_temp_leaves_liveness_only(self):
+        # Temp leaves arriving inside a mapped-field burst ride the same
+        # debounce: one flush, one generation bump, and the mapped fields land
+        # while the temp values stay out of the snapshot.
+        client = self.connect()
+        client.deliver("chelevse/amp", 15400)
+        client.deliver("chelevse/temp1", 247)
+        self.source.flush()
+        self.source.flush()  # nothing left: no second generation bump
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(self.snapshots[0].fields, {"amp": 15400})
+        self.assertEqual(self.source.arrival_generation(), 1)
+
     def test_all_mapped_topics_land_on_their_status_key(self):
         client = self.connect()
         for index, (leaf, field) in enumerate(TOPIC_FIELDS.items()):
@@ -1685,6 +1716,44 @@ class StatusLoopMqttTests(unittest.TestCase):
             "the refused outage was not logged",
         )
         self.assertEqual(self.applied, [{"state": 1}])  # the flush was real
+        # Two unconfirmed failures, one refusal: the refusal reset the streak.
+        self.assertEqual(
+            len([line for line in logs if "outage unconfirmed" in line]), 2
+        )
+
+    def test_a_temp_only_delivery_refuses_the_outage(self):
+        # The temp topics left TOPIC_FIELDS (#159) but an idle charger may
+        # publish nothing but a sensor change for minutes: that burst is still
+        # the charger publishing, so it must refuse the outage exactly like a
+        # mapped-field flush — the streak resets and no offline write or push
+        # lands — while no temp key is ever ingested.
+        client = self.connect()
+        flushes = []
+
+        def arrival_hook():
+            if not flushes:
+                flushes.append(True)
+                client.deliver("chelevse/temp1", 247)
+                self.source.flush()  # liveness-only, after the streak check
+            return self.source.arrival_generation()
+
+        sink = bridge.StatusSink(
+            self.db, self.tracker, self.notifier, arrivals=arrival_hook
+        )
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=3, reconcile=0, sink=sink)
+        self.assertNotEqual(self.tracker.charger_online, False)
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertNotIn(
+            "charger_online", self.db.data.get("status", {}).get("current", {})
+        )
+        self.assertTrue(
+            [line for line in logs if "outage refused" in line],
+            "the refused outage was not logged",
+        )
+        self.assertEqual(self.applied, [{}])  # liveness only: nothing merged
         # Two unconfirmed failures, one refusal: the refusal reset the streak.
         self.assertEqual(
             len([line for line in logs if "outage unconfirmed" in line]), 2

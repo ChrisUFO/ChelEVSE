@@ -23,8 +23,8 @@ Design notes:
   Firestore, null) everything else. ``seed()`` takes the last ``/status`` reply
   and each flush merges the changed fields into it.
 - **Units stay raw.** Topic values are mapped to their ``/status`` key and handed
-  over unchanged (``amp`` in milliamps, temperatures in 10ths of °C); the
-  receiving worker runs ``parse_status`` on every snapshot, so the existing
+  over unchanged (``amp`` in milliamps); the receiving worker runs
+  ``parse_status`` on every snapshot, so the existing
   parser remains the one owner of every unit conversion and of the curated
   document shape — MQTT and HTTP cannot disagree about the document.
 - **Config is not read from MQTT.** ``<base>/config`` is retained, but the bridge
@@ -83,12 +83,15 @@ RECONNECT_MAX_SEC = 30
 # Topic leaf -> /status key. Only the curated status fields are mapped; every
 # other leaf arriving on the wildcard subscription — command/retained-JSON
 # topics (override, config, rapi/…, */set) and the temp1-temp3 sensor readings
-# alike — is dropped unmapped here. The health gate never reads the temp
-# topics: its temperatures come from the /status parse on polls and reconciles
-# (parse_status feeds LiveObservations), so mapping them would be ingest with
-# no consumer (#159). The retained claim-family documents (claim/limit/boost)
-# are below: they are not status fields either, but they feed the claims
-# pipeline's evidence holder instead of being dropped (issue #159).
+# alike — is never mapped into a snapshot. The temp topics are liveness only
+# (``TEMP_TOPICS`` below): the health gate never reads them — its temperatures
+# come from the /status parse on polls and reconciles (parse_status feeds
+# LiveObservations), so mapping them would be ingest with no consumer (#159) —
+# but a delivery still proves the charger is publishing, which the outage
+# classifier reads off the arrival generation. The retained claim-family
+# documents (claim/limit/boost) are below: they are not status fields either,
+# but they feed the claims pipeline's evidence holder instead of being dropped
+# (issue #159).
 TOPIC_FIELDS = {
     "amp": "amp",
     "voltage": "voltage",
@@ -100,6 +103,15 @@ TOPIC_FIELDS = {
     "session_elapsed": "elapsed",
     "total_energy": "total_energy",
 }
+
+# The per-sensor temperature topics (#159): liveness only. No consumer reads a
+# topic temperature — the health gate's readings come from the /status parse on
+# polls and reconciles — so a delivery is never mapped into a snapshot. It
+# still counts as the charger publishing: a temp-only burst arms the debounce
+# and flushes with nothing merged, advancing the arrival generation exactly as
+# a mapped-field flush does (see ``flush``), so the outage classifier keeps its
+# base proof of life.
+TEMP_TOPICS = frozenset({"temp1", "temp2", "temp3"})
 
 CONFIG_VERSION_TOPIC = "config_version"
 # Retained document the firmware rewrites on every override change. It is the
@@ -289,6 +301,7 @@ class MqttSource:
         self._client_factory = client_factory or _default_client_factory
         self._client = None
         self._pending = {}
+        self._liveness_only = False
         self._pending_subscriptions = {}
         self._timer = None
         self._lock = threading.Lock()
@@ -541,11 +554,17 @@ class MqttSource:
         The delivered record carries this delivery's arrival number and whether
         the snapshot was seeded yet, both read under the same lock as the merge:
         the worker may consume it long after a seed or a newer flush.
+
+        A temp-only burst flushes too, with nothing to merge: that delivery is
+        pure liveness — transport facts and the accumulated view, no temp key —
+        and the arrival generation advances exactly as a mapped-field flush
+        does, so the outage classifier still sees the charger publishing.
         """
         with self._lock:
             pending, self._pending = self._pending, {}
+            liveness, self._liveness_only = self._liveness_only, False
             self._timer = None
-            if not pending:
+            if not pending and not liveness:
                 return
             self.snapshot.update(pending)
             self.snapshots += 1
@@ -666,12 +685,20 @@ class MqttSource:
                     )
             return
         field = TOPIC_FIELDS.get(leaf)
-        if field is None:  # retained JSON, commands, rapi/in, deprecated topics
-            return
+        temp = field is None and leaf in TEMP_TOPICS
+        if field is None and not temp:
+            return  # retained JSON, commands, rapi/in, deprecated topics
         self.messages += 1
-        value = _decode(getattr(message, "payload", b""))
+        value = None if temp else _decode(getattr(message, "payload", b""))
         with self._lock:
-            self._pending[field] = value
+            if temp:
+                # Liveness only (#159): the delivery proves the charger is
+                # publishing but its value is never ingested — no consumer
+                # reads a topic temperature. The burst still arms the debounce
+                # and flushes (see ``flush``).
+                self._liveness_only = True
+            else:
+                self._pending[field] = value
             if self._timer is None:
                 timer = threading.Timer(self.debounce, self.flush)
                 timer.daemon = True

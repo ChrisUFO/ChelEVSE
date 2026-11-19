@@ -171,17 +171,22 @@ only the curated fields listed under
 | `<base>/session_energy`   | `session_energy`       | Wh                                                  |
 | `<base>/session_elapsed`  | `elapsed`              | seconds (the deprecated `elapsed` topic is ignored) |
 | `<base>/total_energy`     | `total_energy`         | kWh                                                 |
-| `<base>/temp1`–`temp3`    | —                      | 10ths of °C; dropped unmapped — no consumer (#159)  |
+| `<base>/temp1`–`temp3`    | —                      | 10ths of °C; liveness only, never mapped (#159)     |
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
 Everything else on the base topic (retained `config`, availability counters) is
 ignored by the status path. The `temp1`–`temp3` topics arrive on the wildcard
-subscription but are dropped unmapped (#159): nothing consumes them — the
-health gate's `thermal.high_temp` corroboration reads temperatures from the
+subscription but are never mapped into a snapshot (#159): no consumer reads a
+topic temperature — the health gate's `thermal.high_temp` corroboration reads
+temperatures from the
 `/status` parse on polls and reconciles (`parse_status` →
 `LiveObservations.note_status`), never from the topics — and `status/current`
-carries no temperature field. The retained `claim`, `limit` and `boost`
-documents
+carries no temperature field. A temp delivery is still **liveness**: an idle
+charger may publish nothing but a sensor change for minutes, so a temp-only
+burst debounces and flushes with nothing merged, advancing the arrival
+generation the outage classifier reads as proof the charger is publishing (a
+temp-only publish between failed reconciles refuses an outage escalation). The
+retained `claim`, `limit` and `boost` documents
 are **ingested as claims evidence** (#159): each delivery is decoded and handed
 to the claims holder, parsed defensively (malformed → ignored), and used for
 `status/claims` detail enrichment and corroboration only — never as a status
@@ -489,7 +494,7 @@ guards are unchanged). The cadence, by field kind:
   than `WRITE_MIN_GAP_SEC` (30 s) after the previous write. That gap is the
   worst-case bound: a flapping charger cannot exceed one write per 30 s.
 - **Continuous values** — `session_energy`, `total_energy`, `elapsed`, `power`,
-  `voltage`, temperatures — never trigger a write. They move constantly while
+  `voltage` — never trigger a write. They move constantly while
   charging, so they are carried by the heartbeats: at least one write per
   `CHARGING_HEARTBEAT_SEC` (60 s) while charging, one per `HEARTBEAT_INTERVAL`
   (300 s) otherwise. No write ever originates from `elapsed` alone — the app
