@@ -62,11 +62,17 @@ def _state_label(state, manual_override):
 
 
 def parse_status(data):
-    """OpenEVSE /status JSON -> fields for the status/current document."""
+    """OpenEVSE /status JSON -> parsed fields for one observation.
+
+    The per-sensor ``temp1``-``temp3`` readings are parsed here for the health
+    observations path only (``LiveObservations.note_status`` -> the
+    ``thermal.high_temp`` corroboration gate, #159's plan amendment): the status
+    sink drops them before anything reaches ``status/current``, and the
+    tile-only average ``temp_c`` is not computed at all. ``_sensor_temp`` keeps
+    the absent-sensor sentinels (0/``false``/negative -> None) so the gate never
+    sees a phantom reading.
+    """
     state = data.get("state")
-    # Absent temperature sensors read 0 (or a negative sentinel); ignore them.
-    raw_temps = [data.get(k) for k in ("temp1", "temp2", "temp3")]
-    temps = [t for t in raw_temps if isinstance(t, (int, float)) and t > 0]
     return {
         "state": state,
         "state_label": _state_label(state, data.get("manual_override")),
@@ -77,7 +83,6 @@ def parse_status(data):
         "total_energy": data.get("total_energy"),
         "elapsed": data.get("elapsed"),
         "vehicle": data.get("vehicle"),
-        "temp_c": round(sum(temps) / len(temps) / 10, 1) if temps else None,
         "temp1": _sensor_temp(data.get("temp1")),
         "temp2": _sensor_temp(data.get("temp2")),
         "temp3": _sensor_temp(data.get("temp3")),
@@ -87,7 +92,9 @@ def parse_status(data):
     }
 
 
-# parse_status outputs that keep the raw key's name.
+# parse_status outputs that keep the raw key's name. The per-sensor temps are
+# deliberately absent: a snapshot never carries them into the write path (the
+# health gate reads them from the full parse, not from snapshots).
 _SNAPSHOT_FIELDS = (
     "state",
     "amp",
@@ -98,11 +105,7 @@ _SNAPSHOT_FIELDS = (
     "elapsed",
     "vehicle",
     "pilot",
-    "temp1",
-    "temp2",
-    "temp3",
 )
-_SNAPSHOT_TEMPS = ("temp1", "temp2", "temp3")
 
 
 def parse_snapshot(data):
@@ -125,8 +128,6 @@ def parse_snapshot(data):
             parsed[key] = fields[key]
     if "state" in data:
         parsed["state_label"] = fields["state_label"]
-    if any(key in data for key in _SNAPSHOT_TEMPS):
-        parsed["temp_c"] = fields["temp_c"]
     return parsed
 
 
@@ -220,7 +221,11 @@ def as_int(value):
 
 
 def _sensor_temp(value):
-    """Raw tenths-of-°C reading -> °C, or None for absent-sensor sentinels."""
+    """Raw tenths-of-°C reading -> °C, or None for absent-sensor sentinels.
+
+    Kept for the health observations path only (``thermal.high_temp``
+    corroboration): the values never reach ``status/current``.
+    """
     if _is_number(value) and value > 0:
         return round(value / 10, 1)
     return None

@@ -161,7 +161,9 @@ class RateLimitTests(WritePolicyBase):
         self.apply(total_energy=100)
         self.assertEqual(len(self.writes()), 1)
         # Continuous-only movement of every flavour, each with its own
-        # scheduler tick: none of it may produce a write.
+        # scheduler tick: none of it may produce a write. A temperature burst
+        # is the strongest case -- parse_snapshot drops the field entirely
+        # (#159), so the apply carries transport facts only.
         self.clock.advance(1)
         self.apply_partial({"elapsed": 1})
         self.tick()
@@ -235,7 +237,8 @@ class HeartbeatTests(WritePolicyBase):
     def test_the_heartbeat_payload_is_complete_never_timestamp_only(self):
         self.apply(state=3, session_energy=500, elapsed=50)
         self.clock.advance(self.CHARGING)
-        # The heartbeat's forced reconcile returns a full /status payload.
+        # The heartbeat's forced reconcile returns a full /status payload. The
+        # reply carries temp1 (the health gate's feed); the write must not.
         self.tick(
             observe=lambda: self.apply(
                 state=3,
@@ -263,17 +266,12 @@ class HeartbeatTests(WritePolicyBase):
                 "total_energy",
                 "elapsed",
                 "vehicle",
-                "temp_c",
-                "temp1",
-                "temp2",
-                "temp3",
                 "pilot",
                 "charger_online",
                 "updated_at",
             },
         )
         self.assertEqual(write["amp"], 15.4)
-        self.assertEqual(write["temp_c"], 24.7)
 
     def test_a_heartbeat_without_a_fresh_observation_does_not_write(self):
         # The charger never answered and MQTT stayed silent: no apply landed

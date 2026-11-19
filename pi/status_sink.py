@@ -42,6 +42,13 @@ MQTT_PENDING_QUEUE = MQTT_PENDING_SNAPSHOTS + MQTT_PENDING_EDGES
 # at a constant state 254 changes the label alone, and that change publishes at
 # the next heartbeat rather than arming a write.
 TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
+# Parsed fields that never reach status/current (S2 #159): the per-sensor temps
+# are parsed solely for the health observations path (``LiveObservations
+# .note_status`` -> the ``thermal.high_temp`` corroboration gate), and the sink
+# is the one boundary every parsed observation -- HTTP reply or MQTT snapshot
+# -- crosses into the document, so this is where they drop out. The schema is
+# additive: values already stored simply stop being written and read.
+TEMP_FIELDS = ("temp1", "temp2", "temp3")
 class StatusSink:
     """The one status apply path, shared by the HTTP poll and MQTT snapshots.
 
@@ -399,6 +406,10 @@ class StatusSink:
 
     def _apply(self, fields, source, complete):
         tracker = self.tracker
+        # The health-only temps drop out at this boundary: everything below --
+        # the accumulated view, the tracker, every publish -- is the document
+        # path, and none of it may carry them (#159).
+        fields = {k: v for k, v in fields.items() if k not in TEMP_FIELDS}
         # The observation merges into the accumulated view first -- a discrete
         # field it moves arms the write policy's trigger -- and the write
         # itself is decided after the state machine, so the document and the

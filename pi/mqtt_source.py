@@ -80,9 +80,12 @@ KEEPALIVE_SEC = 60
 RECONNECT_MIN_SEC = 1
 RECONNECT_MAX_SEC = 30
 
-# Topic leaf -> /status key. Only the curated status fields the bridge stores
-# are mapped; command/retained-JSON topics (override, config, rapi/…, */set)
-# are ignored by construction because they are not listed here. The retained
+# Topic leaf -> /status key. Only the curated status fields are mapped; command/
+# retained-JSON topics (override, config, rapi/…, */set) are ignored by
+# construction because they are not listed here. The temp1-temp3 leaves are the
+# one deliberate exception: nothing downstream persists them (the sink drops
+# them), but the mapping keeps the snapshot view complete for the parse that
+# feeds the health gate's temperature corroboration (#159). The retained
 # claim-family documents (claim/limit/boost) are below: they are not status
 # fields either, but they feed the claims pipeline's evidence holder
 # instead of being dropped (issue #159).

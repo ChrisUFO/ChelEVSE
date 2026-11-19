@@ -837,9 +837,10 @@ class MqttWorkerTests(MqttWorkerBase):
         self.run_worker()
         doc = self.current()
         self.assertEqual(doc["amp"], 15.4)  # mA -> A
-        self.assertEqual(doc["temp1"], 24.7)  # 10ths -> °C
-        self.assertEqual(doc["temp_c"], 24.7)
-        self.assertIsNone(doc["temp2"])  # absent sensor sentinel
+        # The seeded temps parse (the health gate's feed) but never reach the
+        # document: no temp key survives the write path (#159).
+        for key in ("temp_c", "temp1", "temp2", "temp3"):
+            self.assertNotIn(key, doc)
         self.assertEqual(doc["state"], 3)
         self.assertEqual(doc["state_label"], "charging")
         self.assertIs(doc["charger_online"], True)
