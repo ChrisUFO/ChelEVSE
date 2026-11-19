@@ -30,6 +30,7 @@ import {
   periodHasBaseOverlap,
   periodHasDates,
   planHasUnpriced,
+  rateIsFinite,
   rateIsUsable,
   rateMonthsText,
   ratePlanRange,
@@ -955,16 +956,18 @@ function paintBaseBlock(card, state) {
     card.addBaseButton.hidden = covered;
     if (card.baseWarning) {
       // The base-less warning is about a plan that leaves hours no row covers:
-      // those hours cost the stored flat rate (#188) — 0.00 only when no usable
-      // flat rate is stored. A plan whose windows between them price the whole
-      // year has nothing to warn about, so the sentence states that instead of
-      // promising a gap that the strip, the table and History all deny.
+      // those hours cost the stored flat rate (#188) — the resolver charges any
+      // finite value, so the copy names it whenever one is stored and falls to
+      // "no price" only when none is. A plan whose windows between them price
+      // the whole year has nothing to warn about, so the sentence states that
+      // instead of promising a gap that the strip, the table and History all
+      // deny.
       setText(
         card.baseWarning,
         covered
           ? 'No base rate in this season — another season’s base prices these hours.'
           : state.planUnpriced
-            ? rateIsUsable(flat)
+            ? rateIsFinite(flat)
               ? `No base rate — hours outside the windows cost your flat rate ${priceText(flat)} unless another season’s base covers them.`
               : 'No base rate — hours outside the windows have no price unless another season’s base covers them.'
             : 'No base rate — every hour of these dates has a price.',
@@ -1400,7 +1403,8 @@ export function paintPlan(state) {
   // retires itself as soon as that seed stops being the whole plan (dates
   // edited, a window or another season added, or the plan emptied). Its
   // outside-the-seed sentence prices those dates at the stored flat rate
-  // (#188) — 0.00 only when no usable flat rate is stored.
+  // (#188) — any finite value the resolver would charge, 0.00 only when none
+  // is stored.
   const seeded = state.seedNoticeKey
     ? state.planPeriods.find((period) => period.key === state.seedNoticeKey && period.base)
     : null;
@@ -1409,23 +1413,23 @@ export function paintPlan(state) {
   const seedNote = $('plan-seed');
   seedNote.hidden = !state.seedNoticeKey;
   const flat = $('setting-rate').value;
-  const flatUsable = rateIsUsable(flat);
+  const flatFinite = rateIsFinite(flat);
   setText(
     $('plan-seed-note'),
     state.seedNoticeKey && seeded
-      ? flatUsable
+      ? flatFinite
         ? `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost your flat rate ${priceText(flat)} until you cover them.`
         : `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost 0.00 until you cover them.`
       : '',
   );
 
   // The plan help and the gap line's lead-in name the same price the engine
-  // charges a date no season covers (#188): the stored flat rate while one is
-  // usable, 0.00 only when none is. Repainted on every pass, so the number can
-  // never drift from the flat field.
+  // charges a date no season covers (#188): the stored flat rate whenever one
+  // is finite — the resolver's own gate — 0.00 only when none is. Repainted on
+  // every pass, so the number can never drift from the flat field.
   setText(
     $('plan-help-gaps'),
-    flatUsable
+    flatFinite
       ? `Dates outside every season cost your flat rate ${priceText(flat)}.`
       : 'Dates outside every season cost 0.00.',
   );
@@ -1436,7 +1440,7 @@ export function paintPlan(state) {
   if (gaps.length > 0) {
     setText(
       $('uncovered-price'),
-      flatUsable ? `priced at your flat rate ${priceText(flat)}` : 'priced at 0.00',
+      flatFinite ? `priced at your flat rate ${priceText(flat)}` : 'priced at 0.00',
     );
     const dateNode = $('uncovered-dates');
     dateNode.replaceChildren();

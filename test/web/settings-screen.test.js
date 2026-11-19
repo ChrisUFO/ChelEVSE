@@ -498,11 +498,12 @@ test('a season date edit commits through the card wiring and unsaves the draft',
 // ---------- #188 wording: every pricing surface names the flat fallback ----------
 //
 // The engine (PR #191) prices an instant no row matches at the stored flat
-// rate, so the screen's vocabulary must too: while a usable flat rate is
-// stored, the gap line, the plan help, the base-less warning, the seed note
-// and the checker name that price — the 0.00 wording survives only when no
-// usable fallback is stored. Both branches keep the uncovered-date vs
-// uncovered-hour distinction, and the checker's announce reads the same words.
+// rate, so the screen's vocabulary must too: while a finite flat rate is
+// stored — the resolver's own gate, inside the 0–5 bounds or not — the gap
+// line, the plan help, the base-less warning, the seed note and the checker
+// name that price; the 0.00 wording survives only when no finite fallback is
+// stored. Both branches keep the uncovered-date vs uncovered-hour distinction,
+// and the checker's announce reads the same words.
 
 // The Applies row of the painted checker: children[2] is the third row, its
 // second cell the value.
@@ -554,6 +555,27 @@ test('the checker, gap line and warnings price the flat fallback, or say 0.00 wi
   assert.equal(element('uncovered-price').textContent, 'priced at 0.00');
   assert.equal(element('plan-help-gaps').textContent, 'Dates outside every season cost 0.00.');
   assert.equal(appliesText(), 'Uncovered date — no season covers this date — priced at 0.00.');
+
+  // A finite but out-of-bounds rate still prices the fallback — the resolver's
+  // gate is finite-only (0–5 is the editor's rule), so the copy must not deny
+  // a price the checker's own resolved price states.
+  type('setting-rate', '7');
+  assert.equal(element('uncovered-price').textContent, 'priced at your flat rate USD 7.00');
+  assert.equal(
+    element('plan-help-gaps').textContent,
+    'Dates outside every season cost your flat rate USD 7.00.',
+  );
+  assert.equal(
+    appliesText(),
+    'Uncovered date — no season covers this date — priced at your flat rate USD 7.00.',
+  );
+  for (const listener of element('preview-time').listeners.get('change') || []) listener();
+  // The announce leads with the checker's own resolved price, so one match
+  // pins that the copy no longer denies it.
+  assert.match(
+    element('preview-live').textContent,
+    /USD 7\.00 per kWh, uncovered date, priced at your flat rate USD 7\.00\.$/,
+  );
 });
 
 test('the checker names an uncovered hour — this season has no price for it', () => {
@@ -576,6 +598,13 @@ test('the checker names an uncovered hour — this season has no price for it', 
 
   type('setting-rate', '');
   assert.equal(appliesText(), 'Uncovered hour — this season has no price for this hour — 0.00.');
+
+  // The hour arm keeps the resolver's finite gate too.
+  type('setting-rate', '7');
+  assert.equal(
+    appliesText(),
+    'Uncovered hour — this season has no price for this hour — your flat rate USD 7.00.',
+  );
 });
 
 test('a base-less season warns at the flat fallback, or of no price without one', () => {
@@ -593,6 +622,13 @@ test('a base-less season warns at the flat fallback, or of no price without one'
     warning.textContent,
     'No base rate — hours outside the windows have no price unless another season’s base covers them.',
   );
+  // Finite out-of-bounds still charges (the resolver's gate), so the warning
+  // names it rather than denying a price History states.
+  type('setting-rate', '7');
+  assert.equal(
+    warning.textContent,
+    'No base rate — hours outside the windows cost your flat rate USD 7.00 unless another season’s base covers them.',
+  );
 });
 
 test('the flat → Seasons seed note prices the uncovered dates at the flat rate', () => {
@@ -601,12 +637,27 @@ test('the flat → Seasons seed note prices the uncovered dates at the flat rate
   click(element('rate-mode-seasons'));
 
   // The seed names the wall clock's current month as a date range, so the
-  // sentence is pinned by shape: the second clause names the flat fallback,
-  // never 0.00 (#188).
+  // sentence is pinned by shape: the second clause names the flat fallback
+  // while one is finite, 0.00 when none is (#188).
   assert.equal(element('plan-seed').hidden, false);
   assert.match(
     element('plan-seed-note').textContent,
     /^Seeded .+ at your flat rate\. Dates outside it cost your flat rate USD 0\.31 until you cover them\.$/,
+  );
+
+  // Clearing the flat field after seeding re-enters the 0.00 arm; a finite but
+  // out-of-bounds rate keeps the fallback arm — the resolver's gate is
+  // finite-only.
+  type('setting-rate', '');
+  assert.equal(element('plan-seed').hidden, false);
+  assert.match(
+    element('plan-seed-note').textContent,
+    /^Seeded .+ at your flat rate\. Dates outside it cost 0\.00 until you cover them\.$/,
+  );
+  type('setting-rate', '7');
+  assert.match(
+    element('plan-seed-note').textContent,
+    /^Seeded .+ at your flat rate\. Dates outside it cost your flat rate USD 7\.00 until you cover them\.$/,
   );
 });
 

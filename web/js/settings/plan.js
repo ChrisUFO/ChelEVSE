@@ -28,13 +28,21 @@ import { DAY_NAMES } from '../schedule.js';
 // The rate bounds live in rates.js: the same 0–5 limit governs a flat rate and
 // a window row, so both validators share one definition.
 
-// A rate the engine can actually use: finite once parsed and inside the
-// documented bounds. The validators and the resolver both reject anything else,
-// so any view asking "does this row have a price?" must ask it the same way —
-// otherwise it quotes a price the rest of the screen denies.
+// A rate the editor can save: finite once parsed and inside the documented
+// bounds. The validators reject anything else — the write path's rule — so any
+// view gating a save or an action must ask it the same way.
 export function rateIsUsable(value) {
   const rate = parseRateValue(value);
   return Number.isFinite(rate) && rate >= RATE_MIN && rate <= RATE_MAX;
+}
+
+// The resolver's own gate: normalizeRateSchedule keeps any finite rate and
+// flatFallbackRate charges it, inside the 0–5 bounds or not. Copy that states
+// what a no-row instant costs must gate on this — rateIsUsable would deny a
+// price the engine charges (a hand-edited out-of-bounds document) while the
+// checker's own Price cell and History state it.
+export function rateIsFinite(value) {
+  return Number.isFinite(parseRateValue(value));
 }
 
 export const MONTH_NAMES = [

@@ -34,6 +34,7 @@ import {
   previewBlocker,
   previewRate,
   rateEditorMode,
+  rateIsFinite,
   rateIsUsable,
   ratePeriods,
   rateRowFields,
@@ -915,11 +916,12 @@ function paintPreview() {
   }
   rows.push(paintPreviewRow('Price', price));
   // An instant no row matches prices at the stored flat rate (#188), so the
-  // sentence names that price while the flat field holds a usable value — 0.00
-  // wording only when no usable fallback is stored. Both cases still say which
-  // one they are: no season covers this date, or this season has no price for
-  // this hour.
-  const flatFallback = rateIsUsable($('setting-rate').value)
+  // sentence names that price whenever the resolver would charge one — any
+  // finite value, the same gate as the checker's own finite-only fallback and
+  // the engine's flatFallbackRate. 0.00 wording only when no finite fallback
+  // is stored. Both cases still say which one they are: no season covers this
+  // date, or this season has no price for this hour.
+  const flatFallback = rateIsFinite($('setting-rate').value)
     ? `your flat rate ${priceText($('setting-rate').value)}`
     : null;
   let applies = '';
@@ -968,9 +970,10 @@ function announcePreview() {
     return;
   }
   const band = result.tier ? `${result.tier}, ` : '';
-  // Same dual path as the visible row: the flat fallback's price when one is
-  // stored, the 0.00 wording only when none is (#188) — and the case named.
-  const flatFallback = rateIsUsable($('setting-rate').value)
+  // Same dual path as the visible row: the flat fallback's price whenever the
+  // resolver would charge one (any finite value), the 0.00 wording only when it
+  // would not (#188) — and the case named.
+  const flatFallback = rateIsFinite($('setting-rate').value)
     ? `your flat rate ${priceText($('setting-rate').value)}`
     : null;
   const where = result.uncoveredDate
