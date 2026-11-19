@@ -353,11 +353,11 @@ export function periodHasBaseOverlap(period, rows) {
   });
 }
 
-// Whether a non-empty plan has any instant no row matches. The engine prices an
-// instant from the union of the rows that match it: a row's season decides the
-// date, and its weekday segment decides the minutes — a window that wraps
-// midnight also prices the next day's early hours from the day it started. A
-// plan is therefore fully priced exactly when, for every date and weekday, the
+// Whether a non-empty plan has any instant no row matches. The rows price an
+// instant from the union that matches it: a row's season decides the date, and
+// its weekday segment decides the minutes — a window that wraps midnight also
+// prices the next day's early hours from the day it started. A plan's rows
+// therefore cover every instant exactly when, for every date and weekday, the
 // matching segments cover the whole day. Like `intervalUncovered` in rates.js,
 // this names "no row matched", not the price: since #188 such an instant prices
 // at the stored flat rate — 0.00 only when no usable flat rate is stored.
