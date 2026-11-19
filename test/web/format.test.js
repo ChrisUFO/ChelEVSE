@@ -102,9 +102,12 @@ test('stateFor falls back to the unknown state', () => {
 
 test('every state has a distinct label and colour', () => {
   // The bridge derives `stopped` for a user Stop (254 + manual_override 1) and
-  // `sleeping` for a real sleep — the two must not render alike.
+  // `sleeping` for a real sleep — the two must not render alike, so a user
+  // Stop can never show as Sleeping (#159).
   assert.equal(stateFor('stopped').label, 'Stopped');
   assert.equal(stateFor('stopped').color, '#e0b45c');
+  assert.equal(stateFor('sleeping').label, 'Sleeping');
+  assert.equal(stateFor('sleeping').color, '#93a0b4');
   const labels = Object.values(STATES).map((state) => state.label);
   const colors = Object.values(STATES).map((state) => state.color);
   assert.equal(new Set(labels).size, labels.length);
