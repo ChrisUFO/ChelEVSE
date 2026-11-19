@@ -28,13 +28,21 @@ import { DAY_NAMES } from '../schedule.js';
 // The rate bounds live in rates.js: the same 0–5 limit governs a flat rate and
 // a window row, so both validators share one definition.
 
-// A rate the engine can actually use: finite once parsed and inside the
-// documented bounds. The validators and the resolver both reject anything else,
-// so any view asking "does this row have a price?" must ask it the same way —
-// otherwise it quotes a price the rest of the screen denies.
+// A rate the editor can save: finite once parsed and inside the documented
+// bounds. The validators reject anything else — the write path's rule — so any
+// view gating a save or an action must ask it the same way.
 export function rateIsUsable(value) {
   const rate = parseRateValue(value);
   return Number.isFinite(rate) && rate >= RATE_MIN && rate <= RATE_MAX;
+}
+
+// The resolver's own gate: normalizeRateSchedule keeps any finite rate and
+// flatFallbackRate charges it, inside the 0–5 bounds or not. Copy that states
+// what a no-row instant costs must gate on this — rateIsUsable would deny a
+// price the engine charges (a hand-edited out-of-bounds document) while the
+// checker's own Price cell and History state it.
+export function rateIsFinite(value) {
+  return Number.isFinite(parseRateValue(value));
 }
 
 export const MONTH_NAMES = [
@@ -360,7 +368,7 @@ export function periodHasBaseOverlap(period, rows) {
 // therefore cover every instant exactly when, for every date and weekday, the
 // matching segments cover the whole day. Like `intervalUncovered` in rates.js,
 // this names "no row matched", not the price: since #188 such an instant prices
-// at the stored flat rate — 0.00 only when no usable flat rate is stored.
+// at the stored flat rate — 0.00 only when no finite flat rate is stored.
 // Counting base rows alone declared a plan whose hours are all covered by
 // overrides "unpriced"; a window-only stretch of dates still leaves the hours
 // it does not cover without a row. These are warnings, not validation blockers.
@@ -670,9 +678,9 @@ export function ratePlanRange(rows, fallbackRate) {
   if (!range) return null;
   // Since #188 gaps price at the stored flat fallback, so the fallback price
   // joins the advertised range whenever gaps exist; the minimum reaches 0
-  // only when the fallback is unusable and the gap is genuinely unpriced.
+  // only when the fallback is not finite and the gap is genuinely unpriced.
   if (!planHasUnpriced(list)) return range;
-  if (!rateIsUsable(fallbackRate)) return { ...range, min: 0 };
+  if (!rateIsFinite(fallbackRate)) return { ...range, min: 0 };
   const flat = parseRateValue(fallbackRate);
   return { min: Math.min(range.min, flat), max: Math.max(range.max, flat) };
 }
@@ -1437,7 +1445,7 @@ function previewDisplay(entry, tier, baseRate) {
 // prices the season's ordinary hours, an override wins over it, and both
 // unmatched cases price at the stored flat rate (#188) — an uncovered date (no
 // season) or an unpriced hour (a season with neither a base nor a window for
-// that time) is 0 only when no usable flat rate is stored.
+// that time) is 0 only when no finite flat rate is stored.
 export function previewRate(rows, fallbackRate, date) {
   const entry = previewEntry(rows, fallbackRate, date);
   if (!entry) return null;

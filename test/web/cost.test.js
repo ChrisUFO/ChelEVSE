@@ -156,9 +156,9 @@ function liveStatus(state, updated, elapsed, wh = 1000, overrides = {}) {
 }
 
 // A base-less season: the window prices 16:00–19:00. Every other hour of the
-// day prices at the stored flat fallback (#188), so with a usable `rate` the
+// day prices at the stored flat fallback (#188), so with a finite `rate` the
 // marker never fires; `windowOnlyNoFlat` is the console-edited edge with no
-// usable flat rate, where those hours are genuinely 0.00 and the marker
+// finite flat rate, where those hours are genuinely 0.00 and the marker
 // reports them.
 function windowOnly(overrides = {}) {
   return {
@@ -196,7 +196,7 @@ test('the live "understates cost" marker follows the interval it describes', () 
   const straddle = date(2026, 1, 5, 16, 30).getTime();
   assert.equal(statusCostUncovered(liveStatus(3, straddle, 3600), windowOnly()), false);
   assert.notEqual(statusCostLabel(liveStatus(3, straddle, 3600), windowOnly()), null);
-  // Without a usable flat rate the uncovered slice is genuinely 0.00 and the
+  // Without a finite flat rate the uncovered slice is genuinely 0.00 and the
   // marker fires: outside the window, and on the straddling interval whose
   // figure it caveats is still shown — the marker never stands alone.
   assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnlyNoFlat()), true);
@@ -356,7 +356,7 @@ test('the held marker follows the frozen interval', () => {
   const peak = date(2026, 1, 5, 17, 0).getTime();
   const edge = date(2026, 1, 5, 16, 30).getTime();
   // A base-less window prices only its own hours, but the stored flat fallback
-  // prices the rest (#188), so the held marker never fires with a usable
+  // prices the rest (#188), so the held marker never fires with a finite
   // `rate`; the frozen window decides only in the no-fallback edge.
   assert.equal(heldCostUncovered(3600, noon, windowOnly()), false);
   assert.equal(heldCostUncovered(3600, peak, windowOnly()), false);
@@ -870,12 +870,12 @@ test('an expired season scope prices a November session at the flat rate (#188)'
     'GBP 2.35',
   );
   // Live and held windows price at the fallback too, and no marker fires:
-  // with a usable fallback the figure is policy-correct.
+  // with a finite fallback the figure is policy-correct.
   const live = liveStatus(3, date(2026, 11, 18, 20, 0).getTime(), 3600, 19600);
   assert.equal(statusCostLabel(live, expired), 'GBP 2.35');
   assert.equal(statusCostUncovered(live, expired), false);
   assert.equal(heldCostUncovered(3600, date(2026, 11, 18, 20, 0).getTime(), expired), false);
-  // The console-edited edge — the same rows with no usable flat rate — keeps
+  // The console-edited edge — the same rows with no finite flat rate — keeps
   // the genuine 0.00 and its markers.
   const { rate: _rate, ...expiredNoFlat } = expired;
   const liveNoFlat = liveStatus(3, date(2026, 11, 18, 20, 0).getTime(), 3600, 19600);
@@ -947,7 +947,7 @@ test('hours no base or window covers price at the stored flat fallback', () => {
   const cost = hourCost('2026-01-05', '12', 1, windowOnly());
   assert.ok(Math.abs(cost - 0.3) < 1e-9);
   assert.ok(Math.abs(hourCost('2026-01-05', '17', 1, windowOnly()) - 0.32) < 1e-9);
-  // With no usable flat rate stored, the same hour is genuinely 0.00 (the
+  // With no finite flat rate stored, the same hour is genuinely 0.00 (the
   // plan-banner rule).
   assert.ok(Math.abs(hourCost('2026-01-05', '12', 1, windowOnlyNoFlat()) - 0) < 1e-9);
   // A zero-energy hour prices 0.00 rather than hiding.

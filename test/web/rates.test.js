@@ -421,7 +421,7 @@ test('rateAt falls back to the stored flat price when no row matches', () => {
   assert.equal(rateAt(date(2026, 10, 19, 7, 0), rate), 0.2);
   // An hour no row matches prices at the stored flat rate (#188), not 0.
   assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0.3);
-  // With no usable flat rate stored (a console-edited edge), the same hour is
+  // With no finite flat rate stored (a console-edited edge), the same hour is
   // genuinely unpriced: 0.
   assert.equal(rateAt(date(2026, 10, 19, 20, 0), { currency: 'USD', rates: rate.rates }), 0);
 
@@ -469,9 +469,9 @@ test('an expired season scope prices at the stored flat rate (#188)', () => {
   );
 });
 
-// The console-edited edge: rows exist but the flat rate is null/unusable, the
+// The console-edited edge: rows exist but the flat rate is not finite, the
 // only case an unmatched instant is genuinely unpriced.
-test('rows with no usable flat rate leave an unmatched instant genuinely 0 (#188)', () => {
+test('rows with no finite flat rate leave an unmatched instant genuinely 0 (#188)', () => {
   const rows = [baseRow(0.2, { from: '06-15', to: '09-15' })];
   const at = date(2026, 11, 18, 19, 0);
   for (const scheduleWithoutRate of [
@@ -832,7 +832,7 @@ test('rateEntryAt names a base, an override, an uncovered date and an unpriced h
   assert.equal(gap.source, 'uncovered');
   assert.equal(gap.uncoveredDate, false);
   assert.equal(gap.unpricedHour, true);
-  // Without a usable flat rate the same hour is genuinely unpriced: 0, with
+  // Without a finite flat rate the same hour is genuinely unpriced: 0, with
   // the flags intact.
   const baseLessNoFlat = rateEntryAt(date(2026, 1, 15, 12, 0), {
     currency: 'USD',
@@ -850,7 +850,7 @@ test('rateEntryAt names a base, an override, an uncovered date and an unpriced h
   assert.equal(outside.rate, 0.9);
   assert.equal(outside.uncoveredDate, true);
   assert.equal(outside.unpricedHour, false);
-  // The out-of-season date is genuinely unpriced only when no usable flat
+  // The out-of-season date is genuinely unpriced only when no finite flat
   // rate is stored.
   const outsideNoFlat = rateEntryAt(date(2026, 7, 15, 12, 0), {
     currency: 'USD',
@@ -936,7 +936,7 @@ test('rateDayPartition marks base, override and uncovered slices', () => {
       [360, 1440, 0.9, 'uncovered'],
     ],
   );
-  // Without a usable flat rate the same remainder is genuinely unpriced: 0.
+  // Without a finite flat rate the same remainder is genuinely unpriced: 0.
   const baseLessNoFlat = rateDayPartition(
     { currency: 'USD', rates: [windowRow({ rate: 0.1, start: '00:00', end: '06:00' })] },
     date(2026, 1, 15, 12, 0),
@@ -986,7 +986,7 @@ test('costing a base plus override and an uncovered date', () => {
     0.9,
     'uncovered date at the flat fallback',
   );
-  // The same uncovered date with no usable flat rate is genuinely unpriced: 0.
+  // The same uncovered date with no finite flat rate is genuinely unpriced: 0.
   close(
     costForInterval(1000, date(2026, 1, 15, 12, 0), date(2026, 1, 15, 13, 0), {
       currency: 'USD',
@@ -1709,7 +1709,7 @@ test('costForInterval is leap-exact and follows a date-season tail over New Year
     0.3,
     'common year uncovered at the flat fallback',
   );
-  // Without a usable flat rate the same day is genuinely unpriced: 0.
+  // Without a finite flat rate the same day is genuinely unpriced: 0.
   close(
     costForInterval(1000, date(2025, 2, 28, 12, 0), date(2025, 2, 28, 13, 0), {
       rates: [leapOnly],

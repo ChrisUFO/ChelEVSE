@@ -158,7 +158,7 @@ export function statusCostLabel(status, settings) {
 // Whether the live cost interval includes a slice no base/window prices at a
 // row. Only a non-empty schedule can have such a slice, and — since #188 — the
 // marker means the figure genuinely understates cost: the stored flat rate
-// prices the slice when one is usable, so the marker fires only when no usable
+// prices the slice when one is finite, so the marker fires only when no finite
 // flat fallback exists. The status screen adds the marker beside the cost, not
 // a second number.
 export function statusCostUncovered(status, settings) {
@@ -254,7 +254,7 @@ export function heldCostLabel(wh, elapsed, anchorMs, settings) {
 
 // Whether the held interval includes a slice no base/window prices at a row —
 // the same marker the live figure carries, evaluated over the frozen window,
-// and gated the same way: with a usable flat fallback the slice prices at that
+// and gated the same way: with a finite flat fallback the slice prices at that
 // rate, so only a missing fallback makes the figure understate cost.
 export function heldCostUncovered(elapsed, anchorMs, settings) {
   const normalized = costSettings(settings);
@@ -401,7 +401,7 @@ function bucketWindow(id) {
 // for a contributing span, `undefined` when the span does not reach the window
 // (skip it), or null when the pricer cannot price the slice — unreachable under
 // a schedule (a slice no row matches prices at the stored flat rate, 0.00 only
-// when no usable flat rate is stored), kept so a null from the engine
+// when no finite flat rate is stored), kept so a null from the engine
 // hides the bucket instead of half-pricing it.
 function bucketSlice(span, window, settings) {
   const spanStart = valueMillis(span.started_at);
@@ -633,7 +633,7 @@ function hourStartMs(start, hour) {
 
 // One hour bucket priced over its own span (kWh in, like the buckets
 // themselves; costForInterval takes Wh). An hour no base/window covers prices
-// at the stored flat rate — 0.00 only when no usable flat rate is stored, the
+// at the stored flat rate — 0.00 only when no finite flat rate is stored, the
 // existing plan-banner rule — so under a schedule the null cases
 // are only the unusable-input guards.
 export function hourCost(dayId, hour, kwh, settings) {

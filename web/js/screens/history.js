@@ -45,7 +45,7 @@ import {
   seriesCostSummary,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
-import { fmtK, formatDuration, fmtMoney, toNumber } from '../format.js';
+import { fmtK, fmtRate, formatDuration, fmtMoney, toNumber } from '../format.js';
 import { BASE, BAR_RATIO, VIEW_W, buildBar, svgEl } from './history-chart.js';
 
 let active = false;
@@ -160,7 +160,7 @@ function seriesCost(point) {
 
 // A saved plan with any instant no rate row covers advertises it on History:
 // such an instant costs the stored flat rate (#188) — 0.00 only when no
-// usable flat rate is stored. Kept as a pure predicate so the wiring is
+// finite flat rate is stored. Kept as a pure predicate so the wiring is
 // testable without a DOM.
 export function showPlanBanner(data) {
   const normalized = costSettings(data);
@@ -171,6 +171,17 @@ function renderPlanBanner() {
   const banner = $('history-plan-banner');
   if (!banner) return;
   banner.hidden = !showPlanBanner(settings);
+  if (banner.hidden) return;
+  // The banner names a coverage gap, not only under-pricing, so it keeps
+  // appearing while a finite flat fallback prices the gap (#188) — but then the
+  // copy must say that price instead of claiming 0.00. Only a missing fallback
+  // keeps the 0.00 wording.
+  setText(
+    $('history-plan-banner-text'),
+    settings.rate != null
+      ? `Some dates or hours fall outside every season window and are priced at your flat rate ${fmtRate(settings.rate, settings.currency)}.`
+      : 'Some dates or hours have no price and are shown at 0.00.',
+  );
 }
 
 function currentPeriod() {

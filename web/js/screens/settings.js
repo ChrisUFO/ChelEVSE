@@ -34,6 +34,7 @@ import {
   previewBlocker,
   previewRate,
   rateEditorMode,
+  rateIsFinite,
   rateIsUsable,
   ratePeriods,
   rateRowFields,
@@ -914,11 +915,24 @@ function paintPreview() {
     price.append(money);
   }
   rows.push(paintPreviewRow('Price', price));
+  // An instant no row matches prices at the stored flat rate (#188), so the
+  // sentence names that price whenever the resolver would charge one — any
+  // finite value, the same gate as the checker's own finite-only fallback and
+  // the engine's flatFallbackRate. 0.00 wording only when no finite fallback
+  // is stored. Both cases still say which one they are: no season covers this
+  // date, or this season has no price for this hour.
+  const flatFallback = rateIsFinite($('setting-rate').value)
+    ? `your flat rate ${priceText($('setting-rate').value)}`
+    : null;
   let applies = '';
   if (result.uncoveredDate) {
-    applies = 'Uncovered date — no season covers this date — priced at 0.00.';
+    applies = flatFallback
+      ? `Uncovered date — no season covers this date — priced at ${flatFallback}.`
+      : 'Uncovered date — no season covers this date — priced at 0.00.';
   } else if (result.unpricedHour) {
-    applies = 'Uncovered hour — this season has no price for this hour — 0.00.';
+    applies = flatFallback
+      ? `Uncovered hour — this season has no price for this hour — ${flatFallback}.`
+      : 'Uncovered hour — this season has no price for this hour — 0.00.';
   } else if (result.source === 'base') {
     applies = el('span');
     applies.append('Base · ', nowrapEl(result.scopeText));
@@ -956,10 +970,20 @@ function announcePreview() {
     return;
   }
   const band = result.tier ? `${result.tier}, ` : '';
+  // Same dual path as the visible row: the flat fallback's price whenever the
+  // resolver would charge one (any finite value), the 0.00 wording only when it
+  // would not (#188) — and the case named.
+  const flatFallback = rateIsFinite($('setting-rate').value)
+    ? `your flat rate ${priceText($('setting-rate').value)}`
+    : null;
   const where = result.uncoveredDate
-    ? 'uncovered date, priced at 0.00'
+    ? flatFallback
+      ? `uncovered date, priced at ${flatFallback}`
+      : 'uncovered date, priced at 0.00'
     : result.unpricedHour
-      ? 'uncovered hour, priced at 0.00'
+      ? flatFallback
+        ? `uncovered hour, priced at ${flatFallback}`
+        : 'uncovered hour, priced at 0.00'
       : result.source === 'base'
         ? `base ${result.scopeText}`
         : result.source === 'window'

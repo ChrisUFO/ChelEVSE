@@ -495,6 +495,186 @@ test('a season date edit commits through the card wiring and unsaves the draft',
   assert.equal(isSettingsDirty(), true);
 });
 
+// ---------- #188 wording: every pricing surface names the flat fallback ----------
+//
+// The engine (PR #191) prices an instant no row matches at the stored flat
+// rate, so the screen's vocabulary must too: while a finite flat rate is
+// stored — the resolver's own gate, inside the 0–5 bounds or not — the gap
+// line, the plan help, the base-less warning, the seed note and the checker
+// name that price; the 0.00 wording survives only when no finite fallback is
+// stored. Both branches keep the uncovered-date vs uncovered-hour distinction,
+// and the checker's announce reads the same words.
+
+// The Applies row of the painted checker: children[2] is the third row, its
+// second cell the value.
+const appliesText = () => element('preview-rows').children[2].children[1].textContent;
+
+// The plan summary paints nowrap spans through replaceChildren, so its text
+// lives in the children — the summary element itself holds no composed string.
+const summaryText = () =>
+  element('plan-summary-text')
+    .children.map((child) => child.textContent)
+    .join('');
+
+test('the checker, gap line and warnings price the flat fallback, or say 0.00 without one', () => {
+  resetSettings();
+  // A date-scoped summer season (the #188 report's shape, scoped through
+  // 31 October) and a checked moment off-season.
+  element('preview-date').value = '2026-11-18';
+  element('preview-time').value = '12:00';
+  showSettingsData({
+    rate: 0.12,
+    currency: 'USD',
+    rates: [
+      {
+        ...night,
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        from: '06-01',
+        to: '10-31',
+      },
+    ],
+  });
+
+  // With the flat rate stored, every surface names it as the gap's price.
+  assert.equal(element('uncovered-price').textContent, 'priced at your flat rate USD 0.12');
+  assert.equal(
+    element('plan-help-gaps').textContent,
+    'Dates outside every season cost your flat rate USD 0.12.',
+  );
+  assert.equal(
+    appliesText(),
+    'Uncovered date — no season covers this date — priced at your flat rate USD 0.12.',
+  );
+  // The announce reads the same words (the change listener both paints and
+  // announces).
+  for (const listener of element('preview-time').listeners.get('change') || []) listener();
+  assert.match(
+    element('preview-live').textContent,
+    /uncovered date, priced at your flat rate USD 0\.12\.$/,
+  );
+
+  // Clearing the flat rate makes the same gap genuinely unpriced: 0.00 copy.
+  type('setting-rate', '');
+  assert.equal(element('uncovered-price').textContent, 'priced at 0.00');
+  assert.equal(element('plan-help-gaps').textContent, 'Dates outside every season cost 0.00.');
+  assert.equal(appliesText(), 'Uncovered date — no season covers this date — priced at 0.00.');
+  // The advertised range reaches its 0.00 floor on the same repaint — the
+  // summary never widens to a price nothing charges.
+  assert.match(summaryText(), /USD 0\.00–0\.20/);
+
+  // A finite but out-of-bounds rate still prices the fallback — the resolver's
+  // gate is finite-only (0–5 is the editor's rule), so the copy must not deny
+  // a price the checker's own resolved price states.
+  type('setting-rate', '7');
+  assert.equal(element('uncovered-price').textContent, 'priced at your flat rate USD 7.00');
+  assert.equal(
+    element('plan-help-gaps').textContent,
+    'Dates outside every season cost your flat rate USD 7.00.',
+  );
+  assert.equal(
+    appliesText(),
+    'Uncovered date — no season covers this date — priced at your flat rate USD 7.00.',
+  );
+  // The plan summary's advertised range names the union on the same repaint:
+  // the row's 0.20 and the fallback's 7.00, so the rendered range and the
+  // copy above can never diverge again.
+  assert.match(summaryText(), /USD 0\.20–7\.00/);
+  for (const listener of element('preview-time').listeners.get('change') || []) listener();
+  // The announce leads with the checker's own resolved price, so one match
+  // pins that the copy no longer denies it.
+  assert.match(
+    element('preview-live').textContent,
+    /USD 7\.00 per kWh, uncovered date, priced at your flat rate USD 7\.00\.$/,
+  );
+});
+
+test('the checker names an uncovered hour — this season has no price for it', () => {
+  resetSettings();
+  // A window-only all-year season: every date is in scope, so noon is an
+  // uncovered hour, not an uncovered date.
+  element('preview-date').value = '2026-01-15';
+  element('preview-time').value = '12:00';
+  showSettingsData(storedDoc);
+
+  assert.equal(
+    appliesText(),
+    'Uncovered hour — this season has no price for this hour — your flat rate USD 0.31.',
+  );
+  for (const listener of element('preview-time').listeners.get('change') || []) listener();
+  assert.match(
+    element('preview-live').textContent,
+    /uncovered hour, priced at your flat rate USD 0\.31\.$/,
+  );
+
+  type('setting-rate', '');
+  assert.equal(appliesText(), 'Uncovered hour — this season has no price for this hour — 0.00.');
+
+  // The hour arm keeps the resolver's finite gate too.
+  type('setting-rate', '7');
+  assert.equal(
+    appliesText(),
+    'Uncovered hour — this season has no price for this hour — your flat rate USD 7.00.',
+  );
+});
+
+test('a base-less season warns at the flat fallback, or of no price without one', () => {
+  resetSettings();
+  // The stored window-only document has no base and no covering season.
+  showSettingsData(storedDoc);
+  const warning = nodesByClass(seasonCard(), 'base-warning')[0];
+  assert.ok(warning, 'the base-less warning renders');
+  assert.equal(
+    warning.textContent,
+    'No base rate — hours outside the windows cost your flat rate USD 0.31 unless another season’s base covers them.',
+  );
+  type('setting-rate', '');
+  assert.equal(
+    warning.textContent,
+    'No base rate — hours outside the windows have no price unless another season’s base covers them.',
+  );
+  // Finite out-of-bounds still charges (the resolver's gate), so the warning
+  // names it rather than denying a price History states.
+  type('setting-rate', '7');
+  assert.equal(
+    warning.textContent,
+    'No base rate — hours outside the windows cost your flat rate USD 7.00 unless another season’s base covers them.',
+  );
+});
+
+test('the flat → Seasons seed note prices the uncovered dates at the flat rate', () => {
+  resetSettings();
+  showSettingsData({ rate: 0.31, currency: 'USD' });
+  click(element('rate-mode-seasons'));
+
+  // The seed names the wall clock's current month as a date range, so the
+  // sentence is pinned by shape: the second clause names the flat fallback
+  // while one is finite, 0.00 when none is (#188).
+  assert.equal(element('plan-seed').hidden, false);
+  assert.match(
+    element('plan-seed-note').textContent,
+    /^Seeded .+ at your flat rate\. Dates outside it cost your flat rate USD 0\.31 until you cover them\.$/,
+  );
+
+  // Clearing the flat field after seeding re-enters the 0.00 arm; a finite but
+  // out-of-bounds rate keeps the fallback arm — the resolver's gate is
+  // finite-only.
+  type('setting-rate', '');
+  assert.equal(element('plan-seed').hidden, false);
+  assert.match(
+    element('plan-seed-note').textContent,
+    /^Seeded .+ at your flat rate\. Dates outside it cost 0\.00 until you cover them\.$/,
+  );
+  type('setting-rate', '7');
+  assert.match(
+    element('plan-seed-note').textContent,
+    /^Seeded .+ at your flat rate\. Dates outside it cost your flat rate USD 7\.00 until you cover them\.$/,
+  );
+});
+
 // ---------- unsaved-changes guard (#129) ----------
 //
 // The guard rides the same dirty flag the feedback pipeline maintains, so the

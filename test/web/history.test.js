@@ -1461,7 +1461,7 @@ test('sectionView never presents an unreached read as current data', () => {
 test('the plan banner appears exactly when a saved plan has an unpriced instant', () => {
   // Gap 3: the banner is the only signal that a stored plan has instants no
   // rate row covers before the owner opens settings — each costs the stored
-  // flat rate (#188), 0.00 only when no usable flat rate is stored. Its
+  // flat rate (#188), 0.00 only when no finite flat rate is stored. Its
   // condition is a pure predicate so it is covered without a DOM.
   const base = { id: 'b', rate: 0.3, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00' };
   const summer = {
@@ -1495,6 +1495,74 @@ test('the plan banner appears exactly when a saved plan has an unpriced instant'
   assert.equal(showPlanBanner(settings([peak])), true);
   // A date season leaves the rest of the year uncovered.
   assert.equal(showPlanBanner(settings([summer])), true);
+});
+
+// The #188 report, priced end to end at the History layer the sessions list
+// and the summary read (#123's pricing rules): season rows scoped through
+// 31 October expired, and a November session priced ≈80% low because the
+// engine zeroed every unmatched instant. PR #191's engine prices those
+// instants at the stored flat rate; these fixtures pin the money the screen
+// shows for exactly that stored document.
+test('the reported #188 session prices at the flat rate, and a half-covered one splits (#188)', () => {
+  const summerBase = {
+    id: 'summer',
+    rate: 0.2,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '00:00',
+    end: '00:00',
+    months: [5, 6, 7, 8, 9, 10],
+    from: '06-01',
+    to: '10-31',
+  };
+  const summerPeak = {
+    ...summerBase,
+    id: 'peak',
+    rate: 0.32,
+    start: '16:00',
+    end: '19:00',
+  };
+  const reported = { rate: 0.12, currency: 'USD', rates: [summerBase, summerPeak] };
+
+  // The reported session: 19.6 kWh on Wed 18 Nov 2026, every instant
+  // off-season. 0.12 × 19.6 = 2.352 — USD 2.35, not the USD 0.00 (≈80% low)
+  // the old policy priced.
+  const session = {
+    wh: 19600,
+    started_at: new Date(2026, 10, 18, 19, 0),
+    ended_at: new Date(2026, 10, 18, 21, 0),
+  };
+  assert.equal(sessionCostLabel(session, reported), 'USD 2.35');
+  // The banner still appears — the gap is real even though priced — and its
+  // fallback-aware copy is pinned on the screen harness.
+  assert.equal(showPlanBanner(reported), true);
+
+  // A partially covered session: one interval inside the season's last
+  // weekday peak (1 kWh at 0.32) and one off-season at the flat fallback
+  // (1 kWh at 0.12) — USD 0.44, each part at its own price.
+  const halfCovered = {
+    wh: 2000,
+    started_at: new Date(2026, 9, 28, 17, 0),
+    ended_at: new Date(2026, 10, 18, 20, 0),
+    intervals: [
+      {
+        started_at: new Date(2026, 9, 28, 17, 0),
+        ended_at: new Date(2026, 9, 28, 18, 0),
+        wh: 1000,
+      },
+      {
+        started_at: new Date(2026, 10, 18, 19, 0),
+        ended_at: new Date(2026, 10, 18, 20, 0),
+        wh: 1000,
+      },
+    ],
+  };
+  assert.equal(sessionCostLabel(halfCovered, reported), 'USD 0.44');
+
+  // Without a finite flat rate the same rows are genuinely unpriced again:
+  // the reported session reads USD 0.00 (the console-edited edge, kept loud).
+  const { rate: _rate, ...noFallback } = reported;
+  assert.equal(sessionCostLabel(session, noFallback), 'USD 0.00');
+  assert.equal(showPlanBanner(noFallback), true);
 });
 
 // ---------- schedule-priced summaries ----------

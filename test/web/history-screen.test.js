@@ -483,6 +483,49 @@ test('resetHistory clears the browse controls with the view', () => {
   assert.equal(element('sessions-state').hidden, true);
 });
 
+// ---------- the plan banner's copy (#188) ----------
+//
+// The predicate (showPlanBanner) is pinned pure in test/web/history.test.js;
+// this executes the paint that carries its words. The banner keeps appearing
+// while any instant sits outside every window — transparency about the gap —
+// but since #188 such an instant costs the stored flat rate, so the copy says
+// so; only a missing fallback keeps the 0.00 sentence.
+
+test('the plan banner names the flat fallback, or 0.00 only when none is stored', () => {
+  resetHistory();
+  enterHistory();
+  const summer = {
+    id: 'summer',
+    rate: 0.2,
+    days: [0, 1, 2, 3, 4, 5, 6],
+    start: '00:00',
+    end: '00:00',
+    months: [5, 6, 7, 8, 9],
+    from: '06-15',
+    to: '09-15',
+  };
+
+  // A finite flat rate prices the gap: the banner appears and names it.
+  showHistorySettings({ rate: 0.12, currency: 'USD', rates: [summer] });
+  assert.equal(element('history-plan-banner').hidden, false);
+  assert.equal(
+    element('history-plan-banner-text').textContent,
+    'Some dates or hours fall outside every season window and are priced at your flat rate USD 0.12.',
+  );
+
+  // The same rows with no finite flat rate are genuinely unpriced: 0.00 copy.
+  showHistorySettings({ currency: 'USD', rates: [summer] });
+  assert.equal(element('history-plan-banner').hidden, false);
+  assert.equal(
+    element('history-plan-banner-text').textContent,
+    'Some dates or hours have no price and are shown at 0.00.',
+  );
+
+  // A plan with no gap hides the banner whatever the flat rate.
+  showHistorySettings(nightly());
+  assert.equal(element('history-plan-banner').hidden, true);
+});
+
 // ---------- the period pricing pipeline, executed (#123) ----------
 //
 // The Gap this section exists for: `fetchPeriodSessions` once resolved the
