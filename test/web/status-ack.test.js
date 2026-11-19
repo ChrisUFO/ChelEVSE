@@ -118,7 +118,8 @@ initStatus();
 const at = (year, month, day) => Math.floor(new Date(year, month - 1, day, 12).getTime() / 1000);
 
 // A live, complete report with one recorded advisory (the shape on this charger
-// once both gates are reported).
+// once both gates are reported). `ack_command: true` is the current bridge's
+// capability fact (#186); the deploy-skew shape (no fact) has its own test.
 function doc(overrides = {}) {
   return {
     reachable: true,
@@ -143,6 +144,7 @@ function doc(overrides = {}) {
     ],
     alerted: {},
     acks: {},
+    ack_command: true,
     ...overrides,
   };
 }
@@ -382,6 +384,25 @@ test('an already acknowledged advisory and unknown health offer no control at al
   showHealth(null);
   assert.deepEqual(rows(), []);
   assert.equal(element('health-card').getAttribute('data-state'), 'unknown');
+});
+
+test('an older bridge’s document offers no ack control', () => {
+  // Deploy skew (#159): a web deploy ahead of its bridge reads a document
+  // with no `ack_command` — the control this screen paints would write a
+  // command that bridge cannot perform, so the row renders without it.
+  // The advisory itself still lists: the report is as good as ever.
+  const legacy = doc();
+  delete legacy.ack_command;
+  showHealth(legacy);
+  assert.equal(rows().length, 1);
+  assert.equal(rowOf().children.length, 2); // head, meta — no control area
+  assert.equal(buttonOf(rowOf()), null);
+
+  // The bridge is then upgraded and the fact arrives on an otherwise
+  // identical list: the row must rebuild so the control appears — the
+  // rebuild signature carries the capability, not just the advisory facts.
+  showHealth(doc());
+  assert.notEqual(buttonOf(rowOf()), null);
 });
 
 test('sign-out teardown leaves no control or focus behind', () => {

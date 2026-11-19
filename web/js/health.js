@@ -451,7 +451,7 @@ function presentationOf(entry, acks) {
   return entry.corroborated === true ? 'active' : 'recorded';
 }
 
-function advisoryRow(entry, acks, nowMs) {
+function advisoryRow(entry, acks, nowMs, canAckCommand) {
   const id = typeof entry.id === 'string' ? entry.id : '';
   const severity = typeof entry.severity === 'string' ? entry.severity : '';
   const presentation = presentationOf(entry, acks);
@@ -467,7 +467,10 @@ function advisoryRow(entry, acks, nowMs) {
     since: firstSeen || 0,
     // An acknowledged advisory has nothing left to mute, so it offers no
     // control; an id the bridge would refuse offers one that could only fail.
-    canAcknowledge: presentation !== 'acknowledged' && acknowledgeableId(id),
+    // `canAckCommand` is the bridge-capability gate: an older bridge's
+    // document carries no `ack_command`, and a control it could only reject
+    // is worse than none, so the fact must positively be `true`.
+    canAcknowledge: canAckCommand && presentation !== 'acknowledged' && acknowledgeableId(id),
   };
 }
 
@@ -521,6 +524,10 @@ function countRows(rows) {
  *   tone       `muted` | `warn` | `err` | `accent` — the card's marker colour
  *   caveat     the open-gate sentence when advisories are listed beside one
  *              (never at the same time as an `incomplete` headline)
+ *
+ * A row offers its Acknowledge control only when the document positively
+ * carries `ack_command: true` — the bridge-build capability fact — so a web
+ * deploy ahead of its bridge shows no control it could not serve (#159).
  */
 export function healthState({ doc, error = false, nowMs = Date.now() } = {}) {
   if (error) return unknownState('error', null, nowMs);
@@ -553,11 +560,17 @@ export function healthState({ doc, error = false, nowMs = Date.now() } = {}) {
   const transientIncomplete =
     !gates.settings_known || (!gates.relay_health_known && relaySupported);
   const caveat = gateSentence(gates, relaySupported);
+  // The bridge's ack capability, strict `true` (deploy-skew guard, #159): a
+  // document without `ack_command` is an older bridge that cannot perform the
+  // command this control writes, so the control stays hidden rather than
+  // offering a button that could only fail. Null fail-closed, like every
+  // capability fact this projection reads.
+  const canAckCommand = doc.ack_command === true;
   const acks = doc.acks && typeof doc.acks === 'object' ? doc.acks : null;
   const entries = Array.isArray(doc.advisories) ? doc.advisories : [];
   const advisories = entries
     .filter((entry) => entry && typeof entry === 'object')
-    .map((entry) => advisoryRow(entry, acks, nowMs))
+    .map((entry) => advisoryRow(entry, acks, nowMs, canAckCommand))
     .sort(compareRows);
   const counts = countRows(advisories);
   const meta = checkedLabel(checkedAt, nowMs);
