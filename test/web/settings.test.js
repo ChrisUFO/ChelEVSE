@@ -2343,8 +2343,10 @@ test('an all-day window is recognised from its stored start and end', () => {
 });
 
 test('the plan range ignores bad prices', () => {
-  // Bare rows have no scope, so the plan reports the uncovered 0.00 minimum;
-  // the malformed 9 and empty prices still do not widen the maximum.
+  // Bare rows have no scope, so the plan reports a 0 minimum; this call passes
+  // no usable flat fallback, so the gaps are genuinely unpriced (#188) — not a
+  // general rule. The malformed 9 and empty prices still do not widen the
+  // maximum.
   assert.deepEqual(ratePlanRange([{ rate: '0.1' }, { rate: 9 }, { rate: '' }, { rate: 0.32 }]), {
     min: 0,
     max: 0.32,
@@ -3505,7 +3507,9 @@ test('a plan whose hours are all covered by overrides is priced everywhere', () 
   assert.equal(planHasUnpriced([weekdays, weekend]), false);
   assert.deepEqual(ratePlanRange([weekdays, weekend]), { min: 0.2, max: 0.3 });
 
-  // The hours a base-less window leaves open are still unpriced...
+  // The hours a base-less window leaves open still have no row — this call
+  // passes no usable flat fallback, so they are genuinely unpriced (#188),
+  // not a general rule...
   assert.equal(planHasUnpriced([dayEvening]), true);
   assert.deepEqual(ratePlanRange([dayEvening]), { min: 0, max: 0.3 });
   // ...and a base makes the same window fully priced.

@@ -353,15 +353,17 @@ export function periodHasBaseOverlap(period, rows) {
   });
 }
 
-// Whether a non-empty plan has any instant with no price. The engine prices an
+// Whether a non-empty plan has any instant no row matches. The engine prices an
 // instant from the union of the rows that match it: a row's season decides the
 // date, and its weekday segment decides the minutes — a window that wraps
 // midnight also prices the next day's early hours from the day it started. A
 // plan is therefore fully priced exactly when, for every date and weekday, the
-// matching segments cover the whole day. Counting base rows alone declared a
-// plan whose hours are all covered by overrides "unpriced"; a window-only
-// stretch of dates still is unpriced for the hours it does not cover. These are
-// warnings, not validation blockers.
+// matching segments cover the whole day. Like `intervalUncovered` in rates.js,
+// this names "no row matched", not the price: since #188 such an instant prices
+// at the stored flat rate — 0.00 only when no usable flat rate is stored.
+// Counting base rows alone declared a plan whose hours are all covered by
+// overrides "unpriced"; a window-only stretch of dates still leaves the hours
+// it does not cover without a row. These are warnings, not validation blockers.
 const MINUTES_PER_DAY = 1440;
 // A leap reference year, so slot 59 is a real 29 February and every slot has a
 // well-defined weekday; only the month and day are read.

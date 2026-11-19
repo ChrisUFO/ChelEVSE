@@ -115,8 +115,10 @@ let removeConfirmKey = null;
 // The period key of the season the mode switch seeded, while the plan note that
 // explains the seed still applies. Empty when there is nothing to explain.
 let seedNoticeKey = '';
-// Whether the draft leaves any instant with no price. Recomputed once per paint
-// so every card's base block can describe the same plan without re-walking it.
+// Whether the draft leaves any instant no row matches (`planHasUnpriced`):
+// since #188 such an instant prices at the stored flat rate, so the flag names
+// a coverage gap, not a missing price. Recomputed once per paint so every
+// card's base block can describe the same plan without re-walking it.
 let planUnpriced = false;
 let rateValidation = validateRateEditorRows([]);
 

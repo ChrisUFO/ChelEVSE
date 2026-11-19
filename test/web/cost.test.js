@@ -37,7 +37,9 @@ function date(year, month, day, hours = 0, minutes = 0) {
 const FLAT = { rate: 0.245, currency: 'GBP' };
 
 // A nightly off-peak window (00:00–06:00) at 0.10 over a visible all-day base
-// at 0.30. The stored rate is no longer an invisible fallback.
+// at 0.30. The base row is the visible season price; the equal stored rate is
+// the #188 gap fallback for an instant no row matches — this plan has none,
+// the base covers the whole day.
 function nightly(overrides = {}) {
   return {
     rate: 0.3,

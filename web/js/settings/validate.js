@@ -127,8 +127,10 @@ export function validateSettings(draft) {
 // values included: the editor has to show a malformed stored row with its error
 // rather than delete it silently on the next save. The costing layer
 // (normalizeRateSchedule) still drops unusable rows, so a partially corrupt
-// document prices what it can; the flat rate remains only when no usable row is
-// left.
+// document prices what it can; with no usable row left the flat rate is the
+// only configuration, and with usable rows it prices the instants no row
+// matches (#188) — genuinely unpriced (0) only when no usable flat price is
+// stored either.
 //
 // The charger address is optional and never blocks a save: a stored value the
 // grammar rejects (a console-written scheme or port, say) normalizes to '' so the
