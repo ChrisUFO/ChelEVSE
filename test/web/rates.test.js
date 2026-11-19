@@ -403,7 +403,7 @@ test('window days use 0 = Monday, matching the schedule editor chips', () => {
   assert.equal(windowMatches(sunday, date(2026, 10, 19, 10, 30)), false);
 });
 
-test('rateAt keeps the flat price only for an empty schedule and documents precedence', () => {
+test('rateAt falls back to the stored flat price when no row matches', () => {
   const flat = schedule([], 0.4);
   assert.equal(rateAt(date(2026, 10, 19, 12, 0), flat), 0.4);
   assert.equal(rateAt(new Date('nope'), flat), null);
@@ -419,8 +419,11 @@ test('rateAt keeps the flat price only for an empty schedule and documents prece
   assert.equal(rateAt(date(2026, 10, 19, 5, 0), rate), 0.1);
   // Both match at 07:00; the later row wins deterministically.
   assert.equal(rateAt(date(2026, 10, 19, 7, 0), rate), 0.2);
-  // Once any row exists, settings.rate is ignored: the uncovered hour is 0.
-  assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0);
+  // An hour no row matches prices at the stored flat rate (#188), not 0.
+  assert.equal(rateAt(date(2026, 10, 19, 20, 0), rate), 0.3);
+  // With no usable flat rate stored (a console-edited edge), the same hour is
+  // genuinely unpriced: 0.
+  assert.equal(rateAt(date(2026, 10, 19, 20, 0), { currency: 'USD', rates: rate.rates }), 0);
 
   // A visible base covers the ordinary hours; an override wins over it.
   const visible = withBase(
@@ -431,13 +434,70 @@ test('rateAt keeps the flat price only for an empty schedule and documents prece
   assert.equal(rateAt(date(2026, 10, 19, 17, 0), visible), 0.2);
 
   // A weekday window's post-midnight tail is priced on the next day; the gap
-  // before the tail is 0, not the stored flat rate.
+  // before the tail falls back to the stored flat rate.
   const mondayNight = schedule(
     [windowRow({ id: 'monday', rate: 0.1, days: [0], start: '22:00', end: '06:00' })],
     0.3,
   );
   assert.equal(rateAt(date(2026, 10, 20, 1, 0), mondayNight), 0.1);
-  assert.equal(rateAt(date(2026, 10, 19, 1, 0), mondayNight), 0);
+  assert.equal(rateAt(date(2026, 10, 19, 1, 0), mondayNight), 0.3);
+});
+
+// The #188 defect at engine level: season rows that expired leave every
+// November instant unmatched, and the stored flat rate — not 0 — prices it.
+test('an expired season scope prices at the stored flat rate (#188)', () => {
+  const expired = schedule([baseRow(0.2, { from: '06-15', to: '09-15' })], 0.12);
+  // 18 November 2026, 19:00 local: no row matches the date.
+  const at = date(2026, 11, 18, 19, 0);
+  assert.equal(rateAt(at, expired), 0.12);
+  const entry = rateEntryAt(at, expired);
+  assert.equal(entry.rate, 0.12);
+  assert.equal(entry.source, 'uncovered');
+  assert.equal(entry.uncoveredDate, true);
+  assert.equal(entry.unpricedHour, false);
+  // The reported 19.6 kWh session over one hour prices at 0.12 × 19.6.
+  close(
+    costForInterval(19600, date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), expired),
+    2.352,
+    'expired scope at the flat fallback',
+  );
+  // The predicate still names "no row matched" even though the slice has a
+  // price now — the marker gates on the fallback in cost.js, not here.
+  assert.equal(
+    intervalUncovered(date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), expired),
+    true,
+  );
+});
+
+// The console-edited edge: rows exist but the flat rate is null/unusable, the
+// only case an unmatched instant is genuinely unpriced.
+test('rows with no usable flat rate leave an unmatched instant genuinely 0 (#188)', () => {
+  const rows = [baseRow(0.2, { from: '06-15', to: '09-15' })];
+  const at = date(2026, 11, 18, 19, 0);
+  for (const scheduleWithoutRate of [
+    { currency: 'USD', rates: rows },
+    { rate: null, rates: rows },
+  ]) {
+    assert.equal(rateAt(at, scheduleWithoutRate), 0);
+    const entry = rateEntryAt(at, scheduleWithoutRate);
+    assert.equal(entry.rate, 0);
+    assert.equal(entry.source, 'uncovered');
+    assert.equal(entry.uncoveredDate, true);
+    assert.equal(entry.unpricedHour, false);
+  }
+  // The slice prices 0.00 (a real figure, not hidden) and the predicate keeps
+  // flagging it, so the markers still fire.
+  close(
+    costForInterval(19600, date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), {
+      rates: rows,
+    }),
+    0,
+    'expired scope with no flat fallback',
+  );
+  assert.equal(
+    intervalUncovered(date(2026, 11, 18, 19, 0), date(2026, 11, 18, 20, 0), { rates: rows }),
+    true,
+  );
 });
 
 // ---------- costing ----------
@@ -761,21 +821,42 @@ test('rateEntryAt names a base, an override, an uncovered date and an unpriced h
   assert.equal(base.source, 'base');
   assert.equal(base.window.id, 'base');
 
-  // A base-less window covers its hours, not the rest of the date.
+  // A base-less window covers its hours, not the rest of the date: the
+  // uncovered hour prices at the stored flat fallback (#188) and keeps the
+  // `unpricedHour` flag.
   const baseLess = schedule([windowRow({ rate: 0.1, start: '22:00', end: '23:00' })], 0.9);
   const gap = rateEntryAt(date(2026, 1, 15, 12, 0), baseLess);
-  assert.equal(gap.rate, 0);
+  assert.equal(gap.rate, 0.9);
   assert.equal(gap.source, 'uncovered');
   assert.equal(gap.uncoveredDate, false);
   assert.equal(gap.unpricedHour, true);
+  // Without a usable flat rate the same hour is genuinely unpriced: 0, with
+  // the flags intact.
+  const baseLessNoFlat = rateEntryAt(date(2026, 1, 15, 12, 0), {
+    currency: 'USD',
+    rates: baseLess.rates,
+  });
+  assert.equal(baseLessNoFlat.rate, 0);
+  assert.equal(baseLessNoFlat.source, 'uncovered');
+  assert.equal(baseLessNoFlat.uncoveredDate, false);
+  assert.equal(baseLessNoFlat.unpricedHour, true);
 
   const outside = rateEntryAt(
     date(2026, 7, 15, 12, 0),
     schedule([windowRow({ months: [1] })], 0.9),
   );
-  assert.equal(outside.rate, 0);
+  assert.equal(outside.rate, 0.9);
   assert.equal(outside.uncoveredDate, true);
   assert.equal(outside.unpricedHour, false);
+  // The out-of-season date is genuinely unpriced only when no usable flat
+  // rate is stored.
+  const outsideNoFlat = rateEntryAt(date(2026, 7, 15, 12, 0), {
+    currency: 'USD',
+    rates: [windowRow({ months: [1] })],
+  });
+  assert.equal(outsideNoFlat.rate, 0);
+  assert.equal(outsideNoFlat.uncoveredDate, true);
+  assert.equal(outsideNoFlat.unpricedHour, false);
 
   const flat = rateEntryAt(date(2026, 1, 15, 12, 0), schedule([], 0.4));
   assert.equal(flat.rate, 0.4);
@@ -849,6 +930,19 @@ test('rateDayPartition marks base, override and uncovered slices', () => {
     baseLess.map((segment) => [segment.from, segment.to, segment.rate, segment.source]),
     [
       [0, 360, 0.1, 'window'],
+      // The uncovered remainder carries the stored flat fallback (#188).
+      [360, 1440, 0.9, 'uncovered'],
+    ],
+  );
+  // Without a usable flat rate the same remainder is genuinely unpriced: 0.
+  const baseLessNoFlat = rateDayPartition(
+    { currency: 'USD', rates: [windowRow({ rate: 0.1, start: '00:00', end: '06:00' })] },
+    date(2026, 1, 15, 12, 0),
+  );
+  assert.deepEqual(
+    baseLessNoFlat.map((segment) => [segment.from, segment.to, segment.rate, segment.source]),
+    [
+      [0, 360, 0.1, 'window'],
       [360, 1440, 0, 'uncovered'],
     ],
   );
@@ -882,11 +976,22 @@ test('costing a base plus override and an uncovered date', () => {
     0.4,
     'base plus override',
   );
+  // A season scoped to other dates leaves the instant uncovered, priced at the
+  // stored flat fallback (#188).
   const dateGap = schedule([baseRow(0.3, { from: '06-15', to: '09-15' })], 0.9);
   close(
     costForInterval(1000, date(2026, 1, 15, 12, 0), date(2026, 1, 15, 13, 0), dateGap),
+    0.9,
+    'uncovered date at the flat fallback',
+  );
+  // The same uncovered date with no usable flat rate is genuinely unpriced: 0.
+  close(
+    costForInterval(1000, date(2026, 1, 15, 12, 0), date(2026, 1, 15, 13, 0), {
+      currency: 'USD',
+      rates: dateGap.rates,
+    }),
     0,
-    'uncovered date',
+    'uncovered date with no flat fallback',
   );
   close(
     costForSession(
@@ -1592,14 +1697,23 @@ test('costForInterval is leap-exact and follows a date-season tail over New Year
     0.2,
     'leap day',
   );
-  // The same day a year later does not exist; with no base the day is 0.
+  // The same day a year later does not exist; with no base the day prices at
+  // the stored flat fallback (#188).
   close(
     costForInterval(1000, date(2025, 2, 28, 12, 0), date(2025, 2, 28, 13, 0), {
       rate: 0.3,
       rates: [leapOnly],
     }),
+    0.3,
+    'common year uncovered at the flat fallback',
+  );
+  // Without a usable flat rate the same day is genuinely unpriced: 0.
+  close(
+    costForInterval(1000, date(2025, 2, 28, 12, 0), date(2025, 2, 28, 13, 0), {
+      rates: [leapOnly],
+    }),
     0,
-    'common year uncovered',
+    'common year uncovered with no flat fallback',
   );
 
   const december = windowRow({
