@@ -17,8 +17,8 @@ from typing import NamedTuple
 # worst-case bound: a flapping charger cannot exceed one write per gap).
 WRITE_MIN_GAP_SEC = 30
 # While charging (state 3) the continuous values -- energy, elapsed, power,
-# voltage, temperatures -- are refreshed at least this often; they never
-# trigger a write themselves. Idle (any other state) liveness cadence.
+# voltage -- are refreshed at least this often; they never trigger a write
+# themselves. Idle (any other state) liveness cadence.
 CHARGING_HEARTBEAT_SEC = 60
 HEARTBEAT_INTERVAL = 300
 
@@ -44,7 +44,7 @@ class WritePolicy:
       scheduler opportunity, never sooner than ``min_gap`` after the previous
       write. A session close is the state edge itself, so the ``state``
       trigger carries it.
-    - Continuous values (energy, elapsed, power, voltage, temperatures) never
+    - Continuous values (energy, elapsed, power, voltage) never
       trigger a write: they move constantly while charging, so treating them
       as changes would degenerate into a fixed timer. They ride the
       heartbeats -- ``charging_heartbeat`` while state 3, ``idle_heartbeat``
