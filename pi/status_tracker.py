@@ -26,20 +26,22 @@ from write_counter import WriteCounter
 def log(message):
     # seam: tests patch bridge.log (PLAN.md facade rule)
     import bridge  # lazy, call-time only
+
     return bridge.log(message)
 
 
 def _utcnow():
     # seam: tests patch bridge._utcnow (PLAN.md facade rule)
     import bridge  # lazy, call-time only
+
     return bridge._utcnow()
 
 
 def _localnow():
     # seam: tests patch bridge._localnow (PLAN.md facade rule)
     import bridge  # lazy, call-time only
-    return bridge._localnow()
 
+    return bridge._localnow()
 
 
 # Retry a failed status/current seed at most this often while running.
@@ -56,8 +58,9 @@ SESSION_MERGE_MAX_GAP = 48 * 3600
 # retained list still accounts for the session's whole energy while the document
 # stays small (a record is one Firestore document).
 MAX_SESSION_INTERVALS = 100
-class StatusTracker:
 
+
+class StatusTracker:
     """Status-derived state carried across ticks and bridge restarts."""
 
     def __init__(self, db, history=None, counter=None):
@@ -89,6 +92,16 @@ class StatusTracker:
         self.open_interval = None
         self.interval_energy = None
         self.interval_seen_at = None
+        # The plug-in's energy accumulated per tick (the same allowed deltas
+        # ``_track_interval`` attributes), summed across the counter's epochs.
+        # While the charger's session_energy stays monotone it equals the
+        # cumulative anyway, but a counter reset inside an open interval makes
+        # that cumulative the last epoch's alone, and this total is then the
+        # only energy-complete figure (#195). It restarts wherever the counter
+        # goes backwards at a block boundary -- indistinguishable from a new
+        # plug-in's cleared counter -- so it never spans two plug-ins.
+        self.session_wh = 0.0
+        self.session_wh_reset_seen = False
         # The ``charging_stopped_at`` view for status/current (issue #122):
         # the instant charging last ended while still plugged in, or None.
         # The web adopts it as the reconstructed cost anchor on a cold open,
@@ -257,6 +270,15 @@ class StatusTracker:
         silent and the opening is logged instead. Every dropped step is logged
         once with its size, gap and reason — a session priced from a short list
         is otherwise undiagnosable.
+
+        Every allowed step also accumulates into ``session_wh``, the plug-in's
+        per-tick total across the counter's epochs. A reset inside an open
+        interval freezes that total (the step itself adds nothing) and the
+        epochs after it keep accumulating on top, so ``_finalize_session`` can
+        write an energy-complete ``wh`` once the charger's own cumulative
+        covers only the last epoch (#195). A drop at a block boundary restarts
+        the total instead: it is indistinguishable from a new plug-in's cleared
+        counter, and a total that spanned two plug-ins would double-count.
         """
         if not charging:
             return
@@ -270,11 +292,24 @@ class StatusTracker:
                 # baseline it could contradict: a new plug-in's cleared counter
                 # is a fresh start, not an incident worth chasing in the journal.
                 if step < 0 and self.open_interval is not None:
+                    # Mid-interval, the dropped step is a counter reset: the
+                    # epochs after it still belong to this plug-in, so the
+                    # accumulated total keeps what came before and the
+                    # charger's cumulative is from here on only the last
+                    # epoch's (#195).
+                    self.session_wh_reset_seen = True
                     log(
                         f"interval step skipped: counter reset inside the open "
                         f"interval ({step:.0f} Wh, {_gap_seconds(gap)}); "
                         f"rebaselining"
                     )
+                elif step < 0:
+                    # Between blocks the same drop is indistinguishable from a
+                    # new plug-in's cleared counter, so the accumulation
+                    # restarts at this baseline: it must never span two
+                    # plug-ins (#195).
+                    self.session_wh = 0.0
+                    self.session_wh_reset_seen = False
             else:
                 # An unmeasurable gap has no allowance to compare against.
                 allowed = _interval_step_allowance(gap) if _is_number(gap) else None
@@ -304,6 +339,10 @@ class StatusTracker:
             # either) clears too.
             self.charging_stopped_at = None
         self.open_interval["wh"] += delta
+        # The plug-in total takes the same allowed step the interval does, so
+        # a finalized `wh` and the interval list share one observation basis
+        # (#195).
+        self.session_wh += delta
 
     def _note_stop_stamp(self, data):
         """Record ``charging_stopped_at`` on the charging-state stop edge.
@@ -414,9 +453,13 @@ class StatusTracker:
 
         The just-closed charging interval is written beside the aggregates. The
         aggregates keep their meaning exactly: ``wh`` stays the charger's
-        cumulative session_energy, ``elapsed`` its own timer, and
-        ``started_at``/``ended_at`` the plug-in span — so an older reader, or a
-        session with no interval (a restart that never saw growth), still works.
+        cumulative session_energy — unless a counter reset was observed inside
+        an open interval, when that cumulative covers only the last epoch and
+        ``wh`` becomes the tracker's per-tick accumulation across every epoch
+        (#195), the same deltas the interval list holds — ``elapsed`` its own
+        timer, and ``started_at``/``ended_at`` the plug-in span — so an older
+        reader, or a session with no interval (a restart that never saw
+        growth), still works.
         """
         intervals = self._close_interval()
         energy = self.last_charging_energy
@@ -427,7 +470,15 @@ class StatusTracker:
             energy = (
                 tick_energy if _is_number(tick_energy) and tick_energy > 0 else None
             )
-        if energy is None:
+        # A reset seen inside an open interval makes the charger's cumulative
+        # the last epoch's alone (the record that read 15.96 kWh beside
+        # intervals summing 48, #195): the accumulated per-tick total across
+        # epochs is then the plug-in's observed energy. With no reset seen,
+        # the charger's own cumulative is written exactly as before.
+        accumulated = self.session_wh if self.session_wh_reset_seen else None
+        if not (_is_number(accumulated) and accumulated > 0):
+            accumulated = None
+        if energy is None and accumulated is None:
             self.last_charging_energy = None
             self.last_charging_elapsed = None
             return
@@ -443,7 +494,7 @@ class StatusTracker:
         record = {
             "started_at": started_at,
             "ended_at": ended_at,
-            "wh": float(energy),
+            "wh": float(accumulated if accumulated is not None else energy),
             "elapsed": int(elapsed),
         }
         if intervals:
@@ -601,6 +652,11 @@ def _merge_session(candidate, record, vehicle_connected):
     merged = dict(record)
     merged["started_at"] = min(existing_start, record["started_at"])
     merged["ended_at"] = max(existing_end, record["ended_at"])
+    # max, not sum: wh on either side already covers the whole plug-in -- the
+    # charger's cumulative when no reset was seen, or the per-tick
+    # accumulation across the counter's epochs once one was (#195) -- so the
+    # later record contains the earlier's energy and summing would
+    # double-count.
     merged["wh"] = max(existing_wh, record["wh"])
     merged["elapsed"] = int(max(existing_elapsed, record["elapsed"]))
     intervals = _merge_intervals(
