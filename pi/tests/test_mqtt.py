@@ -174,6 +174,8 @@ class MqttSourceTests(MqttSourceBase):
         client.deliver("chelevse/amp", 15400)
         client.deliver("chelevse/session_elapsed", 65)
         client.deliver("chelevse/temp1", 247)
+        client.deliver("chelevse/temp2", 251)
+        client.deliver("chelevse/temp3", False)
         client.deliver("chelevse/state", 3)
         client.deliver("chelevse/vehicle", 1)
         client.deliver("chelevse/power", 3800)
@@ -183,11 +185,17 @@ class MqttSourceTests(MqttSourceBase):
         fields = bridge.parse_status(self.snapshots[0].fields)
         self.assertEqual(fields["amp"], 15.4)  # milliamps -> amps
         self.assertEqual(fields["elapsed"], 65)  # session_elapsed -> elapsed
-        self.assertEqual(fields["temp1"], 24.7)  # 10ths of °C
         self.assertEqual(fields["state"], 3)
         self.assertEqual(fields["state_label"], "charging")
         self.assertEqual(fields["vehicle"], 1)
         self.assertEqual(fields["power"], 3800)
+        # The temp topics arrive on the wildcard subscription but are dropped
+        # unmapped: the flush carried the other deliveries (the snapshot above
+        # is non-empty) while no temp key ever entered it. The health gate
+        # reads temperatures from the /status parse on polls and reconciles,
+        # never from the topics (#159).
+        for key in ("temp1", "temp2", "temp3", "temp_c"):
+            self.assertNotIn(key, self.snapshots[0].fields)
 
     def test_all_mapped_topics_land_on_their_status_key(self):
         client = self.connect()

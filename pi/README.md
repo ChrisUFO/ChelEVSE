@@ -171,16 +171,17 @@ only the curated fields listed under
 | `<base>/session_energy`   | `session_energy`       | Wh                                                  |
 | `<base>/session_elapsed`  | `elapsed`              | seconds (the deprecated `elapsed` topic is ignored) |
 | `<base>/total_energy`     | `total_energy`         | kWh                                                 |
-| `<base>/temp1`–`temp3`    | —                      | 10ths of °C; ingested for the health gate only      |
+| `<base>/temp1`–`temp3`    | —                      | 10ths of °C; dropped unmapped — no consumer (#159)  |
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
 Everything else on the base topic (retained `config`, availability counters) is
-ignored by the status path. The `temp1`–`temp3` topics are mapped but never
-persisted or displayed (#159): the parse keeps them solely as the health
-observations path's feed — `LiveObservations.note_status` → the
-`thermal.high_temp` corroboration gate — so the gate keeps working under MQTT
-reconciles if probes are ever fitted, while `status/current` carries no
-temperature field. The retained `claim`, `limit` and `boost` documents
+ignored by the status path. The `temp1`–`temp3` topics arrive on the wildcard
+subscription but are dropped unmapped (#159): nothing consumes them — the
+health gate's `thermal.high_temp` corroboration reads temperatures from the
+`/status` parse on polls and reconciles (`parse_status` →
+`LiveObservations.note_status`), never from the topics — and `status/current`
+carries no temperature field. The retained `claim`, `limit` and `boost`
+documents
 are **ingested as claims evidence** (#159): each delivery is decoded and handed
 to the claims holder, parsed defensively (malformed → ignored), and used for
 `status/claims` detail enrichment and corroboration only — never as a status

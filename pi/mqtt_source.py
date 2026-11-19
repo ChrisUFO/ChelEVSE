@@ -80,15 +80,15 @@ KEEPALIVE_SEC = 60
 RECONNECT_MIN_SEC = 1
 RECONNECT_MAX_SEC = 30
 
-# Topic leaf -> /status key. Only the curated status fields are mapped; command/
-# retained-JSON topics (override, config, rapi/…, */set) are ignored by
-# construction because they are not listed here. The temp1-temp3 leaves are the
-# one deliberate exception: nothing downstream persists them (the sink drops
-# them), but the mapping keeps the snapshot view complete for the parse that
-# feeds the health gate's temperature corroboration (#159). The retained
-# claim-family documents (claim/limit/boost) are below: they are not status
-# fields either, but they feed the claims pipeline's evidence holder
-# instead of being dropped (issue #159).
+# Topic leaf -> /status key. Only the curated status fields are mapped; every
+# other leaf arriving on the wildcard subscription — command/retained-JSON
+# topics (override, config, rapi/…, */set) and the temp1-temp3 sensor readings
+# alike — is dropped unmapped here. The health gate never reads the temp
+# topics: its temperatures come from the /status parse on polls and reconciles
+# (parse_status feeds LiveObservations), so mapping them would be ingest with
+# no consumer (#159). The retained claim-family documents (claim/limit/boost)
+# are below: they are not status fields either, but they feed the claims
+# pipeline's evidence holder instead of being dropped (issue #159).
 TOPIC_FIELDS = {
     "amp": "amp",
     "voltage": "voltage",
@@ -99,9 +99,6 @@ TOPIC_FIELDS = {
     "session_energy": "session_energy",
     "session_elapsed": "elapsed",
     "total_energy": "total_energy",
-    "temp1": "temp1",
-    "temp2": "temp2",
-    "temp3": "temp3",
 }
 
 CONFIG_VERSION_TOPIC = "config_version"
