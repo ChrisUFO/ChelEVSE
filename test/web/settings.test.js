@@ -3568,6 +3568,11 @@ test('the advertised plan range includes the gap price exactly when a gap exists
   // resolver (a hand-edited document), so it joins the advertised range and
   // the summary never claims a 0.00 floor the engine does not charge.
   assert.deepEqual(ratePlanRange([dateBase], '7'), { min: 0.2, max: 7 });
+  // The mirror arm (#196): the '7' above widened the range only because a
+  // gap existed — a fully covered plan keeps its rows' own range, so the
+  // summary never advertises a flat rate nothing charges.
+  const coveredBase = rateRowFields(baseRateRow('covered', '0.2', null, null));
+  assert.deepEqual(ratePlanRange([coveredBase], '7'), { min: 0.2, max: 0.2 });
   // A non-finite fallback value leaves the gap genuinely unpriced.
   assert.deepEqual(ratePlanRange([dateBase], ''), { min: 0, max: 0.2 });
   assert.deepEqual(ratePlanRange([dateBase], undefined), { min: 0, max: 0.2 });

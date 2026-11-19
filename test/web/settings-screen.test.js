@@ -590,6 +590,30 @@ test('the checker, gap line and warnings price the flat fallback, or say 0.00 wi
     element('preview-live').textContent,
     /USD 7\.00 per kWh, uncovered date, priced at your flat rate USD 7\.00\.$/,
   );
+
+  // The mirror arm (#196): the 7.00 above widened the advertised range only
+  // because the summer season leaves dates uncovered. A fully covered plan —
+  // one all-year base row — keeps its rows' own range: the summary collapses
+  // a single-price range to "USD 0.20", and the end anchor pins that no
+  // widened 7.00 ever follows it. (A snapshot never overwrites a typed draft,
+  // so the scenario starts from a reset form like every other.)
+  resetSettings();
+  showSettingsData({
+    rate: 0.12,
+    currency: 'USD',
+    rates: [
+      {
+        ...night,
+        id: 'all-year',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+      },
+    ],
+  });
+  type('setting-rate', '7');
+  assert.match(summaryText(), /USD 0\.20$/);
 });
 
 test('the checker names an uncovered hour — this season has no price for it', () => {
