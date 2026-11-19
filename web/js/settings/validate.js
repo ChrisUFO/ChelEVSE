@@ -129,7 +129,7 @@ export function validateSettings(draft) {
 // (normalizeRateSchedule) still drops unusable rows, so a partially corrupt
 // document prices what it can; with no usable row left the flat rate is the
 // only configuration, and with usable rows it prices the instants no row
-// matches (#188) — genuinely unpriced (0) only when no usable flat price is
+// matches (#188) — genuinely unpriced (0) only when no finite flat price is
 // stored either.
 //
 // The charger address is optional and never blocks a save: a stored value the

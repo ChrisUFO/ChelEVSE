@@ -1461,7 +1461,7 @@ test('sectionView never presents an unreached read as current data', () => {
 test('the plan banner appears exactly when a saved plan has an unpriced instant', () => {
   // Gap 3: the banner is the only signal that a stored plan has instants no
   // rate row covers before the owner opens settings — each costs the stored
-  // flat rate (#188), 0.00 only when no usable flat rate is stored. Its
+  // flat rate (#188), 0.00 only when no finite flat rate is stored. Its
   // condition is a pure predicate so it is covered without a DOM.
   const base = { id: 'b', rate: 0.3, days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00' };
   const summer = {
@@ -1558,7 +1558,7 @@ test('the reported #188 session prices at the flat rate, and a half-covered one 
   };
   assert.equal(sessionCostLabel(halfCovered, reported), 'USD 0.44');
 
-  // Without a usable flat rate the same rows are genuinely unpriced again:
+  // Without a finite flat rate the same rows are genuinely unpriced again:
   // the reported session reads USD 0.00 (the console-edited edge, kept loud).
   const { rate: _rate, ...noFallback } = reported;
   assert.equal(sessionCostLabel(session, noFallback), 'USD 0.00');

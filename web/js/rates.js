@@ -4,7 +4,7 @@
 // The settings document keeps a flat `rate` for One rate. A non-empty `rates`
 // list is a season plan: the all-day, every-day row is a base, day-restricted
 // rows are overrides, and an instant no row matches costs the stored flat rate
-// (#188) — 0 only when no usable flat rate is stored:
+// (#188) — 0 only when no finite flat rate is stored:
 //
 //   { rate: 0.31, currency: 'USD', rates: [
 //     { id: 'base', rate: 0.30, days: [0,1,2,3,4,5,6], start: '00:00',
@@ -436,7 +436,7 @@ export function windowMatches(window, date) {
 // — a hand-edited or half-written document keeps its usable rows. If no usable
 // row remains, the flat price is the only configuration left; once usable rows
 // exist, an instant no row matches falls back to the flat price, and is
-// genuinely unpriced (0) only when no usable flat price is stored either.
+// genuinely unpriced (0) only when no finite flat price is stored either.
 // Order is preserved: it only matters as the
 // tie-break within a tier for overlapping rows an older writer may have stored.
 export function normalizeRateSchedule(data) {
@@ -470,7 +470,7 @@ function matchingEntry(schedule, date) {
 const UNPRICED_RATE = 0;
 
 // The price an instant no row matches resolves to once rows exist: the stored
-// flat rate when one is usable, else genuinely unpriced (0). This is the
+// flat rate when one is finite, else genuinely unpriced (0). This is the
 // #188 fallback — an expired season scope must not zero the energy drawn
 // outside every window.
 function flatFallbackRate(schedule) {
@@ -481,15 +481,15 @@ function rateFor(schedule, date) {
   const hit = matchingEntry(schedule, date);
   if (hit) return hit.window.rate;
   // An empty schedule is the flat configuration and returns its rate as-is
-  // (null when unusable, which hides downstream figures). Once rows exist, the
+  // (null when not finite, which hides downstream figures). Once rows exist, the
   // stored flat rate is the fallback price for an unmatched instant (#188);
-  // only when it is unusable is the instant genuinely unpriced (0).
+  // only when it is not finite is the instant genuinely unpriced (0).
   return schedule.rates.length === 0 ? schedule.rate : flatFallbackRate(schedule);
 }
 
 // The rate for one local instant: override, season base, then the stored flat
 // rate — whether or not rows exist. An instant is 0 only when rows exist, none
-// matches, and no usable flat rate is stored.
+// matches, and no finite flat rate is stored.
 export function rateAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   return rateFor(normalizeRateSchedule(schedule), date);
@@ -498,7 +498,7 @@ export function rateAt(date, schedule) {
 // The same lookup with the winning row and why it won. With no match, the
 // `uncoveredDate` / `unpricedHour` flags distinguish "no season covers this
 // date" from "a season covers the date but has no base/window for this hour";
-// both price at the stored flat rate (0 only when no usable flat rate is
+// both price at the stored flat rate (0 only when no finite flat rate is
 // stored).
 export function rateEntryAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
@@ -526,7 +526,7 @@ export function rateEntryAt(date, schedule) {
 // schedules never do; a non-empty schedule does when no base or override matches
 // a slice. This names "no row matched", not the price: since #188 such a slice
 // prices at the stored flat rate, so the live cost marker asks this only when no
-// usable fallback exists (see cost.js).
+// finite fallback exists (see cost.js).
 export function intervalUncovered(start, end, schedule) {
   const startMs = toMillis(start);
   const endMs = toMillis(end);
@@ -906,7 +906,7 @@ export function costForInterval(wh, start, end, schedule) {
     const rate = rateFor(normalized, new Date(from));
     // A null rate survives only on the flat path with nothing stored; once rows
     // exist an unmatched slice resolves to the flat fallback (or 0 when no
-    // usable flat rate is stored), never to a null that would hide the figure.
+    // finite flat rate is stored), never to a null that would hide the figure.
     if (rate == null) return null;
     cost += ((energy * (to - from)) / duration / 1000) * rate;
   }

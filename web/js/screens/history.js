@@ -160,7 +160,7 @@ function seriesCost(point) {
 
 // A saved plan with any instant no rate row covers advertises it on History:
 // such an instant costs the stored flat rate (#188) — 0.00 only when no
-// usable flat rate is stored. Kept as a pure predicate so the wiring is
+// finite flat rate is stored. Kept as a pure predicate so the wiring is
 // testable without a DOM.
 export function showPlanBanner(data) {
   const normalized = costSettings(data);
@@ -173,7 +173,7 @@ function renderPlanBanner() {
   banner.hidden = !showPlanBanner(settings);
   if (banner.hidden) return;
   // The banner names a coverage gap, not only under-pricing, so it keeps
-  // appearing while a usable flat fallback prices the gap (#188) — but then the
+  // appearing while a finite flat fallback prices the gap (#188) — but then the
   // copy must say that price instead of claiming 0.00. Only a missing fallback
   // keeps the 0.00 wording.
   setText(

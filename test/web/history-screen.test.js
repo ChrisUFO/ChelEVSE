@@ -505,7 +505,7 @@ test('the plan banner names the flat fallback, or 0.00 only when none is stored'
     to: '09-15',
   };
 
-  // A usable flat rate prices the gap: the banner appears and names it.
+  // A finite flat rate prices the gap: the banner appears and names it.
   showHistorySettings({ rate: 0.12, currency: 'USD', rates: [summer] });
   assert.equal(element('history-plan-banner').hidden, false);
   assert.equal(
@@ -513,7 +513,7 @@ test('the plan banner names the flat fallback, or 0.00 only when none is stored'
     'Some dates or hours fall outside every season window and are priced at your flat rate USD 0.12.',
   );
 
-  // The same rows with no usable flat rate are genuinely unpriced: 0.00 copy.
+  // The same rows with no finite flat rate are genuinely unpriced: 0.00 copy.
   showHistorySettings({ currency: 'USD', rates: [summer] });
   assert.equal(element('history-plan-banner').hidden, false);
   assert.equal(
