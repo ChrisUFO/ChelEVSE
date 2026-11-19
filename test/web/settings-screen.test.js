@@ -509,6 +509,13 @@ test('a season date edit commits through the card wiring and unsaves the draft',
 // second cell the value.
 const appliesText = () => element('preview-rows').children[2].children[1].textContent;
 
+// The plan summary paints nowrap spans through replaceChildren, so its text
+// lives in the children — the summary element itself holds no composed string.
+const summaryText = () =>
+  element('plan-summary-text')
+    .children.map((child) => child.textContent)
+    .join('');
+
 test('the checker, gap line and warnings price the flat fallback, or say 0.00 without one', () => {
   resetSettings();
   // A date-scoped summer season (the #188 report's shape, scoped through
@@ -555,6 +562,9 @@ test('the checker, gap line and warnings price the flat fallback, or say 0.00 wi
   assert.equal(element('uncovered-price').textContent, 'priced at 0.00');
   assert.equal(element('plan-help-gaps').textContent, 'Dates outside every season cost 0.00.');
   assert.equal(appliesText(), 'Uncovered date — no season covers this date — priced at 0.00.');
+  // The advertised range reaches its 0.00 floor on the same repaint — the
+  // summary never widens to a price nothing charges.
+  assert.match(summaryText(), /USD 0\.00–0\.20/);
 
   // A finite but out-of-bounds rate still prices the fallback — the resolver's
   // gate is finite-only (0–5 is the editor's rule), so the copy must not deny
@@ -569,6 +579,10 @@ test('the checker, gap line and warnings price the flat fallback, or say 0.00 wi
     appliesText(),
     'Uncovered date — no season covers this date — priced at your flat rate USD 7.00.',
   );
+  // The plan summary's advertised range names the union on the same repaint:
+  // the row's 0.20 and the fallback's 7.00, so the rendered range and the
+  // copy above can never diverge again.
+  assert.match(summaryText(), /USD 0\.20–7\.00/);
   for (const listener of element('preview-time').listeners.get('change') || []) listener();
   // The announce leads with the checker's own resolved price, so one match
   // pins that the copy no longer denies it.
