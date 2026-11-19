@@ -228,6 +228,22 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.snapshots[0].fields, {"amp": 15400})
         self.assertEqual(self.source.arrival_generation(), 1)
 
+    def test_a_temp_only_burst_flushes_through_the_debounce_timer(self):
+        # The tests above flush by hand, which proves the liveness flag is
+        # consumed but not that a temp delivery arms the timer at all: an
+        # early return in the temp branch would leave them green while
+        # production never flushed the burst (#159). This one drives the
+        # real timer, so the arm must survive any refactor of that branch.
+        self.source.debounce = 0.02
+        client = self.connect()
+        client.deliver("chelevse/temp1", 247)
+        deadline = time.monotonic() + 2
+        while not self.snapshots and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual([record.fields for record in self.snapshots], [{}])
+        self.assertEqual(self.snapshots[0].arrival, 1)
+        self.assertEqual(self.source.arrival_generation(), 1)
+
     def test_all_mapped_topics_land_on_their_status_key(self):
         client = self.connect()
         for index, (leaf, field) in enumerate(TOPIC_FIELDS.items()):
