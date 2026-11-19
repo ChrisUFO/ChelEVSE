@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { normalizeSettings } from '../../web/js/settings/validate.js';
 
 // S2 #159 removed the Temperature stat end-to-end: no tile, no switch, no
 // `show_temperature` plumbing. The behavior tests for the old preference are
@@ -24,7 +25,7 @@ test('the show-temperature switch is gone from the settings markup', () => {
   assert.equal(html.includes('Show temperature'), false);
 });
 
-test('no show_temperature plumbing remains in the settings and status sources', () => {
+test('no temperature plumbing remains in the settings and status sources', () => {
   const sources = [
     read('../../web/js/settings/state.js'),
     read('../../web/js/settings/validate.js'),
@@ -34,6 +35,10 @@ test('no show_temperature plumbing remains in the settings and status sources', 
   for (const source of sources) {
     assert.equal(source.includes('show_temperature'), false, 'show_temperature');
     assert.equal(source.includes('showTemperature'), false, 'showTemperature');
+    // The tile id and the document field name catch a re-added DOM read or
+    // status.temp_c access that the preference tokens alone would miss.
+    assert.equal(source.includes('fig-temp'), false, 'fig-temp');
+    assert.equal(source.includes('temp_c'), false, 'temp_c');
   }
 });
 
@@ -42,4 +47,19 @@ test('the temperature styles are gone from the stylesheet', () => {
   for (const token of ['.temp-sensors', '.temp-sensor', '.temp-idx', 'fig-wide']) {
     assert.equal(css.includes(token), false, token);
   }
+});
+
+// A settings/current document written before this removal still carries
+// show_temperature, so every legacy load runs normalizeSettings with an
+// unknown key. The loader must answer with the documented shape — stale key
+// ignored, dropped by the next whole-document save — not null, which would
+// blank the form over an accepted save baseline and let a save silently
+// replace the stored rate plan.
+test('the settings loader tolerates a stale show_temperature document', () => {
+  assert.deepEqual(normalizeSettings({ rate: 0.31, currency: 'USD', show_temperature: false }), {
+    rate: 0.31,
+    currency: 'USD',
+    rates: [],
+    charger_host: '',
+  });
 });
