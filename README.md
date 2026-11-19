@@ -28,8 +28,9 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 **Electricity price** has two explicit modes. **One rate** is a single flat price and no schedule. **Seasons &
 time-of-use** turns the same form into a list of seasons, each with a base price and optional daily
-windows. The stored flat rate stays in the document, but is used for pricing only when there is no
-schedule.
+windows. The stored flat rate stays in the document and, once a schedule exists, is also the fallback
+price: any instant no row matches — a date outside every season, or an hour a season does not price —
+costs that flat rate, and 0.00 only when no usable flat rate is stored.
 
 - **One rate** shows the flat rate and the shared currency. The plan is hidden. Switching to
   **Seasons & time-of-use** is offered only while the flat rate is valid; it seeds one visible
@@ -67,20 +68,24 @@ schedule.
   individual day chips. A window whose start equals its end is **All day**; the editor shows that
   instead of `00:00 → 00:00`, and the table shows 00:00–24:00. **Set times** reveals the stored
   start and end without inventing hours.
-- **Uncovered dates cost 0.00.** A line under the seasons lists the dates no season covers and
-  offers **Fill N gaps**. Filling creates an empty base season for each gap, opens the first one and
+- **Uncovered dates cost your flat rate.** A line under the seasons lists the dates no season covers —
+  “Uncovered dates — priced at your flat rate USD 0.12”, or 0.00 when no usable flat rate is stored —
+  and offers **Fill N gaps**. Filling creates an empty base season for each gap, opens the first one and
   focuses its base rate; nothing is silently repriced. With every date covered and a base already
   present, **Add a season** is disabled and the reason is printed beside it (edit a season's dates to
   make room); it is never silently absent. A season with windows but no base shows “No base rate —
-  hours outside the windows have no price” and **Add base rate**; adding it uses the stored One rate
+  hours outside the windows cost your flat rate unless another season's base covers them” (no price at
+  all when no usable flat rate is stored) and **Add base rate**; adding it uses the stored One rate
   value, visibly. If another season's base already overlaps those dates, the add action is withheld
   because two bases on one date are invalid.
 - **Switching One rate → Seasons seeds the current month**, not the whole year: the flat price
   becomes a date-bounded base season, a note says so, the rest of the year stays an uncovered gap
-  (0.00 until covered) and **Add a season** is immediately usable for a Summer/Winter split.
+  (it costs your flat rate until covered) and **Add a season** is immediately usable for a
+  Summer/Winter split.
 - **Warnings do not block Save.** Uncovered dates, a base-less season and a base-less hour are
-  warnings, not errors. Saving stays enabled, and the checker and history say which moments are
-  0.00. An empty base or invalid row is a normal field error and does block Save.
+  warnings, not errors. Saving stays enabled, and the checker and history say which moments fall
+  outside every window and what they cost — your flat rate, or 0.00 when no usable flat rate is
+  stored. An empty base or invalid row is a normal field error and does block Save.
 - **Duplicate** copies a season's rows into the rest of the year in one action: the months it does
   not cover, or the single date range a date season leaves (Summer Jun 15–Sep 15 becomes Winter
   Sep 16–Jun 14). It is only offered when that complement is free and the copy stays within the
@@ -97,13 +102,16 @@ schedule.
 - **What applies at** checks a local date and time against the current draft — saved or not — and
   names what prices it. A base reads `Base · Jun 15–Sep 15`; an override reads its day/time summary
   and scope (`Weekdays · 16:00–19:00 · Jun 15–Sep 15`); no row at all reads `Uncovered date — no
-season covers this date — priced at 0.00.`; a season with no base or window for that hour reads
-  `Uncovered hour — this season has no price for this hour — 0.00.` **Now** fills in the current
+season covers this date — priced at your flat rate USD 0.12.`; a season with no base or window for
+  that hour reads `Uncovered hour — this season has no price for this hour — your flat rate USD 0.12.`
+  (both 0.00 when no usable flat rate is stored). **Now** fills in the current
   moment. A definitive answer is withheld while a row is incomplete or two rows collide; the checker
   points back to the blocking fields and asks for the rate when that is the only missing value.
 - The plan summary names the number of seasons and rates, the advertised range and any uncovered
-  dates (`2 seasons · 3 rates · USD 0.00–0.40 · 1 gap`). The range includes 0 whenever some instant
-  is unpriced. The save row still carries `N to fix` for errors; warnings never add to that count.
+  dates (`2 seasons · 3 rates · USD 0.00–0.40 · 1 gap`). The range unions the flat rate in whenever
+  some instant is uncovered — exactly what those hours cost — and includes 0.00 only when no usable
+  flat rate is stored. The save row still carries `N to fix` for errors; warnings never add to that
+  count.
 
 The stored document is unchanged: one flat `rates` list. A month row keeps
 `{ id, rate, days, start, end, months }`. A date row adds `from` and `to` (`MM-DD`, inclusive)
@@ -128,8 +136,10 @@ Technical rules:
   2024 as a reference year; only the month and day are stored. Bounds are inclusive; `from === to`
   is a single day; a reversed range wraps. Leap day is a real annual day (the stored ring always
   includes 29 February); a non-leap year simply has no instant there.
-- Resolution is **override → season base → 0**. The stored flat rate applies only when `rates` is
-  empty. A row's after-midnight tail uses the season of the day it started. The last matching row
+- Resolution is **override → season base → the stored flat rate**. An instant no row matches — a
+  date outside every season, or an hour a season does not price — costs the stored flat rate whether
+  or not rows exist; it is 0.00 only when rows exist, none matches, and no usable flat rate is
+  stored. A row's after-midnight tail uses the season of the day it started. The last matching row
   within each tier is the deterministic tie-break for a hand-edited overlap, but the editor rejects
   same-tier collisions: two bases on one date, or two daily windows that can both match one instant.
   A base plus a daily window is the supported model, not a collision.
@@ -155,8 +165,10 @@ live session and the whole history immediately.
   so under the "Charger offline" banner the last known energy is shown without a scheduled cost.
   Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
   price yet). For a flat rate the figure is still `kWh × rate`, exactly as before. When any slice
-  of the live interval has no base/window price, that slice costs 0.00 and the figure gains a
-  warning-coloured **understates cost** line (tooltip: the 0.00 slices); the figure is not hidden.
+  of the live interval has no base/window price, that slice costs the stored flat rate, so the
+  figure is policy-correct and carries no marker; only when no usable flat rate is stored does the
+  slice cost 0.00 and the figure gain a warning-coloured **understates cost** line (tooltip: the
+  0.00 slices); the figure is not hidden.
 - **History session** costs use the session's own charging intervals when it has them: each
   contiguous charging block is priced over its own start and end, so a top-up at 03:00 stays at the
   off-peak price even though the plug-in began the previous evening. The intervals are only trusted
@@ -166,9 +178,9 @@ live session and the whole history immediately.
   mid-charge bridge restart leaves the pre-restart energy in the total and in no interval, and a
   counter reset or a dropped implausible reading can make the intervals disagree in either
   direction. When a usable interval list cannot be priced (a malformed timestamp or an unreadable
-  rate), the figure is hidden rather than guessed. A schedule with any unpriced dates or base-less
-  hours also shows a plan banner above history saying those moments are shown at 0.00, with a link
-  back to settings.
+  rate), the figure is hidden rather than guessed. A schedule with any uncovered dates or base-less
+  hours also shows a plan banner above history saying those moments are priced at your flat rate
+  (shown at 0.00 only when no usable flat rate is stored), with a link back to settings.
 - **Uniform pro-rating (fallback, an approximation).** A session's energy is one total, not the energy
   drawn in each window, so each slice between rate boundaries is assumed to have drawn energy in
   proportion to its share of the span it is priced over. A charge that ramps up inside one window is
@@ -182,7 +194,8 @@ live session and the whole history immediately.
 - **The period total and the selected bar's cost are hidden when a rate plan exists**, because a history
   document holds a single kWh figure per day and it cannot be split across the windows it was drawn
   in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary
-  says so; the plan banner additionally flags any 0.00 moments. With no plan, every total and bar
+  says so; the plan banner additionally flags the moments outside every window and what they cost
+  (your flat rate, or 0.00 when none is stored). With no plan, every total and bar
   cost is exactly what it was before rate plans existed.
 
 ## How it works
