@@ -59,6 +59,7 @@ import {
   previewBlocker,
   planProblemText,
   previewRate,
+  rateIsFinite,
   rateIsUsable,
   rateMonthsText,
   rateMonthScope,
@@ -2344,7 +2345,7 @@ test('an all-day window is recognised from its stored start and end', () => {
 
 test('the plan range ignores bad prices', () => {
   // Bare rows have no scope, so the plan reports a 0 minimum; this call passes
-  // no usable flat fallback, so the gaps are genuinely unpriced (#188) — not a
+  // no finite flat fallback, so the gaps are genuinely unpriced (#188) — not a
   // general rule. The malformed 9 and empty prices still do not widen the
   // maximum.
   assert.deepEqual(ratePlanRange([{ rate: '0.1' }, { rate: 9 }, { rate: '' }, { rate: 0.32 }]), {
@@ -2362,6 +2363,19 @@ test('a usable rate is finite and inside the accepted bounds', () => {
   // Non-numeric input is unusable rather than a parse accident.
   for (const value of ['six', null, undefined, Number.NaN, Infinity]) {
     assert.equal(rateIsUsable(value), false);
+  }
+});
+
+test('a finite rate is any number the resolver charges, bounds aside', () => {
+  // The flat-fallback copy gate (#188): normalizeRateSchedule keeps any finite
+  // rate and flatFallbackRate charges it, so an out-of-bounds value still
+  // prices a no-row instant.
+  for (const value of ['0', 0, '0.2', 0.2, '5', 5, '7', 7, 5.5, -1]) {
+    assert.equal(rateIsFinite(value), true);
+  }
+  // Absent, blank and non-numeric input is not a rate the resolver charges.
+  for (const value of ['', '   ', 'abc', null, undefined, Number.NaN, Infinity]) {
+    assert.equal(rateIsFinite(value), false);
   }
 });
 
@@ -3508,7 +3522,7 @@ test('a plan whose hours are all covered by overrides is priced everywhere', () 
   assert.deepEqual(ratePlanRange([weekdays, weekend]), { min: 0.2, max: 0.3 });
 
   // The hours a base-less window leaves open still have no row — this call
-  // passes no usable flat fallback, so they are genuinely unpriced (#188),
+  // passes no finite flat fallback, so they are genuinely unpriced (#188),
   // not a general rule...
   assert.equal(planHasUnpriced([dayEvening]), true);
   assert.deepEqual(ratePlanRange([dayEvening]), { min: 0, max: 0.3 });
@@ -3534,12 +3548,12 @@ test('the advertised plan range includes the gap price exactly when a gap exists
     min: 0.3,
     max: 0.32,
   });
-  // A gap with no usable flat fallback is genuinely unpriced, so 0 stays in
+  // A gap with no finite flat fallback is genuinely unpriced, so 0 stays in
   // the advertised range.
   assert.deepEqual(ratePlanRange([dateBase]), { min: 0, max: 0.2 });
   assert.deepEqual(ratePlanRange([dateWindow]), { min: 0, max: 0.32 });
   assert.deepEqual(ratePlanRange([allYearBase, dateWindow]), { min: 0.3, max: 0.32 });
-  // With a usable flat fallback (#188) the same gaps price at that rate, so
+  // With a finite flat fallback (#188) the same gaps price at that rate, so
   // the fallback price joins the advertised range — widening the maximum
   // when it sits above the rows' own prices...
   assert.deepEqual(ratePlanRange([dateBase], 0.31), { min: 0.2, max: 0.31 });
@@ -3547,11 +3561,16 @@ test('the advertised plan range includes the gap price exactly when a gap exists
   // a summer row of 0.20 with a 0.12 flat fallback).
   assert.deepEqual(ratePlanRange([dateWindow], 0.31), { min: 0.31, max: 0.32 });
   assert.deepEqual(ratePlanRange([dateBase], 0.12), { min: 0.12, max: 0.2 });
-  // A usable fallback of exactly 0 prices the gaps at zero, so the range
-  // reaches 0 through the union rather than the unusable special case.
+  // A finite fallback of exactly 0 prices the gaps at zero, so the range
+  // reaches 0 through the union rather than the non-finite special case.
   assert.deepEqual(ratePlanRange([dateBase], 0), { min: 0, max: 0.2 });
-  // An unusable fallback value leaves the gap genuinely unpriced.
+  // A finite fallback outside the editor's 0–5 bounds is still charged by the
+  // resolver (a hand-edited document), so it joins the advertised range and
+  // the summary never claims a 0.00 floor the engine does not charge.
+  assert.deepEqual(ratePlanRange([dateBase], '7'), { min: 0.2, max: 7 });
+  // A non-finite fallback value leaves the gap genuinely unpriced.
   assert.deepEqual(ratePlanRange([dateBase], ''), { min: 0, max: 0.2 });
+  assert.deepEqual(ratePlanRange([dateBase], undefined), { min: 0, max: 0.2 });
 });
 
 test('previewRate reports base, override, uncovered date and unpriced hour', () => {

@@ -1367,14 +1367,14 @@ export function paintPlan(state) {
   state.planPeriods = state.ratePeriodsForDraft();
   // One walk of the draft per paint: each base block's warning asks whether
   // any instant no row covers — such an instant costs the stored flat rate
-  // (#188), 0.00 only when no usable flat rate is stored. The summary's
+  // (#188), 0.00 only when no finite flat rate is stored. The summary's
   // minimum comes from the fallback-aware range below.
   state.planUnpriced = planHasUnpriced(state.draftRates);
   // Only rows that can match and pass validation set a meaningful range; an
   // invalid row is shown and fixed but its price never applies. A base-less
   // season and a date gap price at the stored flat fallback, so that price
   // joins the advertised range whenever gaps exist, and the minimum reaches
-  // 0.00 only when that fallback is unusable.
+  // 0.00 only when that fallback is not finite.
   const rateRows = state.planPeriods
     .filter((period) => period.kind !== 'invalid')
     .flatMap((period) => period.rows)
