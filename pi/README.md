@@ -207,7 +207,12 @@ debounced snapshot as a burst, so a user Stop arriving as `state 254` over MQTT
 labels `stopped` immediately instead of `sleeping` until the next reconcile. A
 redelivery that restates the known flag queues nothing — a retained copy is
 broker-held, not the charger publishing, and must not advance the arrival
-generation the outage classifier reads.
+generation the outage classifier reads. The retain flag draws the same line
+before the first `/status` seed: the broker's stored copy replayed on subscribe
+queues nothing (and the seed carries `manual_override` anyway), while a fresh
+publish — the broker clears the flag on a live forward — queues even unseeded,
+so a Stop pressed after a bridge restart with the charger's HTTP wedged still
+labels `stopped`.
 
 **Cadence.** While the broker is connected **and the subscription is granted**,
 `/status` is fetched once every `MQTT_RECONCILE_SEC` (60 s) and merged into the

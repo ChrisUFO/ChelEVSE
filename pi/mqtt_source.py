@@ -701,7 +701,10 @@ class MqttSource:
             self._config_version(_decode(getattr(message, "payload", b"")))
             return
         if leaf == OVERRIDE_TOPIC:
-            self._override(_decode(getattr(message, "payload", b"")))
+            self._override(
+                _decode(getattr(message, "payload", b"")),
+                getattr(message, "retain", False),
+            )
             return
         if leaf == RAPI_OUT_TOPIC:
             self._rapi_out(_decode(getattr(message, "payload", b"")))
@@ -771,7 +774,7 @@ class MqttSource:
                 self.last_lwt_at = datetime.now(UTC)
             self.log(f"mqtt gateway announced {state}")
 
-    def _override(self, value):
+    def _override(self, value, retained=False):
         """Retained override document -> confirmation state for override commands.
 
         ``<base>/override/set`` echoes the command and is ignored: only the
@@ -785,11 +788,14 @@ class MqttSource:
         retained redelivery that restates the known fact must not advance the
         arrival generation, which the outage classifier reads as the charger
         publishing (a retained copy is broker-held, not fresh publishing).
-        Nothing queues before the first seed either: a fresh process receives
-        the broker's retained copy while the snapshot holds no state for the
-        flag to label, that delivery is as broker-held as a restated
-        redelivery, and the seed's own ``/status`` reply carries
-        ``manual_override`` — so no fact is lost by waiting.
+        Before the first seed only the retained copy waits (``retained`` —
+        the broker replays its stored document on every (re)subscribe): it
+        is as broker-held as a restated redelivery, and the seed's own
+        ``/status`` reply carries ``manual_override`` anyway. A fresh
+        publish queues even unseeded — the broker clears the retain flag on
+        a live forward, so it is the charger writing now, and a process
+        restarted while the charger's HTTP is wedged never sees a seed that
+        could carry the fact (#159).
         """
         with self._lock:
             self.override = value if isinstance(value, dict) else None
@@ -798,7 +804,8 @@ class MqttSource:
             known = self._pending.get(
                 "manual_override", self.snapshot.get("manual_override")
             )
-            if self.seeded and flag is not None and flag != known:
+            seeded_or_fresh = self.seeded or not retained
+            if flag is not None and flag != known and seeded_or_fresh:
                 self._pending["manual_override"] = flag
                 self._arm_debounce()
         self._notify_command_waiters()

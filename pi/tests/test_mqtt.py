@@ -319,14 +319,15 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.source.arrival_generation(), 0)
 
     def test_a_retained_override_doc_before_any_seed_queues_nothing(self):
-        # A fresh process receives the broker's retained copy before the
+        # A fresh process receives the broker's retained copy (retain=True —
+        # the broker replays its stored document on subscribe) before the
         # first HTTP seed: queuing it would advance the arrival generation
-        # on a broker-held delivery -- the same honesty the restated-fact
-        # pin above demands -- and the snapshot holds no state yet for the
+        # on a broker-held delivery — the same honesty the restated-fact
+        # pin above demands — and the snapshot holds no state yet for the
         # flag to label. The seed's own /status reply carries
         # manual_override, so no fact is lost by waiting.
         client = self.connect()
-        client.deliver("chelevse/override", '{"state": "disabled"}')
+        client.deliver("chelevse/override", '{"state": "disabled"}', retain=True)
         self.source.flush()
         self.assertEqual(self.snapshots, [])
         self.assertEqual(self.source.arrival_generation(), 0)
@@ -339,6 +340,26 @@ class MqttSourceTests(MqttSourceBase):
             bridge.parse_snapshot(self.snapshots[0].fields)["state_label"],
             "stopped",
         )
+
+    def test_a_fresh_override_publish_before_any_seed_queues_the_fact(self):
+        # The pre-seed drop above targets only the broker's stored copy: a
+        # live forward arrives with the retain flag cleared even though the
+        # firmware retains the document, and it is the charger genuinely
+        # publishing. Restarted while the charger's HTTP is wedged (#159),
+        # no seed ever lands, so this fresh document is the only fact that
+        # can label the user's Stop stopped.
+        client = self.connect()
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        client.deliver("chelevse/state", 254)
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[0].fields)["state_label"],
+            "stopped",
+        )
+        # Still a partial observation — the flush-time facts, not a seed.
+        self.assertFalse(self.snapshots[0].complete)
+        self.assertFalse(self.source.seeded)
 
     def test_two_override_documents_in_one_window_the_later_one_wins(self):
         # The pending-first ``known`` lookup is what makes the second
@@ -1125,6 +1146,22 @@ class MqttWorkerTests(MqttWorkerBase):
         self.assertEqual(doc["state_label"], "stopped")
         # The flag feeds the label only; it is not a curated field.
         self.assertNotIn("manual_override", doc)
+
+    def test_a_user_stop_via_mqtt_before_any_seed_still_writes_stopped(self):
+        # The restarted-while-HTTP-is-wedged mode (#159): no /status has
+        # answered, nothing is seeded, and the user presses Stop. The
+        # firmware's rewrite of the document is a fresh publish — the
+        # broker clears the retain flag on a live forward — so the fact
+        # must queue without a seed: no reconcile is coming to carry it,
+        # and status/current would otherwise read sleeping for the Stop.
+        self.assertFalse(self.source.seeded)
+        self.client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.client.deliver("chelevse/state", 254)
+        self.source.flush()
+        self.run_worker()
+        doc = self.current()
+        self.assertEqual(doc["state"], 254)
+        self.assertEqual(doc["state_label"], "stopped")
 
     def test_a_pre_seed_snapshot_is_not_promoted_by_a_later_seed(self):
         # Flushed before /status answered, seeded while it sat in the queue: its
