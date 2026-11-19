@@ -640,8 +640,9 @@ test('costForInterval returns null for unusable inputs', () => {
   assert.equal(costForInterval(1000, date(2026, 10, 19, 13, 0), start, s), null);
   // No flat rate and no window covering 12:00: the cost is unknown.
   assert.equal(costForInterval(1000, start, date(2026, 10, 19, 13, 0), { rates: [] }), null);
-  // A non-empty schedule has no flat fallback: the unmatched hour costs 0,
-  // while an empty list with no flat rate is still unknown.
+  // An unmatched hour costs the stored flat rate (#188) — this fixture stores
+  // none, so the hour is genuinely unpriced (0), while an empty list with no
+  // flat rate is still unknown.
   assert.equal(
     costForInterval(1000, start, date(2026, 10, 19, 13, 0), {
       rates: [windowRow({ start: '22:00', end: '23:00' })],

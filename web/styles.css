@@ -2200,9 +2200,9 @@ input[aria-invalid='true'] {
 .strip-seg.window {
   background: color-mix(in oklab, var(--accent) 72%, var(--surface));
 }
-/* Uncovered is 0.00, not a price: the only band that is not a colour of the
-   plan. It reads as the warning it is, and grey no longer stands for both it and
-   a priced window. */
+/* Uncovered is priced by the stored flat rate rather than by a row (#188): the
+   only band that is not a colour of the plan. It reads as the warning it is,
+   and grey no longer stands for both it and a priced window. */
 .strip-seg.uncovered {
   background: color-mix(in oklab, var(--err) 22%, transparent);
   border: 1px dashed color-mix(in oklab, var(--err) 60%, var(--line));

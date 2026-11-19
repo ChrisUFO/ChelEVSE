@@ -158,9 +158,10 @@ function seriesCost(point) {
 
 // ---------- summary + chart ----------
 
-// A saved plan with any unpriced instant advertises it on History: with a
-// schedule, some sessions can be priced at 0.00 without any other signal. Kept as
-// a pure predicate so the wiring is testable without a DOM.
+// A saved plan with any instant no rate row covers advertises it on History:
+// such an instant costs the stored flat rate (#188) — 0.00 only when no
+// usable flat rate is stored. Kept as a pure predicate so the wiring is
+// testable without a DOM.
 export function showPlanBanner(data) {
   const normalized = costSettings(data);
   return hasRateSchedule(normalized) && planHasUnpriced(normalized.rates);

@@ -954,10 +954,11 @@ function paintBaseBlock(card, state) {
     const covered = periodHasBaseOverlap(card.period, state.draftRates);
     card.addBaseButton.hidden = covered;
     if (card.baseWarning) {
-      // The base-less warning is about a plan that leaves hours at 0.00. A plan
-      // whose windows between them price the whole year has nothing to warn
-      // about, so the sentence states that instead of promising a gap that the
-      // strip, the table and History all deny.
+      // The base-less warning is about a plan that leaves hours no row covers:
+      // those hours cost the stored flat rate (#188) — 0.00 only when no usable
+      // flat rate is stored. A plan whose windows between them price the whole
+      // year has nothing to warn about, so the sentence states that instead of
+      // promising a gap that the strip, the table and History all deny.
       setText(
         card.baseWarning,
         covered
@@ -1359,8 +1360,10 @@ export function paintPlan(state) {
   }
 
   state.planPeriods = state.ratePeriodsForDraft();
-  // One walk of the draft per paint: the plan summary's 0.00 minimum and each
-  // base block's warning both ask whether any instant is unpriced.
+  // One walk of the draft per paint: each base block's warning asks whether
+  // any instant no row covers — such an instant costs the stored flat rate
+  // (#188), 0.00 only when no usable flat rate is stored. The summary's
+  // minimum comes from the fallback-aware range below.
   state.planUnpriced = planHasUnpriced(state.draftRates);
   // Only rows that can match and pass validation set a meaningful range; an
   // invalid row is shown and fixed but its price never applies. A base-less
