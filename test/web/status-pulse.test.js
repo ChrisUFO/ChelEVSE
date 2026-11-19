@@ -95,6 +95,24 @@ test('the state badge pulses only for a live charging snapshot', () => {
   assert.equal(pulsing(), false);
 });
 
+test('the state label renders the bridge’s own stopped/sleeping split', () => {
+  // Firmware 8.2.3 reports the same EVSE state 254 for a user Stop and a
+  // real sleep; the bridge separates them (`manual_override`, #159 — the
+  // MQTT path included) and this screen renders only the bridge's word. It
+  // never re-derives a label from the raw state, so a user Stop arriving as
+  // `stopped` can never paint Sleeping here.
+  showStatus(snapshot({ state: 254, state_label: 'stopped' }));
+  assert.equal(element('state-label').textContent, 'Stopped');
+
+  showStatus(snapshot({ state: 254, state_label: 'sleeping' }));
+  assert.equal(element('state-label').textContent, 'Sleeping');
+
+  // The vocabulary is closed: anything else falls back to Unknown rather
+  // than guessing a mood from the raw code.
+  showStatus(snapshot({ state: 254, state_label: 'nonsense' }));
+  assert.equal(element('state-label').textContent, 'Unknown');
+});
+
 test('the banner routes state-aware staleness verdicts', () => {
   const ago = (ms) => ({ toMillis: () => Date.now() - ms });
   const banner = () => element('banner');

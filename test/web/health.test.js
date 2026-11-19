@@ -22,7 +22,8 @@ const at = (year, month, day, hour = 12, minute = 0) =>
   new Date(year, month - 1, day, hour, minute).getTime();
 const NOW = at(2026, 11, 16, 9, 30);
 const seconds = (ms) => Math.floor(ms / 1000);
-// A complete, quiet report: both gates closed, nothing listed.
+// A complete, quiet report: both gates closed, nothing listed. The document
+// a current bridge writes (#186): it carries the ack capability fact.
 const report = (overrides = {}) => ({
   reachable: true,
   source: 'http',
@@ -32,6 +33,7 @@ const report = (overrides = {}) => ({
   advisories: [],
   alerted: {},
   acks: {},
+  ack_command: true,
   ...overrides,
 });
 const visit = (doc, extra = {}) => healthState({ doc, nowMs: NOW, ...extra });
@@ -687,6 +689,36 @@ test('only an unacknowledged advisory with a usable id offers the control', () =
   assert.deepEqual(visit(null).advisories, []);
   assert.deepEqual(visit(report({ reachable: false })).advisories, []);
   assert.deepEqual(visit(report({ advisories: [RECORDED] }), { error: true }).advisories, []);
+});
+
+test('the control is fail-closed on the bridge’s ack_command capability', () => {
+  // Deploy skew (#159): a web deploy ahead of its bridge reads a document
+  // with no `ack_command` — an older bridge cannot perform the command the
+  // control writes, so every row hides it rather than offering a button
+  // that could only fail. Only an explicit `true` shows it.
+  const legacy = report({ advisories: [RECORDED] });
+  delete legacy.ack_command; // the exact shape an older bridge leaves
+  for (const state of [
+    visit(legacy),
+    visit(report({ advisories: [RECORDED], ack_command: undefined })),
+    visit(report({ advisories: [RECORDED], ack_command: null })),
+    visit(report({ advisories: [RECORDED], ack_command: false })),
+    visit(report({ advisories: [RECORDED], ack_command: 'true' })),
+  ]) {
+    assert.equal(state.advisories[0].canAcknowledge, false);
+    // The control shape the screen paints follows, and even a synthetic row
+    // handed straight to the tracker can start no write.
+    assert.equal(ackControlState(state.advisories[0]).show, false);
+    const tracker = createAckTracker({ write: () => Promise.resolve({}) });
+    assert.equal(tracker.start(state.advisories[0]), false);
+  }
+
+  assert.equal(visit(report({ advisories: [RECORDED] })).advisories[0].canAcknowledge, true);
+
+  // The firmware-level gate stands regardless of the capability fact: an
+  // unsupported source lists no advisories at all, so nothing offers a
+  // control on firmware that cannot report health.
+  assert.deepEqual(visit(report({ source: 'unsupported' })).advisories, []);
 });
 
 test('the control reads idle, busy, then the bridge’s reason — never “acknowledged”', () => {

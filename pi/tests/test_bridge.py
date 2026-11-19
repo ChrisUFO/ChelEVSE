@@ -137,6 +137,25 @@ class ParseStatusTests(unittest.TestCase):
         fields = bridge.parse_status({"state": 254})
         self.assertEqual(fields["state_label"], "sleeping")
 
+    def test_state_254_snapshot_label_follows_the_merged_override_fact(self):
+        # The MQTT partial path (#159): a snapshot is the /status seed merged
+        # with one burst, and the override fact in that merge comes from the
+        # seed or from the retained override document the source maps onto it
+        # (no status topic publishes it). The label follows that merged fact
+        # exactly as the HTTP path would derive it -- never a guess.
+        for data, label in (
+            ({"state": 254, "manual_override": 1}, "stopped"),
+            ({"state": 254, "manual_override": 0}, "sleeping"),
+            # Unknown override (never seen): honest about what is knowable.
+            ({"state": 254}, "sleeping"),
+        ):
+            with self.subTest(data=data):
+                parsed = bridge.parse_snapshot(data)
+                self.assertEqual(parsed["state_label"], label)
+                # The flag only ever feeds the label; it is not a curated
+                # field, so the document keeps no second override source.
+                self.assertNotIn("manual_override", parsed)
+
     def test_other_states_are_unchanged(self):
         # The 254 disambiguation does not touch the plain mapping, even though
         # manual_override would be 1 for a held current.
