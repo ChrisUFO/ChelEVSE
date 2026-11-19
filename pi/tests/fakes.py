@@ -349,8 +349,9 @@ class FakeSession:
 class FakeMessage:
     """Just the paho message surface the source reads."""
 
-    def __init__(self, topic, payload):
+    def __init__(self, topic, payload, retain=False):
         self.topic = topic
+        self.retain = retain
         if isinstance(payload, bytes):
             self.payload = payload
         else:
@@ -447,9 +448,9 @@ class FakeMqttClient:
         if self.on_subscribe is not None:
             self.on_subscribe(self, None, mid, reason_codes, None)
 
-    def deliver(self, topic, payload):
+    def deliver(self, topic, payload, retain=False):
         if self.on_message is not None:
-            self.on_message(self, None, FakeMessage(topic, payload))
+            self.on_message(self, None, FakeMessage(topic, payload, retain))
 
 
 class FakeMqttFactory:

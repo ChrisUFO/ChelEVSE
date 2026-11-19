@@ -51,7 +51,11 @@ Design notes:
   adds ``publish`` plus one waiter each for the retained ``<base>/override``
   document (pause/resume/set-current) and the next ``<base>/rapi/out`` (RAPI).
   The connection is only usable for commands when ``connected`` and
-  ``subscribed`` both hold; the bridge decides that, not this module.
+  ``subscribed`` both hold; the bridge decides that, not this module. The
+  retained override document doubles as the only fresher-than-the-seed
+  ``manual_override`` fact on the MQTT path: no status topic publishes the
+  flag, so a document that changes it feeds the debounced snapshot and the
+  label for ``state 254`` stays ``stopped`` for a user Stop (#159).
 
 The client is injected (``client_factory``), so the unit tests need no broker.
 """
@@ -181,6 +185,32 @@ def _decode(payload):
 def _default_log(message):
     """Fallback journal line; the bridge injects its own ``log`` in production."""
     print(message, flush=True)
+
+
+def _override_manual_flag(override):
+    """Retained override document -> the ``manual_override`` status fact.
+
+    The firmware rewrites ``<base>/override`` on every override change, and its
+    states map exactly onto the flag ``/status`` reports for the same change:
+    ``disabled`` (a pause) and ``active`` (a held current) both carry
+    ``manual_override`` 1 — the flag is 1 for *either* override — while
+    ``"null"`` is the auto state, 0. Any other shape (not a document, no
+    recognised ``state``) states no fact: None leaves whatever the ``/status``
+    seed last said standing, so the label stays honest about what is knowable.
+
+    This is the MQTT path's cure for the 254 ambiguity (#159): no topic
+    publishes ``manual_override``, so without it a user Stop (state 254 with
+    override 1) merges into a seed whose override fact predates the Stop and
+    the snapshot labels ``sleeping`` until the next HTTP reconcile.
+    """
+    if not isinstance(override, dict):
+        return None
+    state = override.get("state")
+    if state == "null":
+        return 0
+    if state in ("disabled", "active"):
+        return 1
+    return None
 
 
 def _reason_value(reason_code):
@@ -574,6 +604,14 @@ class MqttSource:
         # A new status snapshot can satisfy an override confirmation.
         self._notify_command_waiters()
 
+    def _arm_debounce(self):
+        """Schedule the debounced flush once (the caller holds the lock)."""
+        if self._timer is None:
+            timer = threading.Timer(self.debounce, self.flush)
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
     # -- paho callbacks ----------------------------------------------------
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None, *_):
@@ -663,7 +701,10 @@ class MqttSource:
             self._config_version(_decode(getattr(message, "payload", b"")))
             return
         if leaf == OVERRIDE_TOPIC:
-            self._override(_decode(getattr(message, "payload", b"")))
+            self._override(
+                _decode(getattr(message, "payload", b"")),
+                getattr(message, "retain", False),
+            )
             return
         if leaf == RAPI_OUT_TOPIC:
             self._rapi_out(_decode(getattr(message, "payload", b"")))
@@ -699,11 +740,7 @@ class MqttSource:
                 self._liveness_only = True
             else:
                 self._pending[field] = value
-            if self._timer is None:
-                timer = threading.Timer(self.debounce, self.flush)
-                timer.daemon = True
-                self._timer = timer
-                timer.start()
+            self._arm_debounce()
 
     def _is_announce(self, topic):
         """True for a topic the announce filter covers.
@@ -737,15 +774,40 @@ class MqttSource:
                 self.last_lwt_at = datetime.now(UTC)
             self.log(f"mqtt gateway announced {state}")
 
-    def _override(self, value):
+    def _override(self, value, retained=False):
         """Retained override document -> confirmation state for override commands.
 
         ``<base>/override/set`` echoes the command and is ignored: only the
         retained ``<base>/override`` document is the firmware's state.
+
+        A document that *changes* the ``manual_override`` fact also feeds the
+        debounced snapshot: no status topic publishes the flag, so this
+        document is the only fresher-than-the-seed source on the MQTT path,
+        and without it a user Stop (state 254) would label ``sleeping`` until
+        the next HTTP reconcile (#159). Only a change queues a delivery — a
+        retained redelivery that restates the known fact must not advance the
+        arrival generation, which the outage classifier reads as the charger
+        publishing (a retained copy is broker-held, not fresh publishing).
+        Before the first seed only the retained copy waits (``retained`` —
+        the broker replays its stored document on every (re)subscribe): it
+        is as broker-held as a restated redelivery, and the seed's own
+        ``/status`` reply carries ``manual_override`` anyway. A fresh
+        publish queues even unseeded — the broker clears the retain flag on
+        a live forward, so it is the charger writing now, and a process
+        restarted while the charger's HTTP is wedged never sees a seed that
+        could carry the fact (#159).
         """
         with self._lock:
             self.override = value if isinstance(value, dict) else None
             self.override_updates += 1
+            flag = _override_manual_flag(self.override)
+            known = self._pending.get(
+                "manual_override", self.snapshot.get("manual_override")
+            )
+            seeded_or_fresh = self.seeded or not retained
+            if flag is not None and flag != known and seeded_or_fresh:
+                self._pending["manual_override"] = flag
+                self._arm_debounce()
         self._notify_command_waiters()
 
     def _rapi_out(self, value):

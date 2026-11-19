@@ -447,8 +447,15 @@ function renderHealth() {
   const caveat = $('health-caveat');
   caveat.hidden = !state.caveat;
   setText(caveat, state.caveat);
+  // The signature carries everything the row renders — including whether it
+  // offers the ack control: the bridge-capability fact can flip beneath an
+  // otherwise identical advisory list (a bridge upgraded under this web), and
+  // a rebuild is what makes the control appear or disappear (#159).
   const signature = state.advisories
-    .map((row) => `${row.id}|${row.presentation}|${row.severity}|${row.name}|${row.seen}`)
+    .map(
+      (row) =>
+        `${row.id}|${row.presentation}|${row.severity}|${row.name}|${row.seen}|${row.canAcknowledge}`,
+    )
     .join(';');
   if (signature !== healthSignature) {
     healthSignature = signature;
