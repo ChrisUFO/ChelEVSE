@@ -13,9 +13,10 @@ import {
 
 // Mirror firestore.rules: a write must carry both flat fields, rate is a number
 // from 0 to 5, currency is a string of 1–8 characters. The optional `rates`
-// list is a season plan; the stored flat rate is used only when no usable row
-// remains. Its rows are validated by validateRateWindows (rules only guard the
-// container).
+// list is a season plan; the stored `rate` remains in both modes — the fallback
+// price for an instant no row matches (#188), and the only configuration left
+// when no usable row remains. Its rows are validated by validateRateWindows
+// (rules only guard the container).
 const CURRENCY_MAX = 8;
 
 // The charger address grammar (issue #54), mirrored exactly by the bridge's

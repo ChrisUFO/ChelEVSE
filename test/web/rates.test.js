@@ -761,7 +761,8 @@ test('costForIntervals is all-or-nothing', () => {
   // An unpriceable slice (no flat rate, no schedule) hides it too.
   assert.equal(costForIntervals([good], { rates: [] }), null);
   assert.equal(costForIntervals([good], { rate: null }), null);
-  // A non-empty schedule prices an unmatched slice at 0, exactly as before.
+  // An unmatched slice costs the stored flat rate (#188); this fixture stores
+  // none, so it is genuinely unpriced (0) — not a general rule.
   assert.equal(
     costForIntervals([good], { rates: [windowRow({ start: '22:00', end: '23:00' })] }),
     0,

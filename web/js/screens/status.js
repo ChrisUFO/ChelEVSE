@@ -96,8 +96,8 @@ const acks = createAckTracker({
 let retryRequested = false;
 let schedule = null;
 // Full cost settings ({rate, currency, rates}); the schedule prices a session
-// over its elapsed interval, and the stored flat rate applies only when no row
-// exists at all.
+// over its elapsed interval, and an instant no row matches costs the stored
+// flat rate (#188) — 0.00 only when no usable flat rate is stored.
 let settings = null;
 let active = false;
 let ampsTouched = false;

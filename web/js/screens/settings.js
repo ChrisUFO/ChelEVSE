@@ -141,7 +141,8 @@ function currentRateMode() {
 }
 
 // The mode is derived from the draft rows, never stored. One rate is the flat
-// pair; Seasons hides the unused fallback rate (the shared currency remains).
+// pair; Seasons hides the fallback-rate field — its stored value still prices
+// instants no row matches (#188) — and the shared currency remains.
 function paintRateMode() {
   const mode = currentRateMode();
   const seasons = mode === 'seasons';

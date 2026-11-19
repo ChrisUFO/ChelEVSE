@@ -936,10 +936,12 @@ export function intervalUsable(interval) {
 
 // Cost for a session's charging intervals: one slice per interval, so energy
 // drawn in a cheap window stays cheap even when a long idle gap sits inside the
-// plug-in span. All-or-nothing: if any interval is unusable or any of its slices
-// has no rate, the whole figure is null and the caller hides it — a partial sum
-// would understate the cost of a session that did draw the energy. An empty list
-// is not a price of zero either; callers fall back to the aggregate.
+// plug-in span. All-or-nothing: if any interval is unusable, or the schedule is
+// flat with nothing stored, the whole figure is null and the caller hides it —
+// a partial sum would understate the cost of a session that did draw the
+// energy. A slice no row matches prices at the stored flat rate (0 only when
+// none is stored), so it never nulls the sum. An empty list is not a price of
+// zero either; callers fall back to the aggregate.
 export function costForIntervals(intervals, schedule) {
   if (!Array.isArray(intervals) || intervals.length === 0) return null;
   const normalized = normalizeRateSchedule(schedule);
