@@ -1363,14 +1363,14 @@ export function paintPlan(state) {
   state.planUnpriced = planHasUnpriced(state.draftRates);
   // Only rows that can match and pass validation set a meaningful range; an
   // invalid row is shown and fixed but its price never applies. A base-less
-  // season and a date gap both put 0 in the range, so the plan cannot advertise
-  // a minimum it does not actually charge.
+  // season and a date gap price at the stored flat fallback, so the plan's
+  // advertised minimum only reaches 0.00 when that fallback is unusable.
   const rateRows = state.planPeriods
     .filter((period) => period.kind !== 'invalid')
     .flatMap((period) => period.rows)
     .filter((entry) => Object.keys(state.rateValidation.rows[entry.index] || {}).length === 0)
     .map((entry) => entry.row);
-  const range = ratePlanRange(rateRows);
+  const range = ratePlanRange(rateRows, $('setting-rate').value);
   const problems = validationProblemCount(state.rateValidation, state.draftRates.length);
   const capped = state.draftRates.length > MAX_RATE_WINDOWS;
   const gaps = mergeDateRanges(uncoveredDateRanges(state.draftRates));

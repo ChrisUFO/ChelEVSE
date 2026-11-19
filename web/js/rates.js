@@ -3,8 +3,8 @@
 //
 // The settings document keeps a flat `rate` for One rate. A non-empty `rates`
 // list is a season plan: the all-day, every-day row is a base, day-restricted
-// rows are overrides, and an unmatched instant costs 0. The stored flat rate is
-// ignored while that list has usable rows:
+// rows are overrides, and an instant no row matches costs the stored flat rate
+// (#188) — 0 only when no usable flat rate is stored:
 //
 //   { rate: 0.31, currency: 'USD', rates: [
 //     { id: 'base', rate: 0.30, days: [0,1,2,3,4,5,6], start: '00:00',
@@ -435,7 +435,9 @@ export function windowMatches(window, date) {
 // A stored document's optional row list. Invalid rows are dropped one at a time
 // — a hand-edited or half-written document keeps its usable rows. If no usable
 // row remains, the flat price is the only configuration left; once usable rows
-// exist, an unmatched instant is 0. Order is preserved: it only matters as the
+// exist, an instant no row matches falls back to the flat price, and is
+// genuinely unpriced (0) only when no usable flat price is stored either.
+// Order is preserved: it only matters as the
 // tie-break within a tier for overlapping rows an older writer may have stored.
 export function normalizeRateSchedule(data) {
   const source = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
@@ -467,16 +469,27 @@ function matchingEntry(schedule, date) {
 
 const UNPRICED_RATE = 0;
 
+// The price an instant no row matches resolves to once rows exist: the stored
+// flat rate when one is usable, else genuinely unpriced (0). This is the
+// #188 fallback — an expired season scope must not zero the energy drawn
+// outside every window.
+function flatFallbackRate(schedule) {
+  return schedule.rate != null ? schedule.rate : UNPRICED_RATE;
+}
+
 function rateFor(schedule, date) {
   const hit = matchingEntry(schedule, date);
   if (hit) return hit.window.rate;
-  // A flat configuration is the fallback. Once any row exists, settings.rate is
-  // deliberately ignored; an unmatched instant has no price (0).
-  return schedule.rates.length === 0 ? schedule.rate : UNPRICED_RATE;
+  // An empty schedule is the flat configuration and returns its rate as-is
+  // (null when unusable, which hides downstream figures). Once rows exist, the
+  // stored flat rate is the fallback price for an unmatched instant (#188);
+  // only when it is unusable is the instant genuinely unpriced (0).
+  return schedule.rates.length === 0 ? schedule.rate : flatFallbackRate(schedule);
 }
 
-// The rate for one local instant: override, season base, flat only when the
-// schedule is empty, else 0.
+// The rate for one local instant: override, season base, then the stored flat
+// rate — whether or not rows exist. An instant is 0 only when rows exist, none
+// matches, and no usable flat rate is stored.
 export function rateAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   return rateFor(normalizeRateSchedule(schedule), date);
@@ -485,7 +498,8 @@ export function rateAt(date, schedule) {
 // The same lookup with the winning row and why it won. With no match, the
 // `uncoveredDate` / `unpricedHour` flags distinguish "no season covers this
 // date" from "a season covers the date but has no base/window for this hour";
-// both price 0.
+// both price at the stored flat rate (0 only when no usable flat rate is
+// stored).
 export function rateEntryAt(date, schedule) {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
   const normalized = normalizeRateSchedule(schedule);
@@ -500,7 +514,7 @@ export function rateEntryAt(date, schedule) {
   }
   const scopeCoversDate = normalized.rates.some((window) => seasonMatches(window, date));
   return {
-    rate: UNPRICED_RATE,
+    rate: flatFallbackRate(normalized),
     window: null,
     source: 'uncovered',
     uncoveredDate: !scopeCoversDate,
@@ -510,7 +524,9 @@ export function rateEntryAt(date, schedule) {
 
 // Whether a schedule leaves any slice of an interval without a row. Flat
 // schedules never do; a non-empty schedule does when no base or override matches
-// a slice. Used for the live cost marker.
+// a slice. This names "no row matched", not the price: since #188 such a slice
+// prices at the stored flat rate, so the live cost marker asks this only when no
+// usable fallback exists (see cost.js).
 export function intervalUncovered(start, end, schedule) {
   const startMs = toMillis(start);
   const endMs = toMillis(end);
@@ -528,8 +544,9 @@ export function intervalUncovered(start, end, schedule) {
 }
 
 // One local day as a complete, contiguous partition: every minute from 00:00 to
-// 24:00 belongs to exactly one segment, carrying the winning window (or null for
-// the flat fallback). Boundaries are every window start/end plus midnight, and
+// 24:00 belongs to exactly one segment, carrying the winning window (or none
+// when the minute prices at the flat fallback). Boundaries are every window
+// start/end plus midnight, and
 // matching cannot change between two boundaries, so one probe per interval is
 // exact for the wall clock. A wrapping window's tail lands at the start of the
 // day and its main part at the end; both refer to the same stored row.
@@ -562,7 +579,7 @@ export function rateDayPartition(schedule, date) {
       ? hit.window.rate
       : normalized.rates.length === 0
         ? normalized.rate
-        : UNPRICED_RATE;
+        : flatFallbackRate(normalized);
     const source = hit
       ? hit.source
       : normalized.rates.length === 0
@@ -887,8 +904,9 @@ export function costForInterval(wh, start, end, schedule) {
     const to = boundaries[i];
     if (to <= from) continue;
     const rate = rateFor(normalized, new Date(from));
-    // Flat with no rate is unknown; a schedule with no matching row prices the
-    // slice at 0 instead of inventing a fallback.
+    // A null rate survives only on the flat path with nothing stored; once rows
+    // exist an unmatched slice resolves to the flat fallback (or 0 when no
+    // usable flat rate is stored), never to a null that would hide the figure.
     if (rate == null) return null;
     cost += ((energy * (to - from)) / duration / 1000) * rate;
   }
