@@ -125,7 +125,6 @@ function readFields() {
     rate: $('setting-rate').value,
     currency: $('setting-currency').value,
     chargerHost: $('setting-charger-host').value,
-    showTemperature: $('setting-show-temperature').checked,
     rates: draftRates,
   };
 }
@@ -1026,7 +1025,6 @@ function paintFeedback() {
   $('setting-rate').disabled = settingsSaving;
   $('setting-currency').disabled = settingsSaving;
   $('setting-charger-host').disabled = settingsSaving;
-  $('setting-show-temperature').disabled = settingsSaving;
   $('confirm-one-rate').disabled = settingsSaving;
   $('cancel-one-rate').disabled = settingsSaving;
   paintRateMode();
@@ -1056,7 +1054,6 @@ function writeFields(fields) {
   $('setting-rate').value = fields.rate;
   $('setting-currency').value = fields.currency;
   $('setting-charger-host').value = fields.chargerHost || '';
-  $('setting-show-temperature').checked = fields.showTemperature !== false;
   draftRates = (Array.isArray(fields.rates) ? fields.rates : []).map(rateRowFields);
   removeConfirmKey = null;
   planPeriods = ratePeriodsForDraft();
@@ -1438,9 +1435,6 @@ export function initSettings() {
   $('setting-rate').addEventListener('input', () => handleInput('rate'));
   $('setting-currency').addEventListener('input', () => handleInput('currency'));
   $('setting-charger-host').addEventListener('input', () => handleInput('chargerHost'));
-  // The toggle is a boolean, so it has no field error to keep live; it only
-  // marks the form dirty.
-  $('setting-show-temperature').addEventListener('change', recomputeDirty);
   $('rate-mode-flat').addEventListener('click', requestOneRate);
   $('rate-mode-seasons').addEventListener('click', switchToSeasons);
   $('rate-mode-flat').addEventListener('keydown', paintModeKeyboard);

@@ -232,12 +232,9 @@ export function previewBlocker(validation) {
 // The exact Firestore payload for a validated settings save. `rates` is omitted
 // when empty, so a flat configuration writes byte-for-byte the two fields it
 // always has. `charger_host` is omitted the same way: absent means "use the
-// bridge's bootstrap", so clearing the field removes the key. `show_temperature`
-// is omitted when true — absent already means visible — so a visible toggle
-// never adds a key, and only a stored `false` (which the form always carries)
-// reaches the document. A month row keeps its stored key order; a date row
-// appends `from`/`to` after `months`, whose value is the derived compatibility
-// hint.
+// bridge's bootstrap", so clearing the field removes the key. A month row keeps
+// its stored key order; a date row appends `from`/`to` after `months`, whose
+// value is the derived compatibility hint.
 export function settingsPayload(values) {
   const source = values || {};
   const payload = { rate: source.rate, currency: source.currency };
@@ -272,7 +269,6 @@ export function settingsPayload(values) {
   // able to carry something `firestore.rules` would refuse.
   const host = validateChargerHost(source.chargerHost).value;
   if (host) payload.charger_host = host;
-  if (source.showTemperature === false) payload.show_temperature = false;
   return payload;
 }
 
@@ -289,8 +285,7 @@ function parseCurrencyValue(value) {
 // through rateWindowsKey so day/month order and numeric text do not matter. The
 // charger address is compared trimmed (the only normalization it has), so
 // " 192.168.1.50 " matches "192.168.1.50" but an invalid value never compares
-// equal to a blank one. The temperature toggle compares by its visible/hidden
-// meaning, so an absent field (the default) matches an explicit true.
+// equal to a blank one.
 export function sameSettingsInput(a, b) {
   const left = a || {};
   const right = b || {};
@@ -304,8 +299,7 @@ export function sameSettingsInput(a, b) {
     ratesMatch &&
     parseCurrencyValue(left.currency) === parseCurrencyValue(right.currency) &&
     rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
-    String(left.chargerHost ?? '').trim() === String(right.chargerHost ?? '').trim() &&
-    (left.showTemperature !== false) === (right.showTemperature !== false)
+    String(left.chargerHost ?? '').trim() === String(right.chargerHost ?? '').trim()
   );
 }
 
@@ -322,8 +316,7 @@ function settingsEqual(a, b) {
     left.rate === right.rate &&
     left.currency === right.currency &&
     rateWindowsKey(left.rates) === rateWindowsKey(right.rates) &&
-    left.charger_host === right.charger_host &&
-    left.show_temperature === right.show_temperature
+    left.charger_host === right.charger_host
   );
 }
 
@@ -435,19 +428,16 @@ export function reconcileSettingsSave({
 } = {}) {
   const rates = Array.isArray(values.rates) ? values.rates : [];
   // The confirmed/attempted document is in stored shape (`charger_host`, absent
-  // when the field was cleared; `show_temperature`, absent when the stat is
-  // visible), exactly like a snapshot: every comparison below runs it through
-  // settingsFields/normalizeSettings.
+  // when the field was cleared), exactly like a snapshot: every comparison
+  // below runs it through settingsFields/normalizeSettings.
   const attempted = { rate: values.rate, currency: values.currency, rates };
   if (values.chargerHost) attempted.charger_host = values.chargerHost;
-  if (values.showTemperature === false) attempted.show_temperature = false;
   const untouched = settingsDraftMatches(draft, attempted);
   const draftFields = {
     rate: String(draft.rate ?? ''),
     currency: String(draft.currency ?? ''),
     rates: Array.isArray(draft.rates) ? draft.rates : [],
     chargerHost: String(draft.chargerHost ?? ''),
-    showTemperature: draft.showTemperature !== false,
   };
 
   if (ok) {

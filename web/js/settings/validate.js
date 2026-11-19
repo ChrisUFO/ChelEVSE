@@ -108,11 +108,6 @@ export function validateSettings(draft) {
   const host = validateChargerHost(draft && draft.chargerHost);
   if (host.error) errors.chargerHost = host.error;
 
-  // The temperature toggle is a checkbox, so the draft is already boolean;
-  // anything else (a form built without the field) reads as the default
-  // "visible" and can never block a save.
-  const showTemperature = !(draft && draft.showTemperature === false);
-
   // The rate editor owns the row and document-level rate messages; this
   // validator only reports the flat pair. A stored schedule must still be valid
   // for the document to be saveable (and must never be silently dropped), so its
@@ -122,7 +117,7 @@ export function validateSettings(draft) {
   return {
     valid: Object.keys(errors).length === 0 && windows.valid,
     errors,
-    values: { rate, currency, rates: windows.values, chargerHost: host.value, showTemperature },
+    values: { rate, currency, rates: windows.values, chargerHost: host.value },
   };
 }
 
@@ -139,9 +134,6 @@ export function validateSettings(draft) {
 // form stays saveable and the next write replaces it. A valid host is carried
 // through so an unrelated rate edit re-sends it instead of deleting it — the
 // settings write replaces the whole document.
-//
-// `show_temperature` is optional the same way, with absent/non-bool meaning
-// visible: a corrupt value must not hide the stat nor block a save.
 export function normalizeSettings(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const normalized = normalizeRateSchedule(data);
@@ -155,7 +147,6 @@ export function normalizeSettings(data) {
     // back into settingsFields (showSettingsData -> setFields), so the key must
     // survive that round trip.
     charger_host: validateChargerHost(data.charger_host).value,
-    show_temperature: data.show_temperature !== false,
   };
 }
 
@@ -163,7 +154,6 @@ export function normalizeSettings(data) {
 // deletes a stored schedule, and the rate table can round-trip rows it does not
 // change. `chargerHost` travels the same way: the form always holds the stored
 // address, so a rate-only save does not drop it from the whole-document write.
-// `showTemperature` rides along identically.
 export function settingsFields(settings) {
   const normalized = normalizeSettings(settings);
   return normalized
@@ -172,9 +162,8 @@ export function settingsFields(settings) {
         currency: normalized.currency,
         rates: normalized.rates,
         chargerHost: normalized.charger_host,
-        showTemperature: normalized.show_temperature,
       }
-    : { rate: '', currency: '', rates: [], chargerHost: '', showTemperature: true };
+    : { rate: '', currency: '', rates: [], chargerHost: '' };
 }
 
 // The form before the first settings snapshot is blank apart from whatever the
@@ -186,9 +175,6 @@ export function firstLoadFields(draft, stored) {
   const fields = settingsFields(stored);
   const kept = (value) => typeof value === 'string' && value.trim() !== '';
   const rows = Array.isArray(draft && draft.rates) ? draft.rates : [];
-  // The checkbox's untouched state is checked (visible), so only an explicit
-  // off-toggle counts as typing; anything else adopts the stored preference.
-  const toggledOff = draft && draft.showTemperature === false;
   // Stored values arrive in the stored shape; a draft row the owner typed is
   // already an editor row. writeFields normalizes both, and rateRowFields maps
   // an editor row to itself, so the mix is inert.
@@ -196,7 +182,6 @@ export function firstLoadFields(draft, stored) {
     rate: kept(draft && draft.rate) ? draft.rate : fields.rate,
     currency: kept(draft && draft.currency) ? draft.currency : fields.currency,
     chargerHost: kept(draft && draft.chargerHost) ? draft.chargerHost : fields.chargerHost,
-    showTemperature: toggledOff ? false : fields.showTemperature,
     rates: rows.length ? rows : fields.rates,
   };
 }
