@@ -174,6 +174,8 @@ class MqttSourceTests(MqttSourceBase):
         client.deliver("chelevse/amp", 15400)
         client.deliver("chelevse/session_elapsed", 65)
         client.deliver("chelevse/temp1", 247)
+        client.deliver("chelevse/temp2", 251)
+        client.deliver("chelevse/temp3", False)
         client.deliver("chelevse/state", 3)
         client.deliver("chelevse/vehicle", 1)
         client.deliver("chelevse/power", 3800)
@@ -183,11 +185,64 @@ class MqttSourceTests(MqttSourceBase):
         fields = bridge.parse_status(self.snapshots[0].fields)
         self.assertEqual(fields["amp"], 15.4)  # milliamps -> amps
         self.assertEqual(fields["elapsed"], 65)  # session_elapsed -> elapsed
-        self.assertEqual(fields["temp1"], 24.7)  # 10ths of °C
         self.assertEqual(fields["state"], 3)
         self.assertEqual(fields["state_label"], "charging")
         self.assertEqual(fields["vehicle"], 1)
         self.assertEqual(fields["power"], 3800)
+        # The temp topics arrive on the wildcard subscription but are dropped
+        # unmapped: the flush carried the other deliveries (the snapshot above
+        # is non-empty) while no temp key ever entered it. The health gate
+        # reads temperatures from the /status parse on polls and reconciles,
+        # never from the topics (#159).
+        for key in ("temp1", "temp2", "temp3", "temp_c"):
+            self.assertNotIn(key, self.snapshots[0].fields)
+
+    def test_a_temp_only_burst_counts_as_liveness_without_ingest(self):
+        # An idle charger may publish nothing but a sensor change for minutes,
+        # so a temp-only burst is still the charger publishing: it must flush
+        # and advance the arrival generation (the outage classifier's proof of
+        # life) while never mapping a temp value into the snapshot (#159).
+        client = self.connect()
+        client.deliver("chelevse/temp1", 247)
+        client.deliver("chelevse/temp2", 251)
+        self.assertEqual(self.source.messages, 2)
+        self.assertEqual(self.snapshots, [])
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(self.snapshots[0].fields, {})  # transport facts only
+        self.assertEqual(self.snapshots[0].arrival, 1)
+        self.assertEqual(self.source.arrival_generation(), 1)
+        parsed = bridge.parse_snapshot(self.snapshots[0].fields)
+        self.assertEqual(set(parsed), {"charger_online", "updated_at"})
+
+    def test_a_mixed_burst_flushes_once_with_the_temp_leaves_liveness_only(self):
+        # Temp leaves arriving inside a mapped-field burst ride the same
+        # debounce: one flush, one generation bump, and the mapped fields land
+        # while the temp values stay out of the snapshot.
+        client = self.connect()
+        client.deliver("chelevse/amp", 15400)
+        client.deliver("chelevse/temp1", 247)
+        self.source.flush()
+        self.source.flush()  # nothing left: no second generation bump
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(self.snapshots[0].fields, {"amp": 15400})
+        self.assertEqual(self.source.arrival_generation(), 1)
+
+    def test_a_temp_only_burst_flushes_through_the_debounce_timer(self):
+        # The tests above flush by hand, which proves the liveness flag is
+        # consumed but not that a temp delivery arms the timer at all: an
+        # early return in the temp branch would leave them green while
+        # production never flushed the burst (#159). This one drives the
+        # real timer, so the arm must survive any refactor of that branch.
+        self.source.debounce = 0.02
+        client = self.connect()
+        client.deliver("chelevse/temp1", 247)
+        deadline = time.monotonic() + 2
+        while not self.snapshots and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual([record.fields for record in self.snapshots], [{}])
+        self.assertEqual(self.snapshots[0].arrival, 1)
+        self.assertEqual(self.source.arrival_generation(), 1)
 
     def test_all_mapped_topics_land_on_their_status_key(self):
         client = self.connect()
@@ -837,9 +892,10 @@ class MqttWorkerTests(MqttWorkerBase):
         self.run_worker()
         doc = self.current()
         self.assertEqual(doc["amp"], 15.4)  # mA -> A
-        self.assertEqual(doc["temp1"], 24.7)  # 10ths -> °C
-        self.assertEqual(doc["temp_c"], 24.7)
-        self.assertIsNone(doc["temp2"])  # absent sensor sentinel
+        # The seeded temps parse (the health gate's feed) but never reach the
+        # document: no temp key survives the write path (#159).
+        for key in ("temp_c", "temp1", "temp2", "temp3"):
+            self.assertNotIn(key, doc)
         self.assertEqual(doc["state"], 3)
         self.assertEqual(doc["state_label"], "charging")
         self.assertIs(doc["charger_online"], True)
@@ -1676,6 +1732,44 @@ class StatusLoopMqttTests(unittest.TestCase):
             "the refused outage was not logged",
         )
         self.assertEqual(self.applied, [{"state": 1}])  # the flush was real
+        # Two unconfirmed failures, one refusal: the refusal reset the streak.
+        self.assertEqual(
+            len([line for line in logs if "outage unconfirmed" in line]), 2
+        )
+
+    def test_a_temp_only_delivery_refuses_the_outage(self):
+        # The temp topics left TOPIC_FIELDS (#159) but an idle charger may
+        # publish nothing but a sensor change for minutes: that burst is still
+        # the charger publishing, so it must refuse the outage exactly like a
+        # mapped-field flush — the streak resets and no offline write or push
+        # lands — while no temp key is ever ingested.
+        client = self.connect()
+        flushes = []
+
+        def arrival_hook():
+            if not flushes:
+                flushes.append(True)
+                client.deliver("chelevse/temp1", 247)
+                self.source.flush()  # liveness-only, after the streak check
+            return self.source.arrival_generation()
+
+        sink = bridge.StatusSink(
+            self.db, self.tracker, self.notifier, arrivals=arrival_hook
+        )
+        session = FakeSession([requests.ConnectionError("gone")] * 3)
+        logs = []
+        with mock.patch.object(bridge, "log", logs.append):
+            self.run_loop(session, polls=3, reconcile=0, sink=sink)
+        self.assertNotEqual(self.tracker.charger_online, False)
+        self.assertEqual(self.notifier.bodies, [])
+        self.assertNotIn(
+            "charger_online", self.db.data.get("status", {}).get("current", {})
+        )
+        self.assertTrue(
+            [line for line in logs if "outage refused" in line],
+            "the refused outage was not logged",
+        )
+        self.assertEqual(self.applied, [{}])  # liveness only: nothing merged
         # Two unconfirmed failures, one refusal: the refusal reset the streak.
         self.assertEqual(
             len([line for line in logs if "outage unconfirmed" in line]), 2

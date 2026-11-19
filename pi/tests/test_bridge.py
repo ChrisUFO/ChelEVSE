@@ -100,7 +100,9 @@ class ParseStatusTests(unittest.TestCase):
         self.assertEqual(fields["temp1"], 25.0)
         self.assertIsNone(fields["temp2"])
         self.assertIsNone(fields["temp3"])
-        self.assertEqual(fields["temp_c"], 25.0)
+        # The tile-only average is gone; the per-sensor readings survive for
+        # the health observations path only (never persisted).
+        self.assertNotIn("temp_c", fields)
         self.assertEqual(fields["amp"], 15.4)
         self.assertEqual(fields["pilot"], 16)
         self.assertEqual(fields["vehicle"], 1)
@@ -111,7 +113,7 @@ class ParseStatusTests(unittest.TestCase):
         self.assertIsNone(fields["state"])
         self.assertIsNone(fields["amp"])
         self.assertEqual(fields["state_label"], "unknown")
-        self.assertIsNone(fields["temp_c"])
+        self.assertNotIn("temp_c", fields)
 
     def test_state_254_with_manual_override_is_stopped(self):
         # Firmware 8.2.3 realises a user Stop (pause) as 254 + manual_override 1.

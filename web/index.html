@@ -329,21 +329,6 @@
               <span class="fig-value"><span id="fig-cost" class="fig-cost">—</span></span>
               <span class="fig-sub" id="cost-sub"></span>
             </div>
-            <div class="fig fig-wide" id="fig-temp-stat">
-              <span class="fig-label">Temperature</span>
-              <span class="fig-value"><span id="fig-temp">—</span><em>°C</em></span>
-              <span class="temp-sensors">
-                <span class="temp-sensor"
-                  ><span class="temp-idx">T1</span><span id="fig-temp1">—</span></span
-                >
-                <span class="temp-sensor"
-                  ><span class="temp-idx">T2</span><span id="fig-temp2">—</span></span
-                >
-                <span class="temp-sensor"
-                  ><span class="temp-idx">T3</span><span id="fig-temp3">—</span></span
-                >
-              </span>
-            </div>
           </section>
 
           <section class="controls" id="controls" style="--i: 3" aria-label="Controls">
@@ -703,9 +688,7 @@
             <section class="card-block connection-card" aria-labelledby="connection-heading">
               <div class="block-head">
                 <h2 id="connection-heading">Charger connection</h2>
-                <p class="block-sub">
-                  Where this app finds your charger, and whether its temperature shows on Status.
-                </p>
+                <p class="block-sub">Where this app finds your charger.</p>
               </div>
               <div class="field">
                 <label class="field-label" for="setting-charger-host">Charger address</label>
@@ -722,19 +705,6 @@
                 >
                 <span class="field-error" id="charger-host-error" hidden></span>
               </div>
-              <label class="switch-row" for="setting-show-temperature">
-                <span class="switch-copy">
-                  <span class="switch-title">Show temperature</span>
-                  <span class="switch-sub"
-                    >The Temperature stat on the Status page. Hide it when the charger reports no
-                    sensors.</span
-                  >
-                </span>
-                <span class="switch">
-                  <input id="setting-show-temperature" type="checkbox" role="switch" checked />
-                  <span class="switch-track" aria-hidden="true"></span>
-                </span>
-              </label>
             </section>
 
             <section class="card-block settings-card" aria-labelledby="settings-heading">

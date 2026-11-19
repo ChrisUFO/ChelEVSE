@@ -99,11 +99,6 @@ let schedule = null;
 // over its elapsed interval, and the stored flat rate applies only when no row
 // exists at all.
 let settings = null;
-// The Status Temperature stat's visibility from settings/current
-// (`show_temperature`, absent = visible — issue #117). Cost settings and this
-// preference read the same document but keep separate shapes: costSettings
-// drops unknown keys, so the raw value is adopted here.
-let showTemperature = true;
 let active = false;
 let ampsTouched = false;
 let holdOpen = false;
@@ -271,13 +266,6 @@ function renderScheduleBadge() {
     : 'A schedule window is active';
 }
 
-// The temperature preference hides the whole stat (average and sensors), not
-// individual readings. Re-applied on every status render so a hidden tile never
-// reappears through a fresh snapshot.
-function renderTemperatureVisibility() {
-  $('fig-temp-stat').hidden = !showTemperature;
-}
-
 // The claims reason line (#159): a deliberately dumb paint of claimsState's
 // projection, the renderHealth split — the whole decision lives in
 // js/claims.js, unit-tested without a DOM. The freshness facts are the same
@@ -325,12 +313,6 @@ function renderStatus() {
     status && status.session_energy != null ? fmtK(toNumber(status.session_energy) / 1000) : '—',
   );
   setText($('fig-setpoint'), status ? numOrDash(status.pilot) : '—');
-  setText($('fig-temp'), status ? numOrDash(status.temp_c) : '—');
-  for (const n of [1, 2, 3]) {
-    const t = status ? numOrDash(status[`temp${n}`]) : '—';
-    setText($(`fig-temp${n}`), t === '—' ? t : `${t}°`);
-  }
-  renderTemperatureVisibility();
 
   if (!ampsTouched && current) {
     // `/status` pilot is the configured setpoint. An idle charger legitimately
@@ -731,7 +713,6 @@ export function leaveStatus() {
   healthView = null;
   schedule = null;
   settings = null;
-  showTemperature = true;
   ampsTouched = false;
   holdOpen = false;
   holdAmps = 32;
@@ -829,13 +810,9 @@ export function showClaims(data) {
 
 // settings/current — null until an owner saves a rate. The whole document is
 // kept so the live cost can use the optional schedule; once it holds any row the
-// stored flat rate is ignored and an uncovered moment prices at 0.00. The
-// temperature preference rides the same snapshot so the stat reacts live to a
-// toggle saved anywhere (this browser or another), without a reload.
+// stored flat rate is ignored and an uncovered moment prices at 0.00.
 export function showSettings(data) {
   settings = costSettings(data);
-  showTemperature = !(data && data.show_temperature === false);
-  renderTemperatureVisibility();
   renderCost();
 }
 

@@ -161,7 +161,9 @@ class RateLimitTests(WritePolicyBase):
         self.apply(total_energy=100)
         self.assertEqual(len(self.writes()), 1)
         # Continuous-only movement of every flavour, each with its own
-        # scheduler tick: none of it may produce a write.
+        # scheduler tick: none of it may produce a write. A temperature burst
+        # is the strongest case -- parse_snapshot drops the field entirely
+        # (#159), so the apply carries transport facts only.
         self.clock.advance(1)
         self.apply_partial({"elapsed": 1})
         self.tick()
@@ -235,7 +237,8 @@ class HeartbeatTests(WritePolicyBase):
     def test_the_heartbeat_payload_is_complete_never_timestamp_only(self):
         self.apply(state=3, session_energy=500, elapsed=50)
         self.clock.advance(self.CHARGING)
-        # The heartbeat's forced reconcile returns a full /status payload.
+        # The heartbeat's forced reconcile returns a full /status payload. The
+        # reply carries temp1 (the health gate's feed); the write must not.
         self.tick(
             observe=lambda: self.apply(
                 state=3,
@@ -263,17 +266,43 @@ class HeartbeatTests(WritePolicyBase):
                 "total_energy",
                 "elapsed",
                 "vehicle",
-                "temp_c",
-                "temp1",
-                "temp2",
-                "temp3",
                 "pilot",
                 "charger_online",
                 "updated_at",
             },
         )
         self.assertEqual(write["amp"], 15.4)
-        self.assertEqual(write["temp_c"], 24.7)
+
+    def test_temps_feed_health_but_never_reach_the_document(self):
+        # The #159 plan amendment: parse_status keeps temp1-temp3 solely for
+        # LiveObservations.note_status (the thermal.high_temp corroboration
+        # gate, unchanged in test_health/test_notifications), and the sink
+        # drops them at the apply boundary -- so no write of any flavour
+        # (first snapshot, trigger, heartbeat) carries a temperature field.
+        fields = bridge.parse_status(status_payload(state=3, temp1=247, temp2=251))
+        self.assertEqual(fields["temp1"], 24.7)  # the health gate's feed, °C
+        self.assertEqual(fields["temp2"], 25.1)
+        self.assertNotIn("temp_c", fields)  # the tile-only average is gone
+        self.sink.apply_status(fields, "http")  # first snapshot publishes
+
+        # A temperature burst parses to transport facts only: the partial
+        # carries no temp key, so nothing merges and nothing is owed.
+        parsed = bridge.parse_snapshot({"temp1": 250})
+        self.assertEqual(
+            set(parsed), {"charger_online", "updated_at"}
+        )
+        self.clock.advance(1)
+        self.sink.apply_status(parsed, "mqtt", complete=False)
+
+        # The trigger publish that follows carries the accumulated view --
+        # merged from the full parse above -- and no temperature key in it.
+        self.clock.advance(self.GAP)
+        self.apply(state=1)
+        self.tick()
+        self.assertTrue(len(self.writes()) >= 2)
+        for write in self.writes():
+            for key in ("temp_c", "temp1", "temp2", "temp3"):
+                self.assertNotIn(key, write)
 
     def test_a_heartbeat_without_a_fresh_observation_does_not_write(self):
         # The charger never answered and MQTT stayed silent: no apply landed

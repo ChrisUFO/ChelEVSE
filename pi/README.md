@@ -171,11 +171,22 @@ only the curated fields listed under
 | `<base>/session_energy`   | `session_energy`       | Wh                                                  |
 | `<base>/session_elapsed`  | `elapsed`              | seconds (the deprecated `elapsed` topic is ignored) |
 | `<base>/total_energy`     | `total_energy`         | kWh                                                 |
-| `<base>/temp1`–`temp3`    | `temp1`–`temp3`        | 10ths of °C; `false` when absent                    |
+| `<base>/temp1`–`temp3`    | —                      | 10ths of °C; liveness only, never mapped (#159)     |
 | `<base>/config_version`   | —                      | triggers one `/config` sync                         |
 
 Everything else on the base topic (retained `config`, availability counters) is
-ignored by the status path. The retained `claim`, `limit` and `boost` documents
+ignored by the status path. The `temp1`–`temp3` topics arrive on the wildcard
+subscription but are never mapped into a snapshot (#159): no consumer reads a
+topic temperature — the health gate's `thermal.high_temp` corroboration reads
+temperatures from the
+`/status` parse on polls and reconciles (`parse_status` →
+`LiveObservations.note_status`), never from the topics — and `status/current`
+carries no temperature field. A temp delivery is still **liveness**: an idle
+charger may publish nothing but a sensor change for minutes, so a temp-only
+burst debounces and flushes with nothing merged, advancing the arrival
+generation the outage classifier reads as proof the charger is publishing (a
+temp-only publish between failed reconciles refuses an outage escalation). The
+retained `claim`, `limit` and `boost` documents
 are **ingested as claims evidence** (#159): each delivery is decoded and handed
 to the claims holder, parsed defensively (malformed → ignored), and used for
 `status/claims` detail enrichment and corroboration only — never as a status
@@ -461,8 +472,10 @@ timestamped line and the loop carries on at its next interval.
 
 `status/current` carries the curated set (`state`, `state_label`, `amp`,
 `voltage`, `power`, `session_energy`, `total_energy`, `elapsed`, `vehicle`,
-`temp1`–`temp3`, `temp_c`, `pilot`, `charger_online`, `updated_at`), not the
-whole raw `/status` object.
+`pilot`, `charger_online`, `updated_at`), not the whole raw `/status` object.
+No temperature field is written (#159): the per-sensor readings are parsed for
+the health gate alone and dropped at the sink, and values stored by an older
+bridge are simply never read again (the schema is additive).
 
 ### Write policy (issue #93)
 
@@ -481,7 +494,7 @@ guards are unchanged). The cadence, by field kind:
   than `WRITE_MIN_GAP_SEC` (30 s) after the previous write. That gap is the
   worst-case bound: a flapping charger cannot exceed one write per 30 s.
 - **Continuous values** — `session_energy`, `total_energy`, `elapsed`, `power`,
-  `voltage`, temperatures — never trigger a write. They move constantly while
+  `voltage` — never trigger a write. They move constantly while
   charging, so they are carried by the heartbeats: at least one write per
   `CHARGING_HEARTBEAT_SEC` (60 s) while charging, one per `HEARTBEAT_INTERVAL`
   (300 s) otherwise. No write ever originates from `elapsed` alone — the app
@@ -1075,9 +1088,9 @@ they never look like the end of a session. At startup `state`, `total_energy`,
 `session_energy` and `elapsed` are seeded from `status/current`; if there is no
 usable seed, the first successful poll only establishes state.
 
-`status/current` also carries `elapsed`, per-sensor `temp1`–`temp3` in °C (or
-`null` when the sensor is absent), `pilot` (amps), and the existing `temp_c`
-mean.
+`status/current` also carries `elapsed` and `pilot` (amps). The per-sensor
+temperatures no longer reach it (#159): they are parsed from the live
+`/status` reply for the health gate only.
 
 ### Push notifications (FCM)
 
