@@ -964,7 +964,9 @@ function paintBaseBlock(card, state) {
         covered
           ? 'No base rate in this season — another season’s base prices these hours.'
           : state.planUnpriced
-            ? 'No base rate — hours outside the windows have no price unless another season’s base covers them.'
+            ? rateIsUsable(flat)
+              ? `No base rate — hours outside the windows cost your flat rate ${priceText(flat)} unless another season’s base covers them.`
+              : 'No base rate — hours outside the windows have no price unless another season’s base covers them.'
             : 'No base rate — every hour of these dates has a price.',
       );
     }
@@ -1396,7 +1398,9 @@ export function paintPlan(state) {
 
   // The seed note explains the workable season the mode switch created, and
   // retires itself as soon as that seed stops being the whole plan (dates
-  // edited, a window or another season added, or the plan emptied).
+  // edited, a window or another season added, or the plan emptied). Its
+  // outside-the-seed sentence prices those dates at the stored flat rate
+  // (#188) — 0.00 only when no usable flat rate is stored.
   const seeded = state.seedNoticeKey
     ? state.planPeriods.find((period) => period.key === state.seedNoticeKey && period.base)
     : null;
@@ -1404,17 +1408,36 @@ export function paintPlan(state) {
     state.seedNoticeKey = '';
   const seedNote = $('plan-seed');
   seedNote.hidden = !state.seedNoticeKey;
+  const flat = $('setting-rate').value;
+  const flatUsable = rateIsUsable(flat);
   setText(
     $('plan-seed-note'),
     state.seedNoticeKey && seeded
-      ? `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost 0.00 until you cover them.`
+      ? flatUsable
+        ? `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost your flat rate ${priceText(flat)} until you cover them.`
+        : `Seeded ${seeded.monthText} at your flat rate. Dates outside it cost 0.00 until you cover them.`
       : '',
+  );
+
+  // The plan help and the gap line's lead-in name the same price the engine
+  // charges a date no season covers (#188): the stored flat rate while one is
+  // usable, 0.00 only when none is. Repainted on every pass, so the number can
+  // never drift from the flat field.
+  setText(
+    $('plan-help-gaps'),
+    flatUsable
+      ? `Dates outside every season cost your flat rate ${priceText(flat)}.`
+      : 'Dates outside every season cost 0.00.',
   );
 
   const uncoveredLine = $('uncovered-line');
   const gapText = dateSetText(gaps);
   uncoveredLine.hidden = gaps.length === 0;
   if (gaps.length > 0) {
+    setText(
+      $('uncovered-price'),
+      flatUsable ? `priced at your flat rate ${priceText(flat)}` : 'priced at 0.00',
+    );
     const dateNode = $('uncovered-dates');
     dateNode.replaceChildren();
     // The copy above already separates the range from the sentence; a leading

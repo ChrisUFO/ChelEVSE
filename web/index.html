@@ -438,7 +438,9 @@
           </section>
 
           <p class="plan-banner" id="history-plan-banner" hidden>
-            Some dates or hours have no price and are shown at 0.00.
+            <span id="history-plan-banner-text"
+              >Some dates or hours have no price and are shown at 0.00.</span
+            >
             <a href="#config">Open settings</a>
           </p>
 
@@ -813,7 +815,8 @@
                   </div>
                   <p class="plan-help" id="plan-help">
                     A season repeats every year. Give each season a base rate, then add daily
-                    windows where the price changes. Dates outside every season cost 0.00.
+                    windows where the price changes.
+                    <span id="plan-help-gaps">Dates outside every season cost 0.00.</span>
                   </p>
                   <div class="plan-seed" id="plan-seed" hidden>
                     <p class="plan-seed-note" id="plan-seed-note" role="status"></p>
@@ -831,7 +834,10 @@
                     hidden
                   >
                     <span class="uncovered-copy">
-                      <span><strong>Uncovered dates</strong> — priced at 0.00</span>
+                      <span
+                        ><strong>Uncovered dates</strong> —
+                        <span id="uncovered-price">priced at 0.00</span></span
+                      >
                       <span class="uncovered-dates" id="uncovered-dates"></span>
                     </span>
                     <button class="btn small" id="fill-gaps" type="button">Fill gaps</button>
