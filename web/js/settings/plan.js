@@ -666,10 +666,13 @@ export function ratePlanRange(rows, fallbackRate) {
   const list = Array.isArray(rows) ? rows : [];
   const range = rateRangeFor(list);
   if (!range) return null;
-  // Since #188 an uncovered date or base-less hour prices at the stored flat
-  // rate, so the advertised minimum drops to 0 only when that fallback is
-  // unusable and the gap is genuinely unpriced rather than flat-priced.
-  return planHasUnpriced(list) && !rateIsUsable(fallbackRate) ? { ...range, min: 0 } : range;
+  // Since #188 gaps price at the stored flat fallback, so the fallback price
+  // joins the advertised range whenever gaps exist; the minimum reaches 0
+  // only when the fallback is unusable and the gap is genuinely unpriced.
+  if (!planHasUnpriced(list)) return range;
+  if (!rateIsUsable(fallbackRate)) return { ...range, min: 0 };
+  const flat = parseRateValue(fallbackRate);
+  return { min: Math.min(range.min, flat), max: Math.max(range.max, flat) };
 }
 
 function periodOrder(period) {

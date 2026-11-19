@@ -3514,7 +3514,7 @@ test('a plan whose hours are all covered by overrides is priced everywhere', () 
   assert.equal(planHasUnpriced([rateRowFields(baseRateRow('empty', '', null, null))]), true);
 });
 
-test('the advertised plan range includes 0 exactly when a gap has no usable fallback', () => {
+test('the advertised plan range includes the gap price exactly when a gap exists', () => {
   const allYearBase = rateRowFields(baseRateRow('base', '0.3', null, null));
   const dateBase = rateRowFields({ ...summerDates, rate: 0.2 });
   const dateWindow = rateRowFields({
@@ -3535,10 +3535,17 @@ test('the advertised plan range includes 0 exactly when a gap has no usable fall
   assert.deepEqual(ratePlanRange([dateWindow]), { min: 0, max: 0.32 });
   assert.deepEqual(ratePlanRange([allYearBase, dateWindow]), { min: 0.3, max: 0.32 });
   // With a usable flat fallback (#188) the same gaps price at that rate, so
-  // the advertised minimum is the rows' own — an unusable fallback value
-  // changes nothing.
-  assert.deepEqual(ratePlanRange([dateBase], 0.31), { min: 0.2, max: 0.2 });
-  assert.deepEqual(ratePlanRange([dateWindow], 0.31), { min: 0.32, max: 0.32 });
+  // the fallback price joins the advertised range — widening the maximum
+  // when it sits above the rows' own prices...
+  assert.deepEqual(ratePlanRange([dateBase], 0.31), { min: 0.2, max: 0.31 });
+  // ...or the minimum when it sits below them (the #188 headline shape:
+  // a summer row of 0.20 with a 0.12 flat fallback).
+  assert.deepEqual(ratePlanRange([dateWindow], 0.31), { min: 0.31, max: 0.32 });
+  assert.deepEqual(ratePlanRange([dateBase], 0.12), { min: 0.12, max: 0.2 });
+  // A usable fallback of exactly 0 prices the gaps at zero, so the range
+  // reaches 0 through the union rather than the unusable special case.
+  assert.deepEqual(ratePlanRange([dateBase], 0), { min: 0, max: 0.2 });
+  // An unusable fallback value leaves the gap genuinely unpriced.
   assert.deepEqual(ratePlanRange([dateBase], ''), { min: 0, max: 0.2 });
 });
 
