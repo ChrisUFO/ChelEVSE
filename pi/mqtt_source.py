@@ -785,6 +785,11 @@ class MqttSource:
         retained redelivery that restates the known fact must not advance the
         arrival generation, which the outage classifier reads as the charger
         publishing (a retained copy is broker-held, not fresh publishing).
+        Nothing queues before the first seed either: a fresh process receives
+        the broker's retained copy while the snapshot holds no state for the
+        flag to label, that delivery is as broker-held as a restated
+        redelivery, and the seed's own ``/status`` reply carries
+        ``manual_override`` — so no fact is lost by waiting.
         """
         with self._lock:
             self.override = value if isinstance(value, dict) else None
@@ -793,7 +798,7 @@ class MqttSource:
             known = self._pending.get(
                 "manual_override", self.snapshot.get("manual_override")
             )
-            if flag is not None and flag != known:
+            if self.seeded and flag is not None and flag != known:
                 self._pending["manual_override"] = flag
                 self._arm_debounce()
         self._notify_command_waiters()

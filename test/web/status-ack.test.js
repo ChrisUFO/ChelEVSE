@@ -403,6 +403,14 @@ test('an older bridge’s document offers no ack control', () => {
   // rebuild signature carries the capability, not just the advisory facts.
   showHealth(doc());
   assert.notEqual(buttonOf(rowOf()), null);
+
+  // And the reverse skew — the fact hand-deleted in the console (A.8) or
+  // the bridge rolled back: the same rebuild must remove the control
+  // again; the gate is symmetric.
+  showHealth(legacy);
+  assert.equal(rows().length, 1);
+  assert.equal(rowOf().children.length, 2); // head, meta — no control area
+  assert.equal(buttonOf(rowOf()), null);
 });
 
 test('sign-out teardown leaves no control or focus behind', () => {

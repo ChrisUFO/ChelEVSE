@@ -318,6 +318,44 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual(self.snapshots, [])
         self.assertEqual(self.source.arrival_generation(), 0)
 
+    def test_a_retained_override_doc_before_any_seed_queues_nothing(self):
+        # A fresh process receives the broker's retained copy before the
+        # first HTTP seed: queuing it would advance the arrival generation
+        # on a broker-held delivery -- the same honesty the restated-fact
+        # pin above demands -- and the snapshot holds no state yet for the
+        # flag to label. The seed's own /status reply carries
+        # manual_override, so no fact is lost by waiting.
+        client = self.connect()
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.source.flush()
+        self.assertEqual(self.snapshots, [])
+        self.assertEqual(self.source.arrival_generation(), 0)
+        # Once seeded, the same document change feeds the snapshot as usual.
+        self.source.seed(status_payload(state=254, manual_override=0))
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[0].fields)["state_label"],
+            "stopped",
+        )
+
+    def test_two_override_documents_in_one_window_the_later_one_wins(self):
+        # The pending-first ``known`` lookup is what makes the second
+        # document win inside one debounce window (and the arm no-ops
+        # while the timer is already set): one snapshot leaves, carrying
+        # the later flag -- the earlier one never lands anywhere.
+        client = self.connect()
+        self.source.seed(status_payload(state=254, manual_override=0))
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        client.deliver("chelevse/override", '{"state": "null"}')
+        self.source.flush()
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[0].fields)["state_label"],
+            "sleeping",
+        )
+
     def test_a_temp_only_burst_flushes_through_the_debounce_timer(self):
         # The tests above flush by hand, which proves the liveness flag is
         # consumed but not that a temp delivery arms the timer at all: an
@@ -333,6 +371,33 @@ class MqttSourceTests(MqttSourceBase):
         self.assertEqual([record.fields for record in self.snapshots], [{}])
         self.assertEqual(self.snapshots[0].arrival, 1)
         self.assertEqual(self.source.arrival_generation(), 1)
+
+    def test_an_override_only_change_flushes_through_the_debounce_timer(self):
+        # The override tests above flush by hand, which proves the fact is
+        # consumed but not that the document change arms the timer at all:
+        # deleting that arm would leave every one of them green while an
+        # override-only change sat unflushed forever on an idle charger
+        # (#159). This one drives the real timer -- the state burst's own
+        # flush has already come and gone -- so the override branch's arm
+        # must survive any refactor, exactly like the temp-only pin above.
+        self.source.debounce = 0.02
+        client = self.connect()
+        self.source.seed(status_payload(state=3, manual_override=0))
+        client.deliver("chelevse/state", 254)
+        deadline = time.monotonic() + 2
+        while len(self.snapshots) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        client.deliver("chelevse/override", '{"state": "disabled"}')
+        deadline = time.monotonic() + 2
+        while len(self.snapshots) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(len(self.snapshots), 2)
+        self.assertEqual(
+            bridge.parse_snapshot(self.snapshots[1].fields)["state_label"],
+            "stopped",
+        )
+        self.assertEqual(self.snapshots[1].arrival, 2)
+        self.assertEqual(self.source.arrival_generation(), 2)
 
     def test_all_mapped_topics_land_on_their_status_key(self):
         client = self.connect()
