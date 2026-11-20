@@ -44,6 +44,7 @@ import {
   pointCostSummary,
   sessionCostLabel,
   seriesCostSummary,
+  seriesWindowUncovered,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, fmtRate, formatDuration, fmtMoney, toNumber } from '../format.js';
@@ -132,7 +133,12 @@ let scrubPointer = null;
 // The bucket/series cost summaries and the coverage disclosure live in
 // js/cost.js beside the pricing helpers they call; re-exported here so the
 // screen's tests keep this path.
-export { coverageDisclosure, pointCostSummary, seriesCostSummary } from '../cost.js';
+export {
+  coverageDisclosure,
+  pointCostSummary,
+  seriesCostSummary,
+  seriesWindowUncovered,
+} from '../cost.js';
 
 // The sessions a period's $ prices: the recorded payload plus, while a charge
 // is in progress, the live session's contribution (#126) — merged only for a
@@ -183,6 +189,34 @@ function renderPlanBanner() {
     settings.rate != null
       ? `Some dates or hours fall outside every season window and are priced at your flat rate ${fmtRate(settings.rate, settings.currency)}.`
       : 'Some dates or hours have no price and are shown at 0.00.',
+  );
+}
+
+// The per-window rate-scope flag (#193): the plan banner above speaks for the
+// whole saved plan — it fires on any gap anywhere — while this line speaks for
+// the window on screen only. A season that expired mid-month makes a November
+// week partly flat-priced (the line names the fallback) while a July week of
+// the same plan is fully row-priced (no line), and a flat-only plan never
+// flags. The predicate is pure (seriesWindowUncovered, js/cost.js) over the
+// series' own bucket windows — exactly the spans the period's figures price —
+// so the sentence's "this week/month/year/day" names the same window the
+// summary does, and it composes with the cost cell untouched: the #194
+// coverage suffix keeps its own sentence beside the figure, this line adds a
+// second, subdued one beneath.
+function renderWindowNote() {
+  const note = $('history-window-note');
+  if (!note) return;
+  const uncovered = seriesWindowUncovered(series, currentPeriod().bucket, settings);
+  note.hidden = !uncovered;
+  if (note.hidden) return;
+  // The #192 copy rule: name the stored flat rate while one is finite; only a
+  // missing fallback keeps the 0.00 sentence.
+  const unit = currentPeriod().unit;
+  setText(
+    note,
+    settings.rate != null
+      ? `Part of this ${unit} prices at your flat rate ${fmtRate(settings.rate, settings.currency)}.`
+      : `Part of this ${unit} has no price and is shown at 0.00.`,
   );
 }
 
@@ -271,6 +305,7 @@ function paintPeriodSwitch() {
 
 function renderSummary() {
   renderPlanBanner();
+  renderWindowNote();
   // The summary total is the series sum, except for a day whose hours were never
   // recorded: its daily total is real, so the copy and the number agree instead
   // of showing "—" beside "today has a total".
@@ -1292,6 +1327,8 @@ export function resetHistory() {
   periodId = DEFAULT_PERIOD;
   const planBanner = $('history-plan-banner');
   if (planBanner) planBanner.hidden = true;
+  const windowNote = $('history-window-note');
+  if (windowNote) windowNote.hidden = true;
   series = [];
   selectedId = null;
   dayTotal = null;
