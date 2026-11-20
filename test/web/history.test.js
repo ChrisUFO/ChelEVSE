@@ -36,11 +36,12 @@ import {
   sumSeries,
 } from '../../web/js/history.js';
 import {
+  coverageDisclosure,
   pointCostSummary,
   seriesCostSummary,
   showPlanBanner,
 } from '../../web/js/screens/history.js';
-import { sessionCostLabel } from '../../web/js/cost.js';
+import { sessionCostLabel, sessionIntervalsValid } from '../../web/js/cost.js';
 
 test('dayId uses local calendar components', () => {
   assert.equal(dayId(new Date(2026, 0, 5, 12)), '2026-01-05');
@@ -1886,6 +1887,134 @@ test('an all-unpriceable bar hides its figure instead of pricing it free', () =>
   assert.ok(end > start, 'screens/history.js closes seriesCost');
   const body = source.slice(start, end + 2);
   assert.match(body, /unpricedEnergy && !summary\.pricedEnergy\)\) return null/);
+});
+
+// ---------- the summary's coverage disclosure (#194) ----------
+//
+// The live case the issue was filed on (19 Nov 2026): a week whose kWh comes
+// from day documents while the sessions behind it price only a fraction — the
+// counter-reset plug-in whose `wh` undercounts, so reconciliation fails and
+// the aggregate prices 13.7 of the week's 48.1 kWh. The summary's $ must say
+// what it prices instead of reading as a 3.2¢ tariff.
+
+// The live plan shape: one all-day November season at 0.1127 with the same
+// figure stored as the flat fallback, so every slice below prices at one rate
+// and the figures are exact. November dates keep it clear of every DST edge.
+const NOVEMBER = {
+  rate: 0.1127,
+  currency: 'USD',
+  rates: [
+    {
+      id: 'november',
+      rate: 0.1127,
+      days: [0, 1, 2, 3, 4, 5, 6],
+      start: '00:00',
+      end: '00:00',
+      months: [11],
+    },
+  ],
+};
+
+// The 15–19 Nov counter-reset plug-in: seven usable intervals that kept
+// counting through the reset, summing to 48.038 kWh against a record `wh` of
+// 15.956 kWh — far outside the max(250 Wh, 2%) band, so the money guard
+// prices the stored span's aggregate (cost.test.js's overshoot shape) and the
+// rest hides. 80 h of the 93.2 h plug-in fall inside the week of the 16th.
+function counterResetSession() {
+  return {
+    id: '1795142880',
+    wh: 15956,
+    started_at: new Date(2026, 10, 15, 10, 48),
+    ended_at: new Date(2026, 10, 19, 8),
+    intervals: [
+      {
+        started_at: new Date(2026, 10, 15, 10, 48),
+        ended_at: new Date(2026, 10, 15, 22),
+        wh: 11800,
+      },
+      { started_at: new Date(2026, 10, 16), ended_at: new Date(2026, 10, 16, 8), wh: 8600 },
+      { started_at: new Date(2026, 10, 16, 20), ended_at: new Date(2026, 10, 17, 4), wh: 7800 },
+      { started_at: new Date(2026, 10, 17, 21), ended_at: new Date(2026, 10, 18, 5), wh: 7200 },
+      { started_at: new Date(2026, 10, 18, 10), ended_at: new Date(2026, 10, 18, 18), wh: 6238 },
+      { started_at: new Date(2026, 10, 18, 22), ended_at: new Date(2026, 10, 19, 2), wh: 3200 },
+      { started_at: new Date(2026, 10, 19, 5), ended_at: new Date(2026, 10, 19, 8), wh: 3200 },
+    ],
+  };
+}
+
+test('the live counter-reset week discloses the energy its $ prices', () => {
+  const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
+  const session = counterResetSession();
+  // The reconciliation failure that routes pricing to the stored span.
+  assert.equal(sessionIntervalsValid(session.intervals, session.wh), false);
+  // The week's day documents: Mon 16 – Thu 19 Nov, 48.1 kWh recorded.
+  const points = periodSeries(
+    'week',
+    [
+      { id: '2026-11-16', kwh: 12.4 },
+      { id: '2026-11-17', kwh: 11.8 },
+      { id: '2026-11-18', kwh: 11.9 },
+      { id: '2026-11-19', kwh: 12.0 },
+    ],
+    today,
+  );
+  const summary = seriesCostSummary(points, 'day', NOVEMBER, [session]);
+  // The aggregate's in-window share at the plan's one rate.
+  const share = (15956 * 80) / 93.2;
+  assert.ok(Math.abs(summary.coveredWh - share) < 1e-6);
+  assert.ok(Math.abs(summary.recordedWh - 48100) < 1e-6);
+  assert.ok(Math.abs(summary.cost - (share / 1000) * 0.1127) < 1e-9);
+  assert.equal(coverageDisclosure(summary), 'priced 13.7 of 48.1 kWh');
+  // The kWh the summary shows is exactly the day documents' total.
+  assert.ok(Math.abs(sumSeries(points) - 48.1) < 1e-9);
+  // Every day bar keeps #123's own verdict: recorded energy no session covers
+  // never prices itself free.
+  for (const point of points) {
+    const bucket = pointCostSummary(point, 'day', NOVEMBER, [session]);
+    assert.equal(bucket.unpricedEnergy, true);
+  }
+});
+
+test('a covered period discloses nothing, and the tolerance band keeps rounding quiet', () => {
+  // The week's sessions account for its days: no suffix, exactly as before.
+  const today = new Date(2026, 9, 18, 12);
+  const points = periodSeries('week', [{ id: '2026-10-14', kwh: 2 }], today);
+  const sessions = [
+    { wh: 2000, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 3) },
+  ];
+  const covered = seriesCostSummary(points, 'day', NIGHTLY, sessions);
+  assert.ok(Math.abs(covered.cost - 0.2) < 1e-9);
+  assert.equal(coverageDisclosure(covered), null);
+  // The band is the interval reconciliation's own — max(250 Wh, 2%) of the
+  // recorded total, inclusive. A 3 kWh day with 2.75 kWh covered (the 250 Wh
+  // floor, exactly) stays quiet; at 2.74 kWh (260 Wh) the line fires.
+  const day = periodSeries('week', [{ id: '2026-10-14', kwh: 3 }], today);
+  const atFloor = seriesCostSummary(day, 'day', NIGHTLY, [
+    { wh: 2750, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
+  ]);
+  assert.equal(coverageDisclosure(atFloor), null);
+  const pastFloor = seriesCostSummary(day, 'day', NIGHTLY, [
+    { wh: 2740, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
+  ]);
+  assert.equal(coverageDisclosure(pastFloor), 'priced 2.74 of 3.00 kWh');
+});
+
+test('a period with nothing covered keeps the $ hidden and discloses nothing', () => {
+  const points = periodSeries('week', [{ id: '2026-10-15', kwh: 4.2 }], new Date(2026, 9, 18, 12));
+  const summary = seriesCostSummary(points, 'day', NIGHTLY);
+  assert.equal(summary.cost, null);
+  assert.equal(coverageDisclosure(summary), null);
+});
+
+test("the Day period's hour summary never carries a coverage disclosure", () => {
+  // Hour buckets price the day document's own energy — coverage is
+  // definitional on this path, whatever the sessions list holds.
+  const points = hourSeries({ '02': 2, 12: 1 }, new Date(2026, 9, 18, 12, 40));
+  const summary = seriesCostSummary(points, 'hour', NIGHTLY, []);
+  assert.ok(Math.abs(summary.cost - 0.5) < 1e-9);
+  assert.ok(Math.abs(summary.coveredWh - 3000) < 1e-9);
+  assert.ok(Math.abs(summary.recordedWh - 3000) < 1e-9);
+  assert.equal(coverageDisclosure(summary), null);
 });
 
 // ---------- screen read paths ----------

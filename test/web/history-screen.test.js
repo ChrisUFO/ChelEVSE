@@ -629,6 +629,85 @@ test('the period sessions read keeps its empty and rejecting edges', async () =>
   await assert.rejects(fetchPeriodSessions(periodById('week'), bounds, fail), /offline/);
 });
 
+// ---------- the summary's coverage disclosure, executed (#194) ----------
+//
+// The same seam as the pricing pass above, on the live case the issue was
+// filed on (19 Nov 2026): the week of Mon 16 – Thu 19 Nov holds 48.1 kWh of
+// day documents while the counter-reset plug-in's failed reconciliation
+// leaves the aggregate pricing 13.7 kWh of it. The rendered cost cell must
+// carry the disclosure beside the figure; the pure math is pinned in
+// history.test.js.
+
+// The live plan shape: one all-day November season at 0.1127, with the same
+// figure stored as the flat fallback.
+function novemberPlan() {
+  return {
+    rate: 0.1127,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'november',
+        rate: 0.1127,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [11],
+      },
+    ],
+  };
+}
+
+test('a partially covered week renders the disclosure beside the summary $', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
+  const descriptor = periodById('week');
+  // Seven usable intervals summing to 48.038 kWh against the record's
+  // 15.956 kWh `wh` — reconciliation fails, so the stored span's aggregate is
+  // the pricing record, and only its in-window share (80 h of the 93.2 h
+  // plug-in) lands inside the week.
+  const reset = {
+    id: '1795142880',
+    wh: 15956,
+    started_at: new Date(2026, 10, 15, 10, 48),
+    ended_at: new Date(2026, 10, 19, 8),
+    intervals: [
+      {
+        started_at: new Date(2026, 10, 15, 10, 48),
+        ended_at: new Date(2026, 10, 15, 22),
+        wh: 11800,
+      },
+      { started_at: new Date(2026, 10, 16), ended_at: new Date(2026, 10, 16, 8), wh: 8600 },
+      { started_at: new Date(2026, 10, 16, 20), ended_at: new Date(2026, 10, 17, 4), wh: 7800 },
+      { started_at: new Date(2026, 10, 17, 21), ended_at: new Date(2026, 10, 18, 5), wh: 7200 },
+      { started_at: new Date(2026, 10, 18, 10), ended_at: new Date(2026, 10, 18, 18), wh: 6238 },
+      { started_at: new Date(2026, 10, 18, 22), ended_at: new Date(2026, 10, 19, 2), wh: 3200 },
+      { started_at: new Date(2026, 10, 19, 5), ended_at: new Date(2026, 10, 19, 8), wh: 3200 },
+    ],
+  };
+  applyHistory(
+    descriptor,
+    {
+      docs: [
+        { id: '2026-11-16', kwh: 12.4 },
+        { id: '2026-11-17', kwh: 11.8 },
+        { id: '2026-11-18', kwh: 11.9 },
+        { id: '2026-11-19', kwh: 12.0 },
+      ],
+      fromCache: false,
+    },
+    null,
+    today,
+    [reset],
+  );
+  showHistorySettings(novemberPlan());
+  // USD 1.54 prices 13.7 kWh at 0.1127 — said out loud beside the 48.1 the
+  // summary shows, which stays the day documents' own total.
+  assert.equal(element('history-cost-cell').hidden, false);
+  assert.equal(element('history-cost').textContent, 'USD 1.54 · priced 13.7 of 48.1 kWh');
+  assert.equal(element('history-total').textContent, '48.1');
+});
+
 // ---------- the live session's period contribution, executed (#126) ----------
 //
 // The same seam as #123's pricing pass, extended with the status input: the
