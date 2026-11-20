@@ -708,6 +708,168 @@ test('a partially covered week renders the disclosure beside the summary $', () 
   assert.equal(element('history-total').textContent, '48.1');
 });
 
+// ---------- the per-window rate-scope note, executed (#193) ----------
+//
+// The plan banner speaks for the saved plan (any gap, anywhere); the note
+// beneath the summary speaks for the window on screen only. The predicate is
+// pinned pure in history.test.js — this executes the paint and its copy,
+// including the composition with the #194 disclosure above.
+
+// The #188 plan shape: one all-day season base 15 June – 15 September, with
+// the stored flat rate as the fallback every other instant prices at.
+function expiredSeasonPlan(rate = 0.12) {
+  return {
+    rate,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [6, 7, 8, 9],
+        from: '06-15',
+        to: '09-15',
+      },
+    ],
+  };
+}
+
+test('a window no rate row covers renders the note naming the rate, or 0.00 (#193)', () => {
+  resetHistory();
+  enterHistory();
+  // The screen's default period is Month, so the applied window is the month:
+  // November 2026 through today, every instant of it outside the season.
+  const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
+  applyHistory(
+    periodById('month'),
+    { docs: [{ id: '2026-11-18', kwh: 2 }], fromCache: false },
+    null,
+    today,
+    [
+      // One session wholly inside the day: 2 kWh, every instant off-season.
+      { wh: 2000, started_at: new Date(2026, 10, 18, 1), ended_at: new Date(2026, 10, 18, 3) },
+    ],
+  );
+  // The fallback prices the whole window: the note names it, beside a cost
+  // figure that prices the session at that same flat rate.
+  showHistorySettings(expiredSeasonPlan());
+  assert.equal(element('history-window-note').hidden, false);
+  assert.equal(
+    element('history-window-note').textContent,
+    'Part of this month prices at your flat rate USD 0.12.',
+  );
+  assert.equal(element('history-cost').textContent, 'USD 0.24');
+  // The plan-wide banner still applies its own predicate (the gap is real
+  // even though this window prices): both speak, each about its own scope.
+  assert.equal(element('history-plan-banner').hidden, false);
+
+  // The same rows with no finite flat rate: the 0.00 vocabulary, and the
+  // session genuinely prices at USD 0.00.
+  showHistorySettings({ currency: 'USD', rates: expiredSeasonPlan().rates });
+  assert.equal(
+    element('history-window-note').textContent,
+    'Part of this month has no price and is shown at 0.00.',
+  );
+  assert.equal(element('history-cost').textContent, 'USD 0.00');
+});
+
+test('a fully covered window under a gapped plan, and flat-only, keep the note hidden', () => {
+  resetHistory();
+  enterHistory();
+  // A July month of the same expired-season plan: every instant row-priced,
+  // while the plan's gap (the rest of the year) sits outside the window.
+  applyHistory(
+    periodById('month'),
+    { docs: [{ id: '2026-07-21', kwh: 2 }], fromCache: false },
+    null,
+    new Date(2026, 6, 22, 12),
+    [{ wh: 2000, started_at: new Date(2026, 6, 21, 1), ended_at: new Date(2026, 6, 21, 3) }],
+  );
+  showHistorySettings(expiredSeasonPlan());
+  assert.equal(element('history-window-note').hidden, true);
+  assert.equal(element('history-cost').textContent, 'USD 0.40'); // 2 kWh at the 0.20 season base
+  // The plan banner still fires — the gap sits outside this window.
+  assert.equal(element('history-plan-banner').hidden, false);
+
+  // A flat-only plan flags nothing anywhere.
+  showHistorySettings({ rate: 0.12, currency: 'USD' });
+  assert.equal(element('history-window-note').hidden, true);
+  assert.equal(element('history-plan-banner').hidden, true);
+  assert.equal(element('history-cost').textContent, 'USD 0.24');
+});
+
+test('the rate-scope note composes with the coverage disclosure beside the summary $', () => {
+  // The #194 live case on a season that expires inside the window (through
+  // Wednesday 18 November): the cost cell keeps its own sentence — which
+  // energy the $ prices — and the note adds the tariff scope of the window on
+  // its own subdued line beneath; neither clobbers the other.
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
+  const reset = {
+    id: '1795142880',
+    wh: 15956,
+    started_at: new Date(2026, 10, 15, 10, 48),
+    ended_at: new Date(2026, 10, 19, 8),
+    intervals: [
+      {
+        started_at: new Date(2026, 10, 15, 10, 48),
+        ended_at: new Date(2026, 10, 15, 22),
+        wh: 11800,
+      },
+      { started_at: new Date(2026, 10, 16), ended_at: new Date(2026, 10, 16, 8), wh: 8600 },
+      { started_at: new Date(2026, 10, 16, 20), ended_at: new Date(2026, 10, 17, 4), wh: 7800 },
+      { started_at: new Date(2026, 10, 17, 21), ended_at: new Date(2026, 10, 18, 5), wh: 7200 },
+      { started_at: new Date(2026, 10, 18, 10), ended_at: new Date(2026, 10, 18, 18), wh: 6238 },
+      { started_at: new Date(2026, 10, 18, 22), ended_at: new Date(2026, 10, 19, 2), wh: 3200 },
+      { started_at: new Date(2026, 10, 19, 5), ended_at: new Date(2026, 10, 19, 8), wh: 3200 },
+    ],
+  };
+  applyHistory(
+    periodById('month'),
+    {
+      docs: [
+        { id: '2026-11-16', kwh: 12.4 },
+        { id: '2026-11-17', kwh: 11.8 },
+        { id: '2026-11-18', kwh: 11.9 },
+        { id: '2026-11-19', kwh: 12.0 },
+      ],
+      fromCache: false,
+    },
+    null,
+    today,
+    [reset],
+  );
+  // The stored span lies wholly inside the month, so its full 15.956 kWh is
+  // attributed against the days' 48.1 — the #194 disclosure — while the
+  // season and the fallback share 0.1127, so the $ keeps that one rate and
+  // the note adds that the 19th's time is fallback-priced.
+  showHistorySettings({
+    rate: 0.1127,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'november',
+        rate: 0.1127,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [11],
+        from: '11-01',
+        to: '11-18',
+      },
+    ],
+  });
+  assert.equal(element('history-cost').textContent, 'USD 1.80 · priced 16.0 of 48.1 kWh');
+  assert.equal(element('history-window-note').hidden, false);
+  assert.equal(
+    element('history-window-note').textContent,
+    'Part of this month prices at your flat rate USD 0.1127.',
+  );
+});
+
 // ---------- the live session's period contribution, executed (#126) ----------
 //
 // The same seam as #123's pricing pass, extended with the status input: the

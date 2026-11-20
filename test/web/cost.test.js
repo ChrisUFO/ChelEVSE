@@ -11,6 +11,7 @@ import {
   aggregateCostLabel,
   costSettings,
   heldAnchorAfter,
+  heldCostFallback,
   heldCostLabel,
   heldCostUncovered,
   hourCost,
@@ -21,6 +22,7 @@ import {
   sessionCostLabel,
   sessionCostSpans,
   sessionIntervalsValid,
+  statusCostFallback,
   statusCostLabel,
   statusCostUncovered,
 } from '../../web/js/cost.js';
@@ -373,6 +375,57 @@ test('the held marker follows the frozen interval', () => {
     assert.equal(heldCostUncovered(elapsed, noon, windowOnlyNoFlat()), false, String(elapsed));
   }
   assert.equal(heldCostUncovered(3600, null, windowOnlyNoFlat()), false);
+});
+
+test('the informational fallback markers are the warning gates inverted (#193)', () => {
+  // The same fixtures as the two warning tests: an uncovered slice with a
+  // finite flat fallback is policy-correct, so it carries the informational
+  // marker instead of the warning — the predicates are exclusive by the rate
+  // they read.
+  const inWindow = date(2026, 1, 5, 17, 0).getTime();
+  const outside = date(2026, 1, 5, 12, 0).getTime();
+  const straddle = date(2026, 1, 5, 16, 30).getTime();
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnly()), false);
+  assert.equal(statusCostFallback(liveStatus(3, outside, 3600), windowOnly()), true);
+  assert.equal(statusCostFallback(liveStatus(3, straddle, 3600), windowOnly()), true);
+  // Fully covered intervals, based plans and flat configs carry neither.
+  assert.equal(statusCostFallback(liveStatus(3, inWindow, 3600), windowOnly()), false);
+  assert.equal(statusCostFallback(liveStatus(3, outside, 3600), nightly()), false);
+  assert.equal(statusCostFallback(liveStatus(3, outside, 3600), FLAT), false);
+  // Without a finite fallback the warning fires and the informational marker
+  // never does — the inverse, on the same interval.
+  assert.equal(statusCostFallback(liveStatus(3, outside, 3600), windowOnlyNoFlat()), false);
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), windowOnlyNoFlat()), true);
+  // The marker shares the cost's own gates: nothing to name when the figure is
+  // hidden (not charging, missing write time or elapsed, offline marker).
+  for (const status of [
+    liveStatus(1, outside, 3600),
+    liveStatus(3, null, 3600),
+    liveStatus(3, outside, null),
+    liveStatus(3, outside, 0),
+    liveStatus(3, outside, -60),
+    liveStatus(3, outside, 3600, 1000, { charger_online: false }),
+  ]) {
+    assert.equal(statusCostFallback(status, windowOnly()), false);
+  }
+  assert.equal(statusCostFallback(null, windowOnly()), false);
+
+  // The held twin over the frozen window, gated the same way.
+  const noon = date(2026, 1, 5, 12, 0).getTime();
+  const peak = date(2026, 1, 5, 17, 0).getTime();
+  const edge = date(2026, 1, 5, 16, 30).getTime();
+  assert.equal(heldCostUncovered(3600, noon, windowOnly()), false);
+  assert.equal(heldCostFallback(3600, noon, windowOnly()), true);
+  assert.equal(heldCostFallback(3600, edge, windowOnly()), true);
+  assert.equal(heldCostFallback(3600, peak, windowOnly()), false);
+  assert.equal(heldCostFallback(3600, noon, windowOnlyNoFlat()), false);
+  assert.equal(heldCostUncovered(3600, noon, windowOnlyNoFlat()), true);
+  assert.equal(heldCostFallback(3600, noon, nightly()), false);
+  assert.equal(heldCostFallback(3600, noon, FLAT), false);
+  for (const elapsed of [null, 0, -60]) {
+    assert.equal(heldCostFallback(elapsed, noon, windowOnly()), false, String(elapsed));
+  }
+  assert.equal(heldCostFallback(3600, null, windowOnly()), false);
 });
 
 test('heldAnchorAfter captures, holds, clears and re-anchors', () => {

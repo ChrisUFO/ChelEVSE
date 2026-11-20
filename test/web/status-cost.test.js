@@ -394,11 +394,13 @@ test('flat configs price the session energy with no anchor at all', () => {
 test('the understates-cost marker sits under the figure, live and held', () => {
   // With a finite flat fallback (#188) the half-uncovered hour prices at that
   // fallback for its uncovered half — the figure is policy-correct, so the
-  // marker never fires.
+  // warning never fires. Its informational twin does name the fallback now
+  // (#193), pinned in its own test below; here the warning itself must stay
+  // absent.
   showSettings(WINDOW_ONLY);
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.31');
-  assert.equal(sub().textContent, '');
+  assert.ok(!sub().textContent.includes('understates cost'));
   // Without a finite fallback the live hour ending 16:30 is half uncovered at
   // a genuine 0.00: the figure prices at 0.16 and carries the marker with its
   // tooltip.
@@ -428,6 +430,67 @@ test('the understates-cost marker sits under the figure, live and held', () => {
   showStatus(snapshot({ updated_at: at(2026, 1, 5, 12, 0), elapsed: 3600, session_energy: 1000 }));
   assert.equal(cost(), 'GBP 0.30');
   assert.equal(sub().textContent, '');
+});
+
+test('the flat-fallback line names the price, subdued, and never beside the warning (#193)', () => {
+  // The informational marker (#193): a live interval with an uncovered slice
+  // AND a finite flat fallback prices that slice correctly, so nothing warns —
+  // a subdued line of its own names the fallback. It is the inverse of the
+  // warning's no-fallback gate, on the same interval the figure priced.
+  // A session reset first: the previous test's anchor (17:00) must not win
+  // over this test's own writes — an older charging write cannot rewind it.
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 15, 0),
+      elapsed: 0,
+      session_energy: 0,
+    }),
+  );
+  showSettings(WINDOW_ONLY);
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.31');
+  assert.equal(sub().children.length, 1);
+  assert.equal(sub().children[0].className, 'cost-fallback');
+  assert.equal(sub().children[0].textContent, 'part at your flat rate GBP 0.30');
+  assert.ok(sub().children[0].title.includes('outside every rate row'));
+  assert.ok(!sub().textContent.includes('understates cost'));
+
+  // The stop keeps the frozen window, so it keeps the informational line too
+  // (the held twin: the anchor is the 16:30 write, so the held window is the
+  // same half-uncovered hour).
+  showStatus(
+    snapshot({
+      state: 2,
+      state_label: 'ready',
+      updated_at: at(2026, 1, 5, 17, 30),
+      elapsed: 2 * 3600,
+      session_energy: 1000,
+    }),
+  );
+  assert.equal(cost(), 'GBP 0.31');
+  assert.equal(sub().children[0].className, 'cost-fallback');
+
+  // A fully covered window carries neither line.
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 17, 0), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.32');
+  assert.equal(sub().children.length, 0);
+
+  // The console-edited edge — no finite fallback — keeps the warning alone,
+  // byte-identical to before this line existed.
+  showSettings(WINDOW_ONLY_NO_FLAT);
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.16');
+  assert.equal(sub().children.length, 1);
+  assert.equal(sub().children[0].className, 'cost-unpriced');
+  assert.equal(sub().textContent, 'understates cost');
+
+  // Flat configs never carry it, whatever the interval.
+  showSettings(FLAT);
+  showStatus(snapshot({ updated_at: at(2026, 1, 5, 16, 30), elapsed: 3600, session_energy: 1000 }));
+  assert.equal(cost(), 'GBP 0.25');
+  assert.equal(sub().children.length, 0);
 });
 
 // ---------- cold-open adoption (the bridge's charging_stopped_at, #122) ----------
