@@ -1161,11 +1161,12 @@ class IntervalTests(unittest.TestCase):
         # resuming at the cleared 0, is indistinguishable from a new plug-in
         # -- the restart sheds the pre-reset epochs from wh. The merge folds
         # the resumed block back into the pre-reset record (they overlap), max
-        # keeps the pre-reset figure, and the interval list holds every epoch:
-        # sum(intervals) exceeds wh, the web's reconciliation guard rejects
-        # the list, and only the aggregate is priced. A bounded undercount,
-        # never an overcount, and better than the pre-#195 write in the same
-        # shape (which priced the last epoch's cumulative alone).
+        # keeps the larger side (here the pre-reset figure), and the interval
+        # list holds every epoch: sum(intervals) exceeds wh by the smaller
+        # side's energy (whichever epoch drew less), the web's reconciliation
+        # guard rejects the list, and only the aggregate is priced. A bounded
+        # undercount, never an overcount, and better than the pre-#195 write
+        # in the same shape (which priced the last epoch's cumulative alone).
         self.tick(3, 0, 0)
         self.tick(3, 5000, 3000)
         self.tick(3, 0, 3600)  # reset lands exactly on 0; charging stops

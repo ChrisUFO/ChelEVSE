@@ -999,8 +999,9 @@ equality is _not_ universal:
   their list can exceed it). One corner diverges: a reset that lands exactly
   on 0 and stops the charge, with the same plug-in resuming at the cleared 0,
   restarts the accumulation — that boundary is indistinguishable from a new
-  plug-in — so the merged record's list exceeds `wh` by the pre-reset epochs
-  and the web prices the aggregate: a bounded undercount, never an overcount;
+  plug-in — so the merged record's list exceeds `wh` by the smaller side's
+  energy (whichever epoch drew less) and the web prices the aggregate: a
+  bounded undercount, never an overcount;
 - a **dropped implausible step** stays in the charger's cumulative: `wh` keeps
   it in a plain plug-in while the list goes short, and in a reset-seen plug-in
   `wh` drops it too — keeping the interval basis;
