@@ -870,6 +870,60 @@ test('the rate-scope note composes with the coverage disclosure beside the summa
   );
 });
 
+test('a failed refresh over an empty window hides the note with the window it named (#193)', async () => {
+  // The note is window-scoped, unlike the plan banner: it must die with the
+  // window that earned it. A week the server answered with no documents still
+  // draws (an empty range is a $0.00 range) and still flags its tariff scope;
+  // the offline Refresh over it takes the branch that removes the window's
+  // every figure — the note among them, or the screen would name a window the
+  // presentation says isn't available. Driven exactly as triggered: a server
+  // answer, then a failed read that retains the zero series.
+  freezeClock();
+  try {
+    resetHistory();
+    enterHistory();
+    // October lies wholly outside the summer season, so the week's every
+    // bucket prices at the stored flat rate.
+    showHistorySettings(expiredSeasonPlan());
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    const reads = controlPeriodReads();
+    try {
+      // Week, answered by the server with no documents: a 0.00 total whose
+      // note still names the week's tariff scope.
+      switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+      reads[0].settle({ docs: [], fromCache: false });
+      await flushReads();
+      assert.equal(element('history-total').textContent, '0.00');
+      assert.equal(element('history-window-note').hidden, false);
+      assert.equal(
+        element('history-window-note').textContent,
+        'Part of this week prices at your flat rate USD 0.12.',
+      );
+
+      // Offline, then Refresh: the read retains the series but sums nothing,
+      // so the offline presentation replaces the window — and the note hides
+      // with it while the banner keeps its own, plan-wide scope.
+      const reload = fire('history-refresh', 'click');
+      reads[1].settle({ docs: [], fromCache: true });
+      await reload;
+      for (let i = 0; i < 5; i++) await settle();
+      assert.equal(
+        element('chart-empty-title').textContent,
+        "You're offline — history isn't available.",
+      );
+      assert.equal(element('history-total').textContent, '—');
+      assert.equal(element('history-cost-cell').hidden, true);
+      assert.equal(element('history-window-note').hidden, true);
+      assert.equal(element('history-plan-banner').hidden, false);
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 // ---------- the live session's period contribution, executed (#126) ----------
 //
 // The same seam as #123's pricing pass, extended with the status input: the
