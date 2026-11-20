@@ -869,6 +869,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions(), {})
         self.assertIsNone(self.tracker.pending_session)
 
+    def test_an_accumulated_total_survives_a_zeroed_end_tick(self):
+        # Firmware zeroes session_energy on the end tick; after an in-block
+        # reset (#195) the per-tick accumulation is the figure to write even
+        # though no cumulative remains -- without it the whole plug-in's
+        # pre-reset energy would vanish with the zeroed counter.
+        self.tracker.session_wh = 8800.0
+        self.tracker.session_wh_reset_seen = True
+        self.finalize(self.start + timedelta(hours=1), None, 3600, vehicle=0)
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 8800.0)
+        self.assertEqual(record["elapsed"], 3600)
+
     def test_failed_session_write_is_retried_next_tick(self):
         self.db.fail_writes = True
         self.finalize(self.start + timedelta(hours=1), 6000, 3600, vehicle=0)
@@ -1041,6 +1053,146 @@ class IntervalTests(unittest.TestCase):
         # 3000-1000 growth, then nothing for the reset tick, then 800 from the
         # reset baseline. The first tick only supplies the baseline.
         self.assertAlmostEqual(interval["wh"], 2800.0)
+
+    def test_an_in_block_counter_reset_accumulates_every_epoch_into_wh(self):
+        # The 15-19 Nov 2026 live shape (#195): the charger's session counter
+        # reset mid-block while charging continued, so its final cumulative is
+        # the last epoch's alone -- the record that read 15.96 kWh beside
+        # intervals summing 48. wh must carry every epoch's observed energy:
+        # the same per-tick deltas the interval list holds.
+        self.tick(3, 0, 0)
+        self.tick(3, 8000, 5000)
+        self.tick(3, 15960, 10000)  # epoch 1 ends where the live record did
+        self.tick(3, 300, 10100)  # counter reset mid-block; charging on
+        self.tick(3, 8300, 15000)  # epoch 2 growth
+        self.tick(3, 16200, 20000)  # epoch 2 passes epoch 1's cumulative
+        self.tick(1, 16200, 20000)
+        (record,) = self.sessions().values()
+        # Every observed step: 8000 + 7960 + nothing for the reset + 8000 +
+        # 7900 -- not the 16200 Wh the counter ended at.
+        expected = 8000.0 + 7960.0 + 8000.0 + 7900.0
+        self.assertAlmostEqual(record["wh"], expected)
+        (interval,) = record["intervals"]
+        self.assertAlmostEqual(interval["wh"], expected)
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in record["intervals"]), record["wh"]
+        )
+
+    def test_post_reset_blocks_merge_into_one_energy_complete_record(self):
+        # The rest of the live shape: after an in-block reset the plug-in
+        # continues (a pause, then another block on the same counter), and
+        # each block's record carries the plug-in-wide accumulation -- so the
+        # merge folds them into one document whose wh still reconciles with
+        # the whole interval list.
+        self.tick(3, 0, 0)
+        self.tick(3, 5000, 3000)
+        self.tick(3, 200, 3300)  # in-block reset
+        self.tick(3, 1500, 4000)  # epoch 2 grows
+        self.tick(1, 1500, 4000)  # pause, still plugged in
+        self.tick(3, 1500, 4100)  # block 2 baseline (counter unchanged)
+        self.tick(3, 4000, 6000)
+        self.tick(1, 4000, 6000)  # unplug ends the plug-in
+        self.assertEqual(len(self.sessions()), 1)
+        (record,) = self.sessions().values()
+        # 5000 before the reset + 1300 after it + 2500 in block 2. max, not a
+        # sum: the later record's wh already contains the earlier's.
+        self.assertAlmostEqual(record["wh"], 8800.0)
+        first, second = record["intervals"]
+        self.assertAlmostEqual(first["wh"], 6300.0)
+        self.assertAlmostEqual(second["wh"], 2500.0)
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in record["intervals"]), record["wh"]
+        )
+
+    def test_a_boundary_counter_drop_restarts_the_cumulative_path(self):
+        # A drop between blocks is indistinguishable from a new plug-in's
+        # cleared counter, so the accumulation restarts there and wh stays
+        # exactly the charger's cumulative -- the pre-#195 write, whatever the
+        # plug-in before the drop recorded.
+        self.tick(3, 0, 0)
+        self.tick(3, 4000, 2400)
+        self.tick(1, 4000, 2400)  # pause, still plugged in
+        # Two idle hours before the counter shows up lower: the drop is
+        # silent (no interval is open), and the shrunken counters do not
+        # merge -- a shrink is a new session to the merge predicate.
+        self.tick(3, 100, 2500, step=timedelta(hours=2))
+        self.tick(3, 2100, 3600)
+        self.tick(1, 2100, 3600)
+        self.assertEqual(len(self.sessions()), 2)
+        latest = max(self.sessions().values(), key=lambda item: item["ended_at"])
+        self.assertEqual(latest["wh"], 2100.0)
+        (interval,) = latest["intervals"]
+        # The 100 Wh the reset landed on was never observed growing, so only
+        # the post-baseline 2000 Wh is in the interval -- the same one-poll
+        # baseline caveat every first reading has.
+        self.assertAlmostEqual(interval["wh"], 2000.0)
+
+    def test_a_zero_baseline_plug_in_does_not_inherit_the_dead_accumulator(self):
+        # The boundary the step < 0 restart cannot see (#195): an in-block
+        # reset lands session_energy exactly on 0 as the plug-in's last
+        # charging reading, the vehicle unplugs, and the next plug-in starts
+        # at the cleared 0 -- a step of 0 against the stale baseline, not a
+        # drop. The dead plug-in's accumulation must not leak into the new
+        # plug-in's wh: without the restart the repro's second plug-in
+        # records 8000 for the 3000 actually drawn.
+        self.tick(3, 0, 0)
+        self.tick(3, 5000, 3000)
+        self.tick(3, 0, 3600)  # reset lands on 0; charging never resumes
+        self.tick(1, 0, 3600)  # unplug ends the plug-in on the zeroed counter
+        self.tick(3, 0, 0)  # the next plug-in opens at its cleared counter
+        self.tick(3, 3000, 1800)
+        self.tick(1, 3000, 1800)
+        self.assertEqual(len(self.sessions()), 2)
+        first, second = sorted(
+            self.sessions().values(), key=lambda record: record["ended_at"]
+        )
+        self.assertAlmostEqual(first["wh"], 5000.0)
+        self.assertAlmostEqual(second["wh"], 3000.0)
+        # Both records reconcile with their own interval lists, so the web's
+        # guard prices the intervals instead of the fallback.
+        for record in (first, second):
+            self.assertAlmostEqual(
+                sum(entry["wh"] for entry in record["intervals"]), record["wh"]
+            )
+
+    def test_a_zero_baseline_same_plug_in_resume_prices_a_bounded_undercount(self):
+        # The pinned corner of the zero-baseline restart (#195): a reset that
+        # lands exactly on 0 and stops the charge, with the same plug-in
+        # resuming at the cleared 0, is indistinguishable from a new plug-in
+        # -- the restart sheds the pre-reset epochs from wh. The merge folds
+        # the resumed block back into the pre-reset record (they overlap), max
+        # keeps the larger side (here the pre-reset figure), and the interval
+        # list holds every epoch: sum(intervals) exceeds wh by the smaller
+        # side's energy (whichever epoch drew less), the web's reconciliation
+        # guard rejects the list, and only the aggregate is priced. A bounded
+        # undercount, never an overcount, and better than the pre-#195 write
+        # in the same shape (which priced the last epoch's cumulative alone).
+        self.tick(3, 0, 0)
+        self.tick(3, 5000, 3000)
+        self.tick(3, 0, 3600)  # reset lands exactly on 0; charging stops
+        self.tick(1, 0, 3600)  # still plugged in; block 1 finalizes at 5000
+        self.tick(3, 0, 0, step=timedelta(seconds=10))  # same plug-in resumes
+        self.tick(3, 3000, 1800, step=timedelta(minutes=30))
+        self.tick(1, 3000, 1800, step=timedelta(seconds=10))
+        self.assertEqual(len(self.sessions()), 1)
+        (record,) = self.sessions().values()
+        # The restart wiped the accumulator at the resume, so the merged wh is
+        # the pre-reset epoch's 5000 -- not the plug-in's actual 8000.
+        self.assertAlmostEqual(record["wh"], 5000.0)
+        first, second = record["intervals"]
+        self.assertAlmostEqual(first["wh"], 5000.0)
+        self.assertAlmostEqual(second["wh"], 3000.0)
+        # The merged list holds every epoch while max-wh keeps only the larger
+        # side: the sum exceeds wh by 3000 Wh, past the web's max(250 Wh, 2%)
+        # reconciliation bound, so the guard prices the aggregate (5000 of the
+        # 8000 drawn) rather than a doubled or exact figure.
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in record["intervals"]), 8000.0
+        )
+        self.assertGreater(
+            sum(entry["wh"] for entry in record["intervals"]) - record["wh"],
+            max(250.0, 0.02 * record["wh"]),
+        )
 
     def test_a_seeded_session_attributes_its_first_step_without_a_gap(self):
         # The seeded baseline predates the tracker (the bridge was down), so the

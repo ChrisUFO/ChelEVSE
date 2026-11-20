@@ -965,8 +965,11 @@ one document:
 sessions/1792345678   { started_at, ended_at, wh, elapsed, intervals? }
 ```
 
-`wh` is the charger's `session_energy` and `elapsed` is seconds. `ended_at` is
-the stop time and `started_at` comes from the charger's own timer
+`wh` is the charger's `session_energy` — unless the bridge saw the counter go
+backwards inside a charging block, when that cumulative covers only the last
+epoch and `wh` becomes the accumulated per-tick deltas across every epoch
+(#195), the same observation basis as `intervals`. `elapsed` is seconds.
+`ended_at` is the stop time and `started_at` comes from the charger's own timer
 (`ended_at - elapsed`), never from when the bridge booted.
 
 `intervals` records **when** that energy was actually drawn: one entry per
@@ -988,8 +991,20 @@ equality is _not_ universal:
 
 - a **restart mid-charge** leaves the energy drawn before it in the aggregate
   and in no interval (the seeded baseline starts the new interval at zero);
-- an **in-block counter reset** makes the intervals exceed the reset aggregate;
-- a **dropped implausible step** leaves the aggregate whole and the list short;
+- an **in-block counter reset** is accumulated into `wh` (#195): once the
+  bridge sees the counter go backwards inside a block, `wh` becomes the sum of
+  every epoch's observed per-tick deltas — the same basis as the interval
+  list — because the charger's own cumulative then covers only the last epoch
+  (records written before #195 still carry the last epoch's cumulative, so
+  their list can exceed it). One corner diverges: a reset that lands exactly
+  on 0 and stops the charge, with the same plug-in resuming at the cleared 0,
+  restarts the accumulation — that boundary is indistinguishable from a new
+  plug-in — so the merged record's list exceeds `wh` by the smaller side's
+  energy (whichever epoch drew less) and the web prices the aggregate: a
+  bounded undercount, never an overcount;
+- a **dropped implausible step** stays in the charger's cumulative: `wh` keeps
+  it in a plain plug-in while the list goes short, and in a reset-seen plug-in
+  `wh` drops it too — keeping the interval basis;
 - a **wall-clock step** with no measured span (below) leaves that interval's
   energy in `wh` and in no interval.
 
@@ -1029,10 +1044,15 @@ and each case has its own journal line:
 - `interval step skipped: counter reset inside the open interval (<Δ> Wh, <gap>)`
   — the counter went backwards while an interval was already open (a firmware
   restart mid-session). The step is dropped and the reading becomes the new
-  baseline.
+  baseline. The plug-in's accumulated total keeps the epochs before the reset
+  (#195), so the finalized `wh` sums every epoch while the charger's own
+  cumulative restarts. A drop at a block boundary instead restarts the
+  accumulation — indistinguishable from a new plug-in's cleared counter, it
+  must never span two plug-ins.
 - `interval step dropped: <Δ> Wh in <gap> exceeds the <n> Wh the charger could
 deliver` — the step is physically impossible. The energy stays in the
-  aggregate and the interval stays short.
+  charger's cumulative and the interval stays short; in a reset-seen plug-in
+  `wh` drops it too, keeping the interval basis.
 - `interval span derived: wall clock moved back <step>s; <duration>s measured on
 CLOCK_BOOTTIME (<wh> Wh)` — the wall clock was corrected backwards while the
   interval was open. The interval is kept with the measured boottime span as its
