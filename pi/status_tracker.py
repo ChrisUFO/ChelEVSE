@@ -282,7 +282,12 @@ class StatusTracker:
         does a new block that opens at a counter of exactly 0 while the total
         is still loaded: a reset that landed on 0 makes the next plug-in's
         cleared counter step 0, not backwards, so the drop test alone cannot
-        see that boundary (#195).
+        see that boundary (#195). That restart cannot tell a same-plug-in
+        resume after such a reset from a fresh plug-in: in the resume shape
+        the pre-reset epochs are shed from the total while the merge keeps
+        every interval, so the merged record's interval sum exceeds its
+        ``wh`` and the web's reconciliation guard prices the aggregate -- a
+        bounded undercount, never an overcount.
         """
         if not charging:
             return
@@ -334,7 +339,11 @@ class StatusTracker:
             # against the stale baseline. A counter at 0 mid-accumulation
             # means the firmware cleared it -- a disconnect by the counter's
             # own contract -- so the accumulation restarts here too; with the
-            # accumulator empty the reset is a no-op.
+            # accumulator empty the reset is a no-op. A same-plug-in resume
+            # after such a reset is indistinguishable and wipes too: the
+            # merged record's intervals then outweigh its wh and the web
+            # prices the aggregate -- a bounded undercount, never an
+            # overcount (#195).
             if _is_number(current) and float(current) == 0.0 and self.session_wh:
                 self.session_wh = 0.0
                 self.session_wh_reset_seen = False

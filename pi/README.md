@@ -996,7 +996,11 @@ equality is _not_ universal:
   every epoch's observed per-tick deltas — the same basis as the interval
   list — because the charger's own cumulative then covers only the last epoch
   (records written before #195 still carry the last epoch's cumulative, so
-  their list can exceed it);
+  their list can exceed it). One corner diverges: a reset that lands exactly
+  on 0 and stops the charge, with the same plug-in resuming at the cleared 0,
+  restarts the accumulation — that boundary is indistinguishable from a new
+  plug-in — so the merged record's list exceeds `wh` by the pre-reset epochs
+  and the web prices the aggregate: a bounded undercount, never an overcount;
 - a **dropped implausible step** stays in the charger's cumulative: `wh` keeps
   it in a plain plug-in while the list goes short, and in a reset-seen plug-in
   `wh` drops it too — keeping the interval basis;

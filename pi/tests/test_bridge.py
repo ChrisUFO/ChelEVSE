@@ -1155,6 +1155,44 @@ class IntervalTests(unittest.TestCase):
                 sum(entry["wh"] for entry in record["intervals"]), record["wh"]
             )
 
+    def test_a_zero_baseline_same_plug_in_resume_prices_a_bounded_undercount(self):
+        # The pinned corner of the zero-baseline restart (#195): a reset that
+        # lands exactly on 0 and stops the charge, with the same plug-in
+        # resuming at the cleared 0, is indistinguishable from a new plug-in
+        # -- the restart sheds the pre-reset epochs from wh. The merge folds
+        # the resumed block back into the pre-reset record (they overlap), max
+        # keeps the pre-reset figure, and the interval list holds every epoch:
+        # sum(intervals) exceeds wh, the web's reconciliation guard rejects
+        # the list, and only the aggregate is priced. A bounded undercount,
+        # never an overcount, and better than the pre-#195 write in the same
+        # shape (which priced the last epoch's cumulative alone).
+        self.tick(3, 0, 0)
+        self.tick(3, 5000, 3000)
+        self.tick(3, 0, 3600)  # reset lands exactly on 0; charging stops
+        self.tick(1, 0, 3600)  # still plugged in; block 1 finalizes at 5000
+        self.tick(3, 0, 0, step=timedelta(seconds=10))  # same plug-in resumes
+        self.tick(3, 3000, 1800, step=timedelta(minutes=30))
+        self.tick(1, 3000, 1800, step=timedelta(seconds=10))
+        self.assertEqual(len(self.sessions()), 1)
+        (record,) = self.sessions().values()
+        # The restart wiped the accumulator at the resume, so the merged wh is
+        # the pre-reset epoch's 5000 -- not the plug-in's actual 8000.
+        self.assertAlmostEqual(record["wh"], 5000.0)
+        first, second = record["intervals"]
+        self.assertAlmostEqual(first["wh"], 5000.0)
+        self.assertAlmostEqual(second["wh"], 3000.0)
+        # The merged list holds every epoch while max-wh keeps only the larger
+        # side: the sum exceeds wh by 3000 Wh, past the web's max(250 Wh, 2%)
+        # reconciliation bound, so the guard prices the aggregate (5000 of the
+        # 8000 drawn) rather than a doubled or exact figure.
+        self.assertAlmostEqual(
+            sum(entry["wh"] for entry in record["intervals"]), 8000.0
+        )
+        self.assertGreater(
+            sum(entry["wh"] for entry in record["intervals"]) - record["wh"],
+            max(250.0, 0.02 * record["wh"]),
+        )
+
     def test_a_seeded_session_attributes_its_first_step_without_a_gap(self):
         # The seeded baseline predates the tracker (the bridge was down), so the
         # first step has no measurable gap and must not be judged impossible:
