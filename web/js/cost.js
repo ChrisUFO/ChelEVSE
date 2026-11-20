@@ -37,6 +37,17 @@
 // schedule exists, because one aggregate kWh figure cannot be split across
 // windows; it stays the flat path these schedule helpers never touch.
 //
+// #194 adds the summary's coverage disclosure: the period screens' $ prices
+// only the sessions that overlap the window, while the kWh shown beside it is
+// the day documents' own total, so a partially covered period (a lost record,
+// or a counter-reset session whose aggregate prices a fraction of the days'
+// energy) reads as a plausible tariff. seriesCostSummary therefore totals the
+// buckets' attributed Wh beside their recorded kWh, and when the gap exceeds
+// the same max(250 Wh, 2%) band the buckets' own coverage uses, the summary's
+// cost line says which energy its figure prices ("USD 1.54 · priced 13.7 of
+// 48.1 kWh", coverageDisclosure below). Fully covered periods, hidden
+// figures and every kWh total are untouched.
+//
 // While a charge is live, that same interval is also today's history figure
 // (#126): the period screens merge `liveSessionContribution` — the live window
 // as one pseudo-session — into the sessions a period prices, so the Week/
@@ -73,7 +84,7 @@
 // bridge's `charging_stopped_at` stamp (see adoptedAnchor, issue #122): a
 // captured anchor always wins, and without the stamp today's hide stands.
 
-import { fmtCost, fmtMoney, liveCharging, toNumber } from './format.js';
+import { fmtCost, fmtK, fmtMoney, liveCharging, toNumber } from './format.js';
 import {
   costForInterval,
   costForIntervals,
@@ -648,6 +659,15 @@ export function hourCost(dayId, hour, kwh, settings) {
   const from = hourStartMs(start, index);
   return costForInterval(energy * 1000, from, from + 3600000, normalized);
 }
+// A point's recorded energy in Wh — the day documents' own kWh total, the
+// figure the summary shows beside its $. Normalized the way `sumSeries` reads
+// a series (an unusable bucket reads as zero), so the disclosure's recorded
+// total can never disagree with the kWh on screen.
+function recordedWh(point) {
+  const kwh = toNumber(point && point.kwh);
+  return Number.isFinite(kwh) && kwh > 0 ? kwh * 1000 : 0;
+}
+
 // One rendered bucket's schedule-priced cost and what of its energy it covers.
 // Pure — `settings` arrives per call — and schedule-only by design: the flat
 // path is aggregateCostLabel's and stays byte-identical, so a flat misuse
@@ -661,20 +681,30 @@ export function hourCost(dayId, hour, kwh, settings) {
 // Attribution reconciles with the sessions list by construction, and kWh
 // totals stay the day documents' — `point.kwh` only measures coverage, so a
 // bucket whose recorded energy has no covering session hides its figure
-// instead of pricing itself free.
+// instead of pricing itself free. `coveredWh` carries that same attribution as
+// energy — the Wh the bucket's figure actually prices — so the summary can
+// total covered against recorded (#194). An hour bucket prices the day
+// document's own energy, so its coverage is definitional: what it recorded is
+// what it priced, and the Day summary never carries a coverage disclosure.
 export function pointCostSummary(point, bucket, settings, sessions = []) {
   if (bucket === 'hour') {
     const cost = hourCost(point.dayId, point.id, point.kwh, settings);
-    return { cost, pricedEnergy: point.kwh > 0, unpricedEnergy: false };
+    return {
+      cost,
+      pricedEnergy: point.kwh > 0,
+      unpricedEnergy: false,
+      coveredWh: recordedWh(point),
+    };
   }
   const totals = sessionBucketCost(sessions, point.id, point.kwh, settings);
   if (!totals) {
-    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0 };
+    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0, coveredWh: 0 };
   }
   return {
     cost: totals.cost,
     pricedEnergy: totals.wh > 0,
     unpricedEnergy: !totals.covered,
+    coveredWh: totals.wh,
   };
 }
 
@@ -682,18 +712,45 @@ export function pointCostSummary(point, bucket, settings, sessions = []) {
 // every priced bucket, hidden when the range's energy is unpriceable and
 // nothing priced sits beside it (a 0.00 there would read as free). Buckets
 // with no energy are fully priced at 0.00 — an empty range is a $0.00 range.
+// `coveredWh`/`recordedWh` total the same two energies the buckets measure
+// (#194), so the summary can disclose when its $ prices only part of the kWh
+// shown beside it; kWh totals stay the day documents' own.
 export function seriesCostSummary(points, bucket, settings, sessions = []) {
   if (!hasRateSchedule(settings)) return { cost: null };
   let cost = 0;
   let pricedEnergy = false;
   let unpricedEnergy = false;
+  let coveredWh = 0;
+  let recorded = 0;
   for (const point of points || []) {
     const one = pointCostSummary(point, bucket, settings, sessions);
     if (one.cost != null) cost += one.cost;
     if (one.pricedEnergy) pricedEnergy = true;
     if (one.unpricedEnergy) unpricedEnergy = true;
+    coveredWh += one.coveredWh;
+    recorded += recordedWh(point);
   }
   return {
     cost: unpricedEnergy && !pricedEnergy ? null : cost,
+    coveredWh,
+    recordedWh: recorded,
   };
+}
+
+// The period summary's coverage disclosure (#194): the kWh the figure prices,
+// beside the kWh total the summary already shows, whenever the stored sessions
+// cover only part of the recorded energy — beyond the same max(250 Wh, 2%)
+// band the interval reconciliation and the buckets' own coverage use, so
+// attribution rounding cannot fire the line. Null when the period is covered
+// within that band, and whenever the $ itself hides (a period with nothing
+// covered keeps today's hidden presentation); no figure is invented, and the
+// kWh totals are never touched. Both energies format the way every kWh in the
+// app does (fmtK).
+export function coverageDisclosure(summary) {
+  if (!summary || summary.cost == null) return null;
+  const recorded = toNumber(summary.recordedWh);
+  const covered = toNumber(summary.coveredWh);
+  if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
+  if (recorded - covered <= intervalEnergyTolerance(recorded)) return null;
+  return `priced ${fmtK(covered / 1000)} of ${fmtK(recorded / 1000)} kWh`;
 }

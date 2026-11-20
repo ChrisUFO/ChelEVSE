@@ -1808,11 +1808,13 @@ test('day-period hours price from their captured day, sessions aside', () => {
   ];
   const summary = seriesCostSummary(points, 'hour', NIGHTLY, sessions);
   assert.ok(Math.abs(summary.cost - 0.5) < 1e-9);
-  // An hour bucket is priced, or it is 0.00.
+  // An hour bucket is priced, or it is 0.00; its coverage is definitional, so
+  // the Day summary never carries a coverage disclosure.
   assert.deepEqual(pointCostSummary(points[2], 'hour', NIGHTLY, sessions), {
     cost: 0.2,
     pricedEnergy: true,
     unpricedEnergy: false,
+    coveredWh: 2000,
   });
 });
 

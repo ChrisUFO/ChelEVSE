@@ -704,7 +704,10 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
     [],
   );
   showHistorySettings(nightly());
-  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  // The figure still prices today's live charge alone — and now says so
+  // (#194): yesterday's recorded kWh has no covering session, so the summary
+  // must not read as if GBP 0.30 covered both days.
+  assert.equal(element('history-cost').textContent, 'GBP 0.30 · priced 1.00 of 2.00 kWh');
 });
 
 test('a settle in the session-first order prices the charge exactly once', () => {
