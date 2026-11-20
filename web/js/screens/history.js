@@ -37,6 +37,7 @@ import {
 import {
   aggregateCostLabel,
   costSettings,
+  coverageDisclosure,
   hasRateSchedule,
   liveSessionContribution,
   liveSessionSpan,
@@ -128,9 +129,10 @@ let scrubPointer = null;
 
 // ---------- summary + chart costing ----------
 
-// The bucket/series cost summaries live in js/cost.js beside the pricing
-// helpers they call; re-exported here so the screen's tests keep this path.
-export { pointCostSummary, seriesCostSummary } from '../cost.js';
+// The bucket/series cost summaries and the coverage disclosure live in
+// js/cost.js beside the pricing helpers they call; re-exported here so the
+// screen's tests keep this path.
+export { coverageDisclosure, pointCostSummary, seriesCostSummary } from '../cost.js';
 
 // The sessions a period's $ prices: the recorded payload plus, while a charge
 // is in progress, the live session's contribution (#126) — merged only for a
@@ -299,6 +301,13 @@ function renderSummary() {
         pricingSessions(),
       );
       cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
+      // Partial coverage (#194): the $ prices only part of the kWh shown
+      // beside it — a lost record, or a counter-reset session whose aggregate
+      // prices a fraction of the day documents' energy — so the figure says
+      // what it prices instead of reading as a tariff. A covered period
+      // appends nothing; the kWh total is untouched either way.
+      const disclosure = coverageDisclosure(summary);
+      if (cost && disclosure) cost = `${cost} · ${disclosure}`;
     }
   } else {
     // The flat path, byte-identical to the pre-schedule screen.

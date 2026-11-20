@@ -191,12 +191,17 @@ live session and the whole history immediately.
   pause and a resume carries no energy and no cost. A record without usable intervals still pro-rates
   over the plug-in span, so a paused-then-resumed legacy one can read under or over its true cost by
   the rate difference across the gap.
-- **The period total and the selected bar's cost are hidden when a rate plan exists**, because a history
-  document holds a single kWh figure per day and it cannot be split across the windows it was drawn
-  in. Energy (kWh) stays visible, per-session costs are still shown, and one line under the summary
-  says so; the plan banner additionally flags the moments outside every window and what they cost
-  (your flat rate, or 0.00 when none is stored). With no plan, every total and bar
-  cost is exactly what it was before rate plans existed.
+- **Period costs price the stored sessions, and the summary says when it prices only part of the
+  energy.** Under a rate plan the Week, Month and Year summary and bar costs come from the sessions
+  overlapping the window — each priced over its own charging intervals or plug-in span and
+  attributed to its local days and months, so the figures reconcile with the sessions list — while
+  the Day period's hourly bars price the day document's own hour buckets. The kWh totals stay the
+  day documents' own. A bucket no session covers hides its figure rather than pricing itself free,
+  and when the summary's $ prices only part of the period's kWh — beyond the same
+  `max(250 Wh, 2%)` band — the cost line discloses it inline: `USD 1.54 · priced 13.7 of 48.1 kWh`
+  (#194). The plan banner additionally flags the moments outside every window and what they cost
+  (your flat rate, or 0.00 when none is stored). With no plan, every total and bar cost is exactly
+  what it was before rate plans existed.
 
 ## How it works
 
