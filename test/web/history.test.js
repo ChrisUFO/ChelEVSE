@@ -39,6 +39,7 @@ import {
   coverageDisclosure,
   pointCostSummary,
   seriesCostSummary,
+  seriesWindowUncovered,
   showPlanBanner,
 } from '../../web/js/screens/history.js';
 import { sessionCostLabel, sessionIntervalsValid } from '../../web/js/cost.js';
@@ -2015,6 +2016,106 @@ test("the Day period's hour summary never carries a coverage disclosure", () => 
   assert.ok(Math.abs(summary.coveredWh - 3000) < 1e-9);
   assert.ok(Math.abs(summary.recordedWh - 3000) < 1e-9);
   assert.equal(coverageDisclosure(summary), null);
+});
+
+// ---------- the per-window rate-scope flag (#193) ----------
+//
+// The plan banner is plan-wide (it fires on any gap anywhere); this flag is
+// per viewed window — the union of the series' own bucket windows, exactly the
+// spans the period's figures price. A season that expires mid-window is the
+// #188 shape: the totals are correct, but the window's time is partly flat-
+// priced, and the summary says so.
+
+// The #188 plan shape: one all-day season base 15 June – 15 September, with
+// the stored flat rate 0.12 as the fallback for every instant outside it.
+function expiredSeason(rate = 0.12) {
+  return {
+    rate,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'summer',
+        rate: 0.2,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: [6, 7, 8, 9],
+        from: '06-15',
+        to: '09-15',
+      },
+    ],
+  };
+}
+
+test('the flag follows the viewed window, not the plan (#193)', () => {
+  const plan = expiredSeason();
+  // A November week — the #188 report's shape, every instant outside the
+  // season — flags.
+  const november = periodSeries(
+    'week',
+    [{ id: '2026-11-16', kwh: 12.4 }],
+    new Date(2026, 10, 19, 12),
+  );
+  assert.equal(seriesWindowUncovered(november, 'day', plan), true);
+  // A week the season expires inside: Mon 14 – Thu 19 September 2026, covered
+  // through the 15th only.
+  const september = periodSeries('week', [{ id: '2026-09-14', kwh: 1 }], new Date(2026, 8, 18, 12));
+  assert.equal(seriesWindowUncovered(september, 'day', plan), true);
+  // The same plan, a July week fully inside: no per-window flag, while the
+  // plan-wide banner still fires — the gap outside the window is the banner's
+  // business, not the window's.
+  const july = periodSeries('week', [{ id: '2026-07-20', kwh: 1 }], new Date(2026, 6, 22, 12));
+  assert.equal(seriesWindowUncovered(july, 'day', plan), false);
+  assert.equal(showPlanBanner(plan), true);
+  // Flat-only: the flat rate prices every instant by definition.
+  assert.equal(seriesWindowUncovered(july, 'day', { rate: 0.12, currency: 'USD' }), false);
+  // No finite fallback: the flag still fires — the predicate names scope; the
+  // 0.00 wording is the screen's copy path.
+  const { rate: _rate, ...noFallback } = plan;
+  assert.equal(seriesWindowUncovered(november, 'day', noFallback), true);
+});
+
+test('month and hour buckets carry the same per-window flag', () => {
+  const plan = expiredSeason();
+  // The Year period's month buckets: a year whose months sit mostly outside
+  // the season flags; an all-year base covers every month.
+  const year = periodSeries('year', [{ id: '2026-07-20', kwh: 5 }], new Date(2026, 11, 30, 12));
+  assert.equal(year[0].id, '2026-01');
+  assert.equal(seriesWindowUncovered(year, 'month', plan), true);
+  const allYear = {
+    rate: 0.3,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'base',
+        rate: 0.3,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '00:00',
+        end: '00:00',
+        months: null,
+      },
+    ],
+  };
+  assert.equal(seriesWindowUncovered(year, 'month', allYear), false);
+  // The Day period's hour buckets: a base-less 16:00–19:00 window leaves the
+  // other 21 hours uncovered, so the day flags; the all-day base does not.
+  const day = hourSeries({ 17: 1 }, new Date(2026, 10, 18, 12));
+  const windowOnly = {
+    rate: 0.3,
+    currency: 'USD',
+    rates: [
+      {
+        id: 'peak',
+        rate: 0.32,
+        days: [0, 1, 2, 3, 4, 5, 6],
+        start: '16:00',
+        end: '19:00',
+        months: null,
+      },
+    ],
+  };
+  assert.equal(seriesWindowUncovered(day, 'hour', windowOnly), true);
+  assert.equal(seriesWindowUncovered(day, 'hour', allYear), false);
 });
 
 // ---------- screen read paths ----------

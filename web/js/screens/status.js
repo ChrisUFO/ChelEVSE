@@ -6,6 +6,7 @@ import { $, el, focusAfterRetry, focusFellAway, setText } from '../ui.js';
 import {
   elapsedClock,
   fmtK,
+  fmtRate,
   formatElapsed,
   freezeClock,
   freshnessState,
@@ -20,8 +21,10 @@ import {
   adoptedAnchor,
   costSettings,
   heldAnchorAfter,
+  heldCostFallback,
   heldCostLabel,
   heldCostUncovered,
+  statusCostFallback,
   statusCostLabel,
   statusCostUncovered,
 } from '../cost.js';
@@ -222,12 +225,17 @@ function renderCost() {
   // ignores the anchor entirely.
   let cost = null;
   let uncovered = false;
+  let fallback = false;
   if (status) {
     cost = statusCostLabel(status, settings);
-    if (cost != null) uncovered = statusCostUncovered(status, settings);
-    else if (costAnchor) {
+    if (cost != null) {
+      uncovered = statusCostUncovered(status, settings);
+      fallback = !uncovered && statusCostFallback(status, settings);
+    } else if (costAnchor) {
       cost = heldCostLabel(status.session_energy, costAnchor.elapsed, costAnchor.ms, settings);
       uncovered = cost != null && heldCostUncovered(costAnchor.elapsed, costAnchor.ms, settings);
+      fallback =
+        cost != null && !uncovered && heldCostFallback(costAnchor.elapsed, costAnchor.ms, settings);
     }
   }
   setText($('fig-cost'), cost ?? '—');
@@ -241,6 +249,18 @@ function renderCost() {
     marker.textContent = 'understates cost';
     marker.title =
       'Some hours in this session have no price and count as 0.00, so this cost is lower than the real one.';
+    sub.append(marker);
+  }
+  if (fallback) {
+    // The informational line (#193), subdued — never the warning colour: the
+    // uncovered slice is priced, at the stored flat rate rather than a row, so
+    // the figure is honest and only the fallback deserves naming. Mutually
+    // exclusive with the warning by the rate it reads, and gated the same way
+    // (it never stands alone without the figure).
+    const marker = document.createElement('span');
+    marker.className = 'cost-fallback';
+    marker.textContent = `part at your flat rate ${fmtRate(settings.rate, settings.currency)}`;
+    marker.title = `Part of this session falls outside every rate row and prices at your flat rate ${fmtRate(settings.rate, settings.currency)}.`;
     sub.append(marker);
   }
 }

@@ -165,10 +165,10 @@ live session and the whole history immediately.
   so under the "Charger offline" banner the last known energy is shown without a scheduled cost.
   Until it reports a positive elapsed time the scheduled cost stays hidden (there is no interval to
   price yet). For a flat rate the figure is still `kWh × rate`, exactly as before. When any slice
-  of the live interval has no base/window price, that slice costs the stored flat rate, so the
-  figure is policy-correct and carries no marker; only when no finite flat rate is stored does the
-  slice cost 0.00 and the figure gain a warning-coloured **understates cost** line (tooltip: the
-  0.00 slices); the figure is not hidden.
+  of the live interval has no base/window price, that slice costs the stored flat rate, and a
+  subdued line under the figure names it — `part at your flat rate GBP 0.30` (#193); only when no
+  finite flat rate is stored does the slice cost 0.00 and the line become the warning-coloured
+  **understates cost** one (tooltip: the 0.00 slices). The figure is not hidden either way.
 - **History session** costs use the session's own charging intervals when it has them: each
   contiguous charging block is priced over its own start and end, so a top-up at 03:00 stays at the
   off-peak price even though the plug-in began the previous evening. The intervals are only trusted
@@ -199,7 +199,12 @@ live session and the whole history immediately.
   day documents' own. A bucket no session covers hides its figure rather than pricing itself free,
   and when the summary's $ prices only part of the period's kWh — beyond the same
   `max(250 Wh, 2%)` band — the cost line discloses it inline: `USD 1.54 · priced 13.7 of 48.1 kWh`
-  (#194). The plan banner additionally flags the moments outside every window and what they cost
+  (#194). When part of the _viewed_ window itself falls outside every row — a season that expired
+  mid-month — a subdued line under the summary says so, `Part of this month prices at your flat
+rate USD 0.12.` (or `Part of this month has no price and is shown at 0.00.` when no finite flat
+  rate is stored); it is per window, so the same plan adds nothing on a fully row-priced month,
+  and it never touches the cost line or its coverage suffix (#193). The plan banner additionally
+  flags the moments outside every window and what they cost
   (your flat rate, or 0.00 when none is stored). With no plan, every total and bar cost is exactly
   what it was before rate plans existed.
 

@@ -48,6 +48,14 @@
 // 48.1 kWh", coverageDisclosure below). Fully covered periods, hidden
 // figures and every kWh total are untouched.
 //
+// #193 adds the rate-scope flags: `statusCostFallback`/`heldCostFallback` are
+// the informational inverse of the "understates cost" warning's no-fallback
+// gate (an uncovered slice that a finite stored flat rate prices), and
+// `seriesWindowUncovered` asks the same question of a History period's own
+// bucket windows, so the summary can name the fallback — or the 0.00 — for the
+// part of the *viewed* window no row covers while the plan-wide banner keeps
+// speaking for the whole plan.
+//
 // While a charge is live, that same interval is also today's history figure
 // (#126): the period screens merge `liveSessionContribution` — the live window
 // as one pseudo-session — into the sessions a period prices, so the Week/
@@ -186,6 +194,26 @@ export function statusCostUncovered(status, settings) {
   return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
 }
 
+// The informational twin of that marker (#193): the interval has an uncovered
+// slice AND a finite flat fallback prices it — the exact inverse of the
+// warning's no-fallback gate, so the two predicates are mutually exclusive by
+// the rate they read. The figure is policy-correct, so nothing warns; the
+// Status tile adds a subdued line naming the fallback that part prices at,
+// beside the cost (the warning stays the only warning-coloured line).
+export function statusCostFallback(status, settings) {
+  if (!status) return false;
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return false;
+  if (normalized.rate == null) return false;
+  const updated = status.updated_at;
+  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
+  const seconds = toNumber(status.elapsed);
+  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
+    return false;
+  }
+  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+}
+
 // ---------- held session (plugged in, not charging) ----------
 
 // The frozen anchor is a pair, not a timestamp alone: `elapsed` is cumulative for
@@ -271,6 +299,20 @@ export function heldCostUncovered(elapsed, anchorMs, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return false;
   if (normalized.rate != null) return false;
+  const seconds = toNumber(elapsed);
+  const endMs = endMillis(anchorMs);
+  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
+  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+}
+
+// The informational twin of the held warning (#193), gated exactly like the
+// live one: the frozen window has an uncovered slice that the finite stored
+// flat rate prices, so the figure is honest and only the fallback deserves
+// naming — on the subdued line, never the warning.
+export function heldCostFallback(elapsed, anchorMs, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return false;
+  if (normalized.rate == null) return false;
   const seconds = toNumber(elapsed);
   const endMs = endMillis(anchorMs);
   if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
@@ -753,4 +795,42 @@ export function coverageDisclosure(summary) {
   if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
   if (recorded - covered <= intervalEnergyTolerance(recorded)) return null;
   return `priced ${fmtK(covered / 1000)} of ${fmtK(recorded / 1000)} kWh`;
+}
+
+// ---------- the per-window rate-scope flag (#193) ----------
+
+// The ms window one rendered bucket names — the same span its figure is priced
+// over — or null when the point carries no usable bucket. An hour point needs
+// its day (the Day period's bars): the window is that day's own wall-clock
+// hour, exactly the span hourCost prices.
+function pointWindowMs(point, bucket) {
+  if (!point) return null;
+  if (bucket === 'hour') {
+    const start = dayStartFromId(point.dayId);
+    const hour = toNumber(point.id);
+    if (!start || !Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+    const from = hourStartMs(start, hour);
+    return { start: from, end: from + 3600000 };
+  }
+  return bucketWindow(point.id);
+}
+
+// Whether the viewed window contains time no rate row covers (#193): true when
+// any bucket of the rendered series — each priced over exactly the span
+// pointWindowMs names — has an uncovered slice. That is a statement about the
+// window, not the plan: a flat plan covers every instant by definition, and a
+// plan whose gap lies outside the window reads fully row-priced here, which is
+// what separates this flag from the plan-wide banner (settings.js's
+// planHasUnpriced). The flag names scope, not price — since #188 such a slice
+// costs the stored flat rate (0 only when no finite flat rate is stored) — so
+// the History summary says which price that part of the window carries instead
+// of letting it read as a TOU figure.
+export function seriesWindowUncovered(points, bucket, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return false;
+  for (const point of Array.isArray(points) ? points : []) {
+    const window = pointWindowMs(point, bucket);
+    if (window && intervalUncovered(window.start, window.end, normalized)) return true;
+  }
+  return false;
 }
