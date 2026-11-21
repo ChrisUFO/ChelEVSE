@@ -44,9 +44,9 @@
 // energy) reads as a plausible tariff. seriesCostSummary therefore totals the
 // buckets' attributed Wh beside their recorded kWh, and when the gap exceeds
 // the same max(250 Wh, 2%) band the buckets' own coverage uses, the summary's
-// cost line says which energy its figure prices ("USD 1.54 · priced 13.7 of
-// 48.1 kWh", coverageDisclosure below). Fully covered periods, hidden
-// figures and every kWh total are untouched.
+// cost cell says which energy its figure prices on a small muted caption
+// under the figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below).
+// Fully covered periods, hidden figures and every kWh total are untouched.
 //
 // #193 adds the rate-scope flags: `statusCostFallback`/`heldCostFallback` are
 // the informational inverse of the "understates cost" warning's no-fallback
@@ -780,7 +780,8 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
 }
 
 // The period summary's coverage disclosure (#194): the kWh the figure prices,
-// beside the kWh total the summary already shows, whenever the stored sessions
+// painted beneath it as a small muted caption while the kWh total the summary
+// already shows stays the day documents' own, whenever the stored sessions
 // cover only part of the recorded energy — beyond the same max(250 Wh, 2%)
 // band the interval reconciliation and the buckets' own coverage use, so
 // attribution rounding cannot fire the line. Null when the period is covered
