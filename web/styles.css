@@ -1126,7 +1126,7 @@ input[type='range']::-moz-range-thumb {
   padding: 15px 16px;
   min-width: 0;
 }
-/* A paged window's date-span label wraps to two lines while "Estimated cost"
+/* A paged window's date-span label wraps to two lines while "Cost"
    does not, and the cells stretch to the same height. Pin each label to the top
    and each figure to the bottom so the two figures still share a baseline. At
    320 the 22 px figure needs a second line in the narrow cell, so the cells
