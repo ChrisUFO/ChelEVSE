@@ -201,8 +201,8 @@ function renderPlanBanner() {
 // series' own bucket windows — exactly the spans the period's figures price —
 // so the sentence's "this week/month/year/day" names the same window the
 // summary does, and it composes with the cost cell untouched: the #194
-// coverage suffix keeps its own sentence beside the figure, this line adds a
-// second, subdued one beneath.
+// coverage caption keeps its own small muted line under the figure, this one
+// adds a second sentence beneath the card.
 function renderWindowNote() {
   const note = $('history-window-note');
   if (!note) return;
@@ -318,11 +318,14 @@ function renderSummary() {
   if (total == null) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
+    $('history-cost-coverage').hidden = true;
+    setText($('history-cost-coverage'), '');
     $('history-summary').classList.add('solo');
     return;
   }
   setText($('history-total'), fmtK(total));
   let cost = null;
+  let disclosure = null;
   if (hasRateSchedule(settings)) {
     if (historyState === 'no-intraday') {
       // Today has a total but no hours behind it: the panel copy explains and
@@ -339,10 +342,10 @@ function renderSummary() {
       // Partial coverage (#194): the $ prices only part of the kWh shown
       // beside it — a lost record, or a counter-reset session whose aggregate
       // prices a fraction of the day documents' energy — so the figure says
-      // what it prices instead of reading as a tariff. A covered period
-      // appends nothing; the kWh total is untouched either way.
-      const disclosure = coverageDisclosure(summary);
-      if (cost && disclosure) cost = `${cost} · ${disclosure}`;
+      // what it prices on a small muted caption of its own beneath it, never
+      // inside the figure's display type. A covered period paints no caption;
+      // the kWh total is untouched either way.
+      disclosure = coverageDisclosure(summary);
     }
   } else {
     // The flat path, byte-identical to the pre-schedule screen.
@@ -351,6 +354,10 @@ function renderSummary() {
   $('history-cost-cell').hidden = !cost;
   $('history-summary').classList.toggle('solo', !cost);
   setText($('history-cost'), cost || '');
+  // The caption stands only under a shown figure: coverageDisclosure already
+  // returns null whenever the $ hides, and the caption hides with it.
+  $('history-cost-coverage').hidden = !(cost && disclosure);
+  setText($('history-cost-coverage'), disclosure || '');
 }
 
 // The chart's hint names only what the state on screen can do — two dimensions,
@@ -572,6 +579,8 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-window-note').hidden = true;
+    $('history-cost-coverage').hidden = true;
+    setText($('history-cost-coverage'), '');
     $('history-summary').classList.add('solo');
     // The rescue line names the window the next Refresh will load, which is the
     // one this render is reporting: a series the server answered with nothing
@@ -1357,6 +1366,8 @@ export function resetHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setText($('history-cost'), '');
+    $('history-cost-coverage').hidden = true;
+    setText($('history-cost-coverage'), '');
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);

@@ -198,12 +198,12 @@ live session and the whole history immediately.
   the Day period's hourly bars price the day document's own hour buckets. The kWh totals stay the
   day documents' own. A bucket no session covers hides its figure rather than pricing itself free,
   and when the summary's $ prices only part of the period's kWh — beyond the same
-  `max(250 Wh, 2%)` band — the cost line discloses it inline: `USD 1.54 · priced 13.7 of 48.1 kWh`
+  `max(250 Wh, 2%)` band — a small muted caption under the figure discloses it, `priced 13.7 of 48.1 kWh`
   (#194). When part of the _viewed_ window itself falls outside every row — a season that expired
   mid-month — a subdued line under the summary says so, `Part of this month prices at your flat
 rate USD 0.12.` (or `Part of this month has no price and is shown at 0.00.` when no finite flat
   rate is stored); it is per window, so the same plan adds nothing on a fully row-priced month,
-  and it never touches the cost line or its coverage suffix (#193). The plan banner additionally
+  and it never touches the cost figure or its coverage caption (#193). The plan banner additionally
   flags the moments outside every window and what they cost
   (your flat rate, or 0.00 when none is stored). With no plan, every total and bar cost is exactly
   what it was before rate plans existed.
