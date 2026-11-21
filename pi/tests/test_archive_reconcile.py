@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import archive_reconcile  # noqa: E402
 import bridge  # noqa: E402
-from fakes import FakeDB  # noqa: E402
+from fakes import FakeDB, _StopAfter  # noqa: E402
 from write_counter import WriteCounter  # noqa: E402
 
 
@@ -64,6 +64,7 @@ class ArchiveBase(unittest.TestCase):
         self.boot = 10_000.0
         self.mono = 500.0
         self._last_when = None
+        self._scenario_start = None
         self.total_kwh = 1000.0
         patcher = mock.patch.object(bridge, "log", self.logs.append)
         patcher.start()
@@ -96,11 +97,15 @@ class ArchiveBase(unittest.TestCase):
             step = max(0.0, (when - self._last_when).total_seconds())
         else:
             step = 0.0
+        if self._scenario_start is None:
+            # The charger's session timer starts at the plug-in: the first
+            # applied charging tick of the scenario is its zero.
+            self._scenario_start = when
         self._last_when = when
         self.boot += step
         self.mono += step
         self.total_kwh = total_kwh
-        elapsed = max(0, int((when - _at(15, 8)).total_seconds()))
+        elapsed = max(0, int((when - self._scenario_start).total_seconds()))
         with (
             mock.patch.object(bridge, "_utcnow", return_value=when),
             mock.patch.object(bridge, "_localnow", return_value=when),
@@ -507,6 +512,240 @@ class RestartTests(ArchiveBase):
         self.assertEqual(self.verdict_lines(), [])
         with self.sink._lock:
             self.assertEqual(self.recon.basis.basis_for_day("2026-11-20"), 3000.0)
+
+
+class MidnightCancellationTests(ArchiveBase):
+    """The Nov 15-19 shape: one 48 kWh session spanning four days."""
+
+    def test_every_spanned_day_reconciles_to_a_zero_verdict(self):
+        # The real live shape: nightly scheduled blocks on a plug-in that
+        # stays connected, merging into ONE session record spanning
+        # 2026-11-15 through 2026-11-18 -- 48 kWh across four days, one
+        # block straddling the Nov 17/18 midnight. Every spanned day
+        # reconciles to exactly zero (both sides attribute each tick to the
+        # day it was observed in), so no verdict is written anywhere.
+        self.seed_marker()
+        self.tick(_at(15, 9))
+        self.charge_block(_at(15, 12), hours=4, wh_per_hour=3000)  # 12 kWh
+        self.charge_block(_at(16, 12), hours=4, wh_per_hour=3000)  # 12 kWh
+        self.charge_block(_at(17, 22), hours=4, wh_per_hour=3000)  # straddles
+        self.charge_block(_at(18, 14), hours=4, wh_per_hour=3000)  # 12 kWh
+        # One merged record: the whole plug-in, four intervals, 48 kWh.
+        sessions = self.db.data.get("sessions", {})
+        self.assertEqual(len(sessions), 1)
+        (record,) = sessions.values()
+        self.assertEqual(record["started_at"], _at(15, 12))
+        self.assertEqual(record["ended_at"], _at(18, 18))
+        self.assertEqual(record["wh"], 48000.0)
+        self.assertEqual(len(record["intervals"]), 4)
+        # Daily cadence ticks from the day after the first block.
+        for day in (16, 17, 18, 19, 20):
+            self.tick(_at(day, 9))
+        self.assertEqual(self.verdict_writes(), [])
+        self.assertEqual(self.verdict_lines(), [])
+        # The per-day split both sides hold, exactly: the 22:00-02:00 block
+        # gives the 17th its 23:00 tick (3 kWh) and the 18th the rest.
+        expected = {
+            "2026-11-15": 12.0,
+            "2026-11-16": 12.0,
+            "2026-11-17": 3.0,
+            "2026-11-18": 21.0,
+        }
+        for day, kwh in expected.items():
+            self.assertEqual(self.day_doc(day)["kwh"], kwh, day)
+            self.assertNotIn("gap_wh", self.day_doc(day), day)
+
+
+class MidChargeRestartLossTests(ArchiveBase):
+    """The Nov 1 class disclosed on the live path: wh kept, intervals short."""
+
+    def test_a_mid_charge_restarts_intervals_are_disclosed_as_the_gap(self):
+        # A bridge restart mid-charge keeps the record's wh whole (the
+        # charger's cumulative) but its intervals carry only the
+        # post-restart block -- the sessions archive is short exactly the
+        # pre-restart energy the day doc still holds. The verdict discloses
+        # that as the raw delta; nothing is corrected.
+        self.seed_marker()
+        self.tick(_at(19, 9))
+        # -- the first process: two observed hours, flushed by the hour
+        # rollover, then it dies mid-block.
+        self.apply(_at(19, 12), 3, 0, total_kwh=1000.0)
+        self.apply(_at(19, 13), 3, 3000, total_kwh=1003.0)
+        self.apply(_at(19, 14), 3, 6000, total_kwh=1006.0)
+        self.assertEqual(self.day_doc("2026-11-19")["kwh"], 6.0)
+        # -- the restart: a new tracker seeds off the stored total and opens
+        # its own interval; the charger's cumulative keeps counting.
+        restarted = archive_reconcile.ArchiveReconciler(
+            self.db, counter=WriteCounter(clock=lambda: self.mono)
+        )
+        restarted._started_at = _at(19, 14, 30)
+        tracker = archive_reconcile.SessionBasisTracker(self.db, basis=restarted.basis)
+        tracker.seeded = True
+        tracker.total_energy = 1006.0
+        sink = bridge.StatusSink(self.db, tracker, _QuietNotifier())
+        # From here the scenario's applies drive the restarted process.
+        self.tracker = tracker
+        self.apply(_at(19, 15), 3, 6000, total_kwh=1006.0)  # baseline only
+        self.apply(_at(19, 16), 3, 7000, total_kwh=1007.0)
+        self.apply(_at(19, 16), 1, 7000, total_kwh=1007.0)
+        (record,) = self.db.data.get("sessions", {}).values()
+        self.assertEqual(record["wh"], 7000.0)
+        (interval,) = record["intervals"]
+        self.assertEqual(interval["wh"], 1000.0)
+        with mock.patch.object(bridge, "_localnow", return_value=_at(20, 9)):
+            restarted.tick(_at(20, 9), sink)
+        (write,) = [
+            w
+            for w in self.db.writes
+            if w[1] == "history" and archive_reconcile.GAP_FIELD in (w[3] or {})
+        ]
+        self.assertEqual(
+            write,
+            ("set", "history", "2026-11-19", {"gap_wh": 6000.0}, ["gap_wh"]),
+        )
+        # The day doc's measurements are untouched beside the verdict.
+        self.assertEqual(self.day_doc("2026-11-19")["kwh"], 7.0)
+
+
+class WriteBudgetTests(ArchiveBase):
+    """Steady state: all clean, all finalized -- zero writes per tick."""
+
+    def test_clean_steady_state_ticks_are_write_free(self):
+        self.seed_marker()
+        self.tick(_at(18, 9))
+        self.charge_block(_at(18, 12), hours=3, wh_per_hour=1000)
+        self.tick(_at(19, 9))
+        writes_before = len(self.db.writes)
+        for hour in (10, 11, 12):
+            self.tick(_at(19, hour))
+        self.assertEqual(len(self.db.writes), writes_before)
+        self.assertEqual(self.verdict_lines(), [])
+
+    def test_the_verdict_write_is_isolated_to_its_field_path(self):
+        # A verdict lands beside a two-bucket day doc: kwh, both hour
+        # buckets and updated_at are byte-identical after it, and the write
+        # itself names exactly ["gap_wh"] -- the merge cannot reach any
+        # other field, by construction and by pin.
+        self.seed_marker()
+        self.tick(_at(18, 9))
+        self.apply(_at(18, 12), 3, 0, total_kwh=1000.0)
+        self.apply(_at(18, 13), 3, 1000, total_kwh=1001.0)
+        self.apply(_at(18, 14), 3, 2000, total_kwh=1003.0)
+        self.apply(_at(18, 14), 1, 2000, total_kwh=1003.0)
+        before = dict(self.day_doc("2026-11-18"))
+        self.tick(_at(19, 9))
+        after = self.day_doc("2026-11-18")
+        self.assertEqual(after["kwh"], before["kwh"])
+        self.assertEqual(after["hours"], before["hours"])
+        self.assertEqual(after["updated_at"], before["updated_at"])
+        self.assertEqual(after["gap_wh"], 1000.0)
+        (write,) = [
+            w
+            for w in self.db.writes
+            if w[2] == "2026-11-18" and archive_reconcile.GAP_FIELD in (w[3] or {})
+        ]
+        self.assertEqual(write[4], ["gap_wh"])
+        self.assertEqual(write[3].keys(), {"gap_wh"})
+
+
+class LoopWiringTests(unittest.TestCase):
+    """Seam B rides the seam-A loop: same cadence, after it, never blocked."""
+
+    def setUp(self):
+        self.logs = []
+        patcher = mock.patch.object(bridge, "log", self.logs.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_seam_b_runs_even_while_seam_a_is_inactive(self):
+        # A charger with no period counters (firmware below 4.2.2) makes
+        # seam A log its inactive line and stop; seam B still runs -- it
+        # needs no counters, only the tracker and the archive.
+        db = FakeDB()
+        tracker = bridge.StatusTracker(db)
+        tracker.seeded = True
+        sink = bridge.StatusSink(db, tracker, _QuietNotifier())
+        counter = bridge.ChargerDayCounter()
+        counter.note(None)  # fed, but no usable total_day ever
+        archive = mock.Mock()
+        when = _at(21, 9)
+        with (
+            mock.patch.object(bridge, "_localnow", return_value=when),
+            mock.patch.object(bridge, "_stop", _StopAfter(1)),
+        ):
+            bridge.reconcile_loop(
+                db,
+                sink,
+                counter,
+                bridge.DayReconciler(),
+                3600.0,
+                archive_reconciler=archive,
+            )
+        archive.tick.assert_called_once_with(when, sink)
+        self.assertTrue(
+            any("day reconciliation inactive" in line for line in self.logs)
+        )
+
+    def test_run_threads_the_archive_reconciler_into_the_loop(self):
+        started = []
+
+        class RecordingThread:
+            def __init__(self, target, args=(), kwargs=None, **_options):
+                self.target = target
+                self.kwargs = kwargs or {}
+                started.append(self)
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                pass  # the reconcile loop's bounded shutdown join (#161)
+
+        with (
+            mock.patch.object(bridge.threading, "Thread", RecordingThread),
+            mock.patch.object(bridge, "StatusSink"),
+            mock.patch.object(bridge, "command_loop"),
+            mock.patch.object(bridge, "MqttSource", return_value=mock.Mock()),
+        ):
+            bridge.run(
+                FakeDB(),
+                bridge.ChargerHost("charger"),
+                None,
+                (10, 60, 60, 3600, 5, 60, 300),
+                object(),
+                bridge.WatchdogConfig(enabled=False),
+                reconcile=bridge.ReconcileConfig(3600),
+            )
+        (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
+        self.assertIsInstance(
+            thread.kwargs["archive_reconciler"], archive_reconcile.ArchiveReconciler
+        )
+
+    def test_the_run_tracker_is_the_session_basis_tracker(self):
+        # run() builds the SessionBasisTracker so the live deltas feed the
+        # archive reconciler's basis (patched here to observe construction).
+        with mock.patch.object(
+            bridge, "SessionBasisTracker"
+        ) as tracker, mock.patch.object(
+            bridge, "StatusSink"
+        ), mock.patch.object(
+            bridge.threading, "Thread"
+        ), mock.patch.object(
+            bridge, "command_loop"
+        ):
+            bridge.run(
+                FakeDB(),
+                bridge.ChargerHost("charger"),
+                None,
+                (10, 60, 60, 3600, 5, 60, 300),
+                object(),
+                bridge.WatchdogConfig(enabled=False),
+                reconcile=bridge.ReconcileConfig(3600),
+            )
+        (call_args, call_kwargs) = tracker.call_args
+        self.assertIsInstance(
+            call_kwargs["basis"], archive_reconcile.SessionBasisAccumulator
+        )
 
 
 class AttributionTests(unittest.TestCase):
