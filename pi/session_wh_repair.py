@@ -18,7 +18,7 @@ a document that already reconciles needs nothing.
 """
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import NamedTuple, Optional
 
 # The web guard's tolerance (INTERVAL_ENERGY_FLOOR_WH / _SHARE in cost.js):
@@ -36,11 +36,38 @@ UNUSABLE_INTERVALS = "unusable-intervals"
 # Not in the report's core vocabulary, but a usable interval list beside an
 # unusable aggregate fits none of the above and must not be misfiled.
 BAD_WH = "bad-wh"
+# The era bound's skip: ended_at is not strictly before the bound — absent,
+# unparseable, or at/after it. Never a repair, whatever the list says.
+AFTER_BOUND = "after-bound"
 
 
 def energy_tolerance(wh):
     """The reconciliation band, identical to the web guard's."""
     return max(INTERVAL_ENERGY_FLOOR_WH, INTERVAL_ENERGY_SHARE * wh)
+
+
+def parse_before(value):
+    """Epoch milliseconds for an ISO-8601 timestamp (the ``--before`` bound).
+
+    Accepts a trailing ``Z``, honours explicit offsets, and reads a naive
+    timestamp as UTC; anything unparseable is None.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        ms = parsed.timestamp() * 1000.0
+    except (OverflowError, OSError, ValueError):
+        return None
+    return ms if math.isfinite(ms) else None
 
 
 class RepairDecision(NamedTuple):
@@ -97,16 +124,33 @@ def usable_interval(entry):
     return started_at < ended_at
 
 
-def classify_session(document):
+def _ended_before(ended_at, before_ms):
+    """True when the session's own ``ended_at`` is strictly before the bound."""
+    ended_ms = _endpoint_ms(ended_at)
+    return ended_ms is not None and ended_ms < before_ms
+
+
+def classify_session(document, before=None):
     """Classify one session document and propose the repaired ``wh``.
 
     REPAIR — and ``repaired_wh`` set to the float interval sum — exactly when
     every criterion holds: ``wh`` is a finite number ≥ 0, ``intervals`` is a
     non-empty list, every interval is usable, and the interval sum exceeds
     ``wh + max(250 Wh, 2%·wh)``. Every other shape keeps ``wh`` as it is.
+
+    ``before`` (epoch milliseconds, the CLI's ``--before`` bound) era-gates
+    the decision: a document whose own ``ended_at`` is not strictly before
+    it — absent, unparseable, or at/after the bound — is AFTER_BOUND and is
+    never repaired, whatever its interval list says. That is what keeps the
+    tool off the post-#195 "reset-to-exactly-0" resume corner
+    (ARCHITECTURE §4), where the interval list legitimately exceeds ``wh``
+    and ``wh`` is the better figure; ``None`` leaves the decision unbounded
+    for direct callers.
     """
     if not isinstance(document, dict):
         return RepairDecision(NO_INTERVALS, None, None, None)
+    if before is not None and not _ended_before(document.get("ended_at"), before):
+        return RepairDecision(AFTER_BOUND, None, _aggregate_wh(document), None)
     intervals = document.get("intervals")
     if not isinstance(intervals, (list, tuple)) or not intervals:
         return RepairDecision(NO_INTERVALS, None, _aggregate_wh(document), None)
@@ -133,7 +177,8 @@ def _aggregate_wh(document):
     return float(raw_wh)
 
 
-def repair_wh(document):
+def repair_wh(document, before=None):
     """The repaired ``wh`` for one session document, or None when it must be
-    left alone — the one-call contract the CLI's write step uses."""
-    return classify_session(document).repaired_wh
+    left alone — the one-call contract the CLI's write step uses. Pass the
+    same era bound (``before``, epoch ms) the CLI runs with."""
+    return classify_session(document, before).repaired_wh
