@@ -620,6 +620,4 @@ class ReconcileEnvTests(unittest.TestCase):
             mock.patch.object(bridge, "ChargerTransport"),
         ):
             bridge.main()
-        self.assertTrue(
-            any("day reconciliation: every 3600 s" in line for line in logs)
-        )
+        self.assertTrue(any("day reconciliation: every 3600s" in line for line in logs))
