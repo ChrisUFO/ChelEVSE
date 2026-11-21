@@ -579,6 +579,8 @@ function renderHistory() {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
     $('history-window-note').hidden = true;
+    $('history-cost-coverage').hidden = true;
+    setText($('history-cost-coverage'), '');
     $('history-summary').classList.add('solo');
     // The rescue line names the window the next Refresh will load, which is the
     // one this render is reporting: a series the server answered with nothing
@@ -1364,6 +1366,8 @@ export function resetHistory() {
     $('history-cost-cell').hidden = true;
     $('history-summary').classList.add('solo');
     setText($('history-cost'), '');
+    $('history-cost-coverage').hidden = true;
+    setText($('history-cost-coverage'), '');
     setText($('sessions-count'), '');
     setFeedback('', '');
     setRefreshBusy(false);

@@ -1018,6 +1018,54 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
   assert.equal(element('history-cost').textContent, 'GBP 0.30');
   assert.equal(element('history-cost-coverage').hidden, false);
   assert.equal(element('history-cost-coverage').textContent, 'priced 1.00 of 2.00 kWh');
+
+  // Back to the single covered day: the live charge prices its every kWh
+  // again, and the caption the partial week just left visible must hide with
+  // its text cleared. Unlike the covered pin above (whose pre-state was
+  // already hidden), this one can fail — the render before it demonstrably
+  // showed the caption.
+  applyHistory(
+    descriptor,
+    { docs: [{ id: '2026-10-18', kwh: 1 }], fromCache: false },
+    null,
+    today,
+    [],
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  assert.equal(element('history-cost-coverage').hidden, true);
+  assert.equal(element('history-cost-coverage').textContent, '');
+});
+
+test('resetHistory clears the coverage caption with its cell (#194)', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 9, 18, 12);
+  // The same partial week as above: yesterday's recorded kWh has no covering
+  // session, so the caption stands visibly under the figure.
+  applyHistory(
+    periodById('week'),
+    {
+      docs: [
+        { id: '2026-10-17', kwh: 1 },
+        { id: '2026-10-18', kwh: 1 },
+      ],
+      fromCache: false,
+    },
+    null,
+    today,
+    [],
+  );
+  showHistorySettings(nightly());
+  showHistoryStatus(statusAt(3, today.getTime(), 7200, 1000));
+  assert.equal(element('history-cost-coverage').hidden, false);
+
+  // The sign-out/reset path cleared the disclosure when it lived inside the
+  // cost string; the split node must not survive it with a stale visible
+  // state, the #201 stale-note class.
+  resetHistory();
+  assert.equal(element('history-cost-coverage').hidden, true);
+  assert.equal(element('history-cost-coverage').textContent, '');
 });
 
 test('a settle in the session-first order prices the charge exactly once', () => {
