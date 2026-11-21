@@ -1079,7 +1079,10 @@ A day's verdict is **deferred until final**: it is computed only once no
 open charging session overlaps the day (checked against the tracker's open
 interval; the ~3-day trailing window bounds the wait against the 48 h merge
 cap), because that is the moment the day's intervals exist in the archive
-in their final form. The verdict is raw and exact: `gap_wh` = the day
+in their final form. A day still overlapped when the window ages it out (a
+pathological multi-day continuous block) takes the explicit `gap_wh: null`
+mark too — its basis never settled, so its absence must not read as clean.
+The verdict is raw and exact: `gap_wh` = the day
 document's `kwh`×1000 plus still-pending energy, minus the session-basis
 Wh — **no tolerance band** (the band rule stays the charger-counter seam's).
 It is written once, only when nonzero, as a `["gap_wh"]` field-path merge

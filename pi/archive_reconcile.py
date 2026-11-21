@@ -33,7 +33,11 @@ charging session overlaps the day (checked against the tracker's open
 interval, bounded by the ~3-day trailing window versus the 48 h merge cap),
 because that is the moment the session's intervals exist in the archive in
 their final form. Until then the day is left alone -- an open session's
-energy is still moving. The verdict itself is exact: ``gap_wh`` is the raw
+energy is still moving. The deferral has a horizon, not a silence: a day
+still overlapped when the window ages it out (a pathological multi-day
+continuous block) carries the explicit ``gap_wh: null`` mark, because its
+basis never settled inside the window and absence is the clean verdict.
+The verdict itself is exact: ``gap_wh`` is the raw
 same-basis delta with **no tolerance band** (the band rule stays seam A's);
 a session straddling midnight cancels precisely because both sides attribute
 each tick's delta to the local day it was observed in. Exactness is also why
@@ -69,8 +73,9 @@ BACKFILL_WINDOW_DAYS = 60
 # beyond 48 h starts a new session record (SESSION_MERGE_MAX_GAP), so an
 # open session stops overlapping a past day well inside three days; a day
 # older than this that is still overlapped (a pathological multi-day
-# continuous block) is left unevaluated rather than verdicted from a basis
-# the archive has not settled.
+# continuous block) is marked unknown (gap_wh null) rather than verdicted
+# from a basis the archive has not settled -- its absence must not read
+# as the clean verdict.
 TRAILING_WINDOW_DAYS = 3
 # The disclosure fields this module owns, on the documents it verdicts.
 GAP_FIELD = "gap_wh"
@@ -285,10 +290,13 @@ class ArchiveReconciler:
         # unknown for verified-clean (the three-state contract: number =
         # raw gap, null = not verdictable, absent = evaluated clean).
         self._inexact = set()
-        # The inexact days whose null mark has not landed yet (a failed
-        # write retries next tick; an unmarked inexact day would read as
-        # clean downstream -- the one silence this module must not keep).
-        self._unmarked_inexact = set()
+        # The days whose ``gap_wh: null`` mark has not landed yet --
+        # inexact straddle days queued by the prime, and days an open
+        # session kept deferred until the window aged them out -- each
+        # mapped to the reason the drain logs. A failed write retries
+        # next tick; an unmarked day here would read as clean downstream
+        # -- the one silence this module must not keep.
+        self._unmarked_inexact = {}
 
     # -- the tick ------------------------------------------------------------
 
@@ -296,7 +304,6 @@ class ArchiveReconciler:
         """One cadence pass: prime once, then verdict finalizable days."""
         if not self._primed and not self._prime(now_local, sink):
             return
-        self._drain_inexact_marks()
         today = now_local.date()
         zone = now_local.tzinfo
         for offset in range(1, self.window_days + 1):
@@ -305,18 +312,38 @@ class ArchiveReconciler:
                 continue  # before the marker: legacy/unknown by design
             if day in self._evaluated or day in self._inexact:
                 continue
-            outcome = self._consider_day(day, sink, zone)
+            outcome = self._consider_day(
+                day, sink, zone, last_visit=(offset == self.window_days)
+            )
             if outcome in ("clean", "written", "verdicted"):
                 self._evaluated.add(day)
+            elif outcome == "aged_out":
+                # The window's oldest day, still deferred: no later tick
+                # of this process visits it again, and a restart's reseed
+                # reads the same window, so the deferral's wait is over --
+                # queue the explicit unknown mark and let this tick's
+                # drain land it (a process death with the day queued but
+                # unwritten would strand it back into silence).
+                self._unmarked_inexact[day] = (
+                    "the open session outlived the verdict window, "
+                    "so no verdict is honest"
+                )
+        self._drain_inexact_marks()
         self._trim(today)
 
-    def _consider_day(self, day, sink, zone):
+    def _consider_day(self, day, sink, zone, last_visit=False):
         """Verdict one candidate day; returns the outcome word.
 
         Deferred while an open charging session overlaps the day: its
         intervals are still moving, and the verdict must wait for the form
-        the archive will keep. The gather (document, pending energy, basis,
-        the open interval's start) is one apply-lock hold -- the
+        the archive will keep. The deferral has a horizon: a day still
+        deferred on its last visit (the window's oldest offset -- no later
+        tick of this process reaches it again, and a restart's reseed
+        reads the same window) can never be verdicted, so it returns
+        ``aged_out`` for the explicit unknown mark instead of slipping
+        out the back of the window unevaluated, where its absence would
+        read as the clean verdict. The gather (document, pending energy,
+        basis, the open interval's start) is one apply-lock hold -- the
         ``_day_totals`` pattern: outside it a flush landing between the
         reads would move energy from pending to the document after the
         document was read.
@@ -329,9 +356,12 @@ class ArchiveReconciler:
                     if isinstance(interval, dict)
                     else None
                 )
-                if isinstance(started, datetime):
-                    if started.astimezone(zone).date().isoformat() <= day:
-                        return "deferred"
+                deferred = (
+                    isinstance(started, datetime)
+                    and started.astimezone(zone).date().isoformat() <= day
+                )
+                if deferred and not last_visit:
+                    return "deferred"
                 snapshot = self.db.collection("history").document(day).get()
                 data = snapshot.to_dict() if snapshot.exists else None
                 kwh = data.get("kwh") if isinstance(data, dict) else None
@@ -344,6 +374,10 @@ class ArchiveReconciler:
                 pending = sink.tracker.history.pending_for_day(day)
                 basis = self.basis.basis_for_day(day)
         except Exception as exc:
+            # A read failure on the last visit leaves the day unqueued:
+            # the aged-out queue is presence-guarded, and a blind mark
+            # could overwrite a stored verdict (the write-once charter).
+            # The failure is loud here, which is all this window allows.
             log(
                 f"archive reconciliation read failed for {day} "
                 f"({exc.__class__.__name__}: {exc}); retrying next tick"
@@ -355,6 +389,11 @@ class ArchiveReconciler:
             # the marker is the idempotence, nothing to recompute or
             # rewrite.
             return "verdicted"
+        if deferred:
+            # Last visit, no stored mark, session still open: the day
+            # ages out of the window unevaluated unless it carries the
+            # explicit unknown mark.
+            return "aged_out"
         day_wh = (float(kwh) if _is_number(kwh) else 0.0) + pending
         gap = round(day_wh * 1000.0 - basis, 3)
         if gap == 0.0:
@@ -370,7 +409,9 @@ class ArchiveReconciler:
         create, touch or clear ``kwh``, ``hours`` or any other field, so the
         measurements stay exactly what the accumulator wrote (#212's
         never-rewrite charter). A failure is counted, logged once, and left
-        unmarked so the next tick retries the same verdict.
+        unmarked so the next tick retries the same verdict -- the prime
+        aborts before its marker on one, so the retry reaches backfill days
+        outside the tick window too.
         """
         try:
             self.db.collection("history").document(day).set(
@@ -393,16 +434,20 @@ class ArchiveReconciler:
         return True
 
     def _drain_inexact_marks(self):
-        """Land the pending ``gap_wh: null`` marks for inexact days.
+        """Land the pending ``gap_wh: null`` marks for unknown days.
 
-        A straddle-touched day's absence would read as verified-clean
-        downstream (the three-state contract makes absence the clean
-        verdict), so the unknown mark is not optional: each pending day
-        gets one bounded write attempt per tick, on the same owned field
-        path, until it lands. Skipped silently when nothing is pending --
-        the steady-state tick stays write-free.
+        A queued day's absence would read as verified-clean downstream
+        (the three-state contract makes absence the clean verdict), so the
+        unknown mark is not optional: each pending day gets one bounded
+        write attempt per tick, on the same owned field path, until it
+        lands. Skipped silently when nothing is pending -- the steady-state
+        tick stays write-free. The drain runs after the candidate loop so
+        a day queued on its last visit lands in the same tick: the process
+        can die at any instant, and a queued-but-unwritten day is the
+        silence the queue exists to prevent.
         """
         for day in sorted(self._unmarked_inexact):
+            reason = self._unmarked_inexact[day]
             try:
                 self.db.collection("history").document(day).set(
                     {GAP_FIELD: None}, merge=[GAP_FIELD]
@@ -415,11 +460,10 @@ class ArchiveReconciler:
                 )
                 continue
             self.counter.record("history")
-            self._unmarked_inexact.discard(day)
+            self._unmarked_inexact.pop(day, None)
             log(
                 f"archive reconciliation: day {day} marked unknown "
-                f"(gap_wh null -- a straddled attribution is approximate, "
-                f"so no verdict is honest; not verified clean)"
+                f"(gap_wh null -- {reason}; not verified clean)"
             )
 
     def _trim(self, today):
@@ -433,12 +477,13 @@ class ArchiveReconciler:
     def _prime(self, now_local, sink):
         """Settle the restart state once: marker, backfill, window reseed.
 
-        Returns True when primed; False (and retried next tick) on any read
-        or marker-write failure -- the backfill is idempotent (days already
-        carrying ``gap_wh`` are skipped, clean days write nothing), so a
-        retried first run converges without repeating a single verdict
-        write. The marker lands only after a complete pass, so a crash
-        mid-backfill restarts it rather than silently truncating it.
+        Returns True when primed; False (and retried next tick) on any
+        read, verdict-write or marker-write failure -- the backfill is
+        idempotent (days already carrying ``gap_wh`` are skipped, clean
+        days write nothing), so a retried first run converges without
+        repeating a single verdict write. The marker lands only after a
+        complete pass (every verdict written), so a crash or a failed
+        write mid-backfill restarts it rather than silently truncating it.
         """
         try:
             marker = self.db.collection("history").document(MARKER_DOC_ID).get()
@@ -497,20 +542,28 @@ class ArchiveReconciler:
                     # Their absence must not read as clean downstream: any
                     # touched day not already carrying a mark (number or
                     # null -- presence is the settled test) is queued for
-                    # an explicit unknown mark, and only days inside the
-                    # declared verdict range may receive one: days before
-                    # recon_from are legacy/unknown by design, so a
-                    # straddling overnight interval's pre-marker part is
-                    # left unmarked rather than written out of contract.
+                    # an explicit unknown mark. The queue is bounded at
+                    # the read range's start, which subsumes the marker
+                    # bound (start >= recon_from by construction):
+                    # ``docs`` covers only [start, today), so a day before
+                    # ``start`` was never read and the presence guard
+                    # cannot see whatever mark it carries -- queueing it
+                    # would issue a blind null write over a stored
+                    # verdict, and a mark is write-once, so the overwrite
+                    # would be permanent.
                     for day in parts:
-                        if day < self._recon_from_iso:
+                        if day < start.isoformat():
                             continue
                         data = docs.get(day)
                         if not (isinstance(data, dict) and GAP_FIELD in data):
-                            self._unmarked_inexact.add(day)
+                            self._unmarked_inexact[day] = (
+                                "a straddled attribution is approximate, "
+                                "so no verdict is honest"
+                            )
                 for day, wh in parts.items():
                     archived[day] = archived.get(day, 0.0) + wh
         verdicts = 0
+        verdict_failed = False
         if first_run:
             # One bounded backfill pass: verdicts for the finalized days the
             # trailing window does not own, from the stored day documents
@@ -530,10 +583,26 @@ class ArchiveReconciler:
                 kwh = data.get("kwh") if isinstance(data, dict) else None
                 day_wh = float(kwh) if _is_number(kwh) else 0.0
                 gap = round(day_wh * 1000.0 - archived.get(day, 0.0), 3)
-                if gap != 0.0 and self._write_verdict(
+                if gap == 0.0:
+                    continue
+                if self._write_verdict(
                     day, gap, day_wh=day_wh, basis=archived.get(day, 0.0)
                 ):
                     verdicts += 1
+                else:
+                    # One failed verdict write must abort the pass before
+                    # the marker: the marker would strand the day outside
+                    # every later path (the tick window never reaches a
+                    # backfill day, and the backfill never re-runs), and
+                    # its absence is the clean verdict -- the divergence
+                    # would read as verified-clean forever.
+                    verdict_failed = True
+            if verdict_failed:
+                log(
+                    "archive reconciliation backfill incomplete (a verdict "
+                    "write failed); marker withheld, retrying next tick"
+                )
+                return False
             if not self._write_marker():
                 return False
             log(

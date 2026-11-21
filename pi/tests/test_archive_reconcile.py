@@ -326,6 +326,57 @@ class LiveVerdictTests(ArchiveBase):
         self.assertEqual(write[2], "2026-11-20")
         self.assertEqual(write[3]["gap_wh"], 1000.0)
 
+    def test_a_day_the_open_session_outlives_is_marked_unknown(self):
+        # The deferral horizon: a session open for more than the trailing
+        # window keeps its days deferred until the window ages each one
+        # out, and an aged-out day is never verdicted again -- not by this
+        # process (the tick window has moved past it) and not by a restart
+        # (the reseed reads the same window). Its day doc holds real
+        # energy the unsettled basis cannot explain, so the last visit
+        # must queue the explicit gap_wh null instead of letting the day
+        # slip out the back of the window, where its absence would read
+        # as the verified-clean verdict.
+        self.seed_marker()
+        # One charging block opens on the 18th and never closes here: the
+        # open interval's start overlaps every candidate day from the
+        # 18th on (the day doc's 5 kWh is real metered energy).
+        self.apply(_at(18, 12), 3, 0, total_kwh=1000.0)
+        self.seed_day("2026-11-18", 5.0)
+        self.tick(_at(19, 13))  # prime; the 18th at offset 1: deferred
+        self.assertEqual(self.verdict_writes(), [])
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-18"))
+        self.tick(_at(20, 13))  # offset 2: still deferred, still unmarked
+        self.assertEqual(self.verdict_writes(), [])
+        # The last visit (the window's oldest offset): the day can never
+        # be verdicted after this tick, so the unknown mark lands now.
+        self.tick(_at(21, 13))
+        self.assertIsNone(self.day_doc("2026-11-18")["gap_wh"])
+        self.assertEqual(
+            self.verdict_writes(),
+            [("set", "history", "2026-11-18", {"gap_wh": None}, ["gap_wh"])],
+        )
+        self.assertEqual(self.recon._unmarked_inexact, {})
+        self.assertTrue(
+            any(
+                "outlived the verdict window" in line
+                for line in self.verdict_lines()
+            )
+        )
+        # The younger overlapped days stay deferred and unmarked: their
+        # session may still close inside the window.
+        self.assertNotIn("2026-11-19", self.recon._evaluated)
+        self.assertNotIn("2026-11-20", self.recon._evaluated)
+        # It closes in time: the younger days verdict normally (clean
+        # here), and the aged day's mark is untouched -- write-once.
+        self.apply(_at(21, 14), 1, 0, total_kwh=1000.0)
+        self.tick(_at(22, 13))
+        self.assertEqual(
+            self.verdict_writes(),
+            [("set", "history", "2026-11-18", {"gap_wh": None}, ["gap_wh"])],
+        )
+        self.assertIn("2026-11-21", self.recon._evaluated)
+        self.assertIn("2026-11-19", self.recon._evaluated)
+
 
 class BackfillTests(ArchiveBase):
     """The one bounded first-run pass over the trailing window's history."""
@@ -483,6 +534,57 @@ class BackfillTests(ArchiveBase):
             len([w for w in self.verdict_writes() if w[2] == "2026-11-01"]), 1
         )
 
+    def test_a_failed_backfill_verdict_write_withholds_the_marker(self):
+        # The marker lands only after a complete pass, and complete means
+        # every verdict landed: a single failed verdict write must abort
+        # the pass before the marker, or the day is stranded -- outside
+        # the tick window, below a backfill that will never re-run -- and
+        # its absence is the clean verdict, so a real divergence would
+        # read as verified-clean forever. The retry re-runs the idempotent
+        # pass (days carrying gap_wh are skipped), so exactly the missing
+        # verdict lands, then the marker.
+        self.seed_day("2026-10-22", 4.806)
+        self.seed_session(_at(22, 12, month=10), _at(22, 13, month=10), 4806.0, 11.0)
+        self.seed_day("2026-11-01", 7.237)
+        self.seed_session(_at(1, 12), _at(1, 13), 7237.0, 10.0)
+        original = self.recon._write_verdict
+        failed = []
+
+        def flaky_verdict(day, gap, *, day_wh, basis):
+            if day == "2026-11-01" and not failed:
+                failed.append(day)
+                return False  # a transient single-document write failure
+            return original(day, gap, day_wh=day_wh, basis=basis)
+
+        with mock.patch.object(
+            self.recon, "_write_verdict", side_effect=flaky_verdict
+        ):
+            self.tick(_at(21, 10))
+        # The pass aborted before the marker: unprimed, no marker document
+        # and no verdict for the failed day -- while the day whose write
+        # landed carries its verdict (the retry must not rewrite it).
+        self.assertFalse(self.recon._primed)
+        self.assertNotIn(
+            archive_reconcile.MARKER_DOC_ID, self.db.data.get("history", {})
+        )
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-01"))
+        self.assertEqual(self.day_doc("2026-10-22")["gap_wh"], 4795.0)
+        # The clean retry converges: the missing verdict, then the marker.
+        self.tick(_at(21, 11))
+        self.assertTrue(self.recon._primed)
+        self.assertEqual(self.day_doc("2026-11-01")["gap_wh"], 7227.0)
+        self.assertEqual(
+            self.db.data["history"][archive_reconcile.MARKER_DOC_ID],
+            {"recon_from": "2026-10-19"},
+        )
+        # Exactly one verdict write per day across both passes.
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-10-22"]), 1
+        )
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-11-01"]), 1
+        )
+
 
 class RestartTests(ArchiveBase):
     """The trailing window recomputes from day docs + one sessions read."""
@@ -622,6 +724,41 @@ class RestartTests(ArchiveBase):
         self.assertEqual(self.verdict_writes(), [])
         self.assertIsNone(self.day_doc("2026-11-19")["gap_wh"])
         self.assertIsNone(self.day_doc("2026-11-20")["gap_wh"])
+
+    def test_a_pre_window_verdict_survives_a_window_start_straddle(self):
+        # The mirror of the pre-marker clamp: on a restart the prime reads
+        # day docs only over [start, today) -- start = max(marker,
+        # today - window_days) -- so a stored interval straddling the
+        # window-start midnight touches a day whose document was never
+        # read. The presence guard cannot see that day's stored verdict
+        # (docs.get(day) is None by construction), so the unknown-mark
+        # queue must be bounded at the read range's start, which subsumes
+        # the marker bound: the pre-window day's numeric verdict survives
+        # a window-start straddle restart intact -- no blind null write,
+        # ever (a mark is write-once, so the overwrite would be
+        # permanent).
+        self.seed_marker()
+        self.seed_day("2026-11-17", 3.0)
+        self.db.data["history"]["2026-11-17"]["gap_wh"] = 5000.0
+        self.seed_day("2026-11-18", 2.0)
+        self.seed_session(_at(17, 22), _at(18, 2), 4000.0, 4000.0)
+        self.recon._started_at = _at(21, 12)
+        self.tick(_at(21, 13))
+        # start = 2026-11-18 (today - 3): the 17th was never read, never
+        # queued, never written -- the previous process's verdict on it
+        # is intact.
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-17"], []
+        )
+        self.assertNotIn("2026-11-17", self.recon._unmarked_inexact)
+        self.assertEqual(self.day_doc("2026-11-17")["gap_wh"], 5000.0)
+        # The in-window straddle-touched day still gets its unknown mark.
+        self.assertIn("2026-11-18", self.recon._inexact)
+        self.assertEqual(
+            self.verdict_writes(),
+            [("set", "history", "2026-11-18", {"gap_wh": None}, ["gap_wh"])],
+        )
+        self.assertIsNone(self.day_doc("2026-11-18")["gap_wh"])
 
     def test_a_delayed_prime_does_not_double_count_this_process_sessions(self):
         # The reseed only takes intervals closed at or before the process
