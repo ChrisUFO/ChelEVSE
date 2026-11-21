@@ -2061,6 +2061,31 @@ test('the same gap discloses on a week and a month alike (#211)', () => {
   assert.equal(coverageDisclosure(month), 'priced 327 of 331 kWh');
 });
 
+test('a fired caption whose app-rounded figures collide shows two decimals (#211)', () => {
+  // fmtK renders ≥100 kWh with no decimals, rounding each figure on its own,
+  // so a 0.3 kWh gap inside the same whole-kWh bracket would print
+  // "330 of 330 kWh" — the line fires, but its magnitude is invisible at
+  // exactly the period scale the issue was filed on. The caption falls back
+  // to two-decimal figures whenever the app formatting renders both sides
+  // alike, so a fired line always shows what is missing.
+  const today = new Date(2026, 9, 31, 12); // October: 31 days
+  const month = seriesCostSummary(
+    periodSeries(
+      'month',
+      Array.from({ length: 30 }, (_, i) => ({
+        id: `2026-10-${String(i + 1).padStart(2, '0')}`,
+        kwh: 11.01, // 330.3 kWh recorded across the covered days
+      })),
+      today,
+    ),
+    'day',
+    NIGHTLY,
+    // 330.0 kWh attributed: fmtK rounds both sides to "330".
+    [{ wh: 330000, started_at: new Date(2026, 9, 1), ended_at: new Date(2026, 9, 31) }],
+  );
+  assert.equal(coverageDisclosure(month), 'priced 330.00 of 330.30 kWh');
+});
+
 test('a period with nothing covered keeps the $ hidden and discloses nothing', () => {
   const points = periodSeries('week', [{ id: '2026-10-15', kwh: 4.2 }], new Date(2026, 9, 18, 12));
   const summary = seriesCostSummary(points, 'day', NIGHTLY);

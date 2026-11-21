@@ -792,14 +792,22 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
 // their max(250 Wh, 2%) band; this caption no longer shares it.) Null
 // whenever the $ itself hides (a period with nothing covered keeps today's
 // hidden presentation); no figure is invented, and the kWh totals are never
-// touched. Both energies format the way every kWh in the app does (fmtK).
+// touched. Both energies format the way every kWh in the app does (fmtK) —
+// except when that app formatting renders the two figures alike (fmtK shows
+// no decimals at ≥100 kWh), where the caption falls back to two-decimal
+// figures so a fired line always shows the magnitude it is disclosing.
 export function coverageDisclosure(summary) {
   if (!summary || summary.cost == null) return null;
   const recorded = toNumber(summary.recordedWh);
   const covered = toNumber(summary.coveredWh);
   if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
   if (Math.round(recorded) - Math.round(covered) < 1) return null;
-  return `priced ${fmtK(covered / 1000)} of ${fmtK(recorded / 1000)} kWh`;
+  const coveredText = fmtK(covered / 1000);
+  const recordedText = fmtK(recorded / 1000);
+  if (coveredText === recordedText) {
+    return `priced ${(covered / 1000).toFixed(2)} of ${(recorded / 1000).toFixed(2)} kWh`;
+  }
+  return `priced ${coveredText} of ${recordedText} kWh`;
 }
 
 // ---------- the per-window rate-scope flag (#193) ----------
