@@ -367,6 +367,65 @@ class ImplausibleJumpTests(LoopBase):
         self.assertEqual(value, 400.4)
 
 
+class MidnightOutageTests(LoopBase):
+    """The charger unreachable across local midnight while the bridge keeps
+    running: the last accepted sample (yesterday's ``total_day``) never
+    expires, so the first new-day tick must not compare it against the new
+    day's fresh totals; recovery resumes normal reconciliation."""
+
+    def test_a_stale_pre_midnight_sample_is_not_compared_against_the_new_day(self):
+        # Day 20 ends healthy: the 23:10 sample reconciles clean against the
+        # archive (authority granted), then the charger goes unreachable.
+        self.seed_history(11.0)
+        self.note(11.0, _at(23, 10, day=20))
+        self.now = _at(23, 11, day=20)
+        self.run_loop(1)
+        self.assertIn("warning authority granted", " ".join(self.logs))
+
+        # Day 21, 00:10: no history document yet, nothing pending -- without
+        # the same-day guard the stale 11 kwh sample would warn a whole
+        # yesterday-sized "bridge low" divergence against zeroes.
+        self.now = _at(0, 10, day=21)
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+
+        # The outage continues: hourly ticks keep holding, not re-warning.
+        self.now = _at(1, 10, day=21)
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+
+    def test_recovery_resumes_normal_reconciliation(self):
+        self.seed_history(11.0)
+        self.note(11.0, _at(23, 10, day=20))
+        self.now = _at(23, 11, day=20)
+        self.run_loop(1)
+        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.now = _at(0, 10, day=21)
+        self.run_loop(1)  # stale sample: skipped
+        self.assertEqual(self.warnings(), [])
+
+        # 09:00: the charger is back. Its counter reset at its own midnight
+        # (a recorded rollover) and reports 0.3 kwh delivered overnight --
+        # energy the bridge never observed while the charger was dark, so
+        # the new day genuinely diverges and the (same-day) sample must be
+        # evaluated and warned about normally: the guard suppressed the
+        # stale sample, not the loop.
+        back = _at(9, day=21)
+        self.note(0.3, back)
+        self.assertIn("day counter rollover", " ".join(self.logs))
+        self.now = back
+        self.run_loop(1)
+        (warning,) = self.warnings()
+        self.assertIn("day 2026-11-21", warning)
+        self.assertIn("bridge low", warning)
+        self.assertIn("0.300 kwh", warning)
+        self.assert_no_writes()
+
+
 class AuthorityTests(ReconcileBase):
     """Divergences before authority are informational notes, never warnings."""
 

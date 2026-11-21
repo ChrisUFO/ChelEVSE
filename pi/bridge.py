@@ -2467,7 +2467,10 @@ def reconcile_loop(db, sink, counter, reconciler, interval, *, initial_delay=0):
     4.2.2) makes the loop inactive after one informational line: nothing to
     reconcile, nothing to warn about. A rejected (implausible) sample
     suppresses the evaluation that would have compared it, so a corrupt
-    reading can neither clear nor damn the day.
+    reading can neither clear nor damn the day. So does a sample that
+    predates local midnight: an unreachable charger across the rollover
+    leaves the counter holding yesterday's total, which cannot clear or
+    damn the new day either.
     """
     inactive_logged = False
     if initial_delay:
@@ -2499,6 +2502,15 @@ def reconcile_loop(db, sink, counter, reconciler, interval, *, initial_delay=0):
         charger_kwh, charger_observed = sample
         now = _localnow()
         day = now.date().isoformat()
+        if charger_observed.date() != now.date():
+            # The accepted sample predates local midnight: the charger was
+            # unreachable across the rollover (overnight outage or restart
+            # loop) while the bridge kept running, so ``total_day`` still
+            # measures yesterday and never expires on its own. Comparing it
+            # against the new day's fresh totals would warn about the whole
+            # of yesterday; the evaluation waits for a sample of the day
+            # being compared.
+            return
         totals = _day_totals(db, sink, day)
         if totals is None:
             return
