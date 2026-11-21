@@ -5,7 +5,8 @@ independent day/month meters (`total_day`/`total_month`). When the two
 disagree beyond tolerance, something lost energy on one side — the bridge
 journals one line and **touches nothing**. This page is what to do when you
 see that line. Design detail lives in
-[../pi/README.md](../pi/README.md) § "Day/month reconciliation".
+[../pi/README.md](../pi/README.md) § "Day reconciliation" and § "Month
+reconciliation".
 
 ## Anatomy of a warning
 
@@ -43,26 +44,31 @@ bridge history …` — not lost energy; the charger counter looks Wh-scaled
 
    ```sh
    sudo journalctl -u chelevse-bridge --since "2026-11-21 08:00" --no-pager \
-     | grep -E "reconciliation (warning|note|rejected)"
-   sudo journalctl -u chelevse-bridge -b --no-pager | grep -E "counter (rollover|step dropped|did not reset)"
+     | grep -E "reconciliation"
+   sudo journalctl -u chelevse-bridge -b --no-pager | grep -E "(counter (rollover|step dropped|did not reset)|history step dropped)"
    ```
 
    The counter lines show what the bridge itself observed: rollovers
    (the counter rebasing at its boundary), dropped implausible steps, and
-   midnights that passed without a reset.
+   midnights that passed without a reset; `history step dropped` is the
+   same implausibility check applied to the history feed itself.
 
 2. Read the gap direction:
 
    - **`bridge low`** (archive < charger): the bridge recorded less than the
      charger delivered — missed intervals. Typical causes: a bridge restart
      or offline span inside the outage window, the charger unreachable for
-     part of the day, or implausible charger steps the validator dropped
+     part of the day, a power cut while charging (each side loses its own
+     unsaved tail — see _Firmware caveats_; the gap can land on either
+     side), or implausible charger steps the validator dropped
      (`counter step dropped` lines).
    - **`bridge high`** (archive > charger): the bridge recorded energy the
      charger's period counter does not account for — usually a charger
      counter event: `/emeter.json` loss with a lifetime re-import from RAPI
      `$GU` (the double-count class), a mid-day firmware reflash/reset, or a
-     period counter zeroed by a boot before NTP.
+     period counter zeroed by a boot before NTP; a power cut while
+     charging can land here too when the charger's unsaved tail was the
+     longer one (see _Firmware caveats_).
 
 3. Corroborate inside the window: bridge restarts (`journalctl -u
 chelevse-bridge --list-boots`, gaps in the log), charger reachability
@@ -123,8 +129,15 @@ counter (firmware below 4.2.2?); nothing to reconcile`) and stays
   as `bridge high`.
 - Losing `/emeter.json` re-imports lifetime from RAPI `$GU` and can
   double-count — the classic `bridge high` cause.
-- A power cut while charging loses up to 5 minutes of energy (the save
-  cadence) — usually inside the 0.2 kWh floor on typical power.
+- A power cut while charging loses up to 5 minutes of energy on each
+  side independently: the charger's tail since its last `/emeter.json`
+  save (the 5-minute save cadence) and the bridge's tail since its last
+  accumulator flush (the 5-minute flush interval — the
+  unclean-power-loss window). At typical charging power (6–11 kW) that
+  is 0.5–0.9 kWh per side, well beyond the 0.2 kWh floor — the floor
+  covers only ~59 s at ceiling power — so a mid-charge power cut is a
+  plausible real divergence cause, in either direction: the side that
+  lost more of its unsaved tail reads low.
 
 ## What the check never does
 
