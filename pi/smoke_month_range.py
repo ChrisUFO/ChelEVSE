@@ -83,8 +83,11 @@ deploy variable would silently retarget it to another project (the deploy
 guard's own cross-check, ``scripts/check-firebase-project.mjs``); unset
 ``GOOGLE_APPLICATION_CREDENTIALS`` or point it at the bridge key.
 
-Run on the Pi with the venv that has google-cloud-firestore, from a
-worktree checkout (never the running service's own checkout):
+Run on the Pi with the venv that has google-cloud-firestore, straight
+from the service checkout -- no worktree needed: the smoke reads only
+(``stream()``), writes nothing and logs to stdout, so the running
+service's own checkout is fine (a worktree is only how a not-yet-merged
+branch gets run):
 
     pi/.venv/bin/python pi/smoke_month_range.py
     pi/.venv/bin/python pi/smoke_month_range.py --month 2026-11 --month 2026-10
