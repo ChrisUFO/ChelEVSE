@@ -12,7 +12,7 @@ import os
 import sys
 import unittest
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -31,9 +31,9 @@ from fakes import (  # noqa: E402
 from test_mqtt import _RecordingNotifier  # noqa: E402
 
 
-def _at(hour, minute=0, second=0, day=20):
+def _at(hour, minute=0, second=0, day=20, month=11, year=2026):
     """One exact instant on the scenario day (2026-11-20 by default)."""
-    return datetime(2026, 11, day, hour, minute, second, tzinfo=UTC)
+    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
 
 
 class ReconcileBase(unittest.TestCase):
@@ -59,8 +59,13 @@ class ReconcileBase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def note(self, value, when=None):
-        """One charger observation at an exact wall-clock instant."""
+    def note(self, value, when=None, counter=None):
+        """One charger observation at an exact wall-clock instant.
+
+        ``counter`` defaults to the day stream; the month tests point it at
+        their month stream -- both read the same shared boot clock, so the
+        helper keeps one monotone view across every stream.
+        """
         when = when or self.now
         if self._last_when is not None:
             self.boot += max(0.0, (when - self._last_when).total_seconds())
@@ -72,7 +77,23 @@ class ReconcileBase(unittest.TestCase):
             ),
             mock.patch.object(bridge.time, "monotonic", return_value=self.boot),
         ):
-            self.counter.note(value)
+            (counter or self.counter).note(value)
+
+    def authorize(self, previous=9.0, at=None):
+        """Observe one midnight rollover (23:59 -> 00:05) and feed it.
+
+        PR-2's authority rule (#161): warnings need a ``total_day`` reset
+        observed within 1 h of Pi-local midnight, so every scenario that
+        expects a warning opens by earning its authority the way the real
+        bridge would.
+        """
+        at = at or _at(0, 5, day=20)
+        self.note(previous, _at(23, 59, day=19))
+        self.note(0.0, at)
+        self.reconciler.consider_evidence(
+            self.counter.rollovers, self.counter.non_resets
+        )
+        return at
 
     def evaluate(
         self,
@@ -114,6 +135,10 @@ class LoopBase(ReconcileBase):
         self.tracker.seeded = True
         self.sink = bridge.StatusSink(self.db, self.tracker, _RecordingNotifier())
         self._seeded_data = None
+        # The month half (#161 PR-2): None keeps the PR-1 day-only scenarios
+        # exactly as they were; the month classes install real ones.
+        self.month_counter = None
+        self.month_reconciler = None
 
     def seed_history(self, kwh, hours=None, day=None):
         """Pre-seed one archive day document, snapshot it for byte-equality."""
@@ -156,6 +181,8 @@ class LoopBase(ReconcileBase):
                     if sample_max_age is not None
                     else bridge.RECONCILE_SAMPLE_MAX_AGE_SEC
                 ),
+                month_counter=self.month_counter,
+                month_reconciler=self.month_reconciler,
             )
 
     def assert_no_writes(self):
@@ -175,7 +202,9 @@ class KnownGoodDayTests(LoopBase):
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
         self.assertEqual(self.notes(), [])
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        # PR-2 (#161): a clean evaluation no longer grants warning
+        # authority -- only an observed midnight rollover does.
+        self.assertFalse(self.reconciler.authorized)
         self.assert_no_writes()
 
     def test_within_one_percent_is_clean(self):
@@ -185,11 +214,13 @@ class KnownGoodDayTests(LoopBase):
 
     def test_the_floor_governs_small_days(self):
         # max(0.2 kwh, 1% of the larger side): small totals use the floor.
+        self.authorize()
         self.note(0.1)
         self.assertEqual(self.evaluate(archive=0.1, charger=0.28), "clean")
         self.assertEqual(self.evaluate(archive=0.1, charger=0.32), "warned")
 
     def test_one_percent_governs_large_days(self):
+        self.authorize()
         self.note(100.0)
         self.assertEqual(self.evaluate(archive=100.0, charger=100.9), "clean")
         self.assertEqual(self.evaluate(archive=100.0, charger=102.0), "warned")
@@ -211,7 +242,8 @@ class ObservationSkewTests(LoopBase):
     coverage at the charger's 48 A ceiling (~59 s on the UK band top)."""
 
     def test_an_aged_same_day_sample_tolerates_the_feed_gap(self):
-        # 13:59: a clean evaluation grants warning authority. 14:00: the
+        # Midnight earned warning authority (the rollover rule, PR-2); the
+        # 13:59 evaluation is clean. 14:00: the
         # hourly HTTP reconcile applied a 5.0 sample; the MQTT snapshots
         # kept the bridge side moving. At 14:00:59 the sample is 59 s old
         # and the bridge total holds ~0.181 kwh (11 kW x 59 s at the 48 A
@@ -219,6 +251,7 @@ class ObservationSkewTests(LoopBase):
         # window still admits the age and the 0.2 floor absorbs the skew
         # -- with a 0.05 floor this exact interleaving warned "bridge
         # high" about energy nobody lost.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -236,6 +269,7 @@ class ObservationSkewTests(LoopBase):
         # gap exceeds what the cadence can explain -- even inside the
         # freshness window, at a power no charger could deliver in the
         # sample's age -- it is a divergence.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -262,7 +296,8 @@ class SampleFreshnessTests(LoopBase):
 
     def test_a_same_day_sample_past_the_freshness_window_is_not_compared(self):
         # The false-warning reproduction at the power that exposes the
-        # band: authority is granted clean at 13:59, the 14:00:00 HTTP
+        # band: authority is earned at midnight (the rollover rule, PR-2),
+        # the 14:00:00 HTTP
         # reconcile then fails (a failed poll advances the next deadline
         # and never notes), the charger delivers ~11 kW via MQTT
         # snapshots, and the tick at 14:00:45 sees a 105 s-old sample
@@ -271,6 +306,7 @@ class SampleFreshnessTests(LoopBase):
         # intervals wide admitted exactly this age and warned "bridge
         # high" about energy nobody lost; the one-interval window
         # suppresses the evaluation instead.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -296,16 +332,18 @@ class SampleFreshnessTests(LoopBase):
         # 59 s old at the default cadence -- just inside the window, which
         # the clamp holds at the tolerance floor's coverage (~59.3 s = the
         # 0.2 floor at 48 A x 253 V, the UK band top): the evaluation
-        # runs -- proven by the authority grant -- and the ceiling-power
+        # runs -- proven by the last-clean stamp a clean evaluation leaves
+        # -- and the ceiling-power
         # skew of that age (12.1 kW x 59 s ~ 0.199 kwh) sits inside the
         # floor: the window and the floor meet at exactly this age, even
         # at the top of the supply band.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(14, 0))
         self.seed_pending(0.199, _at(14, 0, 59))
         self.now = _at(14, 0, 59)
         self.run_loop(1)
-        self.assertTrue(self.reconciler.authorized)
+        self.assertEqual(self.reconciler._last_clean, _at(14, 0, 59))
         self.assertEqual(self.warnings(), [])
         self.assert_no_writes()
 
@@ -318,6 +356,7 @@ class SampleFreshnessTests(LoopBase):
         # observation skew on a day nobody lost energy. run() clamps the
         # window to the tolerance floor's coverage at ceiling power, so
         # the raised cadence suppresses the evaluation instead.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -416,12 +455,18 @@ class AbsentCounterTests(LoopBase):
         self.counter.note(None)
         self.run_loop(1)
         self.assertIn("inactive", " ".join(self.logs))
-        self.seed_history(5.0)
+        # The counter appears (firmware upgraded, say) and the totals
+        # diverge: the comparison runs again, as an informational note --
+        # PR-2 (#161): without an observed midnight rollover it can never
+        # be more than that.
+        self.seed_history(12.0)
         self.note(5.0, _at(10))
         self.now = _at(10)
         self.run_loop(1)
+        (note,) = self.notes()
+        self.assertIn("informational", note)
         self.assertEqual(self.warnings(), [])
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.assertFalse(self.reconciler.authorized)
 
 
 class MidDayRestartTests(LoopBase):
@@ -429,10 +474,12 @@ class MidDayRestartTests(LoopBase):
     figures disagree -- exactly one warning with every field, then silence."""
 
     def test_exactly_one_warning_with_all_fields(self):
-        # Morning: the archive and the charger's day counter grow in
-        # lockstep; the 13:58 evaluation is clean (authority granted).
+        # Authority first: the counter's real midnight rollover (23:59 ->
+        # 00:05) unlocks warnings under the PR-2 rule. Morning: the archive
+        # and the charger's day counter grow in lockstep; the 13:58
+        # evaluation is clean.
+        self.authorize()
         self.seed_history(9.0, hours={"09": 4.0, "10": 3.0, "11": 2.0})
-        self.note(0.0, _at(9))
         self.note(9.0, _at(13, 58))
         self.now = _at(13, 58)
         self.run_loop(1)
@@ -477,14 +524,16 @@ class MidDayRestartTests(LoopBase):
         self.assert_no_writes()
 
     def test_a_gap_grown_by_a_kwh_rearms_the_warning(self):
+        self.authorize()
         self.note(5.0)
-        self.evaluate(archive=5.0, charger=5.0)  # clean; authority granted
+        self.evaluate(archive=5.0, charger=5.0)  # clean
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
         self.assertEqual(self.evaluate(archive=7.4, charger=5.0), "held")
         self.assertEqual(self.evaluate(archive=8.05, charger=5.0), "warned")
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_direction_change_rearms_the_warning(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(
@@ -496,6 +545,7 @@ class MidDayRestartTests(LoopBase):
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_clean_evaluation_closes_the_episode(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
@@ -505,6 +555,7 @@ class MidDayRestartTests(LoopBase):
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_new_day_starts_a_new_episode(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
@@ -540,11 +591,11 @@ class ImplausibleJumpTests(LoopBase):
         self.assertFalse(self.counter.eval_ready)  # ... but not trusted yet
 
     def test_no_false_reconciliation_from_a_rejected_sample(self):
+        self.authorize()
         self.seed_history(10.0)
         self.note(10.0, _at(14))
         self.now = _at(14)
-        self.run_loop(1)  # clean; authority granted
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.run_loop(1)  # clean
         self.note(400.0, _at(14, 1))  # corrupt jump: rejected
         self.now = _at(14, 2)
         self.run_loop(1)  # the untrusted sample is not evaluated
@@ -567,9 +618,11 @@ class MidnightOutageTests(LoopBase):
     day's fresh totals; recovery resumes normal reconciliation."""
 
     def test_a_stale_pre_midnight_sample_is_not_compared_against_the_new_day(self):
-        # Day 20 ends healthy: the 23:10 sample reconciles clean against the
-        # archive (authority granted; the tick lands 59 s after the note,
-        # inside the clamped window), then the charger goes unreachable.
+        # Day 20 ends healthy: authority was earned at the midnight
+        # rollover into day 20, the 23:10 sample reconciles clean against
+        # the archive (the tick lands 59 s after the note, inside the
+        # clamped window), then the charger goes unreachable.
+        self.authorize()
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
         self.now = _at(23, 10, 59, day=20)
@@ -593,6 +646,7 @@ class MidnightOutageTests(LoopBase):
         self.assert_no_writes()
 
     def test_recovery_resumes_normal_reconciliation(self):
+        self.authorize()
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
         self.now = _at(23, 10, 59, day=20)
@@ -639,9 +693,11 @@ class AuthorityTests(ReconcileBase):
         self.assertEqual(len(self.notes()), 1)
 
     def test_authority_is_granted_once_and_survives_later_divergences(self):
-        self.note(5.0)
-        self.evaluate(archive=5.0, charger=5.0)
+        # The grant comes from the observed rollover (authorize), and only
+        # from it: later evaluations neither add nor repeat the grant.
+        self.authorize()
         grants = [line for line in self.logs if "authority granted" in line]
+        self.assertEqual(len(grants), 1)
         self.assertEqual(self.evaluate(archive=9.0, charger=5.0), "warned")
         self.assertEqual(
             [line for line in self.logs if "authority granted" in line], grants
@@ -998,6 +1054,14 @@ class RunWiringTests(unittest.TestCase):
             thread.kwargs["sample_max_age"], bridge.RECONCILE_SAMPLE_MAX_AGE_SEC
         )
 
+    def test_the_reconcile_thread_carries_the_month_half(self):
+        # PR-2 (#161): the loop compares the month on the same tick, from
+        # the same observation family -- run() builds and threads both.
+        started = self.run_bridge(reconcile=bridge.ReconcileConfig(3600), events=[])
+        (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
+        self.assertIsInstance(thread.kwargs["month_counter"], bridge.ChargerDayCounter)
+        self.assertIsInstance(thread.kwargs["month_reconciler"], bridge.MonthReconciler)
+
     def test_a_slow_reconcile_cadence_clamps_the_freshness_window(self):
         # MQTT_RECONCILE_SEC=120 is a legal, documented setting; the
         # window it buys stops at the tolerance floor's coverage instead
@@ -1101,3 +1165,889 @@ class ReconcileEnvTests(unittest.TestCase):
         ):
             bridge.main()
         self.assertTrue(any("day reconciliation: disabled" in line for line in logs))
+
+
+# -- PR-2: rollover authority, month comparison, mismatch rejection (#161) --
+
+
+class RolloverWindowTests(unittest.TestCase):
+    """The authority window (#161 PR-2): a ``total_day`` reset stamp within
+    1 h of Pi-local midnight -- on either side, measured on the same wall
+    clock the archive's day documents use -- is the one piece of evidence
+    that the two sides measure the same day in the same time zone. The
+    window is inclusive at exactly one hour."""
+
+    CASES = (
+        (_at(0, 0, 0), True),  # midnight sharp
+        (_at(0, 59, 59), True),
+        (_at(1, 0, 0), True),  # exactly one hour after: inside
+        (_at(1, 0, 1), False),
+        (_at(9), False),
+        (_at(13, 58), False),  # the mid-day firmware reset
+        (_at(22, 59, 59), False),
+        (_at(23, 0, 0), True),  # exactly one hour before: inside
+        (_at(23, 59, 59), True),
+    )
+
+    def test_the_window_is_one_hour_either_side_of_local_midnight(self):
+        for when, expected in self.CASES:
+            with self.subTest(when=when):
+                self.assertEqual(reconcile.within_rollover_window(when), expected)
+
+
+class RolloverAuthorityTests(LoopBase):
+    """PR-2's false-alarm guard: the day comparison warns only after one
+    ``total_day`` rollover observed within 1 h of Pi-local midnight. A reset
+    at any other hour is boundary evidence of a time-zone or period
+    mismatch: comparisons stay informational and the mismatch is said once,
+    distinctly -- never repeatedly, never as a warning."""
+
+    def test_a_rollover_just_after_midnight_grants_authority(self):
+        self.seed_history(0.5)
+        self.note(9.0, _at(23, 59, day=19))
+        self.note(0.5, _at(0, 5, day=20))
+        self.now = _at(0, 5, day=20)
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        (grant,) = [line for line in self.logs if "authority granted" in line]
+        self.assertIn("rollover", grant)
+        self.assertIn("within 1 h of local midnight", grant)
+        self.assertEqual(self.warnings(), [])  # the day itself is clean
+        self.assert_no_writes()
+
+    def test_a_rollover_just_before_midnight_grants_authority(self):
+        # 23:00 is exactly the other edge: a charger whose midnight falls up
+        # to an hour early still measures (almost) the Pi's day.
+        self.note(9.0, _at(22, 59, day=19))
+        self.note(0.1, _at(23, 0, day=19))
+        self.now = _at(23, 0, 59, day=19)
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assert_no_writes()
+
+    def test_a_clean_evaluation_alone_no_longer_grants_authority(self):
+        # PR-1 granted on one clean evaluation; PR-2 replaces that with the
+        # rollover rule; a clean pair of numbers proves less than it appears
+        # (a fresh install over an old archive agrees by construction),
+        # while an observed midnight rollover proves the period and the zone.
+        self.seed_history(12.4)
+        self.seed_pending(0.1)
+        self.note(12.5)
+        self.run_loop(1)
+        self.assertFalse(self.reconciler.authorized)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+
+    def test_a_reset_at_the_wrong_hour_stays_informational_with_one_note(self):
+        self.seed_history(3.0)  # the archive holds the morning ...
+        self.note(9.0, _at(12))
+        self.note(0.02, _at(13, 58))  # ... the charger reset mid-day
+        self.now = _at(13, 58)
+        self.run_loop(1)
+        (mismatch,) = [
+            line for line in self.logs if "outside 1 h of local midnight" in line
+        ]
+        self.assertIn("time-zone or period mismatch", mismatch)
+        self.assertFalse(self.reconciler.authorized)
+        (note,) = self.notes()  # the divergence is informational
+        self.assertIn("gap 2.980 kwh", note)
+        self.assertEqual(self.warnings(), [])
+        # The next tick says neither line again: both are bounded.
+        self.note(0.03, _at(14, 58))
+        self.now = _at(14, 58)
+        self.run_loop(1)
+        self.assertEqual(len(self.notes()), 1)
+        self.assertEqual(
+            len(
+                [line for line in self.logs if "outside 1 h of local midnight" in line]
+            ),
+            1,
+        )
+        self.assert_no_writes()
+
+    def test_a_valid_rollover_after_a_wrong_hour_one_grants(self):
+        self.note(9.0, _at(12))
+        self.note(0.02, _at(13, 58))  # wrong hour: one note
+        self.now = _at(13, 58)
+        self.run_loop(1)
+        self.note(0.05, _at(23, 59))
+        self.note(0.01, _at(0, 5, day=21))  # the charger's real midnight
+        self.now = _at(0, 5, day=21)
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assertEqual(
+            len([l for l in self.logs if "outside 1 h of local midnight" in l]), 1
+        )
+        self.assertEqual(len([l for l in self.logs if "authority granted" in l]), 1)
+        self.assert_no_writes()
+
+    def test_a_grant_survives_a_mid_day_reset(self):
+        # A mid-day firmware reset is not a time-zone mismatch: authority
+        # earned at a real midnight survives it, and the divergence it causes
+        # is the mid-day restart scenario -- a warning, not a mismatch note.
+        self.authorize()
+        self.seed_history(9.0, hours={"09": 4.0, "10": 3.0, "11": 2.0})
+        self.note(9.0, _at(13, 58))
+        self.now = _at(13, 58)
+        self.run_loop(1)
+        self.note(0.02, _at(13, 58, 40))  # mid-day reset: another rollover
+        self.note(3.4, _at(15))
+        self.seed_pending(0.1, _at(15))
+        self.now = _at(15)
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assertEqual(
+            [line for line in self.logs if "outside 1 h of local midnight" in line],
+            [],
+        )
+        (warning,) = self.warnings()
+        self.assertIn("day 2026-11-20", warning)
+        self.assert_no_writes()
+
+
+class NonResetCounterTests(LoopBase):
+    """A day counter that sails across Pi-local midnight without resetting
+    is not measuring the Pi's day (period or time-zone mismatch): the
+    observation is rejected as boundary evidence -- one distinct line, no
+    authority -- and a grant it contradicts is revoked. The probe is sound
+    only where a reset could not have hidden: a reset-and-rebuilt counter
+    (the outage recovery) must never read as a non-reset."""
+
+    def test_a_non_resetting_counter_is_rejected_as_a_period_mismatch(self):
+        self.seed_history(25.0)  # the archive's morning ...
+        self.note(30.0, _at(23, 59, day=19))
+        self.note(30.1, _at(0, 5, day=20))  # ... carried across: no reset
+        self.now = _at(0, 5, day=20)
+        self.run_loop(1)
+        (mismatch,) = [
+            line for line in self.logs if "day counter did not reset" in line
+        ]
+        self.assertIn("period alignment unproven", mismatch)
+        self.assertFalse(self.reconciler.authorized)
+        (note,) = self.notes()  # 25.0 vs 30.1: informational only
+        self.assertIn("bridge low", note)
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+    def test_a_non_reset_after_a_grant_revokes_authority(self):
+        self.authorize()
+        self.note(9.0, _at(23, 59))
+        self.note(9.1, _at(0, 5, day=21))  # no reset at the second midnight
+        self.seed_history(5.0, day="2026-11-21")
+        self.now = _at(0, 5, day=21)
+        self.run_loop(1)
+        (revoked,) = [line for line in self.logs if "warning authority revoked" in line]
+        self.assertIn("did not reset", revoked)
+        self.assertFalse(self.reconciler.authorized)
+        (note,) = self.notes()  # 5.0 vs 9.1 stays informational
+        self.assertIn("bridge low", note)
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+    def test_an_in_window_rollover_after_a_revocation_re_grants(self):
+        # The recovery half of the revocation story the docs promise:
+        # informational again only *until* a rollover lands within 1 h of
+        # local midnight -- the next midnight's clean reset re-grants
+        # authority (one new grant line) and comparisons warn again.
+        self.authorize()
+        self.note(9.0, _at(23, 59))
+        self.note(9.1, _at(0, 5, day=21))  # no reset: revoked
+        self.seed_history(5.0, day="2026-11-21")
+        self.now = _at(0, 5, day=21)
+        self.run_loop(1)
+        self.assertFalse(self.reconciler.authorized)
+        self.note(9.1, _at(23, 59, day=21))
+        self.note(0.0, _at(0, 5, day=22))  # this midnight resets in-window
+        self.seed_history(0.0, day="2026-11-22")
+        self.now = _at(0, 5, day=22)
+        self.run_loop(1)
+        grants = [line for line in self.logs if "warning authority granted" in line]
+        self.assertEqual(len(grants), 2)  # authorize()'s and exactly one new
+        self.assertTrue(self.reconciler.authorized)
+        # 0.0 vs 0.0 is clean, and authority holds for the next divergence.
+        self.note(4.0, _at(9, day=22))
+        self.seed_pending(0.1, _at(9, day=22))
+        self.now = _at(9, day=22)
+        self.run_loop(1)
+        (warning,) = self.warnings()
+        self.assertIn("day 2026-11-22", warning)
+        self.assert_no_writes()
+
+    def test_a_reset_and_rebuilt_counter_is_not_a_non_reset(self):
+        # The charger reset at its midnight and rebuilt past yesterday's
+        # level while the bridge was dark: inside the observation gap the
+        # current value alone cannot exclude a reset, so the probe stays
+        # quiet (MidnightOutageTests' recovery warning depends on it).
+        self.note(5.0, _at(23, 10, day=19))
+        self.note(5.2, _at(9, day=20))
+        self.assertEqual(self.counter.non_resets, [])
+        self.assertEqual(self.counter.rollovers, [])
+
+    def test_a_tiny_baseline_rise_across_midnight_is_not_a_non_reset(self):
+        # Yesterday ended at 0.01 kwh and the new day passed that within the
+        # gap: a midnight reset explains the reading, so nothing is deduced.
+        self.note(0.01, _at(23, 59, day=19))
+        self.note(0.03, _at(0, 1, day=20))
+        self.assertEqual(self.counter.non_resets, [])
+        self.assertEqual(self.counter.rollovers, [])
+
+    def test_a_non_reset_from_an_untrusted_baseline_is_not_recorded(self):
+        # A corrupt jump poisoned the level; whether the counter dropped in
+        # the dark after it is unknowable from that baseline.
+        self.note(30.0, _at(23, 5, day=19))
+        self.note(400.0, _at(23, 6, day=19))  # rejected as implausible
+        self.note(400.4, _at(0, 5, day=20))  # straddles, no drop, untrusted base
+        self.assertEqual(self.counter.non_resets, [])
+
+
+class MonthLoopBase(LoopBase):
+    """LoopBase plus the month half: a ``total_month`` sample stream and a
+    month reconciler, driven by the same helpers and the same shared boot
+    clock (both counters ride the same applied observations)."""
+
+    def setUp(self):
+        super().setUp()
+        self.month_counter = bridge.ChargerDayCounter(period="month")
+        self.month_reconciler = bridge.MonthReconciler()
+
+    def note_month(self, value, when=None):
+        self.note(value, when, counter=self.month_counter)
+
+    def evaluate_month(
+        self,
+        *,
+        archive,
+        pending=0.0,
+        charger,
+        when=None,
+        observed=None,
+        month="2026-11",
+    ):
+        """One month evaluation at an exact wall-clock instant."""
+        when = when or self.now
+        with mock.patch.object(bridge, "_localnow", return_value=when):
+            return self.month_reconciler.evaluate(
+                day=month,
+                now_local=when,
+                archive_kwh=archive,
+                pending_kwh=pending,
+                charger_kwh=charger,
+                charger_observed_local=observed or when,
+            )
+
+    def month_lines(self):
+        return [line for line in self.logs if "month reconciliation" in line]
+
+    def seed_month_docs(self, kwh_by_day):
+        """Pre-seed the month's earlier day documents (today: seed_history)."""
+        history = self.db.data.setdefault("history", {})
+        for day, kwh in kwh_by_day.items():
+            history[day] = {
+                "kwh": kwh,
+                "hours": {"18": kwh},
+                "updated_at": "2026-11-19T23:00:00Z",
+            }
+
+
+class MonthKnownGoodTests(MonthLoopBase):
+    """The month comparison (#161 PR-2): one documentId range query over the
+    month's ``history/{date}`` documents plus today's pending energy, once
+    per local day, against ``total_month`` from the same observation family
+    that feeds the day counter. Same tolerance, same episode bounding, same
+    zero-writes guarantee."""
+
+    def test_matching_month_totals_are_clean_and_write_free(self):
+        self.seed_month_docs(
+            {"2026-11-01": 8.2, "2026-11-05": 12.9, "2026-11-19": 30.0}
+        )
+        self.seed_history(12.4)
+        self.seed_pending(0.1)
+        self.note(12.5)
+        self.note_month(63.6)  # 8.2 + 12.9 + 30.0 + 12.4 + 0.1
+        self.run_loop(1)
+        # The day comparison is clean, which is the month's authority gate:
+        # exactly one grant line, and the month itself reconciles silently.
+        (grant,) = self.month_lines()
+        self.assertIn("warning authority granted", grant)
+        self.assertIn("one clean day comparison", grant)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+
+    def test_the_month_tolerance_is_the_day_machinery(self):
+        self.note_month(100.0)
+        self.month_reconciler.note_clean_day(self.now)
+        self.assertEqual(self.evaluate_month(archive=100.0, charger=100.9), "clean")
+        self.assertEqual(self.evaluate_month(archive=100.0, charger=102.0), "warned")
+
+    def test_an_empty_month_archive_is_a_zero_month(self):
+        # The 1st, before any document exists: zeros against the early
+        # counter is a normal clean comparison, not a divergence.
+        self.now = _at(9, day=1)
+        self.note(0.05, _at(9, day=1))
+        self.note_month(0.05, _at(9, day=1))
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        self.assert_no_writes()
+
+    def test_a_month_divergence_after_a_clean_day_warns_with_all_fields(self):
+        self.seed_month_docs({"2026-11-01": 8.2, "2026-11-19": 30.0})
+        self.seed_history(12.4)
+        self.seed_pending(0.1)
+        self.note(12.5)
+        self.note_month(55.0)  # 4.3 kwh ahead of the archive
+        self.run_loop(1)
+        (warning,) = [l for l in self.month_lines() if "warning (month" in l]
+        for expected in (
+            "month 2026-11",
+            "50.700 kwh",  # bridge month: 8.2 + 30.0 + 12.4 + 0.1
+            "archive 50.600",
+            "pending 0.100",
+            "charger total_month 55.000 kwh",
+            "4.300 kwh",
+            "bridge low",
+            "no clean evaluation yet",
+            "no history or session data modified",
+        ):
+            self.assertIn(expected, warning)
+        self.assert_no_writes()
+
+    def test_a_month_divergence_before_any_clean_day_is_informational(self):
+        self.seed_month_docs({"2026-11-01": 8.2, "2026-11-19": 30.0})
+        self.seed_history(9.0)  # the day is short: no clean day comparison
+        self.note(12.5)
+        self.note_month(55.0)
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        (note,) = [l for l in self.month_lines() if "note (month" in l]
+        self.assertIn("informational", note)
+        self.assertIn("authority not yet granted", note)
+        self.assert_no_writes()
+
+    def test_the_month_is_compared_once_per_local_day(self):
+        self.seed_history(9.0)
+        self.note(12.5)  # the day diverges: no month authority
+        self.note_month(55.0)
+        self.run_loop(1)
+        month_output = [l for l in self.month_lines() if "(month" in l]
+        self.assertEqual(len(month_output), 1)
+        # The same day's next tick, with a gap grown past the re-arm bound,
+        # does not compare again: the range query runs once per local day.
+        self.note(12.5, _at(15))
+        self.note_month(53.0, _at(15))
+        self.now = _at(15)
+        self.run_loop(1)
+        self.assertEqual(len([l for l in self.month_lines() if "(month" in l]), 1)
+        # The next local day compares again -- and the gap grown by another
+        # kWh overnight re-arms the episode.
+        self.note(12.5, _at(9, day=21))
+        self.note_month(60.0, _at(9, day=21))
+        self.now = _at(9, day=21)
+        self.run_loop(1)
+        self.assertEqual(len([l for l in self.month_lines() if "(month" in l]), 2)
+        self.assert_no_writes()
+
+    def test_a_stale_month_sample_waits_for_a_fresh_one(self):
+        self.seed_history(9.0)
+        self.note(12.5)  # a fresh day sample ...
+        self.note_month(55.0, _at(8, 30))  # ... but the month sample is old
+        self.run_loop(1)
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        # A fresh month sample lets the once-per-day comparison run.
+        self.note(12.5, _at(10))
+        self.note_month(55.0, _at(10))
+        self.now = _at(10)
+        self.run_loop(1)
+        self.assertEqual(len([l for l in self.month_lines() if "(month" in l]), 1)
+        self.assert_no_writes()
+
+    def test_a_sample_from_the_previous_month_is_not_compared(self):
+        # October ended reconciled; the November 1st 00:00:30 tick sees a
+        # month sample from 23:59:31 on the 31st -- inside the freshness
+        # window but measuring October. The same-month guard holds the
+        # evaluation until a November sample arrives.
+        self.seed_month_docs({"2026-10-28": 11.0})
+        self.seed_history(9.0, day="2026-10-31")
+        self.note(9.0, _at(23, 59, 31, day=31, month=10))
+        self.note_month(20.0, _at(23, 59, 31, day=31, month=10))
+        self.now = _at(23, 59, 31, day=31, month=10)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)  # clean October day
+        self.now = _at(0, 0, 30, day=1, month=11)
+        self.run_loop(1)
+        self.assertEqual([l for l in self.month_lines() if "(month 2026-11" in l], [])
+        self.assert_no_writes()
+        # A November sample arrives: the comparison runs -- and November's
+        # missing archive is a real, authorized warning.
+        self.note(0.02, _at(0, 10, day=1, month=11))
+        self.note_month(5.0, _at(0, 10, day=1, month=11))
+        self.now = _at(0, 10, day=1, month=11)
+        self.run_loop(1)
+        (warning,) = [l for l in self.month_lines() if "(month 2026-11" in l]
+        self.assertIn("bridge low", warning)
+        self.assertIn("5.000 kwh", warning)
+        self.assert_no_writes()
+
+    def test_the_month_range_query_reads_only_the_months_documents(self):
+        # Days either side of the month line are not summed: October's and
+        # December's documents stay out of November's total.
+        self.seed_month_docs({"2026-10-31": 40.0, "2026-12-01": 50.0})
+        self.seed_history(9.0)
+        self.note(9.0)
+        self.note_month(9.0)
+        self.run_loop(1)
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        self.assert_no_writes()
+
+    def test_the_month_range_query_wraps_december_into_january(self):
+        # The one non-trivial date computation in the read path: the
+        # December branch's year rollover (next month is next January,
+        # not month 13). Seeded either side of the year boundary, each
+        # month's evaluation sums only its own documents -- 2026-12-31
+        # never leaks into 2027-01's total.
+        self.seed_month_docs({"2026-12-28": 6.0, "2027-01-01": 40.0})
+        self.seed_history(5.5, day="2026-12-31")
+        self.note(5.5, _at(9, day=31, month=12))
+        self.note_month(11.5, _at(9, day=31, month=12))  # 6.0 + 5.5
+        self.now = _at(9, day=31, month=12)
+        self.run_loop(1)
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        self.assertEqual(
+            [l for l in self.logs if "month reconciliation read failed" in l], []
+        )
+        # The January side: December's documents stay out of the new
+        # month's total (today's doc is the seeded January one).
+        self.note(0.02, _at(0, 5, day=1, month=1, year=2027))  # midnight reset
+        self.note_month(40.0, _at(0, 5, day=1, month=1, year=2027))
+        self.now = _at(0, 5, day=1, month=1, year=2027)
+        self.run_loop(1)
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        self.assert_no_writes()
+
+
+class MonthCounterTests(MonthLoopBase):
+    """The month counter stream: the same guarded machinery as the day
+    counter, with the reset boundary at the month line."""
+
+    def test_a_month_rollover_rebaselines_the_counter(self):
+        self.note_month(220.0, _at(9, day=30))
+        self.note_month(0.5, _at(9, day=1, month=12))  # the charger's month line
+        self.assertEqual(self.month_counter.rollovers, [_at(9, day=1, month=12)])
+        value, _observed = self.month_counter.sample()
+        self.assertEqual(value, 0.5)
+        self.assertIn("month counter rollover", " ".join(self.logs))
+
+    def test_a_month_counter_that_does_not_reset_at_the_month_line(self):
+        self.note_month(68.0, _at(23, 59, day=30))
+        self.note_month(68.1, _at(0, 5, day=1, month=12))
+        self.assertEqual(len(self.month_counter.non_resets), 1)
+        self.assertIn("month counter did not reset", " ".join(self.logs))
+
+    def test_an_ordinary_midnight_does_not_probe_the_month_counter(self):
+        # The month counter resets monthly: sailing over a plain midnight is
+        # its normal behaviour, not evidence of anything.
+        self.note_month(68.0, _at(23, 59))
+        self.note_month(68.1, _at(0, 5, day=21))
+        self.assertEqual(self.month_counter.non_resets, [])
+
+
+class MonthNonResetTests(MonthLoopBase):
+    """The month's grant falls with the day's (#161): the same day-counter
+    non-reset that revokes the day's authority disproves the shared clock
+    for both periods, so the month's comparisons go informational again
+    until the next clean day comparison. And it falls with the month
+    counter's own non-reset: a ``total_month`` that sails across its month
+    line is a cumulative counter, whose divergence from the month archive
+    would otherwise false-warn forever -- so that evidence revokes the
+    grant and withholds it until the counter is observed resetting at a
+    month boundary (a clean day proves the day's alignment, not a
+    cumulative counter's)."""
+
+    def test_a_day_non_reset_after_both_grants_revokes_the_month_too(self):
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(0.0, day="2026-11-21")
+        self.seed_history(9.0)  # day 20: 9.0 vs 9.0 is the clean day ...
+        self.note(9.0)
+        self.note_month(18.0)  # ... and 18.0 vs 18.0 the clean month
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assertTrue(self.month_reconciler.authorized)
+        # The alignment breaks after the grants (a time_zone change, a
+        # reflash): the next midnight produces a day non-reset, and both
+        # grants fall in the same tick -- one revoke line each.
+        self.note(9.0, _at(23, 59))
+        self.note(9.1, _at(0, 5, day=21))
+        self.note_month(27.0, _at(0, 5, day=21))
+        self.now = _at(0, 5, day=21)
+        self.run_loop(1)
+        revoked = [line for line in self.logs if "warning authority revoked" in line]
+        self.assertEqual(len(revoked), 2)
+        self.assertIn("day reconciliation", revoked[0])
+        self.assertIn("did not reset", revoked[0])
+        self.assertIn("month reconciliation", revoked[1])
+        self.assertIn("did not reset", revoked[1])
+        self.assertFalse(self.reconciler.authorized)
+        self.assertFalse(self.month_reconciler.authorized)
+        # Both periods' divergences are informational again: 0.0 vs 9.1
+        # and 18.0 vs 27.0, neither a warning.
+        (day_note,) = [line for line in self.logs if "note (day" in line]
+        self.assertIn("bridge low", day_note)
+        (month_note,) = [line for line in self.month_lines() if "note (month" in line]
+        self.assertIn("bridge low", month_note)
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+    def test_a_month_non_reset_after_both_grants_revokes_only_the_month(self):
+        # A firmware variant whose total_month never resets: the day
+        # counter keeps resetting cleanly, but the cumulative month
+        # counter sails across the month line -- one revoke line naming
+        # the month counter, the day's grant untouched, the month's
+        # comparison informational.
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(9.0)  # day 20: 9.0 vs 9.0 is the clean day ...
+        self.note(9.0)
+        self.note_month(18.0)  # ... and 18.0 vs 18.0 the clean month
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assertTrue(self.month_reconciler.authorized)
+        # December arrives and total_month does not drop: the month's own
+        # evidence (a value no hidden reset could explain across the gap).
+        self.note(9.0, _at(23, 59, day=30))
+        self.note_month(18.0, _at(23, 59, day=30))
+        self.note(0.1, _at(0, 5, day=1, month=12))  # the day resets fine
+        self.note_month(18.1, _at(0, 5, day=1, month=12))  # the month does not
+        self.seed_history(0.1, day="2026-12-01")
+        self.now = _at(0, 5, day=1, month=12)
+        self.run_loop(1)
+        (revoked,) = [line for line in self.logs if "warning authority revoked" in line]
+        self.assertIn("month counter did not reset", revoked)
+        self.assertFalse(self.month_reconciler.authorized)
+        self.assertTrue(self.reconciler.authorized)  # the day keeps its grant
+        # 0.1 vs 18.1 is informational -- and the same tick's clean day
+        # comparison does NOT walk the grant back through the gate.
+        (month_note,) = [line for line in self.month_lines() if "note (month" in line]
+        self.assertIn("bridge low", month_note)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            1,
+        )
+        self.assert_no_writes()
+
+    def test_an_observed_month_reset_re_enables_the_clean_day_grant(self):
+        # The withheld grant is evidence-driven, like the day rule: clean
+        # days alone stay blocked while the month counter is misaligned,
+        # the counter resetting at the next month line restores the
+        # alignment, and the next clean day grants again -- warnings
+        # resume, so the withholding cannot silently eat real ones.
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(9.0)
+        self.note(9.0)
+        self.note_month(18.0)
+        self.run_loop(1)
+        self.note(9.0, _at(23, 59, day=30))
+        self.note_month(18.0, _at(23, 59, day=30))
+        self.note(0.1, _at(0, 5, day=1, month=12))
+        self.note_month(18.1, _at(0, 5, day=1, month=12))
+        self.seed_history(0.1, day="2026-12-01")
+        self.now = _at(0, 5, day=1, month=12)
+        self.run_loop(1)
+        self.assertFalse(self.month_reconciler.authorized)
+        # January: the (fixed) counter resets at its month line, and the
+        # new month's first clean day comparison grants again.
+        self.note_month(18.2, _at(23, 59, day=31, month=12))
+        self.note_month(0.5, _at(0, 5, day=1, month=1, year=2027))  # a reset
+        self.note(0.02, _at(0, 5, day=1, month=1, year=2027))
+        self.seed_history(0.02, day="2027-01-01")
+        self.now = _at(0, 5, day=1, month=1, year=2027)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)
+        (restored,) = [
+            line for line in self.month_lines() if "alignment restored" in line
+        ]
+        self.assertIn("month counter reset observed", restored)
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            2,
+        )
+        # 0.02 vs 0.5 warns again: the recovery is complete, not a silence.
+        (warning,) = [line for line in self.month_lines() if "warning (month" in line]
+        self.assertIn("bridge low", warning)
+        self.assert_no_writes()
+
+    def test_a_mid_month_restart_does_not_restore_month_alignment(self):
+        # The restore needs boundary evidence, exactly like the day rule's
+        # window: a total_month drop at any hour other than the month line
+        # is a restart, not proof the counter measures the month -- the
+        # same tick's clean day comparison must NOT grant and the month
+        # comparison stays a note; a later reset at the month line is.
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(9.0)
+        self.note(9.0)
+        self.note_month(18.0)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)
+        # December arrives and total_month sails across its line: the
+        # month's own evidence withholds the clean-day gate.
+        self.note(9.0, _at(23, 59, day=30))
+        self.note_month(18.0, _at(23, 59, day=30))
+        self.note(0.1, _at(0, 5, day=1, month=12))
+        self.note_month(18.1, _at(0, 5, day=1, month=12))
+        self.seed_history(0.1, day="2026-12-01")
+        self.now = _at(0, 5, day=1, month=12)
+        self.run_loop(1)
+        self.assertFalse(self.month_reconciler.authorized)
+        # A mid-month firmware restart drops total_month at 12:00 on the
+        # 10th -- rebaselined, but outside the month window: alignment
+        # stays unproven, and the same tick's clean day comparison (0.4 vs
+        # 0.4, fresh sample) must not walk the grant back through the gate.
+        self.note(0.4, _at(12, 0, day=10, month=12))
+        self.note_month(0.0, _at(12, 0, day=10, month=12))
+        self.seed_history(0.4, day="2026-12-10")
+        self.now = _at(12, 0, day=10, month=12)
+        self.run_loop(1)
+        self.assertFalse(self.month_reconciler.authorized)
+        self.assertTrue(self.reconciler.authorized)  # the day keeps its grant
+        (outside,) = [line for line in self.month_lines() if "outside 1 h" in line]
+        self.assertIn("still unproven", outside)
+        self.assertEqual(
+            [line for line in self.month_lines() if "alignment restored" in line],
+            [],
+        )
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            1,
+        )
+        # 0.5 (December's documents) vs 0.0 stays informational: a counter
+        # proven not to measure the month must not false-warn.
+        (month_note,) = [
+            line
+            for line in self.month_lines()
+            if "note (month" in line and "bridge high" in line
+        ]
+        self.assertIn("month 2026-12", month_note)
+        self.assertEqual(self.warnings(), [])
+        # January: a reset at the month line is the boundary evidence the
+        # gate waits for -- alignment restored, the next clean day grants.
+        self.note(0.6, _at(23, 59, day=31, month=12))
+        self.note_month(0.1, _at(23, 59, day=31, month=12))
+        self.note(0.02, _at(0, 5, day=1, month=1, year=2027))
+        self.note_month(0.0, _at(0, 5, day=1, month=1, year=2027))
+        self.seed_history(0.02, day="2027-01-01")
+        self.now = _at(0, 5, day=1, month=1, year=2027)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)
+        (restored,) = [
+            line for line in self.month_lines() if "alignment restored" in line
+        ]
+        self.assertIn("within 1 h of the month line", restored)
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            2,
+        )
+        self.assert_no_writes()
+
+
+class MonthRobustnessTests(MonthLoopBase):
+    def test_a_failed_month_read_skips_the_evaluation(self):
+        self.note(12.5)
+        self.note_month(68.0)
+        self.db.fail_reads = True
+        self.run_loop(1)
+        failures = [
+            line for line in self.logs if "month reconciliation read failed" in line
+        ]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual([l for l in self.month_lines() if "(month" in l], [])
+        self.assertEqual(self.db.writes, [])
+
+
+class UnitMismatchTests(MonthLoopBase):
+    """A counter reporting Wh where the contract says kWh reads ~1000x the
+    bridge total: that signature is rejected with its own structured line --
+    never warned, never reconciled -- at either period."""
+
+    def test_a_wh_scaled_day_counter_is_rejected_not_warned(self):
+        self.seed_history(12.5)
+        self.note(12_500.0)  # first sample: a baseline, no step to judge
+        self.run_loop(1)
+        (rejected,) = [l for l in self.logs if "reconciliation rejected" in l]
+        self.assertIn("unit mismatch", rejected)
+        self.assertIn("1000x", rejected)
+        self.assertIn("12.500 kwh", rejected)
+        self.assertIn("12500.000 kwh", rejected)
+        self.assertIn("no history or session data modified", rejected)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+        # The episode is bounded: the next hourly tick says nothing new.
+        self.note(12_500.0, _at(10))
+        self.now = _at(10)
+        self.run_loop(1)
+        self.assertEqual(
+            len([l for l in self.logs if "reconciliation rejected" in l]), 1
+        )
+
+    def test_a_wh_scaled_month_counter_is_rejected_not_warned(self):
+        self.month_reconciler.note_clean_day(self.now)
+        self.assertEqual(
+            self.evaluate_month(archive=220.0, charger=220_000.0), "rejected"
+        )
+        (rejected,) = [l for l in self.logs if "reconciliation rejected" in l]
+        self.assertIn("total_month", rejected)
+        self.assertIn("unit mismatch", rejected)
+        self.assertEqual([l for l in self.month_lines() if "warning (month" in l], [])
+
+    def test_a_real_divergence_is_not_classified_as_a_unit_mismatch(self):
+        self.authorize()
+        self.note(12.5)
+        self.assertEqual(self.evaluate(archive=12.5, charger=30.0), "warned")
+        self.assertEqual([l for l in self.logs if "rejected" in l], [])
+
+    def test_a_sub_floor_thousandfold_ratio_is_the_outage_not_the_counter_day(self):
+        # The bridge was dark all day and restarted into a charging
+        # session seconds old: a whisker of observed energy against a
+        # charger that delivered all day on its own schedule. The ratio
+        # reads exactly 1000x, but below REARM_KWH that is the outage
+        # path the warning exists for -- a genuine Wh-scaled counter
+        # crosses 1 kWh on its first charge session and is rejected from
+        # then on.
+        self.authorize()
+        self.assertEqual(
+            self.evaluate(archive=0.0, pending=0.05, charger=50.0), "warned"
+        )
+        (warning,) = self.warnings()
+        self.assertIn("bridge low", warning)
+        self.assertEqual([l for l in self.logs if "reconciliation rejected" in l], [])
+
+    def test_a_sub_floor_thousandfold_ratio_is_the_outage_not_the_counter_month(self):
+        # The month twin: a Pi dead since the month start, the charger
+        # ~100 kwh ahead on its own schedule, the bridge's first observed
+        # energy 0.1 kwh in. Ratio exactly 1000x at a magnitude too small
+        # to carry only the counter signature: the authorized bridge-low
+        # warning is the right line, not the unit-mismatch rejection.
+        self.month_reconciler.note_clean_day(self.now)
+        self.assertEqual(
+            self.evaluate_month(archive=0.0, pending=0.1, charger=100.0), "warned"
+        )
+        (warning,) = [l for l in self.month_lines() if "warning (month" in l]
+        self.assertIn("bridge low", warning)
+        self.assertEqual([l for l in self.logs if "reconciliation rejected" in l], [])
+
+
+class DSTFallBackTests(MonthLoopBase):
+    """The fall-back day (2026-10-25, London's last October Sunday): the fold
+    repeats hour 01 and the day is 25 wall hours, but the reconciler's
+    totals are wall-clock sums -- the folded hour's two passes merge into
+    one ``01`` bucket and nothing about either comparison changes."""
+
+    BST = timezone(timedelta(hours=1))
+    GMT = timezone.utc
+    DAY = "2026-10-25"
+
+    @classmethod
+    def _bst(cls, hour, minute=0, second=0, day=25):
+        return datetime(2026, 10, day, hour, minute, second, tzinfo=cls.BST)
+
+    @classmethod
+    def _gmt(cls, hour, minute=0, second=0, day=25):
+        return datetime(2026, 10, day, hour, minute, second, tzinfo=cls.GMT)
+
+    def test_the_fall_back_day_reconciles_on_both_periods(self):
+        # One ``01`` bucket holds both passes (1.2 kwh BST + 0.8 kwh GMT) --
+        # the accumulator's DST contract -- and the day and month totals
+        # still match the charger's counters.
+        self.seed_month_docs({"2026-10-20": 10.0, "2026-10-24": 6.0})
+        self.seed_history(5.5, hours={"00": 0.5, "01": 2.0, "08": 3.0}, day=self.DAY)
+        self.note(5.5, self._gmt(15))
+        self.note_month(21.5, self._gmt(15))  # 10.0 + 6.0 + 5.5
+        self.now = self._gmt(15)
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        (grant,) = self.month_lines()  # the clean day is the month's gate
+        self.assertIn("one clean day comparison", grant)
+        self.assert_no_writes()
+
+    def test_a_rollover_just_after_midnight_grants_across_the_fold(self):
+        self.note(9.0, self._bst(23, 59, day=24))
+        self.note(0.1, self._bst(0, 5))  # 00:05 BST: 300 wall seconds in
+        self.now = self._bst(0, 5)
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assert_no_writes()
+
+    def test_a_rollover_in_the_folded_hour_is_judged_by_wall_clock(self):
+        # 01:30 GMT is the second pass of the folded hour -- 2.5 real hours
+        # after midnight but 1.5 wall hours: outside the window either way,
+        # so the fold cannot smuggle a misaligned midnight past the rule.
+        self.note(9.0, self._bst(1, 0))
+        self.note(0.5, self._gmt(1, 30))
+        self.now = self._gmt(1, 30)
+        self.run_loop(1)
+        self.assertFalse(self.reconciler.authorized)
+        self.assertEqual(
+            len([l for l in self.logs if "outside 1 h of local midnight" in l]), 1
+        )
+        self.assert_no_writes()
+
+
+class MonthWiringTests(unittest.TestCase):
+    def test_status_loop_feeds_the_month_counter(self):
+        host = _host()
+        session = FakeSession(
+            [FakeResponse(200, _status_payload(total_month=228.9))] * 2
+        )
+        month_counters = bridge.ChargerDayCounter(period="month")
+        db = FakeDB()
+        tracker = bridge.StatusTracker(db)
+        notifier = _RecordingNotifier()
+        transport = bridge.ChargerTransport(session)
+        watchdog = bridge.Watchdog(
+            db, host, None, transport, notifier, bridge.WatchdogConfig()
+        )
+        with mock.patch.object(bridge, "_stop", _StopAfter(2)):
+            bridge.status_loop(
+                db,
+                host,
+                None,
+                transport,
+                10,
+                tracker,
+                notifier,
+                watchdog,
+                day_counters=bridge.ChargerDayCounter(),
+                month_counters=month_counters,
+            )
+        value, _observed = month_counters.sample()
+        self.assertEqual(value, 228.9)

@@ -17,7 +17,8 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
   day reconciliation every RECONCILE_INTERVAL: history/<day> vs the charger's
-    own total_day meter -- read-only, journal-only, zero writes (issue #161)
+    own total_day meter, and once per local day the month's documents vs
+    total_month -- read-only, journal-only, zero writes (issue #161)
 With MQTT_ENABLED=true the status topics arrive on the MQTT source and /status
 becomes reconciliation only (MQTT_RECONCILE_SEC); /config runs on a
 config_version change. Everything still flows through one apply_status path.
@@ -33,7 +34,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -140,6 +141,7 @@ from status_tracker import (  # noqa: E402
 from reconcile import (  # noqa: E402
     ChargerDayCounter,
     DayReconciler,
+    MonthReconciler,
     covered_window_sec,
 )
 from status_sink import (  # noqa: E402
@@ -1195,6 +1197,7 @@ def status_loop(
     observations=None,
     claims=None,
     day_counters=None,
+    month_counters=None,
 ):
     """Poll /status and apply it; with MQTT, poll only to reconcile.
 
@@ -1231,6 +1234,9 @@ def status_loop(
     applied HTTP observation also hands the day reconciler its ``total_day``
     sample (#161) -- the one field the sink drops at the document boundary,
     read here from the full parse. No new charger GET, no new document field.
+    ``month_counters`` is its month twin (``total_month``, #161 PR-2): the
+    same applied observation, the same treatment, so both period counters
+    of one reply reach their reconcilers from one family.
     """
     sink = sink or StatusSink(
         db,
@@ -1342,6 +1348,10 @@ def status_loop(
                         # parse before the sink dropped it at the document
                         # boundary.
                         day_counters.note(fields.get("total_day"))
+                    if month_counters is not None:
+                        # The month reconciler's charger side (#161 PR-2):
+                        # the same reply's total_month, same family.
+                        month_counters.note(fields.get("total_month"))
                 watchdog.record_success(payload)
         _publish_due_heartbeat(sink, heartbeat, watermark)
         _status_scheduler_tick(sink)
@@ -2468,6 +2478,56 @@ def _day_totals(db, sink, day):
     return archive_kwh, pending_kwh
 
 
+def _month_totals(db, sink, now_local):
+    """``(archive_kwh, pending_kwh)`` for the local month, under the apply lock.
+
+    The month side of the #161 comparison: one documentId range query over
+    ``history/{YYYY-MM-DD}`` (the month's first day inclusive to the next
+    month's first day exclusive -- the same wall-clock keys the accumulator
+    writes), plus every month day's still-pending energy, gathered in the
+    same lock hold as the read for the same flush-race reason as
+    :func:`_day_totals`. Reads only; a read failure is one journal line and
+    None, never a crash -- the day's tick retries.
+    """
+    month_start = now_local.date().replace(day=1)
+    next_month = (
+        month_start.replace(year=month_start.year + 1, month=1)
+        if month_start.month == 12
+        else month_start.replace(month=month_start.month + 1)
+    )
+    try:
+        with sink._lock:
+            snapshots = (
+                db.collection("history")
+                .where(
+                    filter=firestore.FieldFilter(
+                        "__name__", ">=", month_start.isoformat()
+                    )
+                )
+                .where(
+                    filter=firestore.FieldFilter(
+                        "__name__", "<", next_month.isoformat()
+                    )
+                )
+                .stream()
+            )
+            archive_kwh = 0.0
+            for snapshot in snapshots:
+                data = snapshot.to_dict()
+                kwh = data.get("kwh") if isinstance(data, dict) else None
+                if _is_number(kwh):
+                    archive_kwh += float(kwh)
+            pending_kwh = 0.0
+            day = month_start
+            while day <= now_local.date():
+                pending_kwh += sink.tracker.history.pending_for_day(day.isoformat())
+                day += timedelta(days=1)
+    except Exception as exc:
+        log(f"month reconciliation read failed ({exc.__class__.__name__}: {exc})")
+        return None
+    return archive_kwh, pending_kwh
+
+
 def reconcile_loop(
     db,
     sink,
@@ -2477,51 +2537,89 @@ def reconcile_loop(
     *,
     initial_delay=0,
     sample_max_age=RECONCILE_SAMPLE_MAX_AGE_SEC,
+    month_counter=None,
+    month_reconciler=None,
 ):
-    """Cross-check the archive's day total against the charger's own (#161).
+    """Cross-check the archive against the charger's own meters (#161).
 
-    One tick is one evaluation: the charger side is the latest validated
-    ``total_day`` sample the status loop fed ``counter``; the bridge side is
-    today's ``history/<day>.kwh`` plus the accumulator's still-pending energy
-    for the day (:func:`_day_totals`). The tolerance, the episode rule and
-    the warning-authority rule live in :class:`reconcile.DayReconciler`;
+    One tick is one day evaluation plus (at most) one month evaluation: the
+    day charger side is the latest validated ``total_day`` sample the
+    status loop fed ``counter``, the bridge side is today's
+    ``history/<day>.kwh`` plus the accumulator's still-pending energy for
+    the day (:func:`_day_totals`); the month comparison rides the same tick
+    **once per local day** (its bridge side is one documentId range query,
+    :func:`_month_totals`, so the cadence bounds the reads) against the
+    latest validated ``total_month`` sample from the same observation
+    family (``month_counter``, fed by the same applied observations as the
+    day counter). The tolerance, the episode rule, the unit-mismatch
+    rejection and the warning-authority rules live in
+    :class:`reconcile.DayReconciler`/:class:`reconcile.MonthReconciler`;
     this loop only gathers and journals. **Zero Firestore writes, ever** --
     reconciliation is read-only (#161's invariant); a repair, if one is ever
     wanted, is a human decision made on the journal's evidence, never an
     automatic correction or backfill.
 
-    A charger whose replies carry no period counters at all (firmware below
+    Each tick first feeds the day counter's boundary evidence (observed
+    rollovers and non-resets) to ``reconciler.consider_evidence``: authority
+    is evidence-driven, independent of whether an evaluation runs. The
+    month reconciler consumes the same non-resets: a grant the evidence
+    disproves falls for both periods, and the month counter's own boundary
+    evidence beside them: a ``total_month`` that sails across its month
+    line without resetting revokes and withholds the month's grant until
+    that counter is observed resetting -- a cumulative month counter is an
+    informational mismatch, not an endless false warning. A
+    charger whose replies carry no period counters at all (firmware below
     4.2.2) makes the loop inactive after one informational line: nothing to
     reconcile, nothing to warn about. A rejected (implausible) sample
     suppresses the evaluation that would have compared it, so a corrupt
     reading can neither clear nor damn the day. So does a sample that
-    predates local midnight: an unreachable charger across the rollover
-    leaves the counter holding yesterday's total, which cannot clear or
-    damn the new day either. And so does a sample older than
-    ``sample_max_age`` (one feed interval, clamped to the tolerance
-    floor's coverage at ceiling power and resolved by :func:`run`): the
-    feed skipped or dropped a reconcile -- or its configured cadence is
-    slower than the coverage bound -- while the bridge side kept
-    advancing, so the growing gap is observation skew, not lost energy,
-    and the evaluation waits for a fresh sample instead of warning about
-    it. The window never exceeds that coverage
-    (``reconcile.covered_window_sec``, one place), so the two cannot
-    disagree by construction: no admitted sample's ceiling-power skew
-    can outrun the floor.
+    predates local midnight (the month's: local month): an unreachable
+    charger across a boundary leaves the counter holding the previous
+    period's total, which cannot clear or damn the new one. And so does a
+    sample older than ``sample_max_age`` (one feed interval, clamped to the
+    tolerance floor's coverage at ceiling power and resolved by
+    :func:`run`; the same window governs both counters): the feed skipped
+    or dropped a reconcile -- or its configured cadence is slower than the
+    coverage bound -- while the bridge side kept advancing, so the growing
+    gap is observation skew, not lost energy, and the evaluation waits for
+    a fresh sample instead of warning about it. The window never exceeds
+    that coverage (``reconcile.covered_window_sec``, one place), so the two
+    cannot disagree by construction: no admitted sample's ceiling-power
+    skew can outrun the floor. A month evaluation the guards hold is not
+    spent: the once-per-day slot stays open until a comparison actually
+    runs.
     """
     inactive_logged = False
+    month_done_day = None  # the local day the month was last compared for
     if initial_delay:
         # Offset from the pollers; only the first iteration is delayed, and
         # the first evaluation needs an applied observation behind it.
         _stop.wait(initial_delay)
 
     def one_tick():
-        nonlocal inactive_logged
+        nonlocal inactive_logged, month_done_day
 
         if not counter.fed:
             # No status observation has applied yet (a startup race): stay
             # quiet rather than declaring a firmware that has not spoken.
             return
+        # Boundary evidence first (#161 PR-2): each observed rollover or
+        # non-reset is judged exactly once, whether or not an evaluation
+        # runs this tick. The month rides the day's non-resets: a counter
+        # that stopped resetting disproves the shared clock for both
+        # periods, so a month grant one contradicts falls here too,
+        # before the month's next comparison. The month counter's own
+        # boundary evidence follows beside it: a total_month that sails
+        # across its month line is not measuring this month, so its
+        # non-reset revokes and withholds the month's grant until the
+        # counter is observed resetting there.
+        reconciler.consider_evidence(counter.rollovers, counter.non_resets)
+        if month_reconciler is not None:
+            month_reconciler.consider_evidence(counter.rollovers, counter.non_resets)
+            if month_counter is not None:
+                month_reconciler.consider_month_evidence(
+                    month_counter.rollovers, month_counter.non_resets
+                )
         if not counter.present:
             if not inactive_logged:
                 log(
@@ -2531,48 +2629,83 @@ def reconcile_loop(
                 )
                 inactive_logged = True
             return
-        sample = counter.latest()
-        if sample is None or not sample[2]:
-            # No usable sample yet, or the latest one was rejected as an
-            # implausible jump: comparing it would reconcile corruption.
-            return
-        charger_kwh, charger_observed = sample[0], sample[1]
         now = _localnow()
         day = now.date().isoformat()
-        if charger_observed.date() != now.date():
-            # The accepted sample predates local midnight: the charger was
-            # unreachable across the rollover (overnight outage or restart
-            # loop) while the bridge kept running, so ``total_day`` still
-            # measures yesterday and never expires on its own. Comparing it
-            # against the new day's fresh totals would warn about the whole
-            # of yesterday; the evaluation waits for a sample of the day
-            # being compared.
+
+        # -- the day comparison -------------------------------------------
+        day_result = None
+        sample = counter.latest()
+        if sample is not None and sample[2]:
+            # A usable sample: None or a just-rejected one means comparing
+            # it would reconcile corruption.
+            charger_kwh, charger_observed = sample[0], sample[1]
+            if charger_observed.date() == now.date():
+                # A sample predating local midnight: the charger was
+                # unreachable across the rollover (overnight outage or
+                # restart loop) while the bridge kept running, so
+                # ``total_day`` still measures yesterday and never expires
+                # on its own. Comparing it against the new day's fresh
+                # totals would warn about the whole of yesterday; the
+                # evaluation waits for a sample of the day being compared.
+                if (now - charger_observed).total_seconds() <= sample_max_age:
+                    # Same-day but stale: the feed skipped or dropped HTTP
+                    # reconciles (a failed poll advances the next deadline,
+                    # an mqtt_mark discard never notes) or its cadence is
+                    # slower than the coverage bound, while the bridge side
+                    # kept advancing from every applied snapshot. The window
+                    # is one feed interval clamped to the tolerance floor's
+                    # coverage at ceiling power
+                    # (reconcile.covered_window_sec) -- exactly the skew the
+                    # floor can explain -- so a sample older than this is
+                    # already beyond it, and this evaluation waits for a
+                    # fresh sample rather than warning about energy nobody
+                    # lost. The status loop already journals its reconcile
+                    # failures; nothing new to say here.
+                    totals = _day_totals(db, sink, day)
+                    if totals is not None:
+                        day_result = reconciler.evaluate(
+                            day=day,
+                            now_local=now,
+                            archive_kwh=totals[0],
+                            pending_kwh=totals[1],
+                            charger_kwh=charger_kwh,
+                            charger_observed_local=charger_observed,
+                        )
+
+        # -- the month comparison (once per local day) --------------------
+        if month_counter is None or month_reconciler is None:
             return
-        if (now - charger_observed).total_seconds() > sample_max_age:
-            # The sample is same-day but stale: the feed skipped or dropped
-            # HTTP reconciles (a failed poll advances the next deadline, an
-            # mqtt_mark discard never notes) or its cadence is slower than
-            # the coverage bound, while the bridge side kept advancing from
-            # every applied snapshot. The window is one feed interval
-            # clamped to the tolerance floor's coverage at ceiling power
-            # (reconcile.covered_window_sec) -- exactly the skew the floor
-            # can explain -- so a sample older than this is already beyond
-            # it, and this evaluation waits for a fresh sample rather than
-            # warning about energy nobody lost. The status loop already
-            # journals its reconcile failures; nothing new to say here.
+        if day_result == "clean":
+            # The month's authority gate (#161): one clean day comparison
+            # proves the shared semantics; the grant itself is idempotent.
+            month_reconciler.note_clean_day(now)
+        if month_done_day == day or not month_counter.fed:
             return
-        totals = _day_totals(db, sink, day)
-        if totals is None:
+        if not month_counter.present:
+            return  # no total_month at all: a firmware the day line covers
+        month_sample = month_counter.latest()
+        if month_sample is None or not month_sample[2]:
             return
-        archive_kwh, pending_kwh = totals
-        reconciler.evaluate(
-            day=day,
+        month_kwh, month_observed = month_sample[0], month_sample[1]
+        if (month_observed.year, month_observed.month) != (now.year, now.month):
+            # The sample measures the previous local month (the tick sits
+            # just past the month line with a sample from before it, inside
+            # the freshness window): it cannot clear or damn the new month.
+            return
+        if (now - month_observed).total_seconds() > sample_max_age:
+            return  # the same freshness clamp as the day sample, reused
+        month_totals = _month_totals(db, sink, now)
+        if month_totals is None:
+            return
+        month_reconciler.evaluate(
+            day=f"{now:%Y-%m}",
             now_local=now,
-            archive_kwh=archive_kwh,
-            pending_kwh=pending_kwh,
-            charger_kwh=charger_kwh,
-            charger_observed_local=charger_observed,
+            archive_kwh=month_totals[0],
+            pending_kwh=month_totals[1],
+            charger_kwh=month_kwh,
+            charger_observed_local=month_observed,
         )
+        month_done_day = day  # only a comparison that ran spends the slot
 
     run_loop("reconcile", one_tick, lambda: _stop.wait(interval))
 
@@ -2605,8 +2738,10 @@ def run(
     validated HistoryConfig (issue #94): the tracker's accumulator flushes
     history/<day> on its cadence and on the shutdown drain below. ``reconcile``
     is the validated ReconcileConfig (#161): its loop cross-checks
-    history/<day> against the charger's ``total_day`` on the given cadence
-    (zero disables it) and is joined, bounded, before the shutdown drain --
+    ``history/<day>`` against the charger's ``total_day`` on the given
+    cadence (zero disables it) and the month's documents against
+    ``total_month`` once per local day, and is joined, bounded, before the
+    shutdown drain --
     its gather shares the sink's apply lock with the drain. One
     :class:`WriteCounter` (issue #96) is built here and threaded through
     every write site, ``status/health`` and the status loop's summary tick,
@@ -2635,10 +2770,15 @@ def run(
     claims = ClaimsObservations()
     # The day reconciler's two halves (#161): the charger-side sample stream
     # (fed by the status loop's applied observations) and the comparison
-    # state (divergence episodes, warning authority). Read-only; nothing
-    # here ever writes back.
+    # state (divergence episodes, warning authority). The month comparison
+    # (PR-2) adds one counter stream of its own -- total_month from the same
+    # observations -- and its reconciler, whose warning authority is the day
+    # comparison's one clean evaluation. Read-only; nothing here ever
+    # writes back.
     day_counters = ChargerDayCounter()
     day_reconciler = DayReconciler()
+    month_counters = ChargerDayCounter(period="month")
+    month_reconciler = MonthReconciler()
     tracker = StatusTracker(
         db,
         history=HistoryAccumulator(
@@ -2714,6 +2854,7 @@ def run(
             "observations": observations,
             "claims": claims,
             "day_counters": day_counters,
+            "month_counters": month_counters,
         },
         daemon=True,
     ).start()
@@ -2807,6 +2948,8 @@ def run(
             kwargs={
                 "initial_delay": RECONCILE_INITIAL_DELAY,
                 "sample_max_age": covered_window_sec(reconcile_feed_sec),
+                "month_counter": month_counters,
+                "month_reconciler": month_reconciler,
             },
             daemon=True,
         )

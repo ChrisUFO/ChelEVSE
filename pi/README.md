@@ -48,36 +48,36 @@ Environment variables, read from `private/bridge.env` (see
 [../private.example/bridge.env.example](../private.example/bridge.env.example));
 real environment variables take precedence.
 
-| Variable                          | Default               | Meaning                                                                                                                                                                                   |
-| --------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's Charger connection value overrides it at runtime (below)                                                                                             |
-| `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                                                                                                                           |
-| `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root)                                                                                                 |
-| `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                                                                                                                      |
-| `CONFIG_INTERVAL`                 | `60`                  | Seconds between charger config polls                                                                                                                                                      |
-| `SCHEDULE_INTERVAL`               | `60`                  | Seconds between schedule/plan polls and sync checks                                                                                                                                       |
-| `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged                                                                                                     |
-| `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                                                                                                                             |
-| `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)                                                                                                               |
-| `NOTIFICATIONS_INTERVAL`          | `300`                 | Seconds between charger health polls (`GET /notifications`; see [Charger health](#charger-health-issue-158))                                                                              |
-| `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)                                                                                                     |
-| `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                                                                                                                |
-| `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                                                                                                                              |
-| `HISTORY_FLUSH_SEC`               | `300`                 | Seconds between `history/<date>` flush writes while charging (rollover, session close and shutdown flush too)                                                                             |
-| `RECONCILE_INTERVAL`              | `3600`                | Seconds between day-reconciliation evaluations of `history/<date>` against the charger's `total_day` (`0` disables; reads only — see [Day reconciliation](#day-reconciliation-issue-161)) |
-| `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                                                                                                                         |
-| `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy                                                                                                             |
-| `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                                                                                                                  |
-| `WATCHDOG_MAX_PER_HOUR`           | `3`                   | Hard cap on restart attempts in a trailing hour                                                                                                                                           |
-| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`               | Allow a restart while the last known state is charging                                                                                                                                    |
-| `MQTT_ENABLED`                    | `false`               | Ingest status from the charger's MQTT topics (see below); HTTP stays the fallback                                                                                                         |
-| `MQTT_HOST`                       | —                     | Broker host (required when `MQTT_ENABLED=true`)                                                                                                                                           |
-| `MQTT_PORT`                       | `1883`                | Broker port                                                                                                                                                                               |
-| `MQTT_USER` / `MQTT_PASS`         | unset                 | Broker credentials; keep the password in `private/bridge.env` only                                                                                                                        |
-| `MQTT_TOPIC`                      | `chelevse`            | Base topic the charger publishes to (`mqtt_topic` in the charger config)                                                                                                                  |
-| `MQTT_RECONCILE_SEC`              | `60`                  | Seconds between HTTP `/status` reconciles while MQTT is connected                                                                                                                         |
-| `MQTT_CLIENT_ID`                  | `chelevse-bridge`     | MQTT client id                                                                                                                                                                            |
-| `MQTT_ANNOUNCE_TOPIC`             | `openevse/announce/#` | Broker filter carrying the gateway's announce/Last Will (see the watchdog)                                                                                                                |
+| Variable                          | Default               | Meaning                                                                                                                                                                                                                                                          |
+| --------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHARGER_HOST`                    | `192.168.0.145`       | Bootstrap charger address; the app's Charger connection value overrides it at runtime (below)                                                                                                                                                                    |
+| `CHARGER_USER` / `CHARGER_PASS`   | unset                 | HTTP Basic auth if set on the charger (blank username is valid)                                                                                                                                                                                                  |
+| `FIREBASE_SERVICE_ACCOUNT`        | —                     | Path to the service-account key (**required**; relative paths resolve from the repo root)                                                                                                                                                                        |
+| `STATUS_INTERVAL`                 | `10`                  | Seconds between charger status polls                                                                                                                                                                                                                             |
+| `CONFIG_INTERVAL`                 | `60`                  | Seconds between charger config polls                                                                                                                                                                                                                             |
+| `SCHEDULE_INTERVAL`               | `60`                  | Seconds between schedule/plan polls and sync checks                                                                                                                                                                                                              |
+| `SCHEDULE_RECONCILE_INTERVAL`     | `300`                 | Seconds between full `/schedule` reconciles even when the desired digest is unchanged                                                                                                                                                                            |
+| `COMMAND_INTERVAL`                | `5`                   | Seconds between command polls                                                                                                                                                                                                                                    |
+| `SETTINGS_INTERVAL`               | `60`                  | Seconds between `settings/current` reads (the live charger-address refresh)                                                                                                                                                                                      |
+| `NOTIFICATIONS_INTERVAL`          | `300`                 | Seconds between charger health polls (`GET /notifications`; see [Charger health](#charger-health-issue-158))                                                                                                                                                     |
+| `WRITE_MIN_GAP_SEC`               | `30`                  | Minimum seconds between `status/current` writes (the write policy's rate-limit bound)                                                                                                                                                                            |
+| `CHARGING_HEARTBEAT_SEC`          | `60`                  | Seconds between `status/current` heartbeat writes while charging (state 3)                                                                                                                                                                                       |
+| `HEARTBEAT_INTERVAL`              | `300`                 | Seconds between `status/current` heartbeat writes while idle                                                                                                                                                                                                     |
+| `HISTORY_FLUSH_SEC`               | `300`                 | Seconds between `history/<date>` flush writes while charging (rollover, session close and shutdown flush too)                                                                                                                                                    |
+| `RECONCILE_INTERVAL`              | `3600`                | Seconds between day-reconciliation evaluations of `history/<date>` against the charger's `total_day` (and, once per local day, the month's documents against `total_month`) (`0` disables; reads only — see [Day reconciliation](#day-reconciliation-issue-161)) |
+| `WATCHDOG_ENABLED`                | `true`                | Probe, restart and alert when `/status` keeps failing (see below)                                                                                                                                                                                                |
+| `WATCHDOG_FAILURES`               | `3`                   | Consecutive failed `/status` polls before the charger is treated as unhealthy                                                                                                                                                                                    |
+| `WATCHDOG_COOLDOWN_SEC`           | `600`                 | Minimum seconds between restart attempts                                                                                                                                                                                                                         |
+| `WATCHDOG_MAX_PER_HOUR`           | `3`                   | Hard cap on restart attempts in a trailing hour                                                                                                                                                                                                                  |
+| `WATCHDOG_RESTART_WHILE_CHARGING` | `false`               | Allow a restart while the last known state is charging                                                                                                                                                                                                           |
+| `MQTT_ENABLED`                    | `false`               | Ingest status from the charger's MQTT topics (see below); HTTP stays the fallback                                                                                                                                                                                |
+| `MQTT_HOST`                       | —                     | Broker host (required when `MQTT_ENABLED=true`)                                                                                                                                                                                                                  |
+| `MQTT_PORT`                       | `1883`                | Broker port                                                                                                                                                                                                                                                      |
+| `MQTT_USER` / `MQTT_PASS`         | unset                 | Broker credentials; keep the password in `private/bridge.env` only                                                                                                                                                                                               |
+| `MQTT_TOPIC`                      | `chelevse`            | Base topic the charger publishes to (`mqtt_topic` in the charger config)                                                                                                                                                                                         |
+| `MQTT_RECONCILE_SEC`              | `60`                  | Seconds between HTTP `/status` reconciles while MQTT is connected                                                                                                                                                                                                |
+| `MQTT_CLIENT_ID`                  | `chelevse-bridge`     | MQTT client id                                                                                                                                                                                                                                                   |
+| `MQTT_ANNOUNCE_TOPIC`             | `openevse/announce/#` | Broker filter carrying the gateway's announce/Last Will (see the watchdog)                                                                                                                                                                                       |
 
 Bad `WATCHDOG_*` values (a non-number, `WATCHDOG_FAILURES=0`, a cooldown below
 zero, a cap below 1, a non-boolean flag) stop the bridge at startup with a
@@ -961,8 +961,11 @@ A read-only audit of that history: every `RECONCILE_INTERVAL` (3600 s;
 the document's `kwh` plus whatever the accumulator still holds pending for
 the day, read together under the apply lock so a flush cannot land between
 them — with the charger's own `total_day` meter from the latest applied
-`/status` observation. The firmware (≥ 4.2.2; this charger runs 8.2.3)
-reports it in kWh, full precision, reset at charger-local midnight and kept
+`/status` observation; once per local day the same loop compares the
+month's documents against `total_month` (the next section). The firmware
+(≥ 4.2.2; this charger runs 8.2.3)
+reports both in kWh, full precision, reset at the charger-local day/month
+boundary (the same `time_zone`) and kept
 across reboots. A gateway older than 4.2.2 reports no period counters at
 all: the reconciler logs one informational line and stays inactive.
 
@@ -981,10 +984,8 @@ A divergence beyond `max(0.2 kWh, 1% of the larger side)` is **one bounded
 single-line journal entry per (day, episode)** naming both totals, the gap,
 the likely outage window `[last clean evaluation → first divergent
 observation]` (local), and that no history or session data was modified;
-it re-arms only when the gap changes direction or grows by ≥ 1 kWh. Until
-the reconciler has warning authority — granted by one clean evaluation —
-divergences are logged as informational notes only, never warnings. The
-floor covers one reconcile interval of the MQTT-mode feed gap: the charger
+it re-arms only when the gap changes direction or grows by ≥ 1 kWh.
+The floor covers one reconcile interval of the MQTT-mode feed gap: the charger
 side advances only at the HTTP reconcile cadence (60 s) while the bridge
 side advances from every applied snapshot, so up to a minute of delivering
 power can sit on one side only (up to the 0.2 kWh floor at the charger's
@@ -997,6 +998,55 @@ the evaluation waits for a fresh sample instead of warning about observation
 skew, and the same holds when the feed skips or drops reconciles (a failed
 HTTP poll, an MQTT-snapshot discard) and the latest sample ages past the
 window.
+
+Warnings need **warning authority** — evidence that both sides measure the
+same period in the same time zone. The day comparison unlocks it only
+after observing one `total_day` rollover within ±1 h of Pi-local midnight
+(wall clock, either side; a clean pair of numbers alone proves less than
+it appears to). Until then divergences are informational notes, never
+warnings. Two observations say the opposite and are each journaled once,
+distinctly, while they stand: a reset at the wrong hour (a time-zone or
+period mismatch suspected) and a trusted sample pair that crosses local
+midnight _without_ dropping — the counter is not measuring the Pi's day.
+The latter also revokes a grant it contradicts. The probe is conservative:
+if the counter's current value could have been delivered since midnight
+(judged by the same step allowance that validates jumps), a
+reset-and-rebuilt counter explains it just as well and nothing is
+concluded — an overnight outage's recovery never reads as a mismatch.
+Authority is in-memory only (the zero-write design persists nothing):
+every restart — each deploy — drops it and the next observed midnight
+rollover re-grants, so informational notes for up to ~24 h after a
+deploy are expected, not a sign of degraded detection.
+
+### Month reconciliation (issue #161)
+
+Once per local day, the same loop compares the month: one documentId range
+query over the month's `history/{date}` documents plus every month day's
+still-pending energy (gathered under the same apply lock as the day read)
+against `total_month` from a second guarded counter stream fed by the same
+applied `/status` observations. The tolerance, the episode bounding, the
+zero-writes guarantee and the freshness treatment are the day machinery
+reused — the month sample is held to the same clamped window, and a
+sample that predates the local month line (just past midnight on the 1st)
+waits for a same-month sample instead of comparing October's counter
+against November's archive. The month's warning authority is one clean
+_day_ comparison: the day comparison proving the shared period semantics
+and time-zone alignment is exactly what the month needs, since the month
+counter rides the same observations and resets on the same local clock —
+and the same non-reset evidence that revokes the day's grant revokes the
+month's with it. The month counter's own non-reset — a `total_month` that
+sails across the month line without dropping, a cumulative counter —
+revokes the grant and withholds it: clean days prove the day's alignment,
+not a cumulative counter's, so the month stays informational until that
+counter is observed resetting at a month boundary.
+
+A divergence near **1000×** at either period is not lost energy — it is a
+Wh-scaled counter (a firmware variant or misconfiguration) — and is
+rejected with its own bounded line naming both totals once the bridge
+total reaches ~1 kWh; below that a ~1000× ratio is what an outage's
+opening looks like (a whisker of observed energy against a charger that
+delivered on its own schedule) and is warned like any divergence. Either
+way it is never reconciled.
 
 **Zero writes, ever.** Reconciliation reads and journals; it never
 corrects, backfills or repairs anything. A divergence is evidence for a
