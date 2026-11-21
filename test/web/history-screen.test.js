@@ -711,6 +711,28 @@ test('a partially covered week renders the disclosure under the summary $', () =
   assert.equal(element('history-total').textContent, '48.1');
 });
 
+test('one missing Wh renders the caption the tolerance band used to hide (#211)', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 9, 18, 12);
+  applyHistory(
+    periodById('week'),
+    { docs: [{ id: '2026-10-18', kwh: 2 }], fromCache: false },
+    null,
+    today,
+    // A session inside the day covering 1,999 of its 2,000 Wh.
+    [{ wh: 1999, started_at: new Date(2026, 9, 18, 1), ended_at: new Date(2026, 9, 18, 3) }],
+  );
+  showHistorySettings(nightly());
+  // The retired band's floor was 250 Wh, so this 1 Wh gap stayed silent
+  // through #194. The caption now fires on any missing Wh: both figures read
+  // alike at the caption's 0.01 kWh precision, so the line itself carries
+  // the disclosure. The pure math is pinned in history.test.js.
+  assert.equal(element('history-cost-cell').hidden, false);
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 2.00 of 2.00 kWh');
+});
+
 // ---------- the per-window rate-scope note, executed (#193) ----------
 //
 // The plan banner speaks for the saved plan (any gap, anywhere); the note
