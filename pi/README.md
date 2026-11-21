@@ -1295,6 +1295,32 @@ win the precedence and retarget the tool to another project's `sessions`;
 this is the deploy guard's own cross-check
 (`scripts/check-firebase-project.mjs`).
 
+### Maintenance: verifying the month documentId range
+
+`pi/smoke_month_range.py` is the read-only live check of the documentId
+range query `_month_totals` runs every tick (#161, #208): per month it
+compares the range's documents against an independent client-side scan of
+`history`, spot-checks both bounds on the month's first-day document, and
+asserts `bridge._month_totals` itself returns the control's sum. Its only
+Firestore calls are `stream()` reads — the source contains no write call at
+all — and it refuses to run when `GOOGLE_APPLICATION_CREDENTIALS` and the
+bridge's `FIREBASE_SERVICE_ACCOUNT` name different projects (the deploy
+guard's cross-check again). The owner runs it on the Pi, plain — no
+worktree dance needed:
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json pi/.venv/bin/python pi/smoke_month_range.py
+# Specific months (repeatable; default is the current and previous month):
+pi/.venv/bin/python pi/smoke_month_range.py --month 2026-10 --month 2026-11
+```
+
+Finding (2026-11-21, project `chelevse`): the string-bound form merged in
+#207 is rejected by production Firestore (`InvalidArgument: __key__ filter
+value must be a Key`); `DocumentReference` bounds are the documented
+requirement (googleapis/python-firestore#153) and returned exactly the
+month's documents — the form `_month_totals` has used since. Exit 0 is the
+green verdict; the `SMOKE PASS/FAIL` summary line is the evidence to quote.
+
 ### Push notifications (FCM)
 
 A single background daemon worker performs every send via the Admin SDK. Three

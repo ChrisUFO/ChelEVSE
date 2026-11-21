@@ -2488,6 +2488,19 @@ def _month_totals(db, sink, now_local):
     same lock hold as the read for the same flush-race reason as
     :func:`_day_totals`. Reads only; a read failure is one journal line and
     None, never a crash -- the day's tick retries.
+
+    Verified 2026-11-21 from the Pi against live Firestore (project
+    chelevse) with ``pi/smoke_month_range.py`` (#208): the string-bound
+    form merged in #207 is rejected by the server (``InvalidArgument:
+    __key__ filter value must be a Key`` -- the Python SDK sends
+    ``__name__`` string bounds verbatim; reference values are the
+    documented requirement, googleapis/python-firestore#153), so the
+    range passes ``DocumentReference`` bounds, byte-lexicographic on the
+    id within the collection. That reference form returned exactly the
+    month's documents (2026-10: 13 docs / 223.350 kWh, 2026-11: 21 docs /
+    331.452 kWh, equal to an independent client-side control) with both
+    bounds' inclusivity/exclusivity confirmed via ``history/2026-11-01``
+    (upper exclusive, lower inclusive); re-run the smoke to re-verify.
     """
     month_start = now_local.date().replace(day=1)
     next_month = (
@@ -2497,16 +2510,16 @@ def _month_totals(db, sink, now_local):
     )
     try:
         with sink._lock:
+            history = db.collection("history")
             snapshots = (
-                db.collection("history")
-                .where(
+                history.where(
                     filter=firestore.FieldFilter(
-                        "__name__", ">=", month_start.isoformat()
+                        "__name__", ">=", history.document(month_start.isoformat())
                     )
                 )
                 .where(
                     filter=firestore.FieldFilter(
-                        "__name__", "<", next_month.isoformat()
+                        "__name__", "<", history.document(next_month.isoformat())
                     )
                 )
                 .stream()
