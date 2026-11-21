@@ -95,13 +95,30 @@ class StatusTracker:
         # The plug-in's energy accumulated per tick (the same allowed deltas
         # ``_track_interval`` attributes), summed across the counter's epochs.
         # While the charger's session_energy stays monotone it equals the
-        # cumulative anyway, but a counter reset inside an open interval makes
-        # that cumulative the last epoch's alone, and this total is then the
-        # only energy-complete figure (#195). It restarts wherever the counter
-        # goes backwards at a block boundary -- indistinguishable from a new
-        # plug-in's cleared counter -- so it never spans two plug-ins.
+        # cumulative anyway, but a counter reset -- inside an open interval
+        # (#195) or between blocks while the plug-in persisted (#212) --
+        # makes that cumulative the last epoch's alone, and this total is
+        # then the only energy-complete figure. It restarts only after the
+        # plug-in is observably over (a disconnect was seen), so it never
+        # spans two plug-ins.
         self.session_wh = 0.0
         self.session_wh_reset_seen = False
+        # The plug-in this accumulation is summing is still connected:
+        # charging has been observed and no tick has reported the vehicle
+        # gone since. While this holds, a counter that goes backwards at a
+        # block boundary -- or lands on exactly 0 -- is a reset the plug-in
+        # survived, not a new plug-in: the accumulation rebaselines and
+        # keeps every epoch (#212). A disconnect observation clears it, and
+        # the next plug-in's cleared counter then starts fresh (#195).
+        self.plug_in_live = False
+        # The accumulation has crossed such a between-blocks reset: the
+        # record it closes must span back to the plug-in's observed start
+        # (``plug_in_started_at``) so it merges with the pre-reset block's
+        # record instead of double-counting it beside it.
+        self.session_wh_spanned_reset = False
+        # The wall-clock first charging tick of that plug-in: the earliest
+        # instant a spanned record may claim.
+        self.plug_in_started_at = None
         # The ``charging_stopped_at`` view for status/current (issue #122):
         # the instant charging last ended while still plugged in, or None.
         # The web adopts it as the reconstructed cost anchor on a cold open,
@@ -213,7 +230,7 @@ class StatusTracker:
             if _is_number(elapsed) and elapsed >= 0:
                 self.last_charging_elapsed = elapsed
             self.interval_seen_at = now
-        self._track_interval(state == 3, previous_energy, gap)
+        self._track_interval(state == 3, previous_energy, gap, _vehicle_connected(data))
         if self.has_state and self.previous_state == 3 and state != 3:
             # A seeded state lets the first tick after a restart close a
             # session that ended while the bridge was down; with no seed the
@@ -245,7 +262,7 @@ class StatusTracker:
         self.session_energy = data.get("session_energy")
         self.elapsed = data.get("elapsed")
 
-    def _track_interval(self, charging, previous_energy, gap):
+    def _track_interval(self, charging, previous_energy, gap, connected):
         """Open a charging interval on the edge and attribute this tick to it.
 
         An interval starts when the bridge first sees state 3 (the charger's
@@ -276,21 +293,31 @@ class StatusTracker:
         interval freezes that total (the step itself adds nothing) and the
         epochs after it keep accumulating on top, so ``_finalize_session`` can
         write an energy-complete ``wh`` once the charger's own cumulative
-        covers only the last epoch (#195). A drop at a block boundary restarts
-        the total instead: it is indistinguishable from a new plug-in's cleared
-        counter, and a total that spanned two plug-ins would double-count. So
-        does a new block that opens at a counter of exactly 0 while the total
-        is still loaded: a reset that landed on 0 makes the next plug-in's
-        cleared counter step 0, not backwards, so the drop test alone cannot
-        see that boundary (#195). That restart cannot tell a same-plug-in
-        resume after such a reset from a fresh plug-in: in the resume shape
-        the pre-reset epochs are shed from the total while the merge keeps
-        every interval, so the merged record's interval sum exceeds its
-        ``wh`` and the web's reconciliation guard prices the aggregate -- a
-        bounded undercount, never an overcount.
+        covers only the last epoch (#195). A reset *between* blocks while the
+        plug-in persisted — no disconnect observed since its first charging
+        tick — is the same incident split across the block boundary, so it is
+        absorbed the same way: the total keeps the pre-reset epochs and the
+        record spans back to the plug-in's observed start (#212). Only a
+        counter that goes backwards after the plug-in is observably over (a
+        disconnect was seen, or the tracker just booted) restarts the total:
+        that drop is a new plug-in's cleared counter, and a total that spanned
+        two plug-ins would double-count (#195).
         """
         if not charging:
+            # A disconnect observation ends the plug-in the accumulation is
+            # summing: whatever charges next is a new plug-in, whose cleared
+            # counter must start the accumulation fresh.
+            if not connected:
+                self.plug_in_live = False
             return
+        # This tick continues the plug-in the accumulation is summing when no
+        # disconnect has been observed since its first charging tick; a boot
+        # or a replug starts one here.
+        same_plug_in = self.plug_in_live
+        if not same_plug_in:
+            self.plug_in_live = True
+            self.plug_in_started_at = _utcnow()
+            self.session_wh_spanned_reset = False
         current = self.interval_energy
         delta = 0.0
         if _is_number(current) and _is_number(previous_energy):
@@ -312,13 +339,28 @@ class StatusTracker:
                         f"interval ({step:.0f} Wh, {_gap_seconds(gap)}); "
                         f"rebaselining"
                     )
+                elif step < 0 and same_plug_in:
+                    # Between blocks with the plug-in still connected, the
+                    # same drop is a reset the plug-in survived, not a new
+                    # plug-in: the total keeps the pre-reset epochs, the
+                    # charger's cumulative restarts, and the record will span
+                    # back to the plug-in's observed start so it merges with
+                    # the pre-reset block's record (#212).
+                    self.session_wh_reset_seen = True
+                    self.session_wh_spanned_reset = True
+                    log(
+                        f"interval step skipped: counter reset between "
+                        f"charging blocks while still plugged in "
+                        f"({step:.0f} Wh, {_gap_seconds(gap)}); rebaselining"
+                    )
                 elif step < 0:
-                    # Between blocks the same drop is indistinguishable from a
-                    # new plug-in's cleared counter, so the accumulation
-                    # restarts at this baseline: it must never span two
-                    # plug-ins (#195).
+                    # The plug-in is observably over (a disconnect was seen),
+                    # so the drop is a new plug-in's cleared counter and the
+                    # accumulation restarts at this baseline: it must never
+                    # span two plug-ins (#195).
                     self.session_wh = 0.0
                     self.session_wh_reset_seen = False
+                    self.session_wh_spanned_reset = False
             else:
                 # An unmeasurable gap has no allowance to compare against.
                 allowed = _interval_step_allowance(gap) if _is_number(gap) else None
@@ -337,16 +379,21 @@ class StatusTracker:
             # reset that landed exactly on 0 as the plug-in's last charging
             # reading leaves the next plug-in's cleared counter stepping 0
             # against the stale baseline. A counter at 0 mid-accumulation
-            # means the firmware cleared it -- a disconnect by the counter's
-            # own contract -- so the accumulation restarts here too; with the
-            # accumulator empty the reset is a no-op. A same-plug-in resume
-            # after such a reset is indistinguishable and wipes too: the
-            # merged record's intervals then outweigh its wh and the web
-            # prices the aggregate -- a bounded undercount, never an
-            # overcount (#195).
+            # means the firmware cleared it; whether that clears the
+            # accumulation depends on the plug-in, exactly as the drop
+            # above (#212): while it persisted the reset is absorbed (the
+            # total keeps every epoch and the record will span back to the
+            # observed start), and after a disconnect the accumulation
+            # restarts here too -- a new plug-in must not inherit the dead
+            # plug-in's energy. With the accumulator empty this is a no-op.
             if _is_number(current) and float(current) == 0.0 and self.session_wh:
-                self.session_wh = 0.0
-                self.session_wh_reset_seen = False
+                if same_plug_in:
+                    self.session_wh_reset_seen = True
+                    self.session_wh_spanned_reset = True
+                else:
+                    self.session_wh = 0.0
+                    self.session_wh_reset_seen = False
+                    self.session_wh_spanned_reset = False
             # The wall clock anchors the stored bounds; the boottime stamp is the
             # same instant on the clock a wall-clock step cannot move, so an
             # interval whose endpoints a step inverts still has a measured span.
@@ -478,13 +525,17 @@ class StatusTracker:
 
         The just-closed charging interval is written beside the aggregates. The
         aggregates keep their meaning exactly: ``wh`` stays the charger's
-        cumulative session_energy — unless a counter reset was observed inside
-        an open interval, when that cumulative covers only the last epoch and
-        ``wh`` becomes the tracker's per-tick accumulation across every epoch
-        (#195), the same deltas the interval list holds — ``elapsed`` its own
-        timer, and ``started_at``/``ended_at`` the plug-in span — so an older
-        reader, or a session with no interval (a restart that never saw
-        growth), still works.
+        cumulative session_energy — unless a counter reset was observed while
+        the plug-in persisted, inside an open interval (#195) or between
+        blocks (#212), when that cumulative covers only the last epoch and
+        ``wh`` becomes the tracker's per-tick accumulation across every epoch,
+        the same deltas the interval list holds — ``elapsed`` its own timer,
+        and ``started_at``/``ended_at`` the plug-in span — so an older reader,
+        or a session with no interval (a restart that never saw growth), still
+        works. A between-blocks reset also restarts the charger's timer, so a
+        spanned record adopts the plug-in's observed first charging tick as its
+        earliest start: it then covers (and merges with) the pre-reset block's
+        own record instead of pricing the same energy twice.
         """
         intervals = self._close_interval()
         energy = self.last_charging_energy
@@ -495,11 +546,12 @@ class StatusTracker:
             energy = (
                 tick_energy if _is_number(tick_energy) and tick_energy > 0 else None
             )
-        # A reset seen inside an open interval makes the charger's cumulative
-        # the last epoch's alone (the record that read 15.96 kWh beside
-        # intervals summing 48, #195): the accumulated per-tick total across
-        # epochs is then the plug-in's observed energy. With no reset seen,
-        # the charger's own cumulative is written exactly as before.
+        # A reset seen while the plug-in persisted — inside an open interval
+        # (#195) or between blocks (#212) — makes the charger's cumulative the
+        # last epoch's alone (the record that read 15.96 kWh beside intervals
+        # summing 48): the accumulated per-tick total across epochs is then
+        # the plug-in's observed energy. With no reset seen, the charger's own
+        # cumulative is written exactly as before.
         accumulated = self.session_wh if self.session_wh_reset_seen else None
         if not (_is_number(accumulated) and accumulated > 0):
             accumulated = None
@@ -516,6 +568,18 @@ class StatusTracker:
                 elapsed = 0
         ended_at = _utcnow()
         started_at = ended_at - timedelta(seconds=elapsed)
+        if self.session_wh_spanned_reset:
+            # The accumulation crossed a between-blocks reset the plug-in
+            # survived (#212): the charger's post-reset timer reaches back
+            # only to the reset, so the record adopts the plug-in's observed
+            # first charging tick as its earliest start. It then overlaps the
+            # pre-reset block's own record — the merge keeps one document,
+            # and the accumulated ``wh`` cannot double-count beside it. The
+            # observed start is never later than the plug-in the energy was
+            # measured in, so it cannot reach into another session either.
+            observed_start = self.plug_in_started_at
+            if isinstance(observed_start, datetime) and observed_start < started_at:
+                started_at = observed_start
         record = {
             "started_at": started_at,
             "ended_at": ended_at,
@@ -559,6 +623,20 @@ class StatusTracker:
             return
         record = self.pending_session
         self._write_session(record.get("_id"), record)
+
+    def drain_session(self):
+        """Give a still-pending session record one final, bounded attempt.
+
+        The per-tick retry keeps a failed finalize alive only while the
+        loops run; the shutdown path in ``run`` calls this beside the
+        history drain (#94's exit honesty, applied to sessions), so a stop
+        or restart — a deploy's ``systemctl restart`` above all — cannot
+        drop the one record whose write failed in its final window. One
+        attempt, not a loop: a failure is logged by the write itself and
+        the record is lost with the process, exactly the bounded loss the
+        history drain keeps.
+        """
+        self._flush_pending_session()
 
     def record_history(self, total):
         """Accumulate the total_energy delta into the history accumulator.

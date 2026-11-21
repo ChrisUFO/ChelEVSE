@@ -1067,10 +1067,11 @@ one document:
 sessions/1792345678   { started_at, ended_at, wh, elapsed, intervals? }
 ```
 
-`wh` is the charger's `session_energy` — unless the bridge saw the counter go
-backwards inside a charging block, when that cumulative covers only the last
-epoch and `wh` becomes the accumulated per-tick deltas across every epoch
-(#195), the same observation basis as `intervals`. `elapsed` is seconds.
+`wh` is the charger's `session_energy` — unless the bridge saw the counter
+reset while the plug-in persisted, inside a charging block (#195) or between
+blocks (#212), when that cumulative covers only the last epoch and `wh`
+becomes the accumulated per-tick deltas across every epoch, the same
+observation basis as `intervals`. `elapsed` is seconds.
 `ended_at` is the stop time and `started_at` comes from the charger's own timer
 (`ended_at - elapsed`), never from when the bridge booted.
 
@@ -1093,17 +1094,20 @@ equality is _not_ universal:
 
 - a **restart mid-charge** leaves the energy drawn before it in the aggregate
   and in no interval (the seeded baseline starts the new interval at zero);
-- an **in-block counter reset** is accumulated into `wh` (#195): once the
-  bridge sees the counter go backwards inside a block, `wh` becomes the sum of
-  every epoch's observed per-tick deltas — the same basis as the interval
-  list — because the charger's own cumulative then covers only the last epoch
-  (records written before #195 still carry the last epoch's cumulative, so
-  their list can exceed it). One corner diverges: a reset that lands exactly
-  on 0 and stops the charge, with the same plug-in resuming at the cleared 0,
-  restarts the accumulation — that boundary is indistinguishable from a new
-  plug-in — so the merged record's list exceeds `wh` by the smaller side's
-  energy (whichever epoch drew less) and the web prices the aggregate: a
-  bounded undercount, never an overcount;
+- a **counter reset while the plug-in persisted** is accumulated into `wh`
+  (#195 in-block, #212 between blocks): once the bridge sees the counter
+  reset — inside a block, or between blocks with no disconnect observed since
+  the plug-in began — `wh` becomes the sum of every epoch's observed per-tick
+  deltas — the same basis as the interval list — because the charger's own
+  cumulative then covers only the last epoch. A between-blocks reset also
+  restarts the charger's timer, so the record adopts the plug-in's observed
+  first charging tick as its earliest start and merges with the pre-reset
+  block's record instead of double-counting beside it. Records written by
+  older bridges still diverge, disclosed rather than repaired: pre-#195
+  documents carry the last epoch's cumulative (their list can exceed `wh`),
+  and bridges between #195 and #212 shed a between-blocks reset's pre-reset
+  epochs from `wh` — the resume-band shape whose list exceeds `wh` and is
+  priced as a bounded undercount by the aggregate;
 - a **dropped implausible step** stays in the charger's cumulative: `wh` keeps
   it in a plain plug-in while the list goes short, and in a reset-seen plug-in
   `wh` drops it too — keeping the interval basis;
@@ -1148,9 +1152,15 @@ and each case has its own journal line:
   restart mid-session). The step is dropped and the reading becomes the new
   baseline. The plug-in's accumulated total keeps the epochs before the reset
   (#195), so the finalized `wh` sums every epoch while the charger's own
-  cumulative restarts. A drop at a block boundary instead restarts the
-  accumulation — indistinguishable from a new plug-in's cleared counter, it
-  must never span two plug-ins.
+  cumulative restarts.
+- `interval step skipped: counter reset between charging blocks while still
+plugged in (<Δ> Wh, <gap>)` — the same reset observed at a block boundary
+  with no disconnect seen since the plug-in began (#212): the step is dropped,
+  the reading becomes the new baseline, and the accumulated total keeps the
+  pre-reset epochs, so the finalized `wh` equals the interval-list sum. A
+  boundary drop _after_ an observed disconnect stays silent: it is a new
+  plug-in's cleared counter, and the accumulation simply restarts there — it
+  must never span two plug-ins (#195).
 - `interval step dropped: <Δ> Wh in <gap> exceeds the <n> Wh the charger could
 deliver` — the step is physically impossible. The energy stays in the
   charger's cumulative and the interval stays short; in a reset-seen plug-in
@@ -1272,7 +1282,8 @@ field but `wh`, and it is idempotent: once `wh` equals the interval sum the
 document reconciles, so a rerun writes nothing.
 
 **Why the bound.** The criteria alone cannot tell a pre-#195 undercount from
-the post-#195 "reset-to-exactly-0" resume corner
+the "reset-to-exactly-0" resume corner written by the bridges between #195
+and the #212 continuity fix
 ([../ARCHITECTURE.md](../ARCHITECTURE.md) §4): there the interval list
 legitimately exceeds `wh` — a bounded undercount, never an overcount, and
 `wh` is the better figure — and repairing it would write a double-counting

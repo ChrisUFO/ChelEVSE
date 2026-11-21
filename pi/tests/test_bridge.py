@@ -1119,20 +1119,57 @@ class IntervalTests(unittest.TestCase):
             sum(entry["wh"] for entry in record["intervals"]), record["wh"]
         )
 
-    def test_a_boundary_counter_drop_restarts_the_cumulative_path(self):
-        # A drop between blocks is indistinguishable from a new plug-in's
-        # cleared counter, so the accumulation restarts there and wh stays
-        # exactly the charger's cumulative -- the pre-#195 write, whatever the
-        # plug-in before the drop recorded.
+    def test_a_reset_between_blocks_while_plugged_in_converges_wh_with_the_intervals(self):
+        # The 21 Nov 2026 live shape (#212): session 1795224371 charged
+        # 828.36 Wh, the charger's session counter reset to zero while the
+        # vehicle stayed plugged in, and the second block drew 16368.62 Wh
+        # from the cleared counter. The old policy shed the first epoch from
+        # the accumulated wh, so the merged record read 16368.62 beside
+        # intervals summing 17197 and the web's reconciliation band
+        # (max(250 Wh, 2%)) rejected the list. While the plug-in persists,
+        # the accumulator rebaselines at the reset and keeps every epoch, so
+        # wh converges with the interval list.
+        started = self.tick(3, 0, 0)
+        self.tick(3, 828.36, 1200)  # epoch 1 draws its energy
+        self.tick(1, 828.36, 1200)  # charging stops; the vehicle stays plugged in
+        self.tick(3, 0, 0, step=timedelta(minutes=33))  # the counter reset to zero
+        self.tick(3, 5456.21, 1200)
+        self.tick(3, 10912.41, 2400)
+        self.tick(3, 16368.62, 3600)  # epoch 2 ends where the live record did
+        self.tick(1, 16368.62, 3600, vehicle=0)  # the unplug closes the plug-in
+        self.assertEqual(len(self.sessions()), 1)
+        (record,) = self.sessions().values()
+        expected = 828.36 + 16368.62
+        self.assertAlmostEqual(record["wh"], expected)
+        first, second = record["intervals"]
+        self.assertAlmostEqual(first["wh"], 828.36)
+        self.assertAlmostEqual(second["wh"], 16368.62)
+        total = sum(entry["wh"] for entry in record["intervals"])
+        # The convergence the web's sessionIntervalsValid band asks for --
+        # here exactly, not just within max(250 Wh, 2%).
+        self.assertAlmostEqual(total, record["wh"])
+        self.assertLessEqual(abs(total - record["wh"]), max(250.0, 0.02 * record["wh"]))
+        # The reset also restarted the charger's elapsed timer, so the record
+        # spans back to the plug-in's observed first charging tick: it merges
+        # with the pre-reset block's record (one document) instead of
+        # double-counting that energy beside it.
+        self.assertEqual(record["started_at"], started)
+
+    def test_a_boundary_counter_drop_after_a_disconnect_restarts_the_cumulative_path(self):
+        # A drop between blocks is a new plug-in only once a disconnect was
+        # observed in between (#195's replug rule; #212 narrows it to that
+        # case): the accumulation restarts there and wh stays exactly the
+        # charger's cumulative -- the pre-#195 write, whatever the plug-in
+        # before the drop recorded.
         self.tick(3, 0, 0)
         self.tick(3, 4000, 2400)
-        self.tick(1, 4000, 2400)  # pause, still plugged in
+        self.tick(1, 4000, 2400, vehicle=0)  # unplug: the vehicle was seen gone
         # Two idle hours before the counter shows up lower: the drop is
         # silent (no interval is open), and the shrunken counters do not
         # merge -- a shrink is a new session to the merge predicate.
         self.tick(3, 100, 2500, step=timedelta(hours=2))
         self.tick(3, 2100, 3600)
-        self.tick(1, 2100, 3600)
+        self.tick(1, 2100, 3600, vehicle=0)
         self.assertEqual(len(self.sessions()), 2)
         latest = max(self.sessions().values(), key=lambda item: item["ended_at"])
         self.assertEqual(latest["wh"], 2100.0)
@@ -1147,16 +1184,17 @@ class IntervalTests(unittest.TestCase):
         # reset lands session_energy exactly on 0 as the plug-in's last
         # charging reading, the vehicle unplugs, and the next plug-in starts
         # at the cleared 0 -- a step of 0 against the stale baseline, not a
-        # drop. The dead plug-in's accumulation must not leak into the new
-        # plug-in's wh: without the restart the repro's second plug-in
-        # records 8000 for the 3000 actually drawn.
+        # drop. The disconnect is observed, so the dead plug-in's
+        # accumulation must not leak into the new plug-in's wh: without the
+        # restart the repro's second plug-in records 8000 for the 3000
+        # actually drawn.
         self.tick(3, 0, 0)
         self.tick(3, 5000, 3000)
         self.tick(3, 0, 3600)  # reset lands on 0; charging never resumes
-        self.tick(1, 0, 3600)  # unplug ends the plug-in on the zeroed counter
+        self.tick(1, 0, 3600, vehicle=0)  # unplug ends the plug-in on the zeroed counter
         self.tick(3, 0, 0)  # the next plug-in opens at its cleared counter
         self.tick(3, 3000, 1800)
-        self.tick(1, 3000, 1800)
+        self.tick(1, 3000, 1800, vehicle=0)
         self.assertEqual(len(self.sessions()), 2)
         first, second = sorted(
             self.sessions().values(), key=lambda record: record["ended_at"]
@@ -1170,18 +1208,14 @@ class IntervalTests(unittest.TestCase):
                 sum(entry["wh"] for entry in record["intervals"]), record["wh"]
             )
 
-    def test_a_zero_baseline_same_plug_in_resume_prices_a_bounded_undercount(self):
-        # The pinned corner of the zero-baseline restart (#195): a reset that
-        # lands exactly on 0 and stops the charge, with the same plug-in
-        # resuming at the cleared 0, is indistinguishable from a new plug-in
-        # -- the restart sheds the pre-reset epochs from wh. The merge folds
-        # the resumed block back into the pre-reset record (they overlap), max
-        # keeps the larger side (here the pre-reset figure), and the interval
-        # list holds every epoch: sum(intervals) exceeds wh by the smaller
-        # side's energy (whichever epoch drew less), the web's reconciliation
-        # guard rejects the list, and only the aggregate is priced. A bounded
-        # undercount, never an overcount, and better than the pre-#195 write
-        # in the same shape (which priced the last epoch's cumulative alone).
+    def test_a_zero_baseline_same_plug_in_resume_converges_wh_with_the_intervals(self):
+        # The corner #195 could only bound: a reset that lands exactly on 0
+        # and stops the charge, with the same plug-in resuming at the
+        # cleared 0, is told from a new plug-in by the disconnect that was
+        # never observed (#212) -- the resume keeps the accumulation. The
+        # merge folds the resumed block back into the pre-reset record, and
+        # wh equals the whole interval list, so the web's reconciliation
+        # band prices the intervals instead of the pro-rated aggregate.
         self.tick(3, 0, 0)
         self.tick(3, 5000, 3000)
         self.tick(3, 0, 3600)  # reset lands exactly on 0; charging stops
@@ -1191,23 +1225,19 @@ class IntervalTests(unittest.TestCase):
         self.tick(1, 3000, 1800, step=timedelta(seconds=10))
         self.assertEqual(len(self.sessions()), 1)
         (record,) = self.sessions().values()
-        # The restart wiped the accumulator at the resume, so the merged wh is
-        # the pre-reset epoch's 5000 -- not the plug-in's actual 8000.
-        self.assertAlmostEqual(record["wh"], 5000.0)
+        # The accumulation kept the pre-reset epoch across the resume, so the
+        # merged wh is the plug-in's actual 8000 -- not the 5000 the #195
+        # policy left in the aggregate.
+        self.assertAlmostEqual(record["wh"], 8000.0)
         first, second = record["intervals"]
         self.assertAlmostEqual(first["wh"], 5000.0)
         self.assertAlmostEqual(second["wh"], 3000.0)
-        # The merged list holds every epoch while max-wh keeps only the larger
-        # side: the sum exceeds wh by 3000 Wh, past the web's max(250 Wh, 2%)
-        # reconciliation bound, so the guard prices the aggregate (5000 of the
-        # 8000 drawn) rather than a doubled or exact figure.
-        self.assertAlmostEqual(
-            sum(entry["wh"] for entry in record["intervals"]), 8000.0
-        )
-        self.assertGreater(
-            sum(entry["wh"] for entry in record["intervals"]) - record["wh"],
-            max(250.0, 0.02 * record["wh"]),
-        )
+        # The merged list holds every epoch and wh holds every epoch: the
+        # sum reconciles exactly, inside the web's max(250 Wh, 2%) band.
+        total = sum(entry["wh"] for entry in record["intervals"])
+        self.assertAlmostEqual(total, 8000.0)
+        self.assertAlmostEqual(total, record["wh"])
+        self.assertLessEqual(abs(total - record["wh"]), max(250.0, 0.02 * record["wh"]))
 
     def test_a_seeded_session_attributes_its_first_step_without_a_gap(self):
         # The seeded baseline predates the tracker (the bridge was down), so the
@@ -1406,13 +1436,15 @@ class IntervalTests(unittest.TestCase):
     def test_a_new_plug_in_counter_is_not_logged_as_a_reset(self):
         # The firmware clears session_energy at unplug, so the next plug-in's
         # first reading is a fresh baseline — not a counter that went backwards.
+        # The unplug is observed (vehicle 0), so the boundary drop restarts
+        # the accumulation rather than absorbing it (#212).
         with mock.patch.object(bridge, "log") as log:
             self.tick(3, 0, 0)
             self.tick(3, 4000, 1200)
-            self.tick(1, 0, 0)  # unplug clears the counters
+            self.tick(1, 0, 0, vehicle=0)  # unplug clears the counters
             self.tick(3, 0, 0)  # new plug-in: counter starts at zero
             self.tick(3, 3000, 1200)
-            self.tick(1, 3000, 2400)
+            self.tick(1, 3000, 2400, vehicle=0)
         messages = [call.args[0] for call in log.call_args_list]
         self.assertEqual(
             [line for line in messages if "counter reset" in line], [], messages
@@ -1468,6 +1500,46 @@ class IntervalTests(unittest.TestCase):
         self.assertEqual(self.sessions(), {})
         self.assertIsNone(self.tracker.open_interval)
         self.assertIsNone(self.tracker.pending_session)
+
+    def test_a_failed_finalize_write_retries_on_later_ticks_and_persists(self):
+        # A Firestore failure at the session close must not lose the record:
+        # the write is held pending and retried at the start of the next
+        # status tick — one bounded attempt per tick, so a down Firestore
+        # cannot loop the bridge — until it lands (#212's writer half).
+        self.tick(3, 0, 0)
+        self.tick(3, 4000, 2400)
+        self.db.fail_writes = True
+        self.tick(1, 4000, 2400)  # the close write fails; the record is held
+        self.assertEqual(self.sessions(), {})
+        self.assertIsNotNone(self.tracker.pending_session)
+        self.db.fail_writes = False
+        self.tick(1, 4000, 2400)  # the next tick retries the pending write
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 4000.0)
+        (interval,) = record["intervals"]
+        self.assertAlmostEqual(interval["wh"], 4000.0)
+        self.assertIsNone(self.tracker.pending_session)
+
+    def test_shutdown_drains_a_still_pending_session_record(self):
+        # The per-tick retry dies with the loops: without a final attempt at
+        # shutdown, a deploy's systemctl restart landing after a failed
+        # close write would drop the record forever — the vehicle has
+        # unplugged, so nothing re-finalizes it. run() drains the pending
+        # session beside the history drain (#212's writer half).
+        self.tick(3, 0, 0)
+        self.tick(3, 4000, 2400)
+        self.db.fail_writes = True
+        self.tick(1, 4000, 2400)  # the close write fails; the record is held
+        self.assertEqual(self.sessions(), {})
+        self.assertIsNotNone(self.tracker.pending_session)
+        self.db.fail_writes = False
+        self.tracker.drain_session()  # the shutdown drain, off the loops
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 4000.0)
+        self.assertIsNone(self.tracker.pending_session)
+        # With nothing pending the drain is a no-op.
+        self.tracker.drain_session()
+        self.assertEqual(len(self.sessions()), 1)
 
     def test_a_seeded_session_without_measured_growth_has_no_intervals(self):
         # Restarted mid-charge, stopped before any tick showed growth: the
