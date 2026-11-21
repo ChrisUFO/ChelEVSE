@@ -29,7 +29,12 @@ their final form. Until then the day is left alone -- an open session's
 energy is still moving. The verdict itself is exact: ``gap_wh`` is the raw
 same-basis delta with **no tolerance band** (the band rule stays seam A's);
 a session straddling midnight cancels precisely because both sides attribute
-each tick's delta to the local day it was observed in.
+each tick's delta to the local day it was observed in. Exactness is also why
+a restart's recomputed window verdicts only the days it can attribute
+exactly: a stored interval that straddles a midnight can only be split by
+the constant-power approximation, so every day it touches gets no verdict
+from that process rather than an approximate one -- written once means
+exact or absent.
 
 The loop lives in ``bridge.reconcile_loop`` (seam B runs after seam A on the
 same cadence, reading only except for its own verdict writes, never blocking
@@ -194,7 +199,10 @@ def attribute_interval(started_at, ended_at, wh, zone):
     covers by (#125) -- while an interval inside one day lands whole. The
     live accumulator needs no split (each tick carries its own instant), so
     this approximation only ever applies to restart/backfill recomputes of
-    already-closed intervals.
+    already-closed intervals -- and an interval that straddles a midnight
+    makes every day it touches one this process cannot attribute exactly
+    (see :meth:`ArchiveReconciler._prime`), so those days get no verdict
+    rather than an approximate one.
     """
     total = (ended_at - started_at).total_seconds()
     if total <= 0:
@@ -255,6 +263,13 @@ class ArchiveReconciler:
         # Days this process has settled (verdict written, or clean by
         # evaluation) so a steady-state tick re-reads nothing.
         self._evaluated = set()
+        # Days this process cannot attribute exactly: a stored interval
+        # straddling a midnight contributed to them, and the constant-power
+        # split is an approximation the live per-tick basis never makes. A
+        # verdict is exact or absent (#212: written once, raw), so these
+        # days get no verdict from this process -- the next one, observing
+        # their successors tick by tick, has the exact basis again.
+        self._inexact = set()
 
     # -- the tick ------------------------------------------------------------
 
@@ -268,7 +283,7 @@ class ArchiveReconciler:
             day = (today - timedelta(days=offset)).isoformat()
             if day < self._recon_from_iso:
                 continue  # before the marker: legacy/unknown by design
-            if day in self._evaluated:
+            if day in self._evaluated or day in self._inexact:
                 continue
             outcome = self._consider_day(day, sink, zone)
             if outcome in ("clean", "written", "verdicted"):
@@ -351,9 +366,10 @@ class ArchiveReconciler:
         return True
 
     def _trim(self, today):
-        """Keep the settled-day set bounded with the basis window."""
+        """Keep the settled-day sets bounded with the basis window."""
         cutoff = (today - timedelta(days=self.window_days + 1)).isoformat()
         self._evaluated = {day for day in self._evaluated if day >= cutoff}
+        self._inexact = {day for day in self._inexact if day >= cutoff}
 
     # -- restart / first-run priming -----------------------------------------
 
@@ -404,7 +420,10 @@ class ArchiveReconciler:
         # The archived basis over the whole primed range, from the stored
         # intervals -- the persisted form of the same per-tick deltas. Only
         # intervals closed at or before this process started: later ones are
-        # its own writes, already accumulating in the live basis.
+        # its own writes, already accumulating in the live basis. An
+        # interval straddling a local midnight marks every day it touched
+        # inexact: the constant-power split is an approximation, and a
+        # verdict written once must be raw, never approximate.
         archived = {}
         for record in records:
             for entry in record.get("intervals") or []:
@@ -413,9 +432,12 @@ class ArchiveReconciler:
                     continue
                 if interval["ended_at"] > self._started_at:
                     continue
-                for day, wh in attribute_interval(
+                parts = attribute_interval(
                     interval["started_at"], interval["ended_at"], interval["wh"], zone
-                ).items():
+                )
+                if len(parts) > 1:
+                    self._inexact.update(parts)
+                for day, wh in parts.items():
                     archived[day] = archived.get(day, 0.0) + wh
         verdicts = 0
         if first_run:
@@ -426,7 +448,7 @@ class ArchiveReconciler:
             for day in sorted(docs):
                 if day >= window_start.isoformat():
                     break
-                if day < self._recon_from_iso:
+                if day < self._recon_from_iso or day in self._inexact:
                     continue
                 data = docs[day]
                 if isinstance(data, dict) and _is_number(data.get(GAP_FIELD)):

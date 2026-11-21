@@ -284,3 +284,256 @@ class LiveVerdictTests(ArchiveBase):
         (write,) = self.verdict_writes()
         self.assertEqual(write[2], "2026-11-20")
         self.assertEqual(write[3]["gap_wh"], 1000.0)
+
+
+class BackfillTests(ArchiveBase):
+    """The one bounded first-run pass over the trailing window's history."""
+
+    def seed_day(self, day, kwh, hour="12"):
+        self.db.data.setdefault("history", {})[day] = {
+            "kwh": kwh,
+            "hours": {hour: kwh},
+            "updated_at": "2026-11-01T12:00:00Z",
+        }
+
+    def seed_session(self, start, end, wh, interval_wh):
+        self.db.data.setdefault("sessions", {})[str(int(start.timestamp()))] = {
+            "started_at": start,
+            "ended_at": end,
+            "wh": wh,
+            "elapsed": int((end - start).total_seconds()),
+            "intervals": [
+                {"started_at": start, "ended_at": end, "wh": interval_wh}
+            ],
+        }
+
+    def test_first_run_backfills_the_known_intervals_short_days(self):
+        # The live audit's known-bad days (Oct 22/31, Nov 1/13) each carry a
+        # day doc with the full metered energy beside sessions whose
+        # intervals lost almost all of it -- the Nov 1 shape: 7237 Wh in
+        # ``wh`` with intervals carrying only 10 Wh. recon_from precedes
+        # 2026-10-20 so all four get verdicts, and the pass stays bounded.
+        self.assertLess(
+            archive_reconcile.DEFAULT_RECON_FROM.isoformat(), "2026-10-20"
+        )
+        self.seed_day("2026-10-22", 4.806)
+        self.seed_session(_at(22, 12, month=10), _at(22, 13, month=10), 4806.0, 11.0)
+        self.seed_day("2026-10-23", 2.0)  # a clean day in range: no write
+        self.seed_session(_at(23, 12, month=10), _at(23, 13, month=10), 2000.0, 2000.0)
+        self.seed_day("2026-10-31", 9.712)
+        self.seed_session(_at(31, 12, month=10), _at(31, 13, month=10), 9712.0, 12.0)
+        self.seed_day("2026-11-01", 7.237)
+        self.seed_session(_at(1, 12), _at(1, 13), 7237.0, 10.0)
+        self.seed_day("2026-11-13", 12.044)
+        self.seed_session(_at(13, 12), _at(13, 13), 12044.0, 44.0)
+        expected = {
+            "2026-10-22": 4795.0,
+            "2026-10-31": 9700.0,
+            "2026-11-01": 7227.0,
+            "2026-11-13": 12000.0,
+        }
+        before = {
+            day: dict(self.day_doc(day)) for day in expected if self.day_doc(day)
+        }
+        self.tick(_at(21, 10))
+        for day, gap in expected.items():
+            self.assertEqual(self.day_doc(day)["gap_wh"], gap, day)
+            # The measurement fields are byte-identical: the verdict only
+            # added its own field (the field-path isolation pin).
+            self.assertEqual(self.day_doc(day)["kwh"], before[day]["kwh"], day)
+            self.assertEqual(self.day_doc(day)["hours"], before[day]["hours"], day)
+        self.assertEqual(
+            self.db.data["history"][archive_reconcile.MARKER_DOC_ID],
+            {"recon_from": "2026-10-19"},
+        )
+        # The write shapes, pinned: verdicts and marker are field-path
+        # merges on exactly the reconciler's own fields.
+        self.assertIn(
+            ("set", "history", "2026-11-01", {"gap_wh": 7227.0}, ["gap_wh"]),
+            self.verdict_writes(),
+        )
+        self.assertIn(
+            (
+                "set",
+                "history",
+                archive_reconcile.MARKER_DOC_ID,
+                {"recon_from": "2026-10-19"},
+                ["recon_from"],
+            ),
+            self.verdict_writes(),
+        )
+        _total, by_kind = self.recon.counter.snapshot()
+        self.assertEqual(by_kind["history"], 5)  # four verdicts + the marker
+        # A rerun writes nothing at all: every divergent day carries its
+        # verdict, the clean day stays silent, the marker exists.
+        writes_before = len(self.db.writes)
+        self.tick(_at(21, 11))
+        self.assertEqual(len(self.db.writes), writes_before)
+
+    def test_a_day_already_carrying_a_verdict_is_never_rewritten(self):
+        # Idempotence across processes: a day doc that already carries
+        # gap_wh (a previous run's verdict) is skipped by the backfill and
+        # by the window evaluation alike -- absence is the only clean mark,
+        # so presence must mean settled.
+        self.seed_day("2026-11-01", 7.237)
+        self.db.data["history"]["2026-11-01"]["gap_wh"] = 7000.0
+        self.seed_session(_at(1, 12), _at(1, 13), 7237.0, 10.0)
+        self.tick(_at(4, 10))
+        self.assertEqual(self.day_doc("2026-11-01")["gap_wh"], 7000.0)
+        self.assertEqual(
+            [write for write in self.verdict_writes() if write[2] == "2026-11-01"],
+            [],
+        )
+
+    def test_a_failed_marker_write_retries_the_backfill_without_rewriting(self):
+        # The marker lands only after a complete pass, so a marker failure
+        # restarts the backfill -- which must converge without repeating a
+        # single verdict write (days carrying gap_wh are skipped).
+        self.seed_day("2026-11-01", 7.237)
+        self.seed_session(_at(1, 12), _at(1, 13), 7237.0, 10.0)
+        original = self.recon._write_marker
+        failed = []
+
+        def flaky_marker():
+            if not failed:
+                failed.append(True)
+                return False
+            return original()
+
+        with mock.patch.object(self.recon, "_write_marker", side_effect=flaky_marker):
+            self.tick(_at(21, 10))
+        # The marker failed: the pass stays unprimed (the verdict itself
+        # landed -- the day doc carries it -- and the retry must not
+        # rewrite it).
+        self.assertFalse(self.recon._primed)
+        self.assertEqual(self.day_doc("2026-11-01")["gap_wh"], 7227.0)
+        self.tick(_at(21, 11))
+        self.assertTrue(self.recon._primed)
+        self.assertIn(
+            (
+                "set",
+                "history",
+                archive_reconcile.MARKER_DOC_ID,
+                {"recon_from": "2026-10-19"},
+                ["recon_from"],
+            ),
+            self.verdict_writes(),
+        )
+        # Exactly one verdict write for the day across both passes.
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-11-01"]), 1
+        )
+
+
+class RestartTests(ArchiveBase):
+    """The trailing window recomputes from day docs + one sessions read."""
+
+    def collection_counter(self):
+        counts = {}
+        original = self.db.collection
+
+        def counting(name):
+            counts[name] = counts.get(name, 0) + 1
+            return original(name)
+
+        return counts, counting
+
+    def test_a_restart_recomputes_the_window_with_one_sessions_read(self):
+        # A clean intraday block on the 18th and one block across the
+        # Nov 19/20 midnight, both verdicted by the live process (no
+        # writes). The restart rebuilds the trailing window from the stored
+        # intervals with one bounded range read: the intraday day re-
+        # verdicts clean from the rebuilt basis, while the straddle-touched
+        # days -- whose rebuilt basis is the constant-power approximation,
+        # not the per-tick truth -- get no verdict rather than an
+        # approximate one (a verdict is written once, so it is exact or
+        # absent).
+        self.seed_marker()
+        self.tick(_at(18, 9))
+        self.charge_block(_at(18, 12), hours=3, wh_per_hour=1000)
+        self.charge_block(_at(19, 22), hours=4, wh_per_hour=1000)
+        self.tick(_at(20, 9))
+        self.assertEqual(self.verdict_writes(), [])
+        # -- the restart: a new tracker and reconciler over the same db.
+        restarted = archive_reconcile.ArchiveReconciler(
+            self.db, counter=WriteCounter(clock=lambda: self.mono)
+        )
+        restarted._started_at = _at(21, 8)
+        tracker = archive_reconcile.SessionBasisTracker(self.db, basis=restarted.basis)
+        tracker.seeded = True
+        tracker.total_energy = self.total_kwh
+        sink = bridge.StatusSink(self.db, tracker, _QuietNotifier())
+        counts, counting = self.collection_counter()
+        with (
+            mock.patch.object(bridge, "_localnow", return_value=_at(21, 9)),
+            mock.patch.object(self.db, "collection", counting),
+        ):
+            restarted.tick(_at(21, 9), sink)
+        with sink._lock:
+            # The rebuilt basis: the intraday day whole, the straddling
+            # block split by duration share (uniform here).
+            self.assertEqual(restarted.basis.basis_for_day("2026-11-18"), 3000.0)
+            self.assertEqual(restarted.basis.basis_for_day("2026-11-19"), 2000.0)
+            self.assertEqual(restarted.basis.basis_for_day("2026-11-20"), 2000.0)
+        self.assertIn("2026-11-18", restarted._evaluated)
+        self.assertNotIn("2026-11-18", restarted._inexact)
+        # The straddle-touched days carry no verdict from this process.
+        self.assertIn("2026-11-19", restarted._inexact)
+        self.assertIn("2026-11-20", restarted._inexact)
+        self.assertEqual(self.verdict_writes(), [])
+        # The bounded recompute: one sessions range read; the marker read
+        # plus one day-doc range in the prime, then one get for the one
+        # exactly-attributable candidate day.
+        self.assertEqual(counts["sessions"], 1)
+        self.assertEqual(counts["history"], 3)
+        # Steady state after that: a further tick reads and writes nothing.
+        counts2, counting2 = self.collection_counter()
+        with mock.patch.object(self.db, "collection", counting2):
+            restarted.tick(_at(21, 10), sink)
+        self.assertNotIn("history", counts2)
+        self.assertNotIn("sessions", counts2)
+
+    def test_a_delayed_prime_does_not_double_count_this_process_sessions(self):
+        # The reseed only takes intervals closed at or before the process
+        # started: a block this process observed live (and wrote on close)
+        # is already in the live basis -- seeding its stored form again
+        # would double the day and verdict a false gap.
+        self.seed_marker()
+        self.charge_block(_at(20, 12), hours=3, wh_per_hour=1000)
+        # No tick yet: the prime is delayed past the block (a slow first
+        # cadence, or the first reads failed and retried).
+        self.tick(_at(21, 9))
+        self.assertEqual(self.verdict_writes(), [])
+        self.assertEqual(self.verdict_lines(), [])
+        with self.sink._lock:
+            self.assertEqual(self.recon.basis.basis_for_day("2026-11-20"), 3000.0)
+
+
+class AttributionTests(unittest.TestCase):
+    """The stored-interval split: whole inside a day, pro-rated across."""
+
+    def test_an_intraday_interval_lands_whole_on_its_day(self):
+        parts = archive_reconcile.attribute_interval(
+            _at(19, 12), _at(19, 16), 4000.0, UTC
+        )
+        self.assertEqual(parts, {"2026-11-19": 4000.0})
+
+    def test_a_straddling_interval_splits_by_duration_share(self):
+        parts = archive_reconcile.attribute_interval(
+            _at(19, 22), _at(20, 2), 4000.0, UTC
+        )
+        self.assertEqual(parts, {"2026-11-19": 2000.0, "2026-11-20": 2000.0})
+
+    def test_a_multi_day_interval_splits_at_every_midnight(self):
+        parts = archive_reconcile.attribute_interval(
+            _at(18, 12), _at(21, 12), 7200.0, UTC
+        )
+        self.assertEqual(
+            parts,
+            {
+                "2026-11-18": 1200.0,
+                "2026-11-19": 2400.0,
+                "2026-11-20": 2400.0,
+                "2026-11-21": 1200.0,
+            },
+        )
