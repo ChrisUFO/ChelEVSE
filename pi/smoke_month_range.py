@@ -365,7 +365,13 @@ def run_month(db, bridge_mod, year, month):
     """
     start, following = month_bounds(date(year, month, 1))
     start_id, next_id = start.isoformat(), following.isoformat()
-    control, skipped = scan_control(db, start_id, next_id)
+    try:
+        control, skipped = scan_control(db, start_id, next_id)
+    except Exception as error:  # noqa: BLE001 - the FAIL verdict, not a crash
+        control, skipped = {}, []
+        read_error = f"{error.__class__.__name__}: {error}"
+    else:
+        read_error = None
     control_sum = sum(control.values())
     result = {
         "label": f"{year:04d}-{month:02d}",
@@ -376,6 +382,7 @@ def run_month(db, bridge_mod, year, month):
             "count": len(control),
             "sum": control_sum,
             "skipped": skipped,
+            "read_error": read_error,
         },
         "string_probe": probe_string_form(db, start_id, next_id, control),
         "ref_form": verify_ref_form(db, start_id, next_id, control),
@@ -398,7 +405,11 @@ def failing_checks(result):
     """
     failed = []
     if not result["control"]["ok"]:
-        failed.append("control empty")
+        failed.append(
+            "control read failed"
+            if result["control"].get("read_error")
+            else "control empty"
+        )
     if not result["ref_form"]["ok"]:
         failed.append("ref form")
     if not result["production"]["ok"]:
@@ -427,12 +438,19 @@ def print_month(result):
             "filtered client-side"
         )
     else:
-        print(
-            f"month {result['label']}: control EMPTY - no history document "
-            f"in [{result['start_id']}, {result['next_id']}) (empty "
-            "evidence is no evidence)"
-        )
-        control_detail = "no document in range"
+        if control.get("read_error"):
+            print(
+                f"month {result['label']}: control READ FAILED - "
+                f"{control['read_error']}"
+            )
+            control_detail = control["read_error"]
+        else:
+            print(
+                f"month {result['label']}: control EMPTY - no history document "
+                f"in [{result['start_id']}, {result['next_id']}) (empty "
+                "evidence is no evidence)"
+            )
+            control_detail = "no document in range"
     probe = result["string_probe"]
     rows = (
         ("control", "OK" if control["ok"] else "FAIL", control_detail),

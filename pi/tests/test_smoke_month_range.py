@@ -393,6 +393,28 @@ class RunMonthTests(unittest.TestCase):
         self.assertEqual(result["boundary"]["status"], "skipped")
         self.assertEqual(smoke.failing_checks(result), ["control empty"])
 
+    def test_a_control_read_failure_fails_loudly_without_raising(self):
+        # The control scan was the one read run_month did not classify: a
+        # transport failure must FAIL the control gate with the classified
+        # detail (like every other check), not escape the never-raises
+        # contract. With every read exploding the downstream checks fail
+        # on their own verdicts and the month composes.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            result = smoke.run_month(_ExplodingDB(), bridge, 2026, 11)
+            smoke.print_month(result)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["control"]["ok"])
+        self.assertEqual(
+            result["control"]["read_error"], "RuntimeError: transport exploded"
+        )
+        self.assertEqual(
+            smoke.failing_checks(result),
+            ["control read failed", "ref form", "production path"],
+        )
+        self.assertIn("control READ FAILED", out.getvalue())
+        self.assertIn("RuntimeError: transport exploded", out.getvalue())
+
 
 def green_month(label):
     """A result dict shaped like run_month's, for summary composition."""
