@@ -107,9 +107,12 @@ informational notes after a deploy is expected, not a fault):
   authority — both sides provably measure the same day in the same zone.
   Journaled as `day reconciliation: warning authority granted (…period and
 time-zone alignment verified)`.
-- A rollover at the wrong hour keeps comparisons informational with a
-  one-time `time-zone or period mismatch suspected` note; a midnight the
-  counter crosses **without** resetting revokes authority outright.
+- A rollover at the wrong hour **while authority is still unproven**
+  keeps comparisons informational with a one-time
+  `time-zone or period mismatch suspected` note; once granted, a
+  mid-day reset is the restart scenario — no note, and comparisons keep
+  warning. A midnight the counter crosses **without** resetting revokes
+  authority outright.
 - The month needs one clean day comparison first (`month reconciliation:
 warning authority granted (one clean day comparison…)`).
 
