@@ -32,10 +32,14 @@ RECONCILE_INTERVAL = 3600.0
 # Two totals closer than this are the same number: metering noise, a flush
 # still pending, observation skew. The 1% arm scales with the day (a 30 kWh
 # day tolerates 0.3 kWh); the floor keeps tiny mornings from comparing
-# noise against noise, and covers the MQTT-mode feed gap: the charger side
-# advances only at the HTTP reconcile cadence (60 s) while the bridge side
-# advances from every applied snapshot, so up to 60 s of delivering power
-# sits on one side only (~0.19 kWh at the charger's 48 A ceiling).
+# noise against noise, and covers one reconcile interval of the MQTT-mode
+# feed gap: the charger side advances only at the HTTP reconcile cadence
+# (60 s) while the bridge side advances from every applied snapshot, so up
+# to one interval of delivering power sits on one side only (~0.19 kWh at
+# the charger's 48 A ceiling). It bounds skew one interval wide, not the
+# gap in general: when the feed skips or drops reconciles and the sample
+# ages past that, bridge.reconcile_loop's freshness window
+# (RECONCILE_SAMPLE_MAX_AGE_SEC) suppresses the evaluation instead.
 TOLERANCE_KWH = 0.2
 TOLERANCE_FRACTION = 0.01
 # A divergence episode journals one line; it re-arms only when the gap
@@ -79,20 +83,23 @@ class ChargerDayCounter:
     The status loop hands every applied observation's parsed ``total_day``
     here; each step is validated exactly like ``StatusTracker.record_history``
     validates ``total_energy``: a non-finite, negative or absent value is
-    ignored, the first reading is only a baseline, a drop is the counter's
-    own midnight rollover (or a mid-day firmware reset) and is recorded, and
-    an upward step the charger could not have delivered in the elapsed
-    boottime gap is rejected and rebaselined. A rejected sample poisons the
+    ignored, the first reading is only a baseline, a drop from a trusted
+    level is the counter's own midnight rollover (or a mid-day firmware
+    reset), rebaselined and stamped, a drop measured from a rejected
+    (corrupt) baseline rebaselines without stamping (it proves nothing
+    about when midnight fell), and an upward step the charger could not
+    have delivered in the elapsed boottime gap is rejected and
+    rebaselined. A rejected sample poisons the
     counter's level, so the evaluation that would have compared it is
     suppressed until a plausible step restores trust -- a corrupt reading
     must not look like a reconciliation (or a divergence) either way.
 
     The status loop thread writes (:meth:`note`) while the reconcile thread
-    reads (:meth:`sample`, :attr:`eval_ready`); the whole accepted-sample
-    state lives in one atomically-replaced tuple, so a reader always sees
-    one note's value, stamp and trust together -- never yesterday's value
-    paired with today's stamp, and never a just-rejected reading still
-    marked ready.
+    reads (:meth:`latest`, :meth:`sample`, :attr:`eval_ready`); the whole
+    accepted-sample state lives in one atomically-replaced tuple, and
+    :meth:`latest` loads it once, so that reader always sees one note's
+    value, stamp and trust together -- never yesterday's value paired with
+    today's stamp, and never a just-rejected reading still marked ready.
     """
 
     def __init__(self):
@@ -130,6 +137,19 @@ class ChargerDayCounter:
         if state is None:
             return None
         return state[0], state[2]
+
+    def latest(self):
+        """``(value, observed_local, eval_ready)`` from one state load.
+
+        The reader that needs the value together with its stamp and its
+        trust (the reconcile loop's tick) takes all three in this one
+        load, so no interleaved :meth:`note` can pair one note's value
+        with another note's readiness.
+        """
+        state = self._state
+        if state is None:
+            return None
+        return state[0], state[2], state[3]
 
     def note(self, value):
         """One observation's ``total_day``; validated, never raised upon."""
