@@ -1084,7 +1084,10 @@ document's `kwh`×1000 plus still-pending energy, minus the session-basis
 Wh — **no tolerance band** (the band rule stays the charger-counter seam's).
 It is written once, only when nonzero, as a `["gap_wh"]` field-path merge
 that cannot create, touch or clear `kwh`, `hours` or any other field.
-Exactly zero writes nothing: **absence of `gap_wh` means clean**. Both
+Exactly zero writes nothing. `gap_wh` is three-state, and the states are
+the read contract: a **number** is the raw gap, **null** marks a day that
+cannot be verdicted honestly (see the precision rule below), and
+**absence** for a day at or after `recon_from` means evaluated clean. Both
 writes are counted in the write counter's `history` kind — one write per
 divergent day, once ever, plus the marker — so the steady state is ~zero
 writes per tick.
@@ -1101,11 +1104,17 @@ stored intervals, and re-verdicts the finalized days it can attribute
 exactly; already-clean days produce zero writes. One precision rule keeps
 the restart honest: a stored interval that straddles a local midnight can
 only be re-attributed by the constant-power split (the same span machinery
-the web prices by), so every day such an interval touches is left without
-a verdict from that process rather than judged on an approximation — a
-verdict written once is exact or absent. A mid-charge restart's lost
-pre-restart ticks are genuinely absent from the archive, and that loss is
-exactly what the day's verdict discloses.
+the web prices by), so every day such an interval touches gets no verdict
+from that process rather than judged on an approximation — a verdict
+written once is exact or absent. Those days carry an explicit
+`gap_wh: null` unknown mark instead of silence: absence is the clean
+verdict's own mark, and a mid-charge restart (which can lose the open
+interval — the documented in-memory limitation) lands exactly on such a
+day, so the silence would hide the one loss this seam exists to disclose.
+A failed mark write retries on the next tick; the mark is write-once like
+every verdict. A mid-charge restart's lost pre-restart ticks are genuinely
+absent from the archive, and that loss is exactly what the day's verdict
+discloses on the days it can attribute exactly.
 
 **Fault localization — which layer lost the energy.** The two seams
 bracket the archive between the charger's meters and the sessions store:

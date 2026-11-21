@@ -13,13 +13,20 @@ corrects; the verdict only discloses.** No measurement field -- ``kwh``,
 ``hours``, a session's ``wh``, ``elapsed`` or ``intervals`` -- is ever
 rewritten, corrected or backfilled by either seam. The only writes this
 module ever makes are its own additive disclosure metadata on field paths it
-owns: ``gap_wh`` (the raw per-day delta, Wh, signed day-doc-minus-sessions)
-and ``recon_from`` (the date verdicts start; days before it are
-legacy/unknown -- absence of ``gap_wh`` for a day at or after ``recon_from``
-means clean). Both land as field-path merges that cannot touch any other
-field, and both are counted in the write counter's ``history`` kind with the
-repo's write budget (#96): one write per divergent day, once ever, plus the
-one marker write on the first run -- ~zero steady-state writes.
+owns: ``gap_wh`` and ``recon_from`` (the date verdicts start; days before it
+are legacy/unknown). Both land as field-path merges that cannot touch any
+other field, and both are counted in the write counter's ``history`` kind
+with the repo's write budget (#96): one write per divergent day, once ever,
+plus the one marker write on the first run -- ~zero steady-state writes.
+
+``gap_wh`` is three-state, and the states are the read contract: a **number**
+is the raw per-day delta (Wh, signed day-doc-minus-sessions); **null** marks
+a day this module cannot verdict honestly (a stored interval straddles its
+midnight, so the attribution would be the constant-power approximation --
+unknown, not verified clean); **absent** for a day at or after ``recon_from``
+means evaluated clean. A restart mid-charge can lose the open interval (the
+documented in-memory limitation), so the straddle-touched day is exactly
+where a real gap can hide -- its null mark keeps the silence impossible.
 
 A day's verdict is **deferred until final**: it is computed only once no open
 charging session overlaps the day (checked against the tracker's open
@@ -268,8 +275,16 @@ class ArchiveReconciler:
         # split is an approximation the live per-tick basis never makes. A
         # verdict is exact or absent (#212: written once, raw), so these
         # days get no verdict from this process -- the next one, observing
-        # their successors tick by tick, has the exact basis again.
+        # their successors tick by tick, has the exact basis again. Their
+        # absence is not a clean verdict: they carry an explicit
+        # ``gap_wh: null`` mark so downstream readers cannot mistake
+        # unknown for verified-clean (the three-state contract: number =
+        # raw gap, null = not verdictable, absent = evaluated clean).
         self._inexact = set()
+        # The inexact days whose null mark has not landed yet (a failed
+        # write retries next tick; an unmarked inexact day would read as
+        # clean downstream -- the one silence this module must not keep).
+        self._unmarked_inexact = set()
 
     # -- the tick ------------------------------------------------------------
 
@@ -277,6 +292,7 @@ class ArchiveReconciler:
         """One cadence pass: prime once, then verdict finalizable days."""
         if not self._primed and not self._prime(now_local, sink):
             return
+        self._drain_inexact_marks()
         today = now_local.date()
         zone = now_local.tzinfo
         for offset in range(1, self.window_days + 1):
@@ -324,9 +340,11 @@ class ArchiveReconciler:
                 f"({exc.__class__.__name__}: {exc}); retrying next tick"
             )
             return "error"
-        if _is_number(marked):
-            # A previous run already wrote this day's verdict: the marker is
-            # the idempotence, nothing to recompute or rewrite.
+        if marked is not None:
+            # A previous run already settled this day -- a number is the
+            # raw verdict, a null the explicit unknown mark: either way
+            # the marker is the idempotence, nothing to recompute or
+            # rewrite.
             return "verdicted"
         day_wh = (float(kwh) if _is_number(kwh) else 0.0) + pending
         gap = round(day_wh * 1000.0 - basis, 3)
@@ -364,6 +382,36 @@ class ArchiveReconciler:
             f"is ever rewritten"
         )
         return True
+
+    def _drain_inexact_marks(self):
+        """Land the pending ``gap_wh: null`` marks for inexact days.
+
+        A straddle-touched day's absence would read as verified-clean
+        downstream (the three-state contract makes absence the clean
+        verdict), so the unknown mark is not optional: each pending day
+        gets one bounded write attempt per tick, on the same owned field
+        path, until it lands. Skipped silently when nothing is pending --
+        the steady-state tick stays write-free.
+        """
+        for day in sorted(self._unmarked_inexact):
+            try:
+                self.db.collection("history").document(day).set(
+                    {GAP_FIELD: None}, merge=[GAP_FIELD]
+                )
+            except Exception as exc:
+                self.counter.note_failure(exc)
+                log(
+                    f"archive reconciliation unknown-mark write failed for "
+                    f"{day} ({exc.__class__.__name__}: {exc}); will retry"
+                )
+                continue
+            self.counter.record("history")
+            self._unmarked_inexact.discard(day)
+            log(
+                f"archive reconciliation: day {day} marked unknown "
+                f"(gap_wh null -- a straddled attribution is approximate, "
+                f"so no verdict is honest; not verified clean)"
+            )
 
     def _trim(self, today):
         """Keep the settled-day sets bounded with the basis window."""
@@ -437,6 +485,16 @@ class ArchiveReconciler:
                 )
                 if len(parts) > 1:
                     self._inexact.update(parts)
+                    # Their absence must not read as clean downstream: any
+                    # touched day not already carrying a mark (number or
+                    # null) is queued for an explicit unknown mark.
+                    for day in parts:
+                        data = docs.get(day)
+                        if not (
+                            isinstance(data, dict)
+                            and data.get(GAP_FIELD) is not None
+                        ):
+                            self._unmarked_inexact.add(day)
                 for day, wh in parts.items():
                     archived[day] = archived.get(day, 0.0) + wh
         verdicts = 0
@@ -451,8 +509,8 @@ class ArchiveReconciler:
                 if day < self._recon_from_iso or day in self._inexact:
                     continue
                 data = docs[day]
-                if isinstance(data, dict) and _is_number(data.get(GAP_FIELD)):
-                    continue  # already verdicted: absence is the only clean mark
+                if isinstance(data, dict) and data.get(GAP_FIELD) is not None:
+                    continue  # already verdicted or marked unknown: settled
                 kwh = data.get("kwh") if isinstance(data, dict) else None
                 day_wh = float(kwh) if _is_number(kwh) else 0.0
                 gap = round(day_wh * 1000.0 - archived.get(day, 0.0), 3)
