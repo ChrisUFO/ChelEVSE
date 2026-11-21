@@ -197,9 +197,10 @@ live session and the whole history immediately.
   attributed to its local days and months, so the figures reconcile with the sessions list — while
   the Day period's hourly bars price the day document's own hour buckets. The kWh totals stay the
   day documents' own. A bucket no session covers hides its figure rather than pricing itself free,
-  and when the summary's $ prices only part of the period's kWh — beyond the same
-  `max(250 Wh, 2%)` band — a small muted caption under the figure discloses it, `priced 13.7 of 48.1 kWh`
-  (#194). When part of the _viewed_ window itself falls outside every row — a season that expired
+  and when the summary's $ prices only part of the period's kWh — any missing Wh at all, with no
+  tolerance floor and nothing that scales with the period's size (#211) — a small muted caption
+  under the figure discloses it, `priced 13.7 of 48.1 kWh` (#194). When part
+  of the _viewed_ window itself falls outside every row — a season that expired
   mid-month — a subdued line under the summary says so, `Part of this month prices at your flat
 rate USD 0.12.` (or `Part of this month has no price and is shown at 0.00.` when no finite flat
   rate is stored); it is per window, so the same plan adds nothing on a fully row-priced month,

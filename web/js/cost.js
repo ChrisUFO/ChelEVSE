@@ -42,10 +42,13 @@
 // the day documents' own total, so a partially covered period (a lost record,
 // or a counter-reset session whose aggregate prices a fraction of the days'
 // energy) reads as a plausible tariff. seriesCostSummary therefore totals the
-// buckets' attributed Wh beside their recorded kWh, and when the gap exceeds
-// the same max(250 Wh, 2%) band the buckets' own coverage uses, the summary's
-// cost cell says which energy its figure prices on a small muted caption
-// under the figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below).
+// buckets' attributed Wh beside their recorded kWh, and whenever the sessions
+// miss any of that energy — any gap at all, with no tolerance floor and
+// nothing that scales with the period's size (#211) — the summary's cost cell
+// says which energy its figure prices on a small muted caption under the
+// figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below). The
+// max(250 Wh, 2%) band now belongs only to the interval reconciliation and
+// the buckets' own per-bucket $-hiding; the caption no longer shares it.
 // Fully covered periods, hidden figures and every kWh total are untouched.
 //
 // #193 adds the rate-scope flags: `statusCostFallback`/`heldCostFallback` are
