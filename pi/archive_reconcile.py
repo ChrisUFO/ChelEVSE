@@ -143,11 +143,15 @@ class SessionBasisAccumulator:
     def seed(self, day, wh):
         """Add restart-recomputed basis for one day (idempotent per process).
 
-        The prime pass calls this only once per run, after every read and
-        write it depends on has landed, so a retried prime cannot double
-        count. Additive on purpose: ``today`` may already hold live ticks
-        observed since the process started, and the reseeded intervals are
-        the pre-start closed blocks -- disjoint parts of the same day.
+        The prime pass calls this only once per run, under the sink's apply
+        lock -- ``seed`` is the one accumulator mutation issued off the
+        status thread, and ``observe`` mutates the same dict under that
+        lock, so the two read-modify-writes must not interleave. Calls land
+        after every read and write this depends on, so a retried prime
+        cannot double count. Additive on purpose: ``today`` may already hold
+        live ticks observed since the process started, and the reseeded
+        intervals are the pre-start closed blocks -- disjoint parts of the
+        same day.
         """
         if wh:
             self._by_day[day] = self._by_day.get(day, 0.0) + float(wh)
@@ -331,7 +335,12 @@ class ArchiveReconciler:
                 snapshot = self.db.collection("history").document(day).get()
                 data = snapshot.to_dict() if snapshot.exists else None
                 kwh = data.get("kwh") if isinstance(data, dict) else None
-                marked = data.get(GAP_FIELD) if isinstance(data, dict) else None
+                # ``gap_wh`` presence is the settled test (the three-state
+                # contract: number = raw verdict, null = explicitly
+                # unknown, absent = not settled yet) -- a stored null must
+                # settle the day exactly like a number, so ``in``, not
+                # ``is not None``.
+                marked = isinstance(data, dict) and GAP_FIELD in data
                 pending = sink.tracker.history.pending_for_day(day)
                 basis = self.basis.basis_for_day(day)
         except Exception as exc:
@@ -340,7 +349,7 @@ class ArchiveReconciler:
                 f"({exc.__class__.__name__}: {exc}); retrying next tick"
             )
             return "error"
-        if marked is not None:
+        if marked:
             # A previous run already settled this day -- a number is the
             # raw verdict, a null the explicit unknown mark: either way
             # the marker is the idempotence, nothing to recompute or
@@ -487,13 +496,17 @@ class ArchiveReconciler:
                     self._inexact.update(parts)
                     # Their absence must not read as clean downstream: any
                     # touched day not already carrying a mark (number or
-                    # null) is queued for an explicit unknown mark.
+                    # null -- presence is the settled test) is queued for
+                    # an explicit unknown mark, and only days inside the
+                    # declared verdict range may receive one: days before
+                    # recon_from are legacy/unknown by design, so a
+                    # straddling overnight interval's pre-marker part is
+                    # left unmarked rather than written out of contract.
                     for day in parts:
+                        if day < self._recon_from_iso:
+                            continue
                         data = docs.get(day)
-                        if not (
-                            isinstance(data, dict)
-                            and data.get(GAP_FIELD) is not None
-                        ):
+                        if not (isinstance(data, dict) and GAP_FIELD in data):
                             self._unmarked_inexact.add(day)
                 for day, wh in parts.items():
                     archived[day] = archived.get(day, 0.0) + wh
@@ -509,7 +522,10 @@ class ArchiveReconciler:
                 if day < self._recon_from_iso or day in self._inexact:
                     continue
                 data = docs[day]
-                if isinstance(data, dict) and data.get(GAP_FIELD) is not None:
+                # Presence (number or null), not number-ness: a stored
+                # unknown mark settles the backfill exactly like a
+                # verdict.
+                if isinstance(data, dict) and GAP_FIELD in data:
                     continue  # already verdicted or marked unknown: settled
                 kwh = data.get("kwh") if isinstance(data, dict) else None
                 day_wh = float(kwh) if _is_number(kwh) else 0.0
@@ -530,10 +546,16 @@ class ArchiveReconciler:
         # closed blocks already stored beside the ticks this process will
         # observe -- disjoint parts of today, added not replaced). Last, and
         # once: every read and write this depends on has landed, so a retried
-        # prime cannot double count.
-        for offset in range(self.window_days + 1):
-            day = (today - timedelta(days=offset)).isoformat()
-            self.basis.seed(day, archived.get(day, 0.0))
+        # prime cannot double count. The reseed is the one accumulator
+        # mutation off the status thread, so it takes the sink's apply lock:
+        # ``observe`` mutates the same ``_by_day`` dict under that lock on
+        # the status thread, and either side's read-modify-write landing
+        # inside the other's would drop a day's basis -- a corrupted verdict,
+        # written once and therefore permanently wrong.
+        with sink._lock:
+            for offset in range(self.window_days + 1):
+                day = (today - timedelta(days=offset)).isoformat()
+                self.basis.seed(day, archived.get(day, 0.0))
         self._primed = True
         return True
 

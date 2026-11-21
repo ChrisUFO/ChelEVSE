@@ -283,6 +283,24 @@ class LiveVerdictTests(ArchiveBase):
         self.tick(_at(20, 10))
         self.assertEqual(len(self.db.writes), before)
 
+    def test_a_null_marked_day_is_never_re_verdicted(self):
+        # The three-state contract on the live path: ``gap_wh: null`` is a
+        # settled state (unknown, not clean), and the null was written
+        # precisely because the attribution behind any recomputed number
+        # cannot be trusted -- so a later process must leave it alone, not
+        # overwrite the disclosure with its own verdict.
+        self.seed_marker()
+        self.seed_day("2026-11-18", 3.0)
+        self.db.data["history"]["2026-11-18"]["gap_wh"] = None
+        self.tick(_at(19, 9))
+        # No sessions record exists, so the day is not inexact here; the
+        # settled guard alone stands between the null mark and a
+        # re-verdict (the basis is empty, the doc holds 3000 Wh).
+        self.assertNotIn("2026-11-18", self.recon._inexact)
+        self.assertIn("2026-11-18", self.recon._evaluated)
+        self.assertEqual(self.verdict_writes(), [])
+        self.assertIsNone(self.day_doc("2026-11-18")["gap_wh"])
+
     def test_a_day_overlapped_by_an_open_session_is_deferred(self):
         # The Nov 21 resume-band shape: charging is running now and started
         # yesterday, so yesterday's verdict waits -- no read verdict, no
@@ -377,17 +395,53 @@ class BackfillTests(ArchiveBase):
 
     def test_a_day_already_carrying_a_verdict_is_never_rewritten(self):
         # Idempotence across processes: a day doc that already carries
-        # gap_wh (a previous run's verdict) is skipped by the backfill and
-        # by the window evaluation alike -- absence is the only clean mark,
-        # so presence must mean settled.
+        # gap_wh -- a number (a previous run's verdict) or null (its
+        # unknown mark) -- is skipped by the backfill and by the window
+        # evaluation alike -- absence is the only clean mark, so presence
+        # must mean settled.
         self.seed_day("2026-11-01", 7.237)
         self.db.data["history"]["2026-11-01"]["gap_wh"] = 7000.0
         self.seed_session(_at(1, 12), _at(1, 13), 7237.0, 10.0)
+        # The null arm of the same pin: a stored unknown mark settles the
+        # backfill day exactly like a number, even though the recomputed
+        # gap (9712 - 12) is nonzero.
+        self.seed_day("2026-10-31", 9.712)
+        self.db.data["history"]["2026-10-31"]["gap_wh"] = None
+        self.seed_session(_at(31, 12, month=10), _at(31, 13, month=10), 9712.0, 12.0)
         self.tick(_at(4, 10))
         self.assertEqual(self.day_doc("2026-11-01")["gap_wh"], 7000.0)
+        self.assertIsNone(self.day_doc("2026-10-31")["gap_wh"])
         self.assertEqual(
-            [write for write in self.verdict_writes() if write[2] == "2026-11-01"],
+            [
+                write
+                for write in self.verdict_writes()
+                if write[2] in ("2026-11-01", "2026-10-31")
+            ],
             [],
+        )
+
+    def test_a_day_before_recon_from_never_receives_a_mark(self):
+        # First run, an overnight session crossing the marker midnight:
+        # its pre-marker part is outside the declared verdict range (days
+        # before recon_from are legacy/unknown by design -- the marker
+        # exists precisely to fence verdicts), so the unknown-mark queue
+        # is clamped at the marker: no null write, and not even a
+        # document, for that day. The day at/after the marker still gets
+        # its explicit unknown mark.
+        self.seed_day("2026-10-19", 2.0)
+        self.seed_session(_at(18, 22, month=10), _at(19, 2, month=10), 4000.0, 4000.0)
+        self.tick(_at(21, 9))
+        # Nothing was written for the pre-marker day -- not even a
+        # document (the mark write would have created one) -- while the
+        # day at/after the marker got its explicit unknown mark.
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-10-18"], []
+        )
+        self.assertIsNone(self.day_doc("2026-10-18"))
+        self.assertIsNone(self.day_doc("2026-10-19")["gap_wh"])
+        self.assertIn(
+            ("set", "history", "2026-10-19", {"gap_wh": None}, ["gap_wh"]),
+            self.verdict_writes(),
         )
 
     def test_a_failed_marker_write_retries_the_backfill_without_rewriting(self):
@@ -509,6 +563,65 @@ class RestartTests(ArchiveBase):
             restarted.tick(_at(21, 10), sink)
         self.assertNotIn("history", counts2)
         self.assertNotIn("sessions", counts2)
+
+    def test_the_restart_reseed_holds_the_sinks_apply_lock(self):
+        # The reseed is the one accumulator mutation issued off the status
+        # thread: ``observe`` mutates the same ``_by_day`` dict under the
+        # sink's apply lock on the status thread, so an unlocked seed
+        # could interleave its read-modify-write with one and drop a
+        # day's basis -- a corrupted verdict, written once and therefore
+        # permanently wrong. Pin: every seed the prime issues observes
+        # the lock already held (a plain Lock's non-blocking acquire
+        # succeeds only when nothing holds it).
+        self.seed_marker()
+        self.seed_day("2026-11-18", 3.0)
+        self.seed_session(_at(18, 12), _at(18, 15), 3000.0, 3000.0)
+        self.recon._started_at = _at(18, 16)
+        sink = self.sink
+        original = self.recon.basis.seed
+        seeded = []
+
+        def probing_seed(day, wh):
+            grabbed = sink._lock.acquire(blocking=False)
+            try:
+                self.assertFalse(
+                    grabbed, f"reseed of {day} ran without the apply lock"
+                )
+            finally:
+                if grabbed:
+                    sink._lock.release()
+            seeded.append(day)
+            return original(day, wh)
+
+        with mock.patch.object(self.recon.basis, "seed", probing_seed):
+            self.tick(_at(19, 9))
+        # The window really reseeded from the stored interval, under the
+        # lock throughout.
+        self.assertIn("2026-11-18", seeded)
+        with sink._lock:
+            self.assertEqual(self.recon.basis.basis_for_day("2026-11-18"), 3000.0)
+
+    def test_a_restart_does_not_requeue_an_already_null_marked_day(self):
+        # Write-once across processes, null arm: a straddle-touched day
+        # the previous process already marked ``gap_wh: null`` is settled
+        # -- presence, not number-ness, is the test -- so this process's
+        # prime must not re-queue it for the mark drain, and no history
+        # write happens at all.
+        self.seed_marker()
+        self.seed_day("2026-11-19", 2.0)
+        self.seed_day("2026-11-20", 2.0)
+        self.db.data["history"]["2026-11-19"]["gap_wh"] = None
+        self.db.data["history"]["2026-11-20"]["gap_wh"] = None
+        self.seed_session(_at(19, 22), _at(20, 2), 4000.0, 4000.0)
+        self.recon._started_at = _at(20, 12)
+        self.tick(_at(21, 9))
+        # Still known-inexact to this process -- just nothing left to write.
+        self.assertIn("2026-11-19", self.recon._inexact)
+        self.assertNotIn("2026-11-19", self.recon._unmarked_inexact)
+        self.assertNotIn("2026-11-20", self.recon._unmarked_inexact)
+        self.assertEqual(self.verdict_writes(), [])
+        self.assertIsNone(self.day_doc("2026-11-19")["gap_wh"])
+        self.assertIsNone(self.day_doc("2026-11-20")["gap_wh"])
 
     def test_a_delayed_prime_does_not_double_count_this_process_sessions(self):
         # The reseed only takes intervals closed at or before the process
