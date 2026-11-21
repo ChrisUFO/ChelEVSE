@@ -688,8 +688,9 @@ class MqttSourceLoggingTests(MqttSourceBase):
 
 class MqttConfigTests(unittest.TestCase):
     def parse(self, **env):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, env, clear=True
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, env, clear=True),
         ):
             return bridge.mqtt_config()
 
@@ -740,9 +741,10 @@ class MqttConfigTests(unittest.TestCase):
             ("MQTT_TOPIC", " "),
         )
         for name, value in cases:
-            with self.subTest(variable=name, value=value), self.assertRaises(
-                ValueError
-            ) as raised:
+            with (
+                self.subTest(variable=name, value=value),
+                self.assertRaises(ValueError) as raised,
+            ):
                 self.parse(**{name: value})
             self.assertIn(name, str(raised.exception))
 
@@ -829,8 +831,11 @@ class StatusSinkTests(unittest.TestCase):
             self.assertTrue(applied, energy)
         self.assertEqual(self.tracker.total_energy, 120)
         self.assertEqual(
-            [write[3]["total_energy"] for write in self.db.writes
-             if write[1] == "status" and write[2] == "current"],
+            [
+                write[3]["total_energy"]
+                for write in self.db.writes
+                if write[1] == "status" and write[2] == "current"
+            ],
             [100],
         )
 
@@ -867,8 +872,11 @@ class StatusSinkTests(unittest.TestCase):
         # total_energy is continuous and never triggers one (issue #93).
         self.assertEqual(self.tracker.total_energy, 120)
         self.assertEqual(
-            [write[3]["total_energy"] for write in self.db.writes
-             if write[1] == "status" and write[2] == "current"],
+            [
+                write[3]["total_energy"]
+                for write in self.db.writes
+                if write[1] == "status" and write[2] == "current"
+            ],
             [100],
         )
 
@@ -967,9 +975,7 @@ class StatusSinkTests(unittest.TestCase):
         applied = threading.Event()
 
         def apply_live():
-            self.sink.apply_status(
-                bridge.parse_status(status_payload(state=1)), "mqtt"
-            )
+            self.sink.apply_status(bridge.parse_status(status_payload(state=1)), "mqtt")
             applied.set()
 
         worker = threading.Thread(target=apply_live, daemon=True)
@@ -1199,8 +1205,9 @@ class MqttWorkerTests(MqttWorkerBase):
 
         logs = []
         stop = threading.Event()
-        with mock.patch.object(bridge, "log", logs.append), mock.patch.object(
-            bridge, "_stop", stop
+        with (
+            mock.patch.object(bridge, "log", logs.append),
+            mock.patch.object(bridge, "_stop", stop),
         ):
             thread = threading.Thread(
                 target=bridge.mqtt_status_loop,
@@ -1237,8 +1244,9 @@ class MqttWorkerTests(MqttWorkerBase):
         stop = threading.Event()
         self.client.deliver("chelevse/amp", 1000)
         self.source.flush()  # the worker takes this one and blocks on it
-        with mock.patch.object(bridge, "parse_snapshot", blocking_parse), mock.patch.object(
-            bridge, "_stop", stop
+        with (
+            mock.patch.object(bridge, "parse_snapshot", blocking_parse),
+            mock.patch.object(bridge, "_stop", stop),
         ):
             thread = threading.Thread(
                 target=bridge.mqtt_status_loop,
@@ -1287,8 +1295,9 @@ class MqttWorkerTests(MqttWorkerBase):
         stop = threading.Event()
         self.client.deliver("chelevse/amp", 1000)
         self.source.flush()  # the worker takes this one and blocks on it
-        with mock.patch.object(bridge, "parse_snapshot", blocking_parse), mock.patch.object(
-            bridge, "_stop", stop
+        with (
+            mock.patch.object(bridge, "parse_snapshot", blocking_parse),
+            mock.patch.object(bridge, "_stop", stop),
         ):
             thread = threading.Thread(
                 target=bridge.mqtt_status_loop,
@@ -1561,9 +1570,7 @@ class StatusLoopMqttTests(unittest.TestCase):
 
         def spy(db, source, connected, announced=None, last_lwt_at=None, counter=None):
             writes.append((source, connected))
-            original(
-                db, source, connected, announced, last_lwt_at, counter=counter
-            )
+            original(db, source, connected, announced, last_lwt_at, counter=counter)
 
         def on_wait():
             if client.connected:
@@ -1581,9 +1588,7 @@ class StatusLoopMqttTests(unittest.TestCase):
         def on_wait():
             waits["n"] += 1
             if waits["n"] == 2:
-                client.deliver(
-                    "openevse/announce/3988", '{"state":"disconnected"}'
-                )
+                client.deliver("openevse/announce/3988", '{"state":"disconnected"}')
             elif waits["n"] == 4:
                 client.deliver("openevse/announce/3988", '{"state":"connected"}')
 
@@ -2049,12 +2054,11 @@ class ConfigLoopMqttTests(unittest.TestCase):
             self.addCleanup(log_patch.stop)
 
         def run():
-            with mock.patch.object(bridge, "_stop", self.stop), mock.patch.object(
-                bridge, "CONFIG_RETRY_MIN_SEC", retry[0]
-            ), mock.patch.object(
-                bridge, "CONFIG_RETRY_MAX_SEC", retry[1]
-            ), mock.patch.object(
-                bridge, "CONFIG_SAFETY_RESYNC_SEC", safety
+            with (
+                mock.patch.object(bridge, "_stop", self.stop),
+                mock.patch.object(bridge, "CONFIG_RETRY_MIN_SEC", retry[0]),
+                mock.patch.object(bridge, "CONFIG_RETRY_MAX_SEC", retry[1]),
+                mock.patch.object(bridge, "CONFIG_SAFETY_RESYNC_SEC", safety),
             ):
                 bridge.config_loop(
                     self.db,
@@ -2333,6 +2337,9 @@ class RunWiringTests(unittest.TestCase):
                     return  # would block; wiring is what this test checks
                 self.target(*self.args, **self.kwargs)
 
+            def join(self, timeout=None):
+                pass  # the reconcile loop's bounded shutdown join (#161)
+
         def spy(name):
             def record(*args, **kwargs):
                 calls[name] = (args, kwargs)
@@ -2343,31 +2350,21 @@ class RunWiringTests(unittest.TestCase):
         source = mock.Mock()
         source.snapshots = 0
         source.messages = 0
-        config = bridge.MqttConfig(
-            enabled=True, host="192.168.0.224", topic="chelevse"
-        )
-        with mock.patch.object(bridge, "status_loop", spy("status_loop")), mock.patch.object(
-            bridge, "config_loop", spy("config_loop")
-        ), mock.patch.object(
-            bridge, "schedule_loop", spy("schedule_loop")
-        ), mock.patch.object(
-            bridge, "settings_loop", spy("settings_loop")
-        ), mock.patch.object(
-            bridge, "command_loop", spy("command_loop")
-        ), mock.patch.object(
-            bridge, "notifications_loop", spy("notifications_loop")
-        ), mock.patch.object(
-            bridge, "claims_loop", spy("claims_loop")
-        ), mock.patch.object(
-            bridge, "mqtt_status_loop", spy("mqtt_status_loop")
-        ), mock.patch.object(
-            bridge, "MqttSource", return_value=source
-        ) as source_cls, mock.patch.object(
-            bridge.threading, "Thread", _ThreadSpy
-        ), mock.patch.object(
-            bridge, "StatusTracker"
-        ), mock.patch.object(
-            bridge, "Notifier"
+        config = bridge.MqttConfig(enabled=True, host="192.168.0.224", topic="chelevse")
+        with (
+            mock.patch.object(bridge, "status_loop", spy("status_loop")),
+            mock.patch.object(bridge, "config_loop", spy("config_loop")),
+            mock.patch.object(bridge, "schedule_loop", spy("schedule_loop")),
+            mock.patch.object(bridge, "settings_loop", spy("settings_loop")),
+            mock.patch.object(bridge, "command_loop", spy("command_loop")),
+            mock.patch.object(bridge, "notifications_loop", spy("notifications_loop")),
+            mock.patch.object(bridge, "claims_loop", spy("claims_loop")),
+            mock.patch.object(bridge, "reconcile_loop", spy("reconcile_loop")),
+            mock.patch.object(bridge, "mqtt_status_loop", spy("mqtt_status_loop")),
+            mock.patch.object(bridge, "MqttSource", return_value=source) as source_cls,
+            mock.patch.object(bridge.threading, "Thread", _ThreadSpy),
+            mock.patch.object(bridge, "StatusTracker"),
+            mock.patch.object(bridge, "Notifier"),
         ):
             bridge.run(
                 FakeDB(),
@@ -2402,6 +2399,7 @@ class RunWiringTests(unittest.TestCase):
                 "schedule_loop",
                 "notifications_loop",
                 "claims_loop",
+                "reconcile_loop",
                 "mqtt_status_loop",
             ],
         )
@@ -2418,12 +2416,14 @@ class RunWiringTests(unittest.TestCase):
             def start(self):
                 pass
 
-        with mock.patch.object(bridge.threading, "Thread", _ThreadSpy), mock.patch.object(
-            bridge, "StatusTracker"
-        ), mock.patch.object(
-            bridge, "Notifier"
-        ), mock.patch.object(
-            bridge, "command_loop"
+            def join(self, timeout=None):
+                pass  # the reconcile loop's bounded shutdown join (#161)
+
+        with (
+            mock.patch.object(bridge.threading, "Thread", _ThreadSpy),
+            mock.patch.object(bridge, "StatusTracker"),
+            mock.patch.object(bridge, "Notifier"),
+            mock.patch.object(bridge, "command_loop"),
         ):
             bridge.run(
                 FakeDB(),
@@ -2443,6 +2443,7 @@ class RunWiringTests(unittest.TestCase):
                 bridge.schedule_loop,
                 bridge.notifications_loop,
                 bridge.claims_loop,
+                bridge.reconcile_loop,
             ],
         )
 

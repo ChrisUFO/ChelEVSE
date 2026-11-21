@@ -15,6 +15,7 @@ from typing import NamedTuple
 from mqtt_source import DEFAULT_ANNOUNCE_TOPIC
 
 from history_accumulator import HISTORY_FLUSH_SEC
+from reconcile import RECONCILE_INTERVAL
 from write_policy import (
     CHARGING_HEARTBEAT_SEC,
     HEARTBEAT_INTERVAL,
@@ -26,8 +27,8 @@ from write_policy import (
 def cfg(name, default=None):
     # seam: cfg lives in bridge (env-file side effect); resolved at call time
     import bridge  # lazy, call-time only
-    return bridge.cfg(name, default)
 
+    return bridge.cfg(name, default)
 
 
 # --- MQTT status source (issue #44) ----------------------------------------
@@ -38,6 +39,8 @@ DEFAULT_MQTT_CLIENT_ID = "chelevse-bridge"
 MQTT_RECONCILE_SEC = 60
 _TRUE_ENV = frozenset({"1", "true", "yes", "on"})
 _FALSE_ENV = frozenset({"0", "false", "no", "off"})
+
+
 class WatchdogConfig(NamedTuple):
     """Validated watchdog settings; ``watchdog_config()`` fills them from env."""
 
@@ -218,3 +221,30 @@ def history_config_or_exit():
         sys.exit(str(exc))
 
 
+class ReconcileConfig(NamedTuple):
+    """Validated day-reconciliation tunables; ``main()`` fills them from env."""
+
+    interval: float = RECONCILE_INTERVAL
+
+
+def reconcile_config():
+    """Day reconciliation cadence from the environment; bad values raise ValueError.
+
+    Zero is the one legal disabling value (``main()`` then never starts the
+    loop), so the floor is "zero or more" -- unlike the flush and write
+    tunables, which have no useful zero. ``nan`` is rejected for the same
+    reason as every other cadence: against it, every interval comparison
+    reads "not due yet", which would silently freeze the reconciler.
+    """
+    interval = _env_finite("RECONCILE_INTERVAL", RECONCILE_INTERVAL, float)
+    if interval < 0:
+        raise ValueError(f"RECONCILE_INTERVAL must be zero or more, got {interval:g}.")
+    return ReconcileConfig(interval=interval)
+
+
+def reconcile_config_or_exit():
+    """Day reconciliation tunable for ``main()``: a bad value stops the bridge by name."""
+    try:
+        return reconcile_config()
+    except ValueError as exc:
+        sys.exit(str(exc))

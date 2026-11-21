@@ -16,8 +16,8 @@ from write_counter import WriteCounter
 def log(message):
     # seam: tests patch bridge.log (PLAN.md facade rule)
     import bridge  # lazy, call-time only
-    return bridge.log(message)
 
+    return bridge.log(message)
 
 
 # --- History write accumulator (issue #94) ------------------------------------
@@ -26,6 +26,8 @@ def log(message):
 # while charging, and shutdown. 300 s is 12 writes/hour while charging and
 # zero while idle; the shutdown drain means stops and restarts lose nothing.
 HISTORY_FLUSH_SEC = 300
+
+
 class HistoryAccumulator:
     """In-memory ``history/<day>`` deltas; one flush is one write per day.
 
@@ -98,6 +100,20 @@ class HistoryAccumulator:
             and now - self.timed_from >= self.flush_sec
         )
 
+    def pending_for_day(self, day):
+        """Pending kWh attributed to one day document (caller holds the apply lock).
+
+        The day reconciler's read-only view of the unflushed half of a day's
+        total (#161): every mutation of ``pending_hours`` runs under the
+        status sink's apply lock, so the caller must hold it too, or this
+        iteration can race a concurrent ``observe``.
+        """
+        return sum(
+            delta
+            for (pending_day, _hour), delta in self.pending_hours.items()
+            if pending_day == day
+        )
+
     def consider(self, charging):
         """Flush when the charging interval is due."""
         if self.due(self.clock(), charging):
@@ -135,9 +151,9 @@ class HistoryAccumulator:
             # record_history): one write increments kwh and exactly the
             # touched hours.<HH> leaves, so sibling hours and every other
             # field survive, and a missing document is created.
-            merge = ["kwh"] + [f"hours.`{hour}`" for hour in sorted(hours)] + [
-                "updated_at"
-            ]
+            merge = (
+                ["kwh"] + [f"hours.`{hour}`" for hour in sorted(hours)] + ["updated_at"]
+            )
             try:
                 self.db.collection("history").document(day).set(payload, merge=merge)
             except Exception as exc:
@@ -166,5 +182,3 @@ class HistoryAccumulator:
                 f"{landed_buckets} bucket(s), {landed_days} day doc(s)"
             )
         return drained
-
-
