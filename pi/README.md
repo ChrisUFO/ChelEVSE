@@ -987,12 +987,16 @@ divergences are logged as informational notes only, never warnings. The
 floor covers one reconcile interval of the MQTT-mode feed gap: the charger
 side advances only at the HTTP reconcile cadence (60 s) while the bridge
 side advances from every applied snapshot, so up to a minute of delivering
-power can sit on one side only (~0.19 kWh at the charger's 48 A ceiling).
-The freshness window is sized to that cover — one feed interval, resolved
-from the configured cadence — so the two cannot disagree: when the feed
-skips or drops reconciles (a failed HTTP poll, an MQTT-snapshot discard)
-and the latest sample ages past the window, the evaluation waits for a
-fresh sample instead of warning about observation skew.
+power can sit on one side only (up to the 0.2 kWh floor at the charger's
+ceiling — 48 A at the UK supply-band top of 253 V). The freshness window is
+sized to that cover **by construction** — one feed interval, clamped to the
+floor's coverage at ceiling power (`reconcile.covered_window_sec`, ~59 s) —
+so the two cannot disagree at any configured cadence: a slower
+`MQTT_RECONCILE_SEC` or `STATUS_INTERVAL` keeps the window at the clamp and
+the evaluation waits for a fresh sample instead of warning about observation
+skew, and the same holds when the feed skips or drops reconciles (a failed
+HTTP poll, an MQTT-snapshot discard) and the latest sample ages past the
+window.
 
 **Zero writes, ever.** Reconciliation reads and journals; it never
 corrects, backfills or repairs anything. A divergence is evidence for a

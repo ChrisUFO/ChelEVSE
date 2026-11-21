@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bridge  # noqa: E402
+import reconcile  # noqa: E402
 from fakes import (  # noqa: E402
     FakeDB,
     FakeResponse,
@@ -136,7 +137,10 @@ class LoopBase(ReconcileBase):
         """Leave ``kwh`` pending for the scenario day (no write, in memory)."""
         self.tracker.history.observe(kwh, when or self.now)
 
-    def run_loop(self, ticks, on_wait=None):
+    def run_loop(self, ticks, on_wait=None, sample_max_age=None):
+        """Run the loop for ``ticks`` evaluations, optionally at a
+        non-default freshness window (run() derives it from the live feed
+        cadence; the module default matches the shipped MQTT one)."""
         with (
             mock.patch.object(bridge, "_localnow", return_value=self.now),
             mock.patch.object(bridge, "_stop", _StopAfter(ticks, on_wait)),
@@ -147,6 +151,11 @@ class LoopBase(ReconcileBase):
                 self.counter,
                 self.reconciler,
                 self.INTERVAL,
+                sample_max_age=(
+                    sample_max_age
+                    if sample_max_age is not None
+                    else bridge.RECONCILE_SAMPLE_MAX_AGE_SEC
+                ),
             )
 
     def assert_no_writes(self):
@@ -195,10 +204,11 @@ class KnownGoodDayTests(LoopBase):
 class ObservationSkewTests(LoopBase):
     """MQTT mode: the charger side advances at the HTTP reconcile cadence
     (60 s) while the bridge side advances from every applied snapshot, so an
-    evaluation between HTTP reconciles compares a sample up to 60 s old
-    against a seconds-fresh total. The energy delivered in that window is on
-    the bridge side only -- observation skew, not energy lost -- and the
-    tolerance floor covers it (~0.19 kWh at the 48 A ceiling)."""
+    evaluation between HTTP reconciles compares a sample up to one interval
+    old against a seconds-fresh total. The energy delivered in that window
+    is on the bridge side only -- observation skew, not energy lost -- and
+    the tolerance floor covers it: the window is clamped to the floor's
+    coverage at the charger's 48 A ceiling (~59 s on the UK band top)."""
 
     def test_an_aged_same_day_sample_tolerates_the_feed_gap(self):
         # 13:59: a clean evaluation grants warning authority. 14:00: the
@@ -245,9 +255,10 @@ class SampleFreshnessTests(LoopBase):
     skips an HTTP reconcile on a failed poll or an ``mqtt_mark`` discard
     while the bridge side keeps advancing from every applied snapshot, so
     the skew grows with the sample's age. Past the freshness window (one
-    feed interval, 60 s at the default cadence -- exactly the skew the
-    tolerance floor covers at the charger's ceiling) the evaluation waits
-    for a fresh sample instead of warning about energy nobody lost."""
+    feed interval, clamped to the tolerance floor's coverage at the
+    charger's ceiling -- ~59 s at the default cadence) the evaluation
+    waits for a fresh sample instead of warning about energy nobody
+    lost."""
 
     def test_a_same_day_sample_past_the_freshness_window_is_not_compared(self):
         # The false-warning reproduction at the power that exposes the
@@ -282,19 +293,96 @@ class SampleFreshnessTests(LoopBase):
         self.assert_no_writes()
 
     def test_a_sample_at_the_window_edge_is_still_compared(self):
-        # Exactly 60 s old (the failed-reconcile instant right before the
-        # next one lands): still within the window, so the evaluation
-        # runs -- proven by the authority grant -- and at the ceiling the
-        # one interval of skew (~0.18 kwh) sits inside the 0.2 floor:
-        # the window and the floor meet at exactly this age.
+        # 59 s old at the default cadence -- just inside the window, which
+        # the clamp holds at the tolerance floor's coverage (~59.3 s = the
+        # 0.2 floor at 48 A x 253 V, the UK band top): the evaluation
+        # runs -- proven by the authority grant -- and the ceiling-power
+        # skew of that age (12.1 kW x 59 s ~ 0.199 kwh) sits inside the
+        # floor: the window and the floor meet at exactly this age, even
+        # at the top of the supply band.
         self.seed_history(5.0)
         self.note(5.0, _at(14, 0))
-        self.seed_pending(0.184, _at(14, 1))
-        self.now = _at(14, 1)
+        self.seed_pending(0.199, _at(14, 0, 59))
+        self.now = _at(14, 0, 59)
         self.run_loop(1)
         self.assertTrue(self.reconciler.authorized)
         self.assertEqual(self.warnings(), [])
         self.assert_no_writes()
+
+    def test_a_slow_feed_cadence_does_not_widen_the_window(self):
+        # The round-4 reproduction: MQTT_RECONCILE_SEC=120 is a
+        # documented, legal setting, and an unclamped window of one feed
+        # interval (120 s) admitted this exact interleaving -- a sample
+        # 100 s old beside 0.305 kwh (11 kW x 100 s at the 48 A ceiling)
+        # of bridge-only energy -- and warned "bridge high" about
+        # observation skew on a day nobody lost energy. run() clamps the
+        # window to the tolerance floor's coverage at ceiling power, so
+        # the raised cadence suppresses the evaluation instead.
+        self.seed_history(5.0)
+        self.note(5.0, _at(13, 59))
+        self.now = _at(13, 59)
+        self.run_loop(1)
+        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.note(5.0, _at(14, 0))
+        self.seed_pending(0.305, _at(14, 1, 40))
+        self.now = _at(14, 1, 40)
+        self.run_loop(1, sample_max_age=bridge.covered_window_sec(120.0))
+        self.assertEqual(self.warnings(), [])
+        self.assertEqual(self.notes(), [])
+        self.assert_no_writes()
+
+        # The next applied reconcile catches the counter up: comparison
+        # resumes and the day is clean -- the clamp held the evaluation,
+        # not the episode, hostage.
+        self.note(5.305, _at(14, 2))
+        self.now = _at(14, 2)
+        self.run_loop(1, sample_max_age=bridge.covered_window_sec(120.0))
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+
+class FreshnessWindowInvariantTests(unittest.TestCase):
+    """The floor<->window relationship holds by construction (#161, round
+    4): whatever the feed cadence, the window reconcile hands the loop
+    never admits more ceiling-power skew than the tolerance floor covers.
+    Before round 4 this invariant lived in comments only, and any
+    configured cadence above ~62 s re-opened the false "bridge high"
+    warning rounds 2-3 had closed."""
+
+    CADENCES_SEC = (0.5, 1, 5, 10, 30, 59, 60, 62.5, 90, 120, 300, 3600, 86400)
+
+    def test_the_covered_window_never_admits_more_than_the_floor_covers(self):
+        # ceiling power x window <= TOLERANCE_KWH for every cadence:
+        # below the clamp the window is the cadence itself, above it the
+        # floor's coverage bound, so the sweep cannot fall out from
+        # between the two.
+        for cadence in self.CADENCES_SEC:
+            window = reconcile.covered_window_sec(cadence)
+            self.assertLessEqual(window, cadence)
+            self.assertLessEqual(
+                reconcile.CEILING_POWER_KW * window / 3600.0,
+                reconcile.TOLERANCE_KWH + 1e-9,
+                f"cadence {cadence:g}s admits skew past the floor",
+            )
+
+    def test_the_ceiling_is_the_supply_band_top(self):
+        # 48 A at 253 V (the UK 230 V +10% band top), not the ~240 V
+        # nominal: the band top is the most power the charger can
+        # deliver, and the 240 V figure left only 8 Wh of headroom at
+        # the old 60 s window edge -- thin enough for the GET->note
+        # stamp latency to cross at full current.
+        self.assertEqual(reconcile.SUPPLY_BAND_MAX_V, 253.0)
+        self.assertAlmostEqual(reconcile.CEILING_POWER_KW, 48 * 253 / 1000.0)
+        self.assertAlmostEqual(
+            reconcile.MAX_COVERED_AGE_SEC, 3600.0 * 0.2 / 12.144, places=6
+        )
+        # And the default cadence is already at the clamp's edge: the
+        # shipped 60 s feed buys a 59.3 s window, not a 60 s one.
+        self.assertEqual(
+            bridge.RECONCILE_SAMPLE_MAX_AGE_SEC,
+            reconcile.covered_window_sec(60.0),
+        )
+        self.assertLess(bridge.RECONCILE_SAMPLE_MAX_AGE_SEC, 60.0)
 
 
 class AbsentCounterTests(LoopBase):
@@ -480,10 +568,11 @@ class MidnightOutageTests(LoopBase):
 
     def test_a_stale_pre_midnight_sample_is_not_compared_against_the_new_day(self):
         # Day 20 ends healthy: the 23:10 sample reconciles clean against the
-        # archive (authority granted), then the charger goes unreachable.
+        # archive (authority granted; the tick lands 59 s after the note,
+        # inside the clamped window), then the charger goes unreachable.
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
-        self.now = _at(23, 11, day=20)
+        self.now = _at(23, 10, 59, day=20)
         self.run_loop(1)
         self.assertIn("warning authority granted", " ".join(self.logs))
 
@@ -506,7 +595,7 @@ class MidnightOutageTests(LoopBase):
     def test_recovery_resumes_normal_reconciliation(self):
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
-        self.now = _at(23, 11, day=20)
+        self.now = _at(23, 10, 59, day=20)
         self.run_loop(1)
         self.assertIn("warning authority granted", " ".join(self.logs))
         self.now = _at(0, 10, day=21)
@@ -818,7 +907,8 @@ class RunWiringTests(unittest.TestCase):
     creates no reconcile thread, the enabled loop is joined (bounded) before
     the shutdown history drain takes the same sink lock (the drain is the
     #94 data-loss critical path, so nothing may reorder the two), and the
-    sample freshness window is resolved from the live feed cadence."""
+    sample freshness window is resolved from the live feed cadence and
+    clamped to the tolerance floor's coverage at ceiling power."""
 
     INTERVALS = (10, 60, 60, 300, 5, 60, 300)
 
@@ -890,18 +980,44 @@ class RunWiringTests(unittest.TestCase):
     def test_the_freshness_window_in_mqtt_mode_uses_the_reconcile_cadence(self):
         # MQTT mode (the shipped one): the day counter rides the HTTP
         # reconcile cadence, so the window passed to the loop is one
-        # reconcile interval of the configured cadence -- and with the
-        # default 60 s that is exactly the module constant. A 2x factor
-        # here would admit ages past the tolerance floor's coverage and
-        # warn about observation skew while charging.
+        # reconcile interval of the configured cadence, clamped to the
+        # tolerance floor's coverage -- with the default 60 s that is
+        # exactly the module constant. A 2x factor, or the cadence passed
+        # through unclamped, would admit ages past the floor's coverage
+        # and warn about observation skew while charging.
         config = bridge.MqttConfig(enabled=True, host="broker", topic="chelevse")
         started = self.run_bridge(
             reconcile=bridge.ReconcileConfig(3600), events=[], mqtt=config
         )
         (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
-        self.assertEqual(thread.kwargs["sample_max_age"], config.reconcile_sec)
+        self.assertEqual(
+            thread.kwargs["sample_max_age"],
+            bridge.covered_window_sec(config.reconcile_sec),
+        )
         self.assertEqual(
             thread.kwargs["sample_max_age"], bridge.RECONCILE_SAMPLE_MAX_AGE_SEC
+        )
+
+    def test_a_slow_reconcile_cadence_clamps_the_freshness_window(self):
+        # MQTT_RECONCILE_SEC=120 is a legal, documented setting; the
+        # window it buys stops at the tolerance floor's coverage instead
+        # of one 120 s interval -- which admitted 100 s-old
+        # ceiling-power samples and warned about observation skew (the
+        # round-4 finding). Every cadence above the bound buys the same
+        # window.
+        config = bridge.MqttConfig(
+            enabled=True, host="broker", topic="chelevse", reconcile_sec=120.0
+        )
+        started = self.run_bridge(
+            reconcile=bridge.ReconcileConfig(3600), events=[], mqtt=config
+        )
+        (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
+        self.assertLess(thread.kwargs["sample_max_age"], 120.0)
+        self.assertEqual(
+            thread.kwargs["sample_max_age"], bridge.covered_window_sec(120.0)
+        )
+        self.assertEqual(
+            thread.kwargs["sample_max_age"], bridge.covered_window_sec(3600.0)
         )
 
 

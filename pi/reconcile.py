@@ -26,6 +26,7 @@ from parsing import (
     _interval_step_allowance,
     _is_number,
 )
+from transport import MAX_AMPS
 
 # Default cadence of the reconcile loop; RECONCILE_INTERVAL=0 disables it.
 RECONCILE_INTERVAL = 3600.0
@@ -34,21 +35,45 @@ RECONCILE_INTERVAL = 3600.0
 # day tolerates 0.3 kWh); the floor keeps tiny mornings from comparing
 # noise against noise, and covers one reconcile interval of the MQTT-mode
 # feed gap: the charger side advances only at the HTTP reconcile cadence
-# (60 s) while the bridge side advances from every applied snapshot, so up
-# to one interval of delivering power sits on one side only (~0.19 kWh at
-# the charger's 48 A ceiling). The freshness window
-# (bridge.RECONCILE_SAMPLE_MAX_AGE_SEC, one feed interval) is sized to
-# that cover, and the two must move together: keep ceiling power x feed
-# interval <= TOLERANCE_KWH and the window at one interval -- a window
-# two intervals wide would admit ~0.37 kWh of ceiling skew past this
-# floor, and a single skipped reconcile while charging would warn about
-# observation skew, not lost energy.
+# while the bridge side advances from every applied snapshot, so up to one
+# interval of delivering power sits on one side only. That cover is
+# bounded, not open-ended -- ceiling power x admitted age <= TOLERANCE_KWH
+# -- and the bound is enforced in one place by covered_window_sec() below.
 TOLERANCE_KWH = 0.2
 TOLERANCE_FRACTION = 0.01
 # A divergence episode journals one line; it re-arms only when the gap
 # changes direction or grows by at least this much beyond the last journalled
 # gap, so an ongoing known divergence cannot spam the journal hourly.
 REARM_KWH = 1.0
+# The most power the charger can deliver, as the tolerance floor's
+# co-bound: the firmware current ceiling (transport.MAX_AMPS, 48 A) at the
+# top of the UK supply band (230 V +10% = 253 V -- the nominal 240 V would
+# understate the ceiling by ~5% and leave the floor no headroom at the
+# window edge). The floor can only absorb a feed gap while the skew it is
+# asked to cover -- ceiling power x sample age -- stays inside it, so the
+# same ceiling also bounds how old an admitted sample may be.
+SUPPLY_BAND_MAX_V = 253.0
+CEILING_POWER_KW = MAX_AMPS * SUPPLY_BAND_MAX_V / 1000.0
+# The age at which one ceiling-power skew reaches the floor: the oldest
+# sample any feed cadence may admit (~59 s at 48 A x 253 V).
+MAX_COVERED_AGE_SEC = 3600.0 * TOLERANCE_KWH / CEILING_POWER_KW
+
+
+def covered_window_sec(feed_interval_sec):
+    """The sample freshness window for a feed cadence (#161), in one place.
+
+    One feed interval -- but never wider than the tolerance floor's
+    coverage at ceiling power: the enforced form of ``CEILING_POWER_KW x
+    window <= TOLERANCE_KWH``. A cadence slower than MAX_COVERED_AGE_SEC
+    (a raised ``MQTT_RECONCILE_SEC`` or ``STATUS_INTERVAL``) would admit
+    samples whose ceiling-power skew already outruns the floor -- the
+    charger side advances only at the feed cadence while the bridge side
+    advances from every applied snapshot -- so the window stops at the
+    coverage bound instead and evaluations wait for a fresh sample rather
+    than warning about observation skew. bridge.run resolves the live
+    cadence and funnels every window through here.
+    """
+    return min(float(feed_interval_sec), MAX_COVERED_AGE_SEC)
 
 
 def log(message):
