@@ -624,6 +624,20 @@ class StatusTracker:
         record = self.pending_session
         self._write_session(record.get("_id"), record)
 
+    def drain_session(self):
+        """Give a still-pending session record one final, bounded attempt.
+
+        The per-tick retry keeps a failed finalize alive only while the
+        loops run; the shutdown path in ``run`` calls this beside the
+        history drain (#94's exit honesty, applied to sessions), so a stop
+        or restart — a deploy's ``systemctl restart`` above all — cannot
+        drop the one record whose write failed in its final window. One
+        attempt, not a loop: a failure is logged by the write itself and
+        the record is lost with the process, exactly the bounded loss the
+        history drain keeps.
+        """
+        self._flush_pending_session()
+
     def record_history(self, total):
         """Accumulate the total_energy delta into the history accumulator.
 

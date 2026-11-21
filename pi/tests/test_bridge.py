@@ -1520,6 +1520,27 @@ class IntervalTests(unittest.TestCase):
         self.assertAlmostEqual(interval["wh"], 4000.0)
         self.assertIsNone(self.tracker.pending_session)
 
+    def test_shutdown_drains_a_still_pending_session_record(self):
+        # The per-tick retry dies with the loops: without a final attempt at
+        # shutdown, a deploy's systemctl restart landing after a failed
+        # close write would drop the record forever — the vehicle has
+        # unplugged, so nothing re-finalizes it. run() drains the pending
+        # session beside the history drain (#212's writer half).
+        self.tick(3, 0, 0)
+        self.tick(3, 4000, 2400)
+        self.db.fail_writes = True
+        self.tick(1, 4000, 2400)  # the close write fails; the record is held
+        self.assertEqual(self.sessions(), {})
+        self.assertIsNotNone(self.tracker.pending_session)
+        self.db.fail_writes = False
+        self.tracker.drain_session()  # the shutdown drain, off the loops
+        (record,) = self.sessions().values()
+        self.assertEqual(record["wh"], 4000.0)
+        self.assertIsNone(self.tracker.pending_session)
+        # With nothing pending the drain is a no-op.
+        self.tracker.drain_session()
+        self.assertEqual(len(self.sessions()), 1)
+
     def test_a_seeded_session_without_measured_growth_has_no_intervals(self):
         # Restarted mid-charge, stopped before any tick showed growth: the
         # session is still written from the counters, but it carries no interval

@@ -2975,6 +2975,11 @@ def run(
     # lost with the process, bounded by the flush interval (the
     # unclean-power-loss window).
     sink.drain_history()
+    # The same exit honesty for the one session record a failed finalize
+    # left pending: the per-tick retry dies with the loops, so this is its
+    # last bounded attempt (#212's writer half). A failure is logged by
+    # the write itself; the record is lost with the process, as above.
+    tracker.drain_session()
 
 
 def main():
