@@ -377,6 +377,139 @@ class LiveVerdictTests(ArchiveBase):
         self.assertIn("2026-11-21", self.recon._evaluated)
         self.assertIn("2026-11-19", self.recon._evaluated)
 
+    def test_a_last_visit_read_failure_is_retried_after_the_window_rolls(self):
+        # A read failure on a day's final window visit would strand it:
+        # the next tick's window has moved past the day, nothing else
+        # re-derives it, and its absence -- the clean verdict -- would
+        # be a lie. The day is enrolled in the bounded retry set and
+        # verdicted on the next day's tick once reads recover, with the
+        # gap it carried all along.
+        self.seed_marker()
+        # The Nov 20 deferral shape, one day older: charging opens on
+        # the 18th with the day doc ending 1000 Wh ahead of the basis.
+        start = _at(18, 12)
+        self.apply(start, 3, 0, total_kwh=1000.0)
+        self.apply(start + timedelta(hours=1), 3, 1000, total_kwh=1001.0)
+        self.apply(start + timedelta(hours=2), 3, 2000, total_kwh=1002.0)
+        self.apply(start + timedelta(hours=3), 3, 3000, total_kwh=1004.0)
+        self.tick(_at(20, 9))  # prime; the 18th at offset 2: deferred
+        self.assertEqual(self.verdict_writes(), [])
+        # Reads fail across the 18th's final local day in the window.
+        self.db.fail_reads = True
+        self.tick(_at(21, 9))
+        self.db.fail_reads = False
+        self.assertEqual(self.recon._revisit, {"2026-11-18"})
+        self.assertNotIn("2026-11-18", self.recon._evaluated)
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-18") or {})
+        self.assertTrue(
+            any(
+                "read failed for 2026-11-18" in line
+                for line in self.verdict_lines()
+            )
+        )
+        # The window has rolled and the session closed overnight: the
+        # next day's tick retries the day presence-guarded and lands
+        # the verdict it was owed all along.
+        self.apply(_at(21, 6), 1, 3000, total_kwh=1004.0)
+        self.tick(_at(22, 8))
+        self.assertEqual(self.day_doc("2026-11-18")["gap_wh"], 1000.0)
+        self.assertEqual(self.recon._revisit, set())
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-11-18"]), 1
+        )
+
+    def test_a_last_visit_verdict_write_failure_is_retried_after_the_window_rolls(self):
+        # The enrollment covers the verdict-write arm of the failure
+        # too: a write failing on the final visit strands a KNOWN
+        # divergent day as verified-clean -- the worst silence -- so it
+        # rides the same bounded retry and lands on the next day's
+        # tick, exactly once.
+        self.seed_marker()
+        start = _at(18, 12)
+        self.apply(start, 3, 0, total_kwh=1000.0)
+        self.apply(start + timedelta(hours=1), 3, 1000, total_kwh=1001.0)
+        self.apply(start + timedelta(hours=2), 3, 2000, total_kwh=1002.0)
+        self.apply(start + timedelta(hours=3), 3, 3000, total_kwh=1004.0)
+        self.tick(_at(20, 9))  # prime; the 18th deferred
+        self.apply(_at(20, 23), 1, 3000, total_kwh=1004.0)  # closed
+        original = self.recon._write_verdict
+        failed = []
+
+        def flaky_verdict(day, gap, *, day_wh, basis):
+            if day == "2026-11-18" and not failed:
+                failed.append(day)
+                return False  # a transient single-document write failure
+            return original(day, gap, day_wh=day_wh, basis=basis)
+
+        with mock.patch.object(
+            self.recon, "_write_verdict", side_effect=flaky_verdict
+        ):
+            self.tick(_at(21, 9))  # the 18th's last visit
+        self.assertEqual(self.recon._revisit, {"2026-11-18"})
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-18") or {})
+        # Reads and writes recovered: the retry lands the verdict.
+        self.tick(_at(22, 8))
+        self.assertEqual(self.day_doc("2026-11-18")["gap_wh"], 1000.0)
+        self.assertEqual(self.recon._revisit, set())
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-11-18"]), 1
+        )
+
+    def test_a_revisited_day_still_overlapped_takes_the_unknown_mark(self):
+        # The retry keeps the last-visit semantics: a session still open
+        # over the enrolled day means no verdict is honest, so the
+        # retry ages it out into the explicit unknown mark -- the same
+        # horizon the in-window last visit enforces -- drained in the
+        # same tick.
+        self.seed_marker()
+        self.apply(_at(18, 12), 3, 0, total_kwh=1000.0)
+        self.seed_day("2026-11-18", 5.0)
+        self.tick(_at(20, 9))  # prime; the 18th deferred
+        self.db.fail_reads = True
+        self.tick(_at(21, 9))  # the 18th's last visit fails to read
+        self.db.fail_reads = False
+        self.assertEqual(self.recon._revisit, {"2026-11-18"})
+        # The session never closes: the retry cannot verdict the day,
+        # so it takes the null mark instead of silence.
+        self.tick(_at(22, 8))
+        self.assertIsNone(self.day_doc("2026-11-18")["gap_wh"])
+        self.assertEqual(self.recon._revisit, set())
+        self.assertEqual(self.recon._unmarked_inexact, {})
+        self.assertIn(
+            ("set", "history", "2026-11-18", {"gap_wh": None}, ["gap_wh"]),
+            self.verdict_writes(),
+        )
+
+    def test_a_revisit_expires_loudly_when_reads_never_recover(self):
+        # The retry is bounded at one day past the window -- exactly how
+        # long the live basis still guarantees the day -- because a
+        # verdict derived from a trimmed basis would be permanently
+        # wrong. Past the bound the day is dropped with a loud line
+        # rather than written dishonestly.
+        self.seed_marker()
+        self.apply(_at(18, 12), 3, 0, total_kwh=1000.0)
+        self.seed_day("2026-11-18", 5.0)
+        self.tick(_at(20, 9))  # prime; the 18th deferred
+        self.db.fail_reads = True
+        self.tick(_at(21, 9))  # the 18th's last visit fails to read
+        self.db.fail_reads = False
+        self.assertEqual(self.recon._revisit, {"2026-11-18"})
+        # No tick recovers within the grace day; the day after, the
+        # entry is past the horizon and is dropped loudly, never
+        # written -- the documented silence, not a dishonest verdict.
+        self.tick(_at(23, 8))
+        self.assertEqual(self.recon._revisit, set())
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-18"], []
+        )
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-18") or {})
+        self.assertTrue(
+            any(
+                "left the retry horizon" in line and "2026-11-18" in line
+                for line in self.verdict_lines()
+            )
+        )
+
 
 class BackfillTests(ArchiveBase):
     """The one bounded first-run pass over the trailing window's history."""
@@ -583,6 +716,42 @@ class BackfillTests(ArchiveBase):
         )
         self.assertEqual(
             len([w for w in self.verdict_writes() if w[2] == "2026-11-01"]), 1
+        )
+
+    def test_a_failed_prime_still_drains_the_queued_unknown_marks(self):
+        # A first run whose marker write fails has already queued the
+        # straddle-touched days for their explicit unknown marks; the
+        # retrying prime must not hold them hostage until it fully
+        # succeeds -- their absence would read as the clean verdict
+        # downstream, and the drain's writes fail just as
+        # harmlessly-retried during whatever is failing the marker.
+        self.seed_day("2026-11-19", 2.0)
+        self.seed_day("2026-11-20", 2.0)
+        self.seed_session(_at(19, 22), _at(20, 2), 4000.0, 4000.0)
+        # The stored interval predates this process (the restart fence).
+        self.recon._started_at = _at(20, 12)
+        original = self.recon._write_marker
+        failed = []
+
+        def flaky_marker():
+            if not failed:
+                failed.append(True)
+                return False
+            return original()
+
+        with mock.patch.object(self.recon, "_write_marker", side_effect=flaky_marker):
+            self.tick(_at(21, 9))
+        # Unprimed -- but the queued unknown marks landed anyway, and
+        # the queue is empty.
+        self.assertFalse(self.recon._primed)
+        self.assertIsNone(self.day_doc("2026-11-19")["gap_wh"])
+        self.assertIsNone(self.day_doc("2026-11-20")["gap_wh"])
+        self.assertEqual(self.recon._unmarked_inexact, {})
+        # The retry completes the prime; the marks are write-once.
+        self.tick(_at(21, 10))
+        self.assertTrue(self.recon._primed)
+        self.assertEqual(
+            len([w for w in self.verdict_writes() if w[2] == "2026-11-19"]), 1
         )
 
 

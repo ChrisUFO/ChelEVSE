@@ -1114,8 +1114,15 @@ written once is exact or absent. Those days carry an explicit
 verdict's own mark, and a mid-charge restart (which can lose the open
 interval — the documented in-memory limitation) lands exactly on such a
 day, so the silence would hide the one loss this seam exists to disclose.
-A failed mark write retries on the next tick; the mark is write-once like
-every verdict. A mid-charge restart's lost pre-restart ticks are genuinely
+A failed mark write retries on the next tick — even while a retrying
+first-run prime is still failing — and the mark is write-once like
+every verdict. A day whose final window visit itself failed (a read, or
+the verdict write) is retried for one further local day,
+presence-guarded by its own re-read and on a basis the in-memory
+accumulator still guarantees, before its silence is accepted; the retry
+horizon matches exactly how long that basis holds the day, so a verdict
+is never derived from a half-trimmed basis. A mid-charge restart's lost
+pre-restart ticks are genuinely
 absent from the archive, and that loss is exactly what the day's verdict
 discloses on the days it can attribute exactly.
 

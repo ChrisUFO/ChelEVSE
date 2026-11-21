@@ -37,6 +37,10 @@ energy is still moving. The deferral has a horizon, not a silence: a day
 still overlapped when the window ages it out (a pathological multi-day
 continuous block) carries the explicit ``gap_wh: null`` mark, because its
 basis never settled inside the window and absence is the clean verdict.
+A day whose final window visit itself failed (a read, or the verdict
+write) is retried for one further local day -- presence-guarded by the
+same re-read, on a basis the accumulator still guarantees -- before its
+silence is accepted.
 The verdict itself is exact: ``gap_wh`` is the raw
 same-basis delta with **no tolerance band** (the band rule stays seam A's);
 a session straddling midnight cancels precisely because both sides attribute
@@ -297,24 +301,41 @@ class ArchiveReconciler:
         # next tick; an unmarked day here would read as clean downstream
         # -- the one silence this module must not keep.
         self._unmarked_inexact = {}
+        # Days whose final window visit failed (a read, or the verdict
+        # write): the next tick's window no longer reaches such a day,
+        # and nothing else re-derives it (the backfill is first-run
+        # only), so its absence -- the clean verdict -- would be a lie.
+        # Each is retried before the offset loop for one further local
+        # day, presence-guarded by its own re-read on every retry, then
+        # dropped loudly: past that bound the live basis no longer
+        # guarantees the day, and a verdict derived from a trimmed
+        # basis would be permanently wrong.
+        self._revisit = set()
 
     # -- the tick ------------------------------------------------------------
 
     def tick(self, now_local, sink):
-        """One cadence pass: prime once, then verdict finalizable days."""
+        """One cadence pass: prime once, retry last-visit failures, verdict."""
         if not self._primed and not self._prime(now_local, sink):
+            # The prime retries next tick, but unknown marks it already
+            # queued (the straddle scan ran; a verdict or marker write
+            # failed after it) must not wait for full prime success:
+            # their absence would read as the clean verdict downstream,
+            # and the drain's writes fail just as harmlessly-retried
+            # during whatever outage is failing the prime.
+            self._drain_inexact_marks()
             return
         today = now_local.date()
         zone = now_local.tzinfo
+        self._revisit_failed_days(today, sink, zone)
         for offset in range(1, self.window_days + 1):
             day = (today - timedelta(days=offset)).isoformat()
             if day < self._recon_from_iso:
                 continue  # before the marker: legacy/unknown by design
             if day in self._evaluated or day in self._inexact:
                 continue
-            outcome = self._consider_day(
-                day, sink, zone, last_visit=(offset == self.window_days)
-            )
+            last_visit = offset == self.window_days
+            outcome = self._consider_day(day, sink, zone, last_visit=last_visit)
             if outcome in ("clean", "written", "verdicted"):
                 self._evaluated.add(day)
             elif outcome == "aged_out":
@@ -328,8 +349,50 @@ class ArchiveReconciler:
                     "the open session outlived the verdict window, "
                     "so no verdict is honest"
                 )
+            elif outcome == "error" and last_visit:
+                # The day leaves the window after this tick: enroll it
+                # in the bounded retry, or its silence would read as
+                # the clean verdict forever.
+                self._revisit.add(day)
         self._drain_inexact_marks()
         self._trim(today)
+
+    def _revisit_failed_days(self, today, sink, zone):
+        """Retry days whose final window visit failed, for one more day.
+
+        A read or verdict-write failure on a day's last visit would
+        otherwise strand it: no later tick of this process reaches the
+        day, and its absence -- the clean verdict -- would be a lie
+        nothing later corrects (the backfill is first-run only). Each
+        retry runs the full last-visit evaluation, presence-guarded by
+        its own re-read (the write-once charter holds); a day still
+        overlapped by the open session ages out into the explicit
+        unknown mark here. The wait is bounded at one day past the
+        window -- exactly how long the live basis still guarantees the
+        day -- because a verdict derived from a trimmed basis would be
+        permanently wrong; past it the day is dropped loudly instead.
+        """
+        cutoff = (today - timedelta(days=self.window_days + 1)).isoformat()
+        for day in sorted(self._revisit):
+            if day < cutoff:
+                self._revisit.discard(day)
+                log(
+                    f"archive reconciliation: day {day} left the retry "
+                    f"horizon still unmarked (reads never recovered); "
+                    f"its absence reads as clean"
+                )
+                continue
+            outcome = self._consider_day(day, sink, zone, last_visit=True)
+            if outcome in ("clean", "written", "verdicted"):
+                self._revisit.discard(day)
+            elif outcome == "aged_out":
+                self._unmarked_inexact[day] = (
+                    "the open session outlived the verdict window, "
+                    "so no verdict is honest"
+                )
+                self._revisit.discard(day)
+            # "error" keeps the day enrolled for the next tick;
+            # "deferred" is unreachable with last_visit=True.
 
     def _consider_day(self, day, sink, zone, last_visit=False):
         """Verdict one candidate day; returns the outcome word.
@@ -374,10 +437,12 @@ class ArchiveReconciler:
                 pending = sink.tracker.history.pending_for_day(day)
                 basis = self.basis.basis_for_day(day)
         except Exception as exc:
-            # A read failure on the last visit leaves the day unqueued:
-            # the aged-out queue is presence-guarded, and a blind mark
-            # could overwrite a stored verdict (the write-once charter).
-            # The failure is loud here, which is all this window allows.
+            # A read failure leaves the day unqueued: the aged-out queue
+            # is presence-guarded, and a blind mark could overwrite a
+            # stored verdict (the write-once charter). The failure is
+            # loud here, and a last-visit failure (read or verdict
+            # write) is enrolled in the tick's bounded retry set before
+            # the day's silence becomes final.
             log(
                 f"archive reconciliation read failed for {day} "
                 f"({exc.__class__.__name__}: {exc}); retrying next tick"
@@ -444,7 +509,9 @@ class ArchiveReconciler:
         tick stays write-free. The drain runs after the candidate loop so
         a day queued on its last visit lands in the same tick: the process
         can die at any instant, and a queued-but-unwritten day is the
-        silence the queue exists to prevent.
+        silence the queue exists to prevent. It also runs on the
+        prime-failure return, so marks a retrying first run already
+        queued do not wait for full prime success.
         """
         for day in sorted(self._unmarked_inexact):
             reason = self._unmarked_inexact[day]
