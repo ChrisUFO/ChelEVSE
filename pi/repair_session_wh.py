@@ -65,6 +65,7 @@ from session_wh_repair import (  # noqa: E402
     RECONCILE,
     REPAIR,
     UNUSABLE_INTERVALS,
+    _endpoint_ms,
     classify_session,
     parse_before,
 )
@@ -298,28 +299,52 @@ def fail_project_mismatch(mismatch):
 
 
 def collect(db, before=None):
-    """Classify every sessions document, id-sorted for a stable report."""
+    """Classify every sessions document, id-sorted for a stable report.
+
+    Each row carries the document's raw ``ended_at`` beside the decision,
+    so the report can show the era the bound judged it by.
+    """
     rows = []
     for snapshot in db.collection(SESSIONS).stream():
-        decision = classify_session(snapshot.to_dict() or {}, before)
-        rows.append((snapshot.id, decision))
+        document = snapshot.to_dict() or {}
+        decision = classify_session(document, before)
+        rows.append((snapshot.id, decision, document.get("ended_at")))
     rows.sort(key=lambda row: row[0])
     return rows
 
 
+def _format_ended(ended_at):
+    """The row's era evidence: ``YYYY-MM-DD HH:MMZ`` in UTC, or ``n/a`` when
+    the document carries nothing parseable (a live session, a malformed
+    value).
+
+    Parsed with the decision's own endpoint rules, so the column shows
+    exactly the instant the ``--before`` bound was evaluated against.
+    """
+    ms = _endpoint_ms(ended_at)
+    if ms is None:
+        return "n/a"
+    try:
+        ended = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return "n/a"
+    return ended.strftime("%Y-%m-%d %H:%MZ")
+
+
 def print_report(rows):
-    """The table: every classification but reconcile, with its figures."""
+    """The table: every classification but reconcile, its figures, and the
+    ``ended_at`` era the bound judged each row by."""
     shown = [row for row in rows if row[1].classification != RECONCILE]
     if not shown:
         print(f"no {SESSIONS} document diverges; nothing to repair.")
         return
     header = (
-        f"{'session':<20} {'class':<20} {'wh':>12} {'interval sum':>13} "
-        f"{'proposed wh':>12}"
+        f"{'session':<20} {'class':<20} {'ended':<17} {'wh':>12} "
+        f"{'interval sum':>13} {'proposed wh':>12}"
     )
     print(header)
     print("-" * len(header))
-    for doc_id, decision in shown:
+    for doc_id, decision, ended_at in shown:
         wh = f"{decision.wh:.1f}" if decision.wh is not None else "n/a"
         total = (
             f"{decision.interval_sum:.1f}"
@@ -330,14 +355,15 @@ def print_report(rows):
             f"{decision.repaired_wh:.1f}" if decision.repaired_wh is not None else "-"
         )
         print(
-            f"{doc_id:<20} {decision.classification:<20} {wh:>12} {total:>13} "
+            f"{doc_id:<20} {decision.classification:<20} "
+            f"{_format_ended(ended_at):<17} {wh:>12} {total:>13} "
             f"{proposed:>12}"
         )
 
 
 def print_summary(rows):
     counts = {}
-    for _, decision in rows:
+    for _, decision, _ended in rows:
         counts[decision.classification] = counts.get(decision.classification, 0) + 1
     skipped = ", ".join(
         f"{counts.get(name, 0)} {name}"
@@ -359,7 +385,7 @@ def print_summary(rows):
 def apply_repairs(db, rows):
     """Write only the wh field of each repair document; log every write."""
     failures = 0
-    for doc_id, decision in rows:
+    for doc_id, decision, _ended in rows:
         if decision.classification != REPAIR:
             continue
         try:

@@ -179,6 +179,41 @@ class WriteContract(unittest.TestCase):
         self.assertIn("era bound: sessions ended strictly before", out)
         self.assertIn("2026-11-20T18:41:52", out)
 
+    def test_the_report_shows_each_rows_ended_era(self):
+        # The dry-run table is the approval gate: every row carries the
+        # ended_at era the bound judged it by, n/a when the document has
+        # nothing parseable (a live session).
+        db = RepairDB(
+            {
+                "sessions": {
+                    "s_legacy": undercount(PRE_FIX_END),
+                    "s_post": undercount(POST_FIX_END),
+                    "s_live": {
+                        "started_at": POST_FIX_END - timedelta(hours=1),
+                        "wh": 15956,
+                        "intervals": undercount(PRE_FIX_END)["intervals"],
+                    },
+                }
+            }
+        )
+        code, out = run_cli([], db, self.key)
+        self.assertEqual(code, 0)
+        self.assertIn(
+            f"{'s_legacy':<20} {'repair':<20} {'2026-11-19 06:30Z':<17} "
+            f"{'15956.0':>12} {'48038.0':>13} {'48038.0':>12}",
+            out,
+        )
+        self.assertIn(
+            f"{'s_post':<20} {'after-bound':<20} {'2026-11-20 19:12Z':<17} "
+            f"{'15956.0':>12} {'n/a':>13} {'-':>12}",
+            out,
+        )
+        self.assertIn(
+            f"{'s_live':<20} {'after-bound':<20} {'n/a':<17} "
+            f"{'15956.0':>12} {'n/a':>13} {'-':>12}",
+            out,
+        )
+
 
 class ArgumentContract(unittest.TestCase):
     """argparse: the exit-2 refusals and the --before bound."""
