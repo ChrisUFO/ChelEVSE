@@ -1013,6 +1013,10 @@ if the counter's current value could have been delivered since midnight
 (judged by the same step allowance that validates jumps), a
 reset-and-rebuilt counter explains it just as well and nothing is
 concluded — an overnight outage's recovery never reads as a mismatch.
+Authority is in-memory only (the zero-write design persists nothing):
+every restart — each deploy — drops it and the next observed midnight
+rollover re-grants, so informational notes for up to ~24 h after a
+deploy are expected, not a sign of degraded detection.
 
 ### Month reconciliation (issue #161)
 
@@ -1028,7 +1032,9 @@ waits for a same-month sample instead of comparing October's counter
 against November's archive. The month's warning authority is one clean
 _day_ comparison: the day comparison proving the shared period semantics
 and time-zone alignment is exactly what the month needs, since the month
-counter rides the same observations and resets on the same local clock.
+counter rides the same observations and resets on the same local clock —
+and the same non-reset evidence that revokes the day's grant revokes the
+month's with it.
 
 A divergence near **1000×** at either period is not lost energy — it is a
 Wh-scaled counter (a firmware variant or misconfiguration) — and is

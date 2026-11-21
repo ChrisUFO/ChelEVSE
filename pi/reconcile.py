@@ -116,12 +116,21 @@ def _unit_mismatch(bridge_kwh, charger_kwh):
 
     A divergence near 1000x is not lost energy -- no charger delivers a
     month's power in an hour -- so it is rejected with its own line instead
-    of warned about. Only the ratio matters; the magnitudes are bounded by
-    the same tolerance machinery that bounds the comparison itself, which
-    is what keeps the band honest at every scale it can fire at.
+    of warned about. The ratio only carries that signature above
+    ``REARM_KWH`` on the small side: a genuine Wh-scaled counter crosses
+    1 kWh on its first charge session, while below it a ~1000x ratio is
+    exactly what an outage's opening looks like (a bridge dark since the
+    period start restarting into a charging session -- a whisker of
+    observed energy against a charger that delivered on its own schedule),
+    which the ordinary comparison already carries. The magnitudes are
+    bounded by the same tolerance machinery that bounds the comparison
+    itself, which is what keeps the band honest at every scale it can
+    fire at.
     """
-    if bridge_kwh <= 0.0:
-        return False  # nothing to scale: an ordinary comparison decides
+    if bridge_kwh < REARM_KWH:
+        # Too small to carry only the counter signature: the ordinary
+        # warning/note decides, not the rejection.
+        return False
     ratio = charger_kwh / bridge_kwh
     return abs(ratio - UNIT_MISMATCH_FACTOR) <= (
         UNIT_MISMATCH_TOLERANCE * UNIT_MISMATCH_FACTOR
@@ -569,15 +578,40 @@ class MonthReconciler(DayReconciler):
     gate. The day comparison proving the shared period semantics and
     time-zone alignment is exactly what the month needs too (the month
     counter rides the same observations and resets on the same local
-    clock), so the loop grants it via :meth:`note_clean_day`; the rollover
-    evidence itself stays the day reconciler's business.
+    clock), so the loop grants it via :meth:`note_clean_day`; the
+    rollover evidence itself stays the day reconciler's business. The
+    same holds in reverse: the loop feeds the day counter's non-resets
+    to :meth:`consider_evidence`, and each one revokes a held grant --
+    evidence that disproves the shared clock for the day disproves it
+    for the month too.
     """
 
     PERIOD = "month"
     COUNTER = "total_month"
 
     def consider_evidence(self, rollovers, non_resets):
-        """Not this reconciler's gate: month authority comes from the day."""
+        """Consume the day counter's non-resets: each revokes a held grant.
+
+        The month's gate is the day comparison (:meth:`note_clean_day`),
+        so rollovers are not this reconciler's business -- but a day
+        counter that stopped resetting across local midnight disproves
+        the shared period/time-zone alignment for *both* periods (the
+        counters ride the same clock), so the loop hands the day's
+        non-reset stamps here beside the day reconciler's own judgement.
+        A grant one contradicts falls: comparisons are informational
+        again until the next clean day comparison.
+        """
+        for observed in non_resets[self._non_resets_seen :]:
+            self._non_resets_seen += 1
+            if self.authorized:
+                self.authorized = False
+                log(
+                    f"month reconciliation: warning authority revoked -- "
+                    f"the day counter did not reset across the local "
+                    f"midnight before {observed:%Y-%m-%d %H:%M} local; "
+                    f"month comparisons are informational again until a "
+                    f"clean day comparison"
+                )
 
     def note_clean_day(self, now_local):
         """Grant authority after one clean day comparison (once)."""

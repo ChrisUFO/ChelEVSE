@@ -2561,7 +2561,9 @@ def reconcile_loop(
 
     Each tick first feeds the day counter's boundary evidence (observed
     rollovers and non-resets) to ``reconciler.consider_evidence``: authority
-    is evidence-driven, independent of whether an evaluation runs. A
+    is evidence-driven, independent of whether an evaluation runs. The
+    month reconciler consumes the same non-resets: a grant the evidence
+    disproves falls for both periods. A
     charger whose replies carry no period counters at all (firmware below
     4.2.2) makes the loop inactive after one informational line: nothing to
     reconcile, nothing to warn about. A rejected (implausible) sample
@@ -2599,8 +2601,13 @@ def reconcile_loop(
             return
         # Boundary evidence first (#161 PR-2): each observed rollover or
         # non-reset is judged exactly once, whether or not an evaluation
-        # runs this tick.
+        # runs this tick. The month rides the day's non-resets: a counter
+        # that stopped resetting disproves the shared clock for both
+        # periods, so a month grant one contradicts falls here too,
+        # before the month's next comparison.
         reconciler.consider_evidence(counter.rollovers, counter.non_resets)
+        if month_reconciler is not None:
+            month_reconciler.consider_evidence(counter.rollovers, counter.non_resets)
         if not counter.present:
             if not inactive_logged:
                 log(

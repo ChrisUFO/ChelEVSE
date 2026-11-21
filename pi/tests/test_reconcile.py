@@ -1599,6 +1599,48 @@ class MonthCounterTests(MonthLoopBase):
         self.assertEqual(self.month_counter.non_resets, [])
 
 
+class MonthNonResetTests(MonthLoopBase):
+    """The month's grant falls with the day's (#161): the same day-counter
+    non-reset that revokes the day's authority disproves the shared clock
+    for both periods, so the month's comparisons go informational again
+    until the next clean day comparison."""
+
+    def test_a_day_non_reset_after_both_grants_revokes_the_month_too(self):
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(0.0, day="2026-11-21")
+        self.seed_history(9.0)  # day 20: 9.0 vs 9.0 is the clean day ...
+        self.note(9.0)
+        self.note_month(18.0)  # ... and 18.0 vs 18.0 the clean month
+        self.run_loop(1)
+        self.assertTrue(self.reconciler.authorized)
+        self.assertTrue(self.month_reconciler.authorized)
+        # The alignment breaks after the grants (a time_zone change, a
+        # reflash): the next midnight produces a day non-reset, and both
+        # grants fall in the same tick -- one revoke line each.
+        self.note(9.0, _at(23, 59))
+        self.note(9.1, _at(0, 5, day=21))
+        self.note_month(27.0, _at(0, 5, day=21))
+        self.now = _at(0, 5, day=21)
+        self.run_loop(1)
+        revoked = [line for line in self.logs if "warning authority revoked" in line]
+        self.assertEqual(len(revoked), 2)
+        self.assertIn("day reconciliation", revoked[0])
+        self.assertIn("did not reset", revoked[0])
+        self.assertIn("month reconciliation", revoked[1])
+        self.assertIn("did not reset", revoked[1])
+        self.assertFalse(self.reconciler.authorized)
+        self.assertFalse(self.month_reconciler.authorized)
+        # Both periods' divergences are informational again: 0.0 vs 9.1
+        # and 18.0 vs 27.0, neither a warning.
+        (day_note,) = [line for line in self.logs if "note (day" in line]
+        self.assertIn("bridge low", day_note)
+        (month_note,) = [line for line in self.month_lines() if "note (month" in line]
+        self.assertIn("bridge low", month_note)
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+
 class MonthRobustnessTests(MonthLoopBase):
     def test_a_failed_month_read_skips_the_evaluation(self):
         self.note(12.5)
@@ -1654,6 +1696,36 @@ class UnitMismatchTests(MonthLoopBase):
         self.note(12.5)
         self.assertEqual(self.evaluate(archive=12.5, charger=30.0), "warned")
         self.assertEqual([l for l in self.logs if "rejected" in l], [])
+
+    def test_a_sub_floor_thousandfold_ratio_is_the_outage_not_the_counter_day(self):
+        # The bridge was dark all day and restarted into a charging
+        # session seconds old: a whisker of observed energy against a
+        # charger that delivered all day on its own schedule. The ratio
+        # reads exactly 1000x, but below REARM_KWH that is the outage
+        # path the warning exists for -- a genuine Wh-scaled counter
+        # crosses 1 kWh on its first charge session and is rejected from
+        # then on.
+        self.authorize()
+        self.assertEqual(
+            self.evaluate(archive=0.0, pending=0.05, charger=50.0), "warned"
+        )
+        (warning,) = self.warnings()
+        self.assertIn("bridge low", warning)
+        self.assertEqual([l for l in self.logs if "reconciliation rejected" in l], [])
+
+    def test_a_sub_floor_thousandfold_ratio_is_the_outage_not_the_counter_month(self):
+        # The month twin: a Pi dead since the month start, the charger
+        # ~100 kwh ahead on its own schedule, the bridge's first observed
+        # energy 0.1 kwh in. Ratio exactly 1000x at a magnitude too small
+        # to carry only the counter signature: the authorized bridge-low
+        # warning is the right line, not the unit-mismatch rejection.
+        self.month_reconciler.note_clean_day(self.now)
+        self.assertEqual(
+            self.evaluate_month(archive=0.0, pending=0.1, charger=100.0), "warned"
+        )
+        (warning,) = [l for l in self.month_lines() if "warning (month" in l]
+        self.assertIn("bridge low", warning)
+        self.assertEqual([l for l in self.logs if "reconciliation rejected" in l], [])
 
 
 class DSTFallBackTests(MonthLoopBase):
