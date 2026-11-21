@@ -2498,7 +2498,7 @@ def _month_totals(db, sink, now_local):
     range passes ``DocumentReference`` bounds, byte-lexicographic on the
     id within the collection. That reference form returned exactly the
     month's documents (2026-10: 13 docs / 223.350 kWh, 2026-11: 21 docs /
-    331.144 kWh, equal to an independent client-side control) with both
+    331.452 kWh, equal to an independent client-side control) with both
     bounds' inclusivity/exclusivity confirmed via ``history/2026-11-01``
     (upper exclusive, lower inclusive); re-run the smoke to re-verify.
     """
