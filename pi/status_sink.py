@@ -19,8 +19,8 @@ from write_policy import WritePolicy
 def log(message):
     # seam: tests patch bridge.log (PLAN.md facade rule)
     import bridge  # lazy, call-time only
-    return bridge.log(message)
 
+    return bridge.log(message)
 
 
 OFFLINE = {"charger_online": False, "updated_at": firestore.SERVER_TIMESTAMP}
@@ -49,6 +49,13 @@ TRIGGER_FIELDS = ("state", "vehicle", "pilot", "charger_online")
 # -- crosses into the document, so this is where they drop out. The schema is
 # additive: values already stored simply stop being written and read.
 TEMP_FIELDS = ("temp1", "temp2", "temp3")
+# The charger's period counters (#161): parsed solely for the day-reconciliation
+# path (``pi/reconcile.py``'s ChargerDayCounter, fed by the status loop from the
+# parsed observation), and dropped at this same boundary so no write of any
+# flavour carries them either.
+PERIOD_COUNTER_FIELDS = ("total_day", "total_month")
+
+
 class StatusSink:
     """The one status apply path, shared by the HTTP poll and MQTT snapshots.
 
@@ -69,9 +76,7 @@ class StatusSink:
     outage edge, outside the policy's cadences.
     """
 
-    def __init__(
-        self, db, tracker, notifier, arrivals=None, policy=None, counter=None
-    ):
+    def __init__(self, db, tracker, notifier, arrivals=None, policy=None, counter=None):
         self.status_doc = db.collection("status").document("current")
         self.tracker = tracker
         self.notifier = notifier
@@ -406,10 +411,12 @@ class StatusSink:
 
     def _apply(self, fields, source, complete):
         tracker = self.tracker
-        # The health-only temps drop out at this boundary: everything below --
-        # the accumulated view, the tracker, every publish -- is the document
-        # path, and none of it may carry them (#159).
-        fields = {k: v for k, v in fields.items() if k not in TEMP_FIELDS}
+        # The health-only temps and the reconciliation-only period counters
+        # drop out at this boundary: everything below -- the accumulated
+        # view, the tracker, every publish -- is the document path, and none
+        # of it may carry them (#159, #161).
+        drop = TEMP_FIELDS + PERIOD_COUNTER_FIELDS
+        fields = {k: v for k, v in fields.items() if k not in drop}
         # The observation merges into the accumulated view first -- a discrete
         # field it moves arms the write policy's trigger -- and the write
         # itself is decided after the state machine, so the document and the
@@ -565,5 +572,3 @@ def _coalesce(pending):
         else:
             kept.append(record)
     return kept
-
-
