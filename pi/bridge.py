@@ -144,6 +144,10 @@ from reconcile import (  # noqa: E402
     MonthReconciler,
     covered_window_sec,
 )
+from archive_reconcile import (  # noqa: E402
+    ArchiveReconciler,
+    SessionBasisTracker,
+)
 from status_sink import (  # noqa: E402
     MQTT_PENDING_QUEUE,
     StatusSink,
@@ -2552,6 +2556,7 @@ def reconcile_loop(
     sample_max_age=RECONCILE_SAMPLE_MAX_AGE_SEC,
     month_counter=None,
     month_reconciler=None,
+    archive_reconciler=None,
 ):
     """Cross-check the archive against the charger's own meters (#161).
 
@@ -2571,6 +2576,14 @@ def reconcile_loop(
     reconciliation is read-only (#161's invariant); a repair, if one is ever
     wanted, is a human decision made on the journal's evidence, never an
     automatic correction or backfill.
+
+    ``archive_reconciler`` (optional, #212 seam B) runs after the day and
+    month comparisons on the same tick: the day-doc ↔ sessions-archive
+    verdict pass, which reads only except for its own additive ``gap_wh``/
+    ``recon_from`` disclosure writes (field paths it owns -- measurements
+    are never rewritten). It runs even when the charger-counter seams are
+    inactive (firmware below 4.2.2): it needs no period counters, only the
+    tracker's applied observations and the archive.
 
     Each tick first feeds the day counter's boundary evidence (observed
     rollovers and non-resets) to ``reconciler.consider_evidence``: authority
@@ -2609,7 +2622,7 @@ def reconcile_loop(
         # the first evaluation needs an applied observation behind it.
         _stop.wait(initial_delay)
 
-    def one_tick():
+    def seam_a_tick():
         nonlocal inactive_logged, month_done_day
 
         if not counter.fed:
@@ -2720,6 +2733,16 @@ def reconcile_loop(
         )
         month_done_day = day  # only a comparison that ran spends the slot
 
+    def one_tick():
+        # Seam A first (#161): the charger-counter ↔ day-doc comparison,
+        # exactly as it was. Seam B (#212) follows on the same cadence:
+        # the day-doc ↔ sessions-archive verdicts, after seam A, reading
+        # only apart from its own disclosure writes -- never on the status
+        # path, and even while the counter seams sit inactive.
+        seam_a_tick()
+        if archive_reconciler is not None:
+            archive_reconciler.tick(_localnow(), sink)
+
     run_loop("reconcile", one_tick, lambda: _stop.wait(interval))
 
 
@@ -2753,8 +2776,10 @@ def run(
     is the validated ReconcileConfig (#161): its loop cross-checks
     ``history/<day>`` against the charger's ``total_day`` on the given
     cadence (zero disables it) and the month's documents against
-    ``total_month`` once per local day, and is joined, bounded, before the
-    shutdown drain --
+    ``total_month`` once per local day, and the sessions archive against the
+    day documents per day (seam B, #212: verdicts land only on the
+    reconciler's own ``gap_wh`` disclosure field), and is joined, bounded,
+    before the shutdown drain --
     its gather shares the sink's apply lock with the drain. One
     :class:`WriteCounter` (issue #96) is built here and threaded through
     every write site, ``status/health`` and the status loop's summary tick,
@@ -2786,18 +2811,22 @@ def run(
     # state (divergence episodes, warning authority). The month comparison
     # (PR-2) adds one counter stream of its own -- total_month from the same
     # observations -- and its reconciler, whose warning authority is the day
-    # comparison's one clean evaluation. Read-only; nothing here ever
-    # writes back.
+    # comparison's one clean evaluation. Seam B (#212 PR-3) adds the archive
+    # reconciler and the session-basis tracker that feeds it: the day-doc ↔
+    # sessions-archive verdicts, whose only writes are its own additive
+    # gap_wh/recon_from disclosure fields.
     day_counters = ChargerDayCounter()
     day_reconciler = DayReconciler()
     month_counters = ChargerDayCounter(period="month")
     month_reconciler = MonthReconciler()
-    tracker = StatusTracker(
+    archive_reconciler = ArchiveReconciler(db, counter=counter)
+    tracker = SessionBasisTracker(
         db,
         history=HistoryAccumulator(
             db, flush_sec=(history or HistoryConfig()).flush_sec, counter=counter
         ),
         counter=counter,
+        basis=archive_reconciler.basis,
     )
     tracker.seed()
     notifier = Notifier(db, counter=counter)
@@ -2963,6 +2992,7 @@ def run(
                 "sample_max_age": covered_window_sec(reconcile_feed_sec),
                 "month_counter": month_counters,
                 "month_reconciler": month_reconciler,
+                "archive_reconciler": archive_reconciler,
             },
             daemon=True,
         )
@@ -3067,6 +3097,10 @@ def main():
         log(
             f"day reconciliation: every {reconcile.interval:g}s against the "
             f"charger's total_day (reads only)"
+        )
+        log(
+            "sessions-archive reconciliation: per-day verdicts on the same "
+            "cadence (gap_wh disclosure writes only)"
         )
     else:
         log("day reconciliation: disabled (RECONCILE_INTERVAL=0)")

@@ -1,5 +1,5 @@
 """The energy-history reconciler (issue #161; day core in PR-1, month and
-warning authority in PR-2).
+warning authority in PR-2) — seam A of the chain.
 
 A read-only cross-check of the archive against the charger's own meter: the
 ``history/{date}`` documents accumulate what the bridge observed, and the
@@ -8,10 +8,16 @@ gateway firmware (>= 4.2.2; this charger runs 8.2.3) independently reports
 charger-local day/month boundary (the same ``time_zone``) and surviving a
 reboot. When the two disagree beyond tolerance, something lost energy -- an
 outage across a flush window, a dropped attribution step, a counter reset
-the bridge missed -- and the reconciler says so in the journal. It never
-writes: no history or session data is modified, corrected or backfilled,
-and the documents stay exactly what the accumulator wrote (#161's
-read-only invariant).
+the bridge missed -- and the reconciler says so in the journal.
+
+**The charter, shared by both seams (#212): detection never corrects; the
+verdict only discloses.** This seam writes nothing at all — no history or
+session data is modified, corrected or backfilled, and the documents stay
+exactly what the accumulator wrote (#161's read-only invariant). Its
+sibling, :mod:`archive_reconcile` (seam B: day docs vs the sessions
+archive), adds the chain's only writes: additive disclosure metadata
+(``gap_wh``/``recon_from``) on field paths it owns, never a measurement —
+the same promise from the other side of the archive.
 
 One evaluation is one comparison per period: the day side is today's
 ``history/{date}.kwh`` plus whatever the accumulator still holds pending
