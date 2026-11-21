@@ -635,8 +635,8 @@ test('the period sessions read keeps its empty and rejecting edges', async () =>
 // filed on (19 Nov 2026): the week of Mon 16 – Thu 19 Nov holds 48.1 kWh of
 // day documents while the counter-reset plug-in's failed reconciliation
 // leaves the aggregate pricing 13.7 kWh of it. The rendered cost cell must
-// carry the disclosure beside the figure; the pure math is pinned in
-// history.test.js.
+// carry the disclosure under the figure, on its own small muted line; the
+// pure math is pinned in history.test.js.
 
 // The live plan shape: one all-day November season at 0.1127, with the same
 // figure stored as the flat fallback.
@@ -657,7 +657,7 @@ function novemberPlan() {
   };
 }
 
-test('a partially covered week renders the disclosure beside the summary $', () => {
+test('a partially covered week renders the disclosure under the summary $', () => {
   resetHistory();
   enterHistory();
   const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
@@ -701,10 +701,13 @@ test('a partially covered week renders the disclosure beside the summary $', () 
     [reset],
   );
   showHistorySettings(novemberPlan());
-  // USD 1.54 prices 13.7 kWh at 0.1127 — said out loud beside the 48.1 the
-  // summary shows, which stays the day documents' own total.
+  // USD 1.54 prices 13.7 kWh at 0.1127 — said on the #194 caption, the small
+  // muted line under the figure, while the 48.1 the summary shows stays the
+  // day documents' own total and the figure keeps the display size alone.
   assert.equal(element('history-cost-cell').hidden, false);
-  assert.equal(element('history-cost').textContent, 'USD 1.54 · priced 13.7 of 48.1 kWh');
+  assert.equal(element('history-cost').textContent, 'USD 1.54');
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 13.7 of 48.1 kWh');
   assert.equal(element('history-total').textContent, '48.1');
 });
 
@@ -761,6 +764,9 @@ test('a window no rate row covers renders the note naming the rate, or 0.00 (#19
     'Part of this month prices at your flat rate USD 0.12.',
   );
   assert.equal(element('history-cost').textContent, 'USD 0.24');
+  // The session covers the day's every kWh, so the #194 caption stays hidden:
+  // the note below the card speaks, the figure stands alone.
+  assert.equal(element('history-cost-coverage').hidden, true);
   // The plan-wide banner still applies its own predicate (the gap is real
   // even though this window prices): both speak, each about its own scope.
   assert.equal(element('history-plan-banner').hidden, false);
@@ -800,11 +806,12 @@ test('a fully covered window under a gapped plan, and flat-only, keep the note h
   assert.equal(element('history-cost').textContent, 'USD 0.24');
 });
 
-test('the rate-scope note composes with the coverage disclosure beside the summary $', () => {
+test('the rate-scope note composes with the coverage caption under the summary $', () => {
   // The #194 live case on a season that expires inside the window (through
   // Wednesday 18 November): the cost cell keeps its own sentence — which
-  // energy the $ prices — and the note adds the tariff scope of the window on
-  // its own subdued line beneath; neither clobbers the other.
+  // energy the $ prices, on the small muted caption under the figure — and
+  // the note adds the tariff scope of the window on its own subdued line
+  // beneath the card; neither clobbers the other.
   resetHistory();
   enterHistory();
   const today = new Date(2026, 10, 19, 12); // Thursday 19 November 2026
@@ -862,7 +869,9 @@ test('the rate-scope note composes with the coverage disclosure beside the summa
       },
     ],
   });
-  assert.equal(element('history-cost').textContent, 'USD 1.80 · priced 16.0 of 48.1 kWh');
+  assert.equal(element('history-cost').textContent, 'USD 1.80');
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 16.0 of 48.1 kWh');
   assert.equal(element('history-window-note').hidden, false);
   assert.equal(
     element('history-window-note').textContent,
@@ -972,6 +981,9 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
   showHistoryStatus(charging);
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
   assert.equal(element('history-cost-cell').hidden, false);
+  // The live charge covers today's every recorded kWh: no caption while the
+  // figure prices it all.
+  assert.equal(element('history-cost-coverage').hidden, true);
   // Today's bar carries the same estimate (the current slot is selected).
   assert.equal(element('chart-cost').textContent, fmtMoney(0.3, 'GBP'));
   // The kWh display is still the day document's own total.
@@ -1001,8 +1013,11 @@ test("a mid-charge week carries the live estimate in today's bar and the summary
   showHistorySettings(nightly());
   // The figure still prices today's live charge alone — and now says so
   // (#194): yesterday's recorded kWh has no covering session, so the summary
-  // must not read as if GBP 0.30 covered both days.
-  assert.equal(element('history-cost').textContent, 'GBP 0.30 · priced 1.00 of 2.00 kWh');
+  // must not read as if GBP 0.30 covered both days. The caption carries that
+  // sentence on its own small muted line, under the figure.
+  assert.equal(element('history-cost').textContent, 'GBP 0.30');
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 1.00 of 2.00 kWh');
 });
 
 test('a settle in the session-first order prices the charge exactly once', () => {
