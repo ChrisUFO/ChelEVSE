@@ -12,7 +12,7 @@ import os
 import sys
 import unittest
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -175,10 +175,10 @@ class KnownGoodDayTests(LoopBase):
         self.assertEqual(self.warnings(), [])
 
     def test_the_floor_governs_small_days(self):
-        # max(0.05 kwh, 1% of the larger side): small totals use the floor.
+        # max(0.2 kwh, 1% of the larger side): small totals use the floor.
         self.note(0.1)
-        self.assertEqual(self.evaluate(archive=0.1, charger=0.14), "clean")
-        self.assertEqual(self.evaluate(archive=0.1, charger=0.16), "warned")
+        self.assertEqual(self.evaluate(archive=0.1, charger=0.28), "clean")
+        self.assertEqual(self.evaluate(archive=0.1, charger=0.32), "warned")
 
     def test_one_percent_governs_large_days(self):
         self.note(100.0)
@@ -189,6 +189,48 @@ class KnownGoodDayTests(LoopBase):
         # No history doc yet (early morning): archive 0 vs counter 0 is clean.
         self.note(0.0)
         self.assertEqual(self.evaluate(archive=0.0, charger=0.0), "clean")
+        self.assert_no_writes()
+
+
+class ObservationSkewTests(LoopBase):
+    """MQTT mode: the charger side advances at the HTTP reconcile cadence
+    (60 s) while the bridge side advances from every applied snapshot, so an
+    evaluation between HTTP reconciles compares a sample up to 60 s old
+    against a seconds-fresh total. The energy delivered in that window is on
+    the bridge side only -- observation skew, not energy lost -- and the
+    tolerance floor covers it (~0.19 kWh at the 48 A ceiling)."""
+
+    def test_an_aged_same_day_sample_tolerates_the_feed_gap(self):
+        # 13:59: a clean evaluation grants warning authority. 14:00: the
+        # hourly HTTP reconcile applied a 5.0 sample; the MQTT snapshots
+        # kept the bridge side moving. At 14:00:59 the sample is 59 s old
+        # and the bridge total holds ~0.13 kwh (7.7 kW x 59 s) the charger
+        # has not reported yet: with a 0.05 floor this exact interleaving
+        # warned "bridge high" about energy nobody lost.
+        self.seed_history(5.0)
+        self.note(5.0, _at(13, 59))
+        self.now = _at(13, 59)
+        self.run_loop(1)
+        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.seed_pending(0.13, _at(14, 0, 59))
+        self.now = _at(14, 0, 59)
+        self.run_loop(1)
+        self.assertEqual(self.warnings(), [])
+        self.assert_no_writes()
+
+    def test_a_real_divergence_beyond_the_skew_cover_still_warns(self):
+        # The floor is a cover for the feed gap, not a blind eye: once the
+        # gap exceeds what the cadence can explain, it is a divergence.
+        self.seed_history(5.0)
+        self.note(5.0, _at(13, 59))
+        self.now = _at(13, 59)
+        self.run_loop(1)
+        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.seed_pending(0.35, _at(14, 0, 59))
+        self.now = _at(14, 0, 59)
+        self.run_loop(1)
+        (warning,) = self.warnings()
+        self.assertIn("0.350 kwh", warning)
         self.assert_no_writes()
 
 
@@ -497,6 +539,101 @@ class ChargerDayCounterTests(ReconcileBase):
         value, _observed = self.counter.sample()
         self.assertEqual(value, 0.01)
 
+    def test_a_rollover_from_a_rejected_baseline_is_not_stamped(self):
+        # A corrupt jump poisons the level; a later drop measured FROM that
+        # untrusted number is not evidence of when midnight fell, so PR-2's
+        # authority rule must not read it. The drop's fresh reading is still
+        # the counter's own truth, so the counter rebaselines evaluation-ready
+        # rather than suppressing the next hourly evaluation.
+        self.note(10.0, _at(23, 5, day=20))
+        self.note(400.0, _at(23, 6, day=20))  # corrupt jump: rejected
+        midnight = _at(0, 0, 10, day=21)
+        self.note(0.01, midnight)
+        self.assertEqual(self.counter.rollovers, [])
+        self.assertTrue(self.counter.eval_ready)
+        value, _observed = self.counter.sample()
+        self.assertEqual(value, 0.01)
+
+
+class CounterThreadSafetyTests(ReconcileBase):
+    """One counter, two threads: the status loop notes while the reconcile
+    loop samples (the run() wiring shares one instance across both). The
+    pair a reader gets must carry one note's value with the same note's
+    stamp -- separate attributes tore across threads, and a torn pair
+    (yesterday's value, today's stamp) walks straight past the loop's
+    same-day guard and can fabricate an authorized warning.
+
+    The rejected-ordering half (a just-rejected reading still read as
+    eval-ready) cannot be reproduced from outside single bytecodes; it is
+    closed structurally, by carrying eval_ready inside the one atomically
+    replaced state tuple.
+    """
+
+    def test_concurrent_notes_never_tear_the_sampled_pair(self):
+        import threading
+
+        count = 2000
+        base = _at(9)
+        noted = {}  # note index -> the exact value that note stored
+        lock = threading.Lock()
+        violations = []
+        seen = []
+
+        def instant(i):
+            return base + timedelta(seconds=i)
+
+        notes = iter(range(count))
+        boots = iter(range(10_000, 10_000 + count))
+        with (
+            mock.patch.object(
+                bridge, "_localnow", side_effect=lambda: instant(next(notes))
+            ),
+            mock.patch.object(
+                bridge.time,
+                "clock_gettime",
+                side_effect=lambda *_clock: float(next(boots)),
+                create=True,
+            ),
+            mock.patch.object(
+                bridge.time, "monotonic", side_effect=lambda: float(next(boots))
+            ),
+        ):
+            # Both iterators feed note()'s clock reads only (the writer is
+            # the sole caller), so note i observes instant(i) exactly.
+
+            def writer():
+                for i in range(count):
+                    value = 5.0 + i * 0.001  # 1 Wh steps: always plausible
+                    self.counter.note(value)
+                    with lock:
+                        noted[i] = value
+
+            def reader():
+                for _ in range(count):
+                    pair = self.counter.sample()
+                    ready = self.counter.eval_ready  # the loop reads both
+                    if pair is None or not isinstance(ready, bool):
+                        continue
+                    value, observed = pair
+                    seen.append(observed)
+                    i = int((observed - base).total_seconds())
+                    with lock:
+                        expected = noted.get(i)
+                    if expected is not None and value != expected:
+                        violations.append((i, value, expected))
+
+            threads = [
+                threading.Thread(target=writer),
+                threading.Thread(target=reader),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(violations, [])
+        self.assertTrue(seen)  # the reader did observe samples
+
 
 class LoopRobustnessTests(LoopBase):
     def test_a_failed_history_read_skips_the_evaluation(self):
@@ -613,6 +750,66 @@ class StatusLoopFeedTests(unittest.TestCase):
         self.assertEqual(value, 7.5)
 
 
+class RunWiringTests(unittest.TestCase):
+    """run()-level wiring of the day reconciler (#161): ``RECONCILE_INTERVAL=0``
+    creates no reconcile thread, and the enabled loop is joined (bounded)
+    before the shutdown history drain takes the same sink lock -- the drain
+    is the #94 data-loss critical path, so nothing may reorder the two."""
+
+    INTERVALS = (10, 60, 60, 300, 5, 60, 300)
+
+    def run_bridge(self, *, reconcile, events):
+        started = []
+
+        class RecordingThread:
+            def __init__(self, target, args=(), kwargs=None, **_thread_options):
+                self.target = target
+                started.append(self)
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                events.append(f"join:{self.target.__name__}")
+
+        class RecordingSink(bridge.StatusSink):
+            def drain_history(self):
+                events.append("drain_history")
+
+        with (
+            mock.patch.object(bridge.threading, "Thread", RecordingThread),
+            mock.patch.object(bridge, "StatusSink", RecordingSink),
+            mock.patch.object(bridge, "command_loop"),
+        ):
+            bridge.run(
+                FakeDB(),
+                bridge.ChargerHost("charger"),
+                None,
+                self.INTERVALS,
+                object(),
+                bridge.WatchdogConfig(enabled=False),
+                reconcile=reconcile,
+            )
+        return started
+
+    def test_interval_zero_creates_no_reconcile_thread(self):
+        started = self.run_bridge(reconcile=bridge.ReconcileConfig(0), events=[])
+        targets = [thread.target.__name__ for thread in started]
+        self.assertNotIn("reconcile_loop", targets)
+        # Only the reconciler drops out; the pollers start as usual.
+        self.assertIn("status_loop", targets)
+
+    def test_the_reconcile_thread_joins_before_the_history_drain(self):
+        events = []
+        started = self.run_bridge(reconcile=bridge.ReconcileConfig(3600), events=events)
+        self.assertIn("reconcile_loop", [t.target.__name__ for t in started])
+        self.assertIn("join:reconcile_loop", events)
+        self.assertIn("drain_history", events)
+        self.assertLess(
+            events.index("join:reconcile_loop"), events.index("drain_history")
+        )
+
+
 class ReconcileEnvTests(unittest.TestCase):
     """main() parses the reconciler cadence like the other tunables."""
 
@@ -680,3 +877,16 @@ class ReconcileEnvTests(unittest.TestCase):
         ):
             bridge.main()
         self.assertTrue(any("day reconciliation: every 3600s" in line for line in logs))
+
+    def test_main_logs_the_disabled_line_when_interval_is_zero(self):
+        logs = []
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, {"RECONCILE_INTERVAL": "0"}, clear=True),
+            mock.patch.object(bridge, "init_firestore", return_value=FakeDB()),
+            mock.patch.object(bridge, "run"),
+            mock.patch.object(bridge, "log", logs.append),
+            mock.patch.object(bridge, "ChargerTransport"),
+        ):
+            bridge.main()
+        self.assertTrue(any("day reconciliation: disabled" in line for line in logs))

@@ -32,8 +32,11 @@ RECONCILE_INTERVAL = 3600.0
 # Two totals closer than this are the same number: metering noise, a flush
 # still pending, observation skew. The 1% arm scales with the day (a 30 kWh
 # day tolerates 0.3 kWh); the floor keeps tiny mornings from comparing
-# noise against noise.
-TOLERANCE_KWH = 0.05
+# noise against noise, and covers the MQTT-mode feed gap: the charger side
+# advances only at the HTTP reconcile cadence (60 s) while the bridge side
+# advances from every applied snapshot, so up to 60 s of delivering power
+# sits on one side only (~0.19 kWh at the charger's 48 A ceiling).
+TOLERANCE_KWH = 0.2
 TOLERANCE_FRACTION = 0.01
 # A divergence episode journals one line; it re-arms only when the gap
 # changes direction or grows by at least this much beyond the last journalled
@@ -83,15 +86,22 @@ class ChargerDayCounter:
     counter's level, so the evaluation that would have compared it is
     suppressed until a plausible step restores trust -- a corrupt reading
     must not look like a reconciliation (or a divergence) either way.
+
+    The status loop thread writes (:meth:`note`) while the reconcile thread
+    reads (:meth:`sample`, :attr:`eval_ready`); the whole accepted-sample
+    state lives in one atomically-replaced tuple, so a reader always sees
+    one note's value, stamp and trust together -- never yesterday's value
+    paired with today's stamp, and never a just-rejected reading still
+    marked ready.
     """
 
     def __init__(self):
-        self._value = None  # last accepted sample, kWh
-        self._boot = None  # _interval_clock() of the last accepted sample
-        self._observed = None  # local datetime of the last accepted sample
+        # (value_kwh, boot_clock, observed_local, eval_ready) of the latest
+        # applied sample, replaced whole in one attribute assignment (atomic
+        # under the GIL): separate attributes tore across threads.
+        self._state = None
         self._fed = False  # any observation applied here, usable or not
         self._present = False  # any usable sample ever (False => firmware <4.2.2)
-        self._eval_ready = False  # the latest sample may anchor an evaluation
         # Local datetimes of observed counter drops -- the charger's midnight
         # rollover or a mid-day reset. PR-2's warning-authority rule (a
         # rollover within +/-1 h of Pi-local midnight) reads this history;
@@ -111,13 +121,15 @@ class ChargerDayCounter:
     @property
     def eval_ready(self):
         """False while the latest sample is an untrusted, rejected reading."""
-        return self._eval_ready
+        state = self._state
+        return state is not None and state[3]
 
     def sample(self):
         """``(value, observed_local)`` of the latest accepted sample, or None."""
-        if self._value is None:
+        state = self._state
+        if state is None:
             return None
-        return self._value, self._observed
+        return state[0], state[2]
 
     def note(self, value):
         """One observation's ``total_day``; validated, never raised upon."""
@@ -129,45 +141,49 @@ class ChargerDayCounter:
         value = float(value)
         now = _localnow()
         boot = _interval_clock()
-        if self._value is None:
+        state = self._state
+        if state is None:
             # The first reading is only a baseline: nothing to step against.
-            self._value, self._boot, self._observed = value, boot, now
+            self._state = (value, boot, now, True)
             self._present = True
-            self._eval_ready = True
             return
-        gap = None if self._boot is None else boot - self._boot
-        step = value - self._value
+        gap = None if state[1] is None else boot - state[1]
+        step = value - state[0]
         if step < 0:
             # The counter went backwards: the charger's own midnight rollover
             # (expected daily) or a mid-day firmware reset. Either way the new
-            # reading is the counter's truth from here, and the drop itself is
-            # the one observation PR-2's authority rule needs, so it is
-            # stamped. The rebaselined counter stays evaluation-ready.
-            self.rollovers.append(now)
+            # reading is the counter's truth from here -- a reset is a direct
+            # observation, not a step to judge -- so the rebaselined counter
+            # stays evaluation-ready. The stamp is evidence only from a
+            # trusted level: a drop measured from a rejected (corrupt)
+            # baseline proves nothing about when midnight fell, so PR-2's
+            # authority rule must not read it.
+            if state[3]:
+                self.rollovers.append(now)
             log(
                 f"day counter rollover observed at "
                 f"{now:%Y-%m-%d %H:%M:%S} local "
-                f"({self._value:.3f} -> {value:.3f} kwh); rebaselining"
+                f"({state[0]:.3f} -> {value:.3f} kwh); rebaselining"
             )
-            self._value, self._boot, self._observed = value, boot, now
+            self._state = (value, boot, now, True)
             return
         allowed_wh = _interval_step_allowance(gap) if _is_number(gap) else None
         if allowed_wh is not None and step * 1000.0 > allowed_wh:
             # The same ceiling record_history applies: the charger cannot have
             # delivered this step in the time that passed, so the reading is
             # corrupt. Rebaseline to it (it is still the counter's level) but
-            # withhold trust until a plausible step lands on top.
+            # withhold trust until a plausible step lands on top. The level
+            # and its withheld trust are one atomic store, so no reader can
+            # pair the corrupt value with the previous sample's readiness.
             log(
                 f"day counter step dropped: {step:.3f} kwh "
                 f"({step * 1000.0:.0f} Wh) in {_gap_seconds(gap)} exceeds the "
                 f"{allowed_wh:.0f} Wh the charger could deliver; rebaselining "
                 f"the day counter"
             )
-            self._value, self._boot, self._observed = value, boot, now
-            self._eval_ready = False
+            self._state = (value, boot, now, False)
             return
-        self._value, self._boot, self._observed = value, boot, now
-        self._eval_ready = True
+        self._state = (value, boot, now, True)
 
 
 class DayReconciler:

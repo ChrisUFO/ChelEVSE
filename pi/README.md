@@ -975,13 +975,17 @@ could not have delivered in the elapsed time is rejected and rebaselined
 clear nor damn a day), while a drop is the counter's own midnight rollover
 or a mid-day firmware reset, rebaselined and stamped in memory.
 
-A divergence beyond `max(0.05 kWh, 1% of the larger side)` is **one bounded
+A divergence beyond `max(0.2 kWh, 1% of the larger side)` is **one bounded
 single-line journal entry per (day, episode)** naming both totals, the gap,
 the likely outage window `[last clean evaluation → first divergent
 observation]` (local), and that no history or session data was modified;
 it re-arms only when the gap changes direction or grows by ≥ 1 kWh. Until
 the reconciler has warning authority — granted by one clean evaluation —
-divergences are logged as informational notes only, never warnings.
+divergences are logged as informational notes only, never warnings. The
+floor covers the MQTT-mode feed gap: the charger side advances only at the
+HTTP reconcile cadence (60 s) while the bridge side advances from every
+applied snapshot, so up to a minute of delivering power can sit on one side
+only (~0.19 kWh at the charger's 48 A ceiling).
 
 **Zero writes, ever.** Reconciliation reads and journals; it never
 corrects, backfills or repairs anything. A divergence is evidence for a

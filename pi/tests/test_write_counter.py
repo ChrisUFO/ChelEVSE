@@ -627,7 +627,7 @@ class RunWiringTests(unittest.TestCase):
     def shared_counter(self):
         return self.loops()["status_loop"]["sink"].counter
 
-    def test_run_starts_exactly_the_six_poller_threads(self):
+    def test_run_starts_exactly_the_seven_poller_threads(self):
         # Seven since #161: the day reconciler rides its own thread too (it
         # polls nothing -- one evaluation per RECONCILE_INTERVAL).
         self.assertEqual(
