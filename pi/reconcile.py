@@ -111,6 +111,44 @@ def within_rollover_window(observed_local):
     )
 
 
+def within_month_window(observed_local):
+    """True when a month-counter reset stamp falls within 1 h of the month line.
+
+    Day 1, 00:00 local, wall clock, on either side -- the month analogue of
+    :func:`within_rollover_window`, on the same clock the month's day
+    documents are keyed by: a month counter whose boundary runs up to an
+    hour early or late still passes. A drop at any other hour is a
+    mid-month restart, which proves the counter resets but not the period
+    it reset to -- the month authority rule must not read it as month-line
+    evidence, exactly as the day rule refuses a mid-day reset.
+    """
+    month_start = observed_local.replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    if (observed_local - month_start).total_seconds() <= ROLLOVER_WINDOW_SEC:
+        return True
+    if observed_local.month == 12:
+        next_month_start = observed_local.replace(
+            year=observed_local.year + 1,
+            month=1,
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    else:
+        next_month_start = observed_local.replace(
+            month=observed_local.month + 1,
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    return (next_month_start - observed_local).total_seconds() <= ROLLOVER_WINDOW_SEC
+
+
 def _unit_mismatch(bridge_kwh, charger_kwh):
     """True when the charger counter reads like the bridge total in Wh.
 
@@ -321,15 +359,19 @@ class ChargerDayCounter:
             # A trusted pair straddling the period boundary with no drop, and
             # the current value alone exceeds what could have been delivered
             # since the boundary: no reset hides in this gap -- the counter
-            # sailed across (a time-zone or period mismatch). From an
-            # untrusted baseline nothing is concluded, and a smaller value
-            # leaves a reset-and-rebuilt counter just as likely.
+            # did not reset before this stamp. From an untrusted baseline
+            # nothing is concluded, and a smaller value leaves a
+            # reset-and-rebuilt counter just as likely. The line stops at
+            # what is proven: a boundary reset up to an hour late (the
+            # authority window's tolerance) can still land after this
+            # pair, so the mismatch conclusion is the reconcilers' to draw
+            # when no reset arrives, not this observation's.
             self.non_resets.append(now)
             log(
                 f"{self.period} counter did not reset across the local "
-                f"{self.period} boundary (observed {now:%Y-%m-%d %H:%M} local, "
-                f"{value:.3f} kwh vs {state[0]:.3f} kwh before): period "
-                f"mismatch or time-zone misalignment suspected"
+                f"{self.period} boundary before {now:%Y-%m-%d %H:%M} local "
+                f"({value:.3f} kwh vs {state[0]:.3f} kwh before); period "
+                f"alignment unproven until a boundary reset is observed"
             )
         self._state = (value, boot, now, True)
 
@@ -604,9 +646,10 @@ class MonthReconciler(DayReconciler):
         self._month_non_resets_seen = 0
         # True while the month counter's own period alignment is disproven
         # (a non-reset at the month line): the clean-day gate is withheld
-        # until the counter is observed resetting, or a cumulative
-        # ``total_month`` would walk back through that gate every day and
-        # keep false-warning forever.
+        # until the counter is observed resetting at the month line
+        # (within the hour either side) -- or a cumulative ``total_month``
+        # would walk back through that gate every day and keep
+        # false-warning forever.
         self._period_misaligned = False
 
     def consider_evidence(self, rollovers, non_resets):
@@ -643,20 +686,37 @@ class MonthReconciler(DayReconciler):
         cumulative counter, a firmware variant or misconfiguration), so a
         grant it disproves falls and the clean-day gate is withheld: a
         clean day proves the day's alignment, not a cumulative counter's.
-        The next observed month rollover -- the counter actually resetting
-        at its boundary -- restores the alignment and clean days grant
-        again: the same evidence-driven shape as the day rule, one
-        boundary deeper.
+        The next month rollover observed at the month line -- within the
+        hour either side (:func:`within_month_window`), the counter
+        actually resetting at its boundary -- restores the alignment and
+        clean days grant again; a rollover at any other hour is a
+        mid-month restart, which proves the counter resets but not the
+        period it reset to, so the gate stays withheld. The same
+        evidence-driven shape as the day rule, one boundary deeper.
         """
         for observed in rollovers[self._month_rollovers_seen :]:
             self._month_rollovers_seen += 1
-            if self._period_misaligned:
+            if not self._period_misaligned:
+                # Nothing is withheld: a drop while the counter's own
+                # alignment is not in question is the restart scenario,
+                # and the counter has already journaled its rebaseline.
+                continue
+            if within_month_window(observed):
                 self._period_misaligned = False
                 log(
                     f"month reconciliation: month counter reset observed "
-                    f"at {observed:%Y-%m-%d %H:%M} local after a non-reset; "
-                    f"period alignment restored -- the next clean day "
-                    f"comparison can re-grant warning authority"
+                    f"at {observed:%Y-%m-%d %H:%M} local after a non-reset, "
+                    f"within 1 h of the month line; period alignment "
+                    f"restored -- the next clean day comparison can "
+                    f"re-grant warning authority"
+                )
+            else:
+                log(
+                    f"month reconciliation: month counter reset observed "
+                    f"at {observed:%Y-%m-%d %H:%M} local, outside 1 h of "
+                    f"the month line; period alignment still unproven -- "
+                    f"a mid-month restart does not show the counter "
+                    f"measuring this month"
                 )
         for observed in non_resets[self._month_non_resets_seen :]:
             self._month_non_resets_seen += 1

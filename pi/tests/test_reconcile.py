@@ -1323,7 +1323,7 @@ class NonResetCounterTests(LoopBase):
         (mismatch,) = [
             line for line in self.logs if "day counter did not reset" in line
         ]
-        self.assertIn("period mismatch", mismatch)
+        self.assertIn("period alignment unproven", mismatch)
         self.assertFalse(self.reconciler.authorized)
         (note,) = self.notes()  # 25.0 vs 30.1: informational only
         self.assertIn("bridge low", note)
@@ -1790,6 +1790,91 @@ class MonthNonResetTests(MonthLoopBase):
         # 0.02 vs 0.5 warns again: the recovery is complete, not a silence.
         (warning,) = [line for line in self.month_lines() if "warning (month" in line]
         self.assertIn("bridge low", warning)
+        self.assert_no_writes()
+
+    def test_a_mid_month_restart_does_not_restore_month_alignment(self):
+        # The restore needs boundary evidence, exactly like the day rule's
+        # window: a total_month drop at any hour other than the month line
+        # is a restart, not proof the counter measures the month -- the
+        # same tick's clean day comparison must NOT grant and the month
+        # comparison stays a note; a later reset at the month line is.
+        self.authorize()
+        self.seed_month_docs({"2026-11-19": 9.0})
+        self.seed_history(9.0)
+        self.note(9.0)
+        self.note_month(18.0)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)
+        # December arrives and total_month sails across its line: the
+        # month's own evidence withholds the clean-day gate.
+        self.note(9.0, _at(23, 59, day=30))
+        self.note_month(18.0, _at(23, 59, day=30))
+        self.note(0.1, _at(0, 5, day=1, month=12))
+        self.note_month(18.1, _at(0, 5, day=1, month=12))
+        self.seed_history(0.1, day="2026-12-01")
+        self.now = _at(0, 5, day=1, month=12)
+        self.run_loop(1)
+        self.assertFalse(self.month_reconciler.authorized)
+        # A mid-month firmware restart drops total_month at 12:00 on the
+        # 10th -- rebaselined, but outside the month window: alignment
+        # stays unproven, and the same tick's clean day comparison (0.4 vs
+        # 0.4, fresh sample) must not walk the grant back through the gate.
+        self.note(0.4, _at(12, 0, day=10, month=12))
+        self.note_month(0.0, _at(12, 0, day=10, month=12))
+        self.seed_history(0.4, day="2026-12-10")
+        self.now = _at(12, 0, day=10, month=12)
+        self.run_loop(1)
+        self.assertFalse(self.month_reconciler.authorized)
+        self.assertTrue(self.reconciler.authorized)  # the day keeps its grant
+        (outside,) = [line for line in self.month_lines() if "outside 1 h" in line]
+        self.assertIn("still unproven", outside)
+        self.assertEqual(
+            [line for line in self.month_lines() if "alignment restored" in line],
+            [],
+        )
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            1,
+        )
+        # 0.5 (December's documents) vs 0.0 stays informational: a counter
+        # proven not to measure the month must not false-warn.
+        (month_note,) = [
+            line
+            for line in self.month_lines()
+            if "note (month" in line and "bridge high" in line
+        ]
+        self.assertIn("month 2026-12", month_note)
+        self.assertEqual(self.warnings(), [])
+        # January: a reset at the month line is the boundary evidence the
+        # gate waits for -- alignment restored, the next clean day grants.
+        self.note(0.6, _at(23, 59, day=31, month=12))
+        self.note_month(0.1, _at(23, 59, day=31, month=12))
+        self.note(0.02, _at(0, 5, day=1, month=1, year=2027))
+        self.note_month(0.0, _at(0, 5, day=1, month=1, year=2027))
+        self.seed_history(0.02, day="2027-01-01")
+        self.now = _at(0, 5, day=1, month=1, year=2027)
+        self.run_loop(1)
+        self.assertTrue(self.month_reconciler.authorized)
+        (restored,) = [
+            line for line in self.month_lines() if "alignment restored" in line
+        ]
+        self.assertIn("within 1 h of the month line", restored)
+        self.assertEqual(
+            len(
+                [
+                    line
+                    for line in self.month_lines()
+                    if "warning authority granted" in line
+                ]
+            ),
+            2,
+        )
         self.assert_no_writes()
 
 
