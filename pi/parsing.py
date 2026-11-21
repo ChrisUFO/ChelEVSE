@@ -6,10 +6,10 @@ coercion helpers, and the charging-interval clock/step-allowance arithmetic
 the session tracker attributes energy with.
 """
 
+import math
 import time
 
 from firebase_admin import firestore
-
 
 
 STATE_LABELS = {
@@ -29,6 +29,8 @@ STATE_LABELS = {
 # clock resolution so two ticks that land together cannot reject a real step.
 MAX_INTERVAL_POWER_W = 25000.0
 INTERVAL_STEP_FLOOR_WH = 50.0
+
+
 class CommandError(ValueError):
     """Command document cannot be applied to the charger.
 
@@ -71,6 +73,10 @@ def parse_status(data):
     tile-only average ``temp_c`` is not computed at all. ``_sensor_temp`` keeps
     the absent-sensor sentinels (0/``false``/negative -> None) so the gate never
     sees a phantom reading.
+
+    The ``total_day``/``total_month`` period counters are parsed the same way
+    for the day-reconciliation path only (#161, `pi/reconcile.py`): the status
+    sink drops them beside the temps, so they never reach ``status/current``.
     """
     state = data.get("state")
     return {
@@ -86,6 +92,8 @@ def parse_status(data):
         "temp1": _sensor_temp(data.get("temp1")),
         "temp2": _sensor_temp(data.get("temp2")),
         "temp3": _sensor_temp(data.get("temp3")),
+        "total_day": _period_counter(data.get("total_day")),
+        "total_month": _period_counter(data.get("total_month")),
         "pilot": _pilot(data.get("pilot")),
         "charger_online": True,
         "updated_at": firestore.SERVER_TIMESTAMP,
@@ -94,7 +102,9 @@ def parse_status(data):
 
 # parse_status outputs that keep the raw key's name. The per-sensor temps are
 # deliberately absent: a snapshot never carries them into the write path (the
-# health gate reads them from the full parse, not from snapshots).
+# health gate reads them from the full parse, not from snapshots). So are the
+# period counters (#161): the day reconciler is fed by the status loop's
+# applied observations, never by an MQTT partial.
 _SNAPSHOT_FIELDS = (
     "state",
     "amp",
@@ -237,6 +247,21 @@ def _sensor_temp(value):
     return None
 
 
+def _period_counter(value):
+    """One full-precision kWh period counter, or None when unusable.
+
+    The gateway firmware's ``total_day``/``total_month`` counters (>= 4.2.2;
+    this charger runs 8.2.3) are already kWh with no unit coercion to do.
+    Anything but a finite non-negative number is absent -- older firmware
+    omits the keys entirely, and a bool is not a number. Kept for the
+    day-reconciliation path only (#161): the sink drops these fields before
+    anything reaches ``status/current``, exactly like the sensor temps.
+    """
+    if _is_number(value) and value >= 0 and math.isfinite(value):
+        return float(value)
+    return None
+
+
 def _amps(value):
     """OpenEVSE reports charge current in milliamps; the contract is amps."""
     if _is_number(value) and value >= 0:
@@ -285,5 +310,3 @@ def _gap_seconds(gap):
     if not _is_number(gap) or gap < 0:
         return "no earlier reading"
     return f"{float(gap):.0f} s"
-
-

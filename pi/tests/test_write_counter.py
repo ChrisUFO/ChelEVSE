@@ -169,9 +169,7 @@ class SummaryIntervalTests(CounterBase):
         self.assertFalse(self.counter.maybe_summary())
         self.clock.advance(1)
         self.assertTrue(self.counter.maybe_summary())
-        summaries = [
-            line for line in self.logs if line.startswith("firestore writes:")
-        ]
+        summaries = [line for line in self.logs if line.startswith("firestore writes:")]
         self.assertEqual(len(summaries), 2)
 
     def test_the_summary_reports_the_windowed_counts(self):
@@ -187,10 +185,7 @@ class TripwireTests(CounterBase):
             self.counter.record("status")
         self.assertEqual(
             self.warning_lines(),
-            [
-                "write budget warning: 10000 writes in 24h "
-                "— 50% of the free-tier quota"
-            ],
+            ["write budget warning: 10000 writes in 24h — 50% of the free-tier quota"],
         )
         # More writes in the same stretch stay silent.
         self.counter.record("status")
@@ -373,9 +368,7 @@ class WriteSiteTests(unittest.TestCase):
             )
 
     def test_a_transport_health_write_counts_health(self):
-        bridge.write_transport_health(
-            self.db, "mqtt", True, counter=self.counter
-        )
+        bridge.write_transport_health(self.db, "mqtt", True, counter=self.counter)
         self.assertEqual(self.kinds()["health"], 1)
 
     def test_a_failed_transport_health_write_notes_the_failure_and_logs(self):
@@ -443,9 +436,7 @@ class HealthExposureTests(unittest.TestCase):
         self.counter.record("status")
         self.counter.record("status")
         self.counter.record("history")
-        bridge.write_transport_health(
-            self.db, "http", False, counter=self.counter
-        )
+        bridge.write_transport_health(self.db, "http", False, counter=self.counter)
         (write,) = self.health_writes()
         self.assertEqual(write[3]["writes_24h"], 3)
         self.assertEqual(write[3]["writes_by_kind"]["status"], 2)
@@ -595,14 +586,18 @@ def capture_run_wiring():
         def start(self):
             pass
 
+        def join(self, timeout=None):
+            pass  # the reconcile loop's bounded shutdown join (#161)
+
     def record_command(*args, **kwargs):
         bound = inspect.signature(real_command_loop).bind(*args, **kwargs)
         bound.apply_defaults()
         command["bound"] = bound
 
-    with mock.patch.object(
-        bridge.threading, "Thread", RecordingThread
-    ), mock.patch.object(bridge, "command_loop", side_effect=record_command):
+    with (
+        mock.patch.object(bridge.threading, "Thread", RecordingThread),
+        mock.patch.object(bridge, "command_loop", side_effect=record_command),
+    ):
         bridge.run(
             FakeDB(),
             bridge.ChargerHost("charger"),
@@ -632,7 +627,9 @@ class RunWiringTests(unittest.TestCase):
     def shared_counter(self):
         return self.loops()["status_loop"]["sink"].counter
 
-    def test_run_starts_exactly_the_six_poller_threads(self):
+    def test_run_starts_exactly_the_seven_poller_threads(self):
+        # Seven since #161: the day reconciler rides its own thread too (it
+        # polls nothing -- one evaluation per RECONCILE_INTERVAL).
         self.assertEqual(
             set(self.loops()),
             {
@@ -642,6 +639,7 @@ class RunWiringTests(unittest.TestCase):
                 "schedule_loop",
                 "notifications_loop",
                 "claims_loop",
+                "reconcile_loop",
             },
         )
         self.assertEqual(self.command.arguments["interval"], 5)
@@ -705,9 +703,7 @@ class RunWiringTests(unittest.TestCase):
         )
         # The claims loop derives its offline precedence from the tracker the
         # status loop already owns -- one online fact per process.
-        self.assertIs(
-            loops["claims_loop"]["tracker"], loops["status_loop"]["tracker"]
-        )
+        self.assertIs(loops["claims_loop"]["tracker"], loops["status_loop"]["tracker"])
         self.assertIsNone(self.command.arguments["source"])
 
 
@@ -737,8 +733,9 @@ class ConfigLoopOutageSurvivalTests(unittest.TestCase):
 
         event = threading.Event()
         event.set()  # a config_version arrived: the sync is owed now
-        with mock.patch.object(bridge, "log", logs.append), mock.patch.object(
-            bridge, "_stop", _TickSensitiveStop(1)
+        with (
+            mock.patch.object(bridge, "log", logs.append),
+            mock.patch.object(bridge, "_stop", _TickSensitiveStop(1)),
         ):
             # Returning normally is the assertion: the failure cycle,
             # tail wait included, completes instead of raising TypeError.

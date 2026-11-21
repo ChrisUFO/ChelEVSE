@@ -16,6 +16,8 @@ Failure-isolated loops (daemon threads; the service never crash-loops):
   commands every COMMAND_INTERVAL: pending commands/ docs -> charger HTTP API
   settings every SETTINGS_INTERVAL: settings/current.charger_host -> the live
     charger address, applied without a restart (CHARGER_HOST is the bootstrap)
+  day reconciliation every RECONCILE_INTERVAL: history/<day> vs the charger's
+    own total_day meter -- read-only, journal-only, zero writes (issue #161)
 With MQTT_ENABLED=true the status topics arrive on the MQTT source and /status
 becomes reconciliation only (MQTT_RECONCILE_SEC); /config runs on a
 config_version change. Everything still flows through one apply_status path.
@@ -73,10 +75,12 @@ from env_config import (  # noqa: E402
     MQTT_RECONCILE_SEC,
     HistoryConfig,
     MqttConfig,
+    ReconcileConfig,
     WatchdogConfig,
     history_config_or_exit,
     mqtt_config,
     mqtt_config_or_exit,
+    reconcile_config_or_exit,
     watchdog_config,
     watchdog_config_or_exit,
     write_policy_config_or_exit,
@@ -133,6 +137,11 @@ from status_tracker import (  # noqa: E402
     _merge_intervals,
     _merge_session,
 )
+from reconcile import (  # noqa: E402
+    ChargerDayCounter,
+    DayReconciler,
+    covered_window_sec,
+)
 from status_sink import (  # noqa: E402
     MQTT_PENDING_QUEUE,
     StatusSink,
@@ -166,6 +175,32 @@ CLAIMS_INITIAL_DELAY = 11
 # config until the charger's next setting change).
 CONFIG_RETRY_MIN_SEC = 5
 CONFIG_RETRY_MAX_SEC = 60
+# The day reconciler (#161) starts after the status loop has had a chance to
+# apply its first observations (the charger-side sample needs one applied
+# /status reply); from then on one evaluation is one history/<day> read plus
+# at most one journal line -- never a write.
+RECONCILE_INITIAL_DELAY = 30
+# Bounded join on shutdown: a tick mid-read when the stop event lands must not
+# straddle the history drain that follows, which takes the same sink lock.
+RECONCILE_JOIN_SEC = 5.0
+# How old the charger sample may be at an evaluation (#161): ONE feed
+# interval, clamped to what the tolerance floor can cover at the
+# charger's ceiling power (reconcile.covered_window_sec -- the enforced
+# floor<->window invariant). In MQTT mode the day counter advances only
+# at the HTTP reconcile cadence while the bridge side advances from
+# every applied snapshot, so the skew grows with the sample's age, and
+# the floor absorbs exactly one interval of it at the charger's ceiling
+# (48 A at the UK band top, 253 V: ~59 s of full power against the 0.2
+# kWh floor): a wider window would admit ages the floor cannot explain,
+# so a single skipped or discarded reconcile while charging at the
+# ceiling would warn about observation skew, not lost energy. A missed
+# feed suppresses one evaluation instead (scheduling jitter skips a
+# tick, never warns). run() resolves the live window from the
+# configured cadence (MQTT reconcile or status poll) and funnels it
+# through the same clamp, so no cadence can widen the window past the
+# coverage bound -- a slower feed simply suppresses evaluations; this
+# default matches the shipped MQTT one.
+RECONCILE_SAMPLE_MAX_AGE_SEC = covered_window_sec(MQTT_RECONCILE_SEC)
 # How often the status/config loops re-check the MQTT connection. The MQTT
 # client itself reconnects in its own network loop; this only bounds how long a
 # fallback or a config-version reaction can take.
@@ -331,6 +366,8 @@ def redact_config(data):
         key: REDACTED if key in SECRET_CONFIG_KEYS else value
         for key, value in data.items()
     }
+
+
 def settings_loop(db, host, bootstrap, interval, initial_delay=0):
     """Apply ``settings/current.charger_host`` to the running bridge.
 
@@ -510,9 +547,7 @@ def recovery_decision(
             if http_reachable
             else "HTTP unreachable; restarting the gateway over MQTT"
         )
-        return _decision(
-            "restart_gateway", reason, WATCHDOG_ALERT_RESTART, transport
-        )
+        return _decision("restart_gateway", reason, WATCHDOG_ALERT_RESTART, transport)
     reason = (
         "controller is not answering"
         if http_reachable
@@ -714,9 +749,7 @@ class Watchdog:
             )
             self.last_result = self._restart_mqtt(device)
         else:
-            log(
-                f"watchdog: {action} -> POST /restart device={device} ({inputs})"
-            )
+            log(f"watchdog: {action} -> POST /restart device={device} ({inputs})")
             self.last_result = self._restart(device)
         self.last_attempt_at = now
         self.attempts.append(now)
@@ -840,9 +873,7 @@ class Watchdog:
                 self.failed_alerted = True
                 changed = True
         elif (
-            self.episode_attempts
-            and self._cap_reached(now)
-            and not self.failed_alerted
+            self.episode_attempts and self._cap_reached(now) and not self.failed_alerted
         ):
             # This episode already spent an attempt and the hour's allowance is
             # gone while the charger is still down. The last attempt stays on
@@ -1081,9 +1112,7 @@ def _escalate_reconcile_failure(
             "no mqtt snapshot, outage unconfirmed"
         )
         return False
-    landed = sink.apply_offline_if_no_snapshot(
-        mqtt_snapshots, _offline_reason(exc)
-    )
+    landed = sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc))
     if landed is None:
         log(
             f"status reconcile failed ({_offline_reason(exc)}); "
@@ -1165,6 +1194,7 @@ def status_loop(
     sink=None,
     observations=None,
     claims=None,
+    day_counters=None,
 ):
     """Poll /status and apply it; with MQTT, poll only to reconcile.
 
@@ -1196,6 +1226,11 @@ def status_loop(
     tracker has flagged offline (the offline fact folds into
     ``reason: "unknown"``; ``reachable`` tracks the endpoint, not the
     tracker). No new poller: the claims fetch rides this loop's cadence.
+
+    ``day_counters`` is the run's :class:`reconcile.ChargerDayCounter`: every
+    applied HTTP observation also hands the day reconciler its ``total_day``
+    sample (#161) -- the one field the sink drops at the document boundary,
+    read here from the full parse. No new charger GET, no new document field.
     """
     sink = sink or StatusSink(
         db,
@@ -1224,10 +1259,13 @@ def status_loop(
             changed,
         ) = _mqtt_transport_state(mqtt, transport_state)
         if changed:
-            previous, transport_state = transport_state, (
-                current,
-                mqtt_connected,
-                announced,
+            previous, transport_state = (
+                transport_state,
+                (
+                    current,
+                    mqtt_connected,
+                    announced,
+                ),
             )
             source = current
             if mqtt_ready:
@@ -1291,15 +1329,19 @@ def status_loop(
                         mqtt_snapshots = mqtt.snapshots
                     reconcile_failures = 0
                     if observations is not None:
-                        observations.note_status(
-                            fields, parse_fault_counters(payload)
-                        )
+                        observations.note_status(fields, parse_fault_counters(payload))
                     if claims is not None:
                         # This applied observation is one reconcile tick for
                         # the claims loop: hand it the reply's claims_version
                         # and state, then wake the fetch (#159).
                         claims.note_status(fields, payload)
                         claims.wake()
+                    if day_counters is not None:
+                        # The day reconciler's charger side (#161): the same
+                        # applied observation's total_day, read from the full
+                        # parse before the sink dropped it at the document
+                        # boundary.
+                        day_counters.note(fields.get("total_day"))
                 watchdog.record_success(payload)
         _publish_due_heartbeat(sink, heartbeat, watermark)
         _status_scheduler_tick(sink)
@@ -1361,9 +1403,7 @@ def _config_source_edge(mqtt, config_event, source, connected, mqtt_mode):
         return None, None
     current = "mqtt" if mqtt_mode else "http"
     if current != source:
-        return current, _config_source_detail(
-            mqtt, config_event, connected, mqtt_mode
-        )
+        return current, _config_source_detail(mqtt, config_event, connected, mqtt_mode)
     return None, None
 
 
@@ -1618,9 +1658,7 @@ def config_loop(
                     # status/config -- one config poll, two consumers (D6).
                     observations.note_config(view)
                 counter.record("config")
-                _consume_config_version_trigger(
-                    mqtt, config_event, mqtt_mode, version
-                )
+                _consume_config_version_trigger(mqtt, config_event, mqtt_mode, version)
                 pending = False
                 retry_delay = 0.0
                 retry_at = 0.0
@@ -1699,10 +1737,7 @@ def _fail_stale_command(doc, counter):
         doc.reference.update({"status": "failed", "error": reason})
     except Exception as exc:
         counter.note_failure(exc)
-        log(
-            f"command {doc.id} stale update failed "
-            f"({exc.__class__.__name__}: {exc})"
-        )
+        log(f"command {doc.id} stale update failed ({exc.__class__.__name__}: {exc})")
         return
     counter.record("command")
     log(f"command {doc.id} failed: {reason}")
@@ -1980,9 +2015,7 @@ def schedule_loop(
                 malformed_logged = False
                 enabled, rules = normalized
                 digest = schedule_hash(enabled, rules)
-                events, desired_event_rules = schedule_events(
-                    rules if enabled else []
-                )
+                events, desired_event_rules = schedule_events(rules if enabled else [])
                 now = time.monotonic()
                 changed = digest != last_hash
                 due = (
@@ -2189,9 +2222,7 @@ def notifications_loop(
         # needs none -- an empty map replaces the stored value.
         if watermark:
             departed = {
-                key: firestore.DELETE_FIELD
-                for key in alerted
-                if key not in watermark
+                key: firestore.DELETE_FIELD for key in alerted if key not in watermark
             }
             if departed:
                 write["alerted"] = {**watermark, **departed}
@@ -2356,9 +2387,7 @@ def claims_loop(
             else:
                 facts = observations.snapshot()
                 if tracker is not None:
-                    facts["charger_online"] = getattr(
-                        tracker, "charger_online", None
-                    )
+                    facts["charger_online"] = getattr(tracker, "charger_online", None)
                 content = claims_project(target, facts)
         stable = claims_comparable(content)
         if stable == last_stable:
@@ -2415,6 +2444,139 @@ def claims_loop(
     run_loop("claims", one_tick, lambda: _stop.wait(tick))
 
 
+def _day_totals(db, sink, day):
+    """``(archive_kwh, pending_kwh)`` for one day, under the sink's apply lock.
+
+    Every accumulator mutation -- ``observe``, ``flush``, the shutdown drain
+    -- runs under that lock (the sink owns it; this read-only gather borrows
+    it, #161), so the history document read and the pending sum are taken
+    inside one hold: outside it, a flush landing between the two would move
+    its energy from pending to the document after the document was read, and
+    the day's total would silently lose it. Reads only; a read failure is
+    one journal line and None, never a crash -- the next tick retries.
+    """
+    try:
+        with sink._lock:
+            snapshot = db.collection("history").document(day).get()
+            data = snapshot.to_dict() if snapshot.exists else None
+            archive = data.get("kwh") if isinstance(data, dict) else None
+            archive_kwh = float(archive) if _is_number(archive) else 0.0
+            pending_kwh = sink.tracker.history.pending_for_day(day)
+    except Exception as exc:
+        log(f"day reconciliation read failed ({exc.__class__.__name__}: {exc})")
+        return None
+    return archive_kwh, pending_kwh
+
+
+def reconcile_loop(
+    db,
+    sink,
+    counter,
+    reconciler,
+    interval,
+    *,
+    initial_delay=0,
+    sample_max_age=RECONCILE_SAMPLE_MAX_AGE_SEC,
+):
+    """Cross-check the archive's day total against the charger's own (#161).
+
+    One tick is one evaluation: the charger side is the latest validated
+    ``total_day`` sample the status loop fed ``counter``; the bridge side is
+    today's ``history/<day>.kwh`` plus the accumulator's still-pending energy
+    for the day (:func:`_day_totals`). The tolerance, the episode rule and
+    the warning-authority rule live in :class:`reconcile.DayReconciler`;
+    this loop only gathers and journals. **Zero Firestore writes, ever** --
+    reconciliation is read-only (#161's invariant); a repair, if one is ever
+    wanted, is a human decision made on the journal's evidence, never an
+    automatic correction or backfill.
+
+    A charger whose replies carry no period counters at all (firmware below
+    4.2.2) makes the loop inactive after one informational line: nothing to
+    reconcile, nothing to warn about. A rejected (implausible) sample
+    suppresses the evaluation that would have compared it, so a corrupt
+    reading can neither clear nor damn the day. So does a sample that
+    predates local midnight: an unreachable charger across the rollover
+    leaves the counter holding yesterday's total, which cannot clear or
+    damn the new day either. And so does a sample older than
+    ``sample_max_age`` (one feed interval, clamped to the tolerance
+    floor's coverage at ceiling power and resolved by :func:`run`): the
+    feed skipped or dropped a reconcile -- or its configured cadence is
+    slower than the coverage bound -- while the bridge side kept
+    advancing, so the growing gap is observation skew, not lost energy,
+    and the evaluation waits for a fresh sample instead of warning about
+    it. The window never exceeds that coverage
+    (``reconcile.covered_window_sec``, one place), so the two cannot
+    disagree by construction: no admitted sample's ceiling-power skew
+    can outrun the floor.
+    """
+    inactive_logged = False
+    if initial_delay:
+        # Offset from the pollers; only the first iteration is delayed, and
+        # the first evaluation needs an applied observation behind it.
+        _stop.wait(initial_delay)
+
+    def one_tick():
+        nonlocal inactive_logged
+
+        if not counter.fed:
+            # No status observation has applied yet (a startup race): stay
+            # quiet rather than declaring a firmware that has not spoken.
+            return
+        if not counter.present:
+            if not inactive_logged:
+                log(
+                    "day reconciliation inactive: the charger reports no "
+                    "total_day period counter (firmware below 4.2.2?); "
+                    "nothing to reconcile"
+                )
+                inactive_logged = True
+            return
+        sample = counter.latest()
+        if sample is None or not sample[2]:
+            # No usable sample yet, or the latest one was rejected as an
+            # implausible jump: comparing it would reconcile corruption.
+            return
+        charger_kwh, charger_observed = sample[0], sample[1]
+        now = _localnow()
+        day = now.date().isoformat()
+        if charger_observed.date() != now.date():
+            # The accepted sample predates local midnight: the charger was
+            # unreachable across the rollover (overnight outage or restart
+            # loop) while the bridge kept running, so ``total_day`` still
+            # measures yesterday and never expires on its own. Comparing it
+            # against the new day's fresh totals would warn about the whole
+            # of yesterday; the evaluation waits for a sample of the day
+            # being compared.
+            return
+        if (now - charger_observed).total_seconds() > sample_max_age:
+            # The sample is same-day but stale: the feed skipped or dropped
+            # HTTP reconciles (a failed poll advances the next deadline, an
+            # mqtt_mark discard never notes) or its cadence is slower than
+            # the coverage bound, while the bridge side kept advancing from
+            # every applied snapshot. The window is one feed interval
+            # clamped to the tolerance floor's coverage at ceiling power
+            # (reconcile.covered_window_sec) -- exactly the skew the floor
+            # can explain -- so a sample older than this is already beyond
+            # it, and this evaluation waits for a fresh sample rather than
+            # warning about energy nobody lost. The status loop already
+            # journals its reconcile failures; nothing new to say here.
+            return
+        totals = _day_totals(db, sink, day)
+        if totals is None:
+            return
+        archive_kwh, pending_kwh = totals
+        reconciler.evaluate(
+            day=day,
+            now_local=now,
+            archive_kwh=archive_kwh,
+            pending_kwh=pending_kwh,
+            charger_kwh=charger_kwh,
+            charger_observed_local=charger_observed,
+        )
+
+    run_loop("reconcile", one_tick, lambda: _stop.wait(interval))
+
+
 def run(
     db,
     host,
@@ -2426,6 +2588,7 @@ def run(
     bootstrap=DEFAULT_CHARGER_HOST,
     write_policy=None,
     history=None,
+    reconcile=None,
 ):
     """Start the pollers; blocks on the command loop until the stop event.
 
@@ -2440,7 +2603,11 @@ def run(
     validated WritePolicyConfig from env; the sink owns the WritePolicy itself
     and with it every ``status/current`` write (issue #93). ``history`` is the
     validated HistoryConfig (issue #94): the tracker's accumulator flushes
-    history/<day> on its cadence and on the shutdown drain below. One
+    history/<day> on its cadence and on the shutdown drain below. ``reconcile``
+    is the validated ReconcileConfig (#161): its loop cross-checks
+    history/<day> against the charger's ``total_day`` on the given cadence
+    (zero disables it) and is joined, bounded, before the shutdown drain --
+    its gather shares the sink's apply lock with the drain. One
     :class:`WriteCounter` (issue #96) is built here and threaded through
     every write site, ``status/health`` and the status loop's summary tick,
     so the journal's counts cover the whole process.
@@ -2466,6 +2633,12 @@ def run(
     # The claims facts (#159): the same holder pattern, fed by the status,
     # schedule and MQTT loops, read by the claims loop beside its own fetch.
     claims = ClaimsObservations()
+    # The day reconciler's two halves (#161): the charger-side sample stream
+    # (fed by the status loop's applied observations) and the comparison
+    # state (divergence episodes, warning authority). Read-only; nothing
+    # here ever writes back.
+    day_counters = ChargerDayCounter()
+    day_reconciler = DayReconciler()
     tracker = StatusTracker(
         db,
         history=HistoryAccumulator(
@@ -2537,7 +2710,11 @@ def run(
     threading.Thread(
         target=status_loop,
         args=status_args,
-        kwargs={"observations": observations, "claims": claims},
+        kwargs={
+            "observations": observations,
+            "claims": claims,
+            "day_counters": day_counters,
+        },
         daemon=True,
     ).start()
     config_args = (
@@ -2611,6 +2788,29 @@ def run(
         },
         daemon=True,
     ).start()
+    # The day reconciler (#161): hourly by default, RECONCILE_INTERVAL=0
+    # leaves it out entirely. Started after the sink exists (its gather
+    # borrows the sink's apply lock) and joined before the shutdown drain.
+    # The sample freshness window is one interval of the live feed
+    # cadence -- MQTT mode feeds the day counter at the HTTP reconcile
+    # cadence, plain polling at the status cadence -- clamped to the
+    # tolerance floor's coverage at ceiling power
+    # (reconcile.covered_window_sec), so no configured cadence can widen
+    # the window past what the floor can explain.
+    reconcile_conf = reconcile or ReconcileConfig()
+    reconcile_feed_sec = mqtt.reconcile_sec if source is not None else status_interval
+    reconcile_thread = None
+    if reconcile_conf.interval > 0:
+        reconcile_thread = threading.Thread(
+            target=reconcile_loop,
+            args=(db, sink, day_counters, day_reconciler, reconcile_conf.interval),
+            kwargs={
+                "initial_delay": RECONCILE_INITIAL_DELAY,
+                "sample_max_age": covered_window_sec(reconcile_feed_sec),
+            },
+            daemon=True,
+        )
+        reconcile_thread.start()
     if mqtt_status_args is not None:
         threading.Thread(
             target=mqtt_status_loop, args=mqtt_status_args, daemon=True
@@ -2619,6 +2819,11 @@ def run(
     command_loop(db, host, auth, transport, command_interval, source, sink, counter)
     if source is not None:
         source.stop()
+    if reconcile_thread is not None:
+        # The reconciler never writes, but its gather holds the sink's apply
+        # lock: join it (bounded) before the history drain takes the same
+        # lock, so a last evaluation cannot straddle the drain.
+        reconcile_thread.join(timeout=RECONCILE_JOIN_SEC)
     # The SIGTERM/SIGINT handlers only set the stop event; with the command
     # loop down, the pending history energy is written before the process
     # exits (issue #94) -- the drain runs here, off the signal handler and
@@ -2648,6 +2853,7 @@ def main():
         )
     write_policy = write_policy_config_or_exit()
     history = history_config_or_exit()
+    reconcile = reconcile_config_or_exit()
 
     try:
         db = init_firestore()
@@ -2696,6 +2902,13 @@ def main():
         )
     else:
         log("mqtt: disabled (HTTP status polling)")
+    if reconcile.interval > 0:
+        log(
+            f"day reconciliation: every {reconcile.interval:g}s against the "
+            f"charger's total_day (reads only)"
+        )
+    else:
+        log("day reconciliation: disabled (RECONCILE_INTERVAL=0)")
     intervals = (
         status_interval,
         config_interval,
@@ -2716,6 +2929,7 @@ def main():
         bootstrap,
         write_policy=write_policy,
         history=history,
+        reconcile=reconcile,
     )
     log("bridge stopped")
 

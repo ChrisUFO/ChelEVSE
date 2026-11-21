@@ -496,7 +496,14 @@ class _StopAfter:
 
 
 def _status_payload(**overrides):
-    """A healthy /status reply for the loop and watchdog tests."""
+    """A healthy /status reply for the loop and watchdog tests.
+
+    The period counters model this charger's firmware (8.2.3, gateway ≥ 4.2.2):
+    every reply carries ``total_day``/``total_month`` in full-precision kWh.
+    Pass ``total_day=None`` (and ``total_month=None``) to model a pre-4.2.2
+    gateway whose replies carry no period counters at all — parsed to None,
+    the same absence the day reconciler treats as inactive (#161).
+    """
     payload = {
         "state": 1,
         "amp": 0,
@@ -506,6 +513,8 @@ def _status_payload(**overrides):
         "total_energy": 100,
         "elapsed": 0,
         "vehicle": 0,
+        "total_day": 12.5,
+        "total_month": 220.4,
         "comm_sent": 10,
         "comm_success": 10,
         "rapi_connected": True,
@@ -513,4 +522,3 @@ def _status_payload(**overrides):
     }
     payload.update(overrides)
     return payload
-

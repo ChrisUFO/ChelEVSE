@@ -121,7 +121,9 @@ class ParseStatusTests(unittest.TestCase):
         # idiom is ``parsing.as_int``).
         for override in (1, "1"):
             with self.subTest(manual_override=override):
-                fields = bridge.parse_status({"state": 254, "manual_override": override})
+                fields = bridge.parse_status(
+                    {"state": 254, "manual_override": override}
+                )
                 self.assertEqual(fields["state_label"], "stopped")
                 # The code itself is passed through untouched.
                 self.assertEqual(fields["state"], 254)
@@ -130,7 +132,9 @@ class ParseStatusTests(unittest.TestCase):
         # A genuinely sleeping charger reports the same 254 with no override.
         for override in (0, "0", None, "", "unknown", True):
             with self.subTest(manual_override=override):
-                fields = bridge.parse_status({"state": 254, "manual_override": override})
+                fields = bridge.parse_status(
+                    {"state": 254, "manual_override": override}
+                )
                 self.assertEqual(fields["state_label"], "sleeping")
 
     def test_state_254_with_manual_override_absent_is_sleeping(self):
@@ -191,7 +195,10 @@ class ApplyCommandTests(unittest.TestCase):
 
     def test_resume_500_with_no_override_is_treated_as_acked(self):
         session = FakeSession(
-            [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 0})]
+            [
+                FakeResponse(500, text="Failed to release"),
+                FakeResponse(200, {"manual_override": 0}),
+            ]
         )
         self.assertEqual(
             bridge.apply_command(session, _host(), None, {"type": "resume"}),
@@ -201,7 +208,10 @@ class ApplyCommandTests(unittest.TestCase):
 
     def test_resume_500_with_override_still_fails(self):
         session = FakeSession(
-            [FakeResponse(500, text="Failed to release"), FakeResponse(200, {"manual_override": 1})]
+            [
+                FakeResponse(500, text="Failed to release"),
+                FakeResponse(200, {"manual_override": 1}),
+            ]
         )
         with self.assertRaises(bridge.CommandError):
             bridge.apply_command(session, _host(), None, {"type": "resume"})
@@ -224,9 +234,7 @@ class ApplyCommandTests(unittest.TestCase):
         bridge.apply_command(
             session, _host(), None, {"type": "set_current", "amps": 99}
         )
-        bridge.apply_command(
-            session, _host(), None, {"type": "set_current", "amps": 1}
-        )
+        bridge.apply_command(session, _host(), None, {"type": "set_current", "amps": 1})
         self.assertEqual(session.calls[0][2]["json"]["charge_current"], bridge.MAX_AMPS)
         self.assertEqual(session.calls[1][2]["json"]["max_current"], bridge.MIN_AMPS)
 
@@ -239,9 +247,9 @@ class ApplyCommandTests(unittest.TestCase):
     def test_current_policy_caps_at_soft_limit_not_hard_or_pilot(self):
         config = {"max_current_soft": 32, "max_current_hard": 80}
         self.assertEqual(
-            bridge.enforce_current_policy(
-                {"type": "set_current", "amps": 16}, config
-            )["amps"],
+            bridge.enforce_current_policy({"type": "set_current", "amps": 16}, config)[
+                "amps"
+            ],
             16,
         )
         for amps in (5, 33, 48, 80):
@@ -525,9 +533,7 @@ class NormalizeScheduleTests(unittest.TestCase):
 
 class ScheduleEventsTests(unittest.TestCase):
     def test_day_mapping_and_overnight_end_shift(self):
-        events, mapping = bridge.schedule_events(
-            [rule("a", [6], "22:00", "06:00")]
-        )
+        events, mapping = bridge.schedule_events([rule("a", [6], "22:00", "06:00")])
         self.assertEqual(events[0]["id"], 1)
         self.assertEqual(events[0]["state"], "active")
         self.assertEqual(events[0]["time"], "22:00:00")
@@ -616,9 +622,13 @@ class HistoryTests(unittest.TestCase):
         # CLOCK_BOOTTIME and clock_gettime are Linux-only; create=True keeps the
         # same patch valid on a Windows host, where `_interval_clock` takes its
         # monotonic fallback — patched to the same value right here.
-        with mock.patch.object(bridge, "_localnow", return_value=when), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=self.boot, create=True
-        ), mock.patch.object(bridge.time, "monotonic", return_value=self.boot):
+        with (
+            mock.patch.object(bridge, "_localnow", return_value=when),
+            mock.patch.object(
+                bridge.time, "clock_gettime", return_value=self.boot, create=True
+            ),
+            mock.patch.object(bridge.time, "monotonic", return_value=self.boot),
+        ):
             self.tracker.record_history(total)
 
     def drain(self):
@@ -669,9 +679,7 @@ class HistoryTests(unittest.TestCase):
         self.assertAlmostEqual(self.history()[day]["hours"]["22"], 5.5)
         # The hour rollover flushed both buckets in ONE write.
         (write,) = self.history_writes()
-        self.assertEqual(
-            write[4], ["kwh", "hours.`21`", "hours.`22`", "updated_at"]
-        )
+        self.assertEqual(write[4], ["kwh", "hours.`21`", "hours.`22`", "updated_at"])
         # Nothing left pending, so a drain writes nothing more.
         self.assertTrue(self.drain())
         self.assertEqual(len(self.history_writes()), 1)
@@ -862,7 +870,10 @@ class SessionTests(unittest.TestCase):
         second = first + timedelta(hours=3)
         self.finalize(second, 3000, 1800, vehicle=0)
         self.assertEqual(len(self.sessions()), 2)
-        self.assertEqual(sorted(record["wh"] for record in self.sessions().values()), [3000.0, 6000.0])
+        self.assertEqual(
+            sorted(record["wh"] for record in self.sessions().values()),
+            [3000.0, 6000.0],
+        )
 
     def test_no_negative_or_zero_wh_record(self):
         self.finalize(self.start + timedelta(hours=1), 0, 0, vehicle=0)
@@ -958,10 +969,12 @@ class IntervalTests(unittest.TestCase):
         self.now += step
         self.mono += (mono_step if mono_step is not None else step).total_seconds()
         self.boot += (boot_step if boot_step is not None else step).total_seconds()
-        with mock.patch.object(bridge, "_utcnow", return_value=self.now), mock.patch.object(
-            bridge.time, "monotonic", return_value=self.mono
-        ), mock.patch.object(
-            bridge.time, "clock_gettime", return_value=self.boot, create=True
+        with (
+            mock.patch.object(bridge, "_utcnow", return_value=self.now),
+            mock.patch.object(bridge.time, "monotonic", return_value=self.mono),
+            mock.patch.object(
+                bridge.time, "clock_gettime", return_value=self.boot, create=True
+            ),
         ):
             (tracker or self.tracker).observe(
                 {
@@ -1014,7 +1027,9 @@ class IntervalTests(unittest.TestCase):
         self.assertAlmostEqual(second["wh"], 5000.0)
         self.assertAlmostEqual(first["wh"] + second["wh"], record["wh"])
         # The merged write keeps the pre-pause document id.
-        self.assertEqual(list(self.sessions()), [str(int(record["started_at"].timestamp()))])
+        self.assertEqual(
+            list(self.sessions()), [str(int(record["started_at"].timestamp()))]
+        )
 
     def test_a_restart_mid_charge_keeps_one_interval_and_fabricates_nothing(self):
         self.db.data["status"] = {
@@ -1231,9 +1246,10 @@ class IntervalTests(unittest.TestCase):
         # dev host lacks; patching it in makes the real boottime branch of
         # `_interval_clock` run wherever the suite does, instead of silently
         # asserting the fallback's answer.
-        with mock.patch.object(
-            bridge.time, "CLOCK_BOOTTIME", 1, create=True
-        ), mock.patch.object(bridge, "log") as log:
+        with (
+            mock.patch.object(bridge.time, "CLOCK_BOOTTIME", 1, create=True),
+            mock.patch.object(bridge, "log") as log,
+        ):
             started = self.tick(3, 0, 0)
             self.tick(
                 3,
@@ -1267,7 +1283,9 @@ class IntervalTests(unittest.TestCase):
         (record,) = self.sessions().values()
         (interval,) = record["intervals"]
         self.assertAlmostEqual(interval["wh"], 6000.0)
-        self.assertEqual((interval["started_at"], interval["ended_at"]), (started, ended))
+        self.assertEqual(
+            (interval["started_at"], interval["ended_at"]), (started, ended)
+        )
 
     def test_a_wall_clock_step_back_keeps_the_interval_with_its_measured_span(self):
         # The Pi's wall clock is corrected backwards mid-session (NTP, a manual
@@ -1277,9 +1295,10 @@ class IntervalTests(unittest.TestCase):
         # patched in (as in the suspend test) so the boottime branch measures the
         # span on hosts that lack it; the monotonic fallback does not see
         # ``boot_step`` and would read a negative span here.
-        with mock.patch.object(
-            bridge.time, "CLOCK_BOOTTIME", 1, create=True
-        ), mock.patch.object(bridge, "log") as log:
+        with (
+            mock.patch.object(bridge.time, "CLOCK_BOOTTIME", 1, create=True),
+            mock.patch.object(bridge, "log") as log,
+        ):
             started = self.tick(3, 0, 0)
             self.tick(
                 3,
@@ -1417,7 +1436,9 @@ class IntervalTests(unittest.TestCase):
         (record,) = self.sessions().values()
         (interval,) = record["intervals"]
         self.assertAlmostEqual(interval["wh"], 20000.0)
-        self.assertEqual((interval["started_at"], interval["ended_at"]), (started, ended))
+        self.assertEqual(
+            (interval["started_at"], interval["ended_at"]), (started, ended)
+        )
 
     def test_an_impossible_step_is_dropped_logged_and_the_next_tick_attributed(self):
         # 20 kWh in ten seconds would need 7 MW. It is dropped and logged, and the
@@ -1505,7 +1526,9 @@ class MergeIntervalTests(unittest.TestCase):
             {"started_at": start, "ended_at": start + timedelta(minutes=10), "wh": 0},
             "junk",
         ]
-        record = self.record(start + timedelta(hours=1), [self.interval(start, 30, 500)], 2500)
+        record = self.record(
+            start + timedelta(hours=1), [self.interval(start, 30, 500)], 2500
+        )
         with mock.patch.object(bridge, "log") as log:
             merged = bridge._merge_session(candidate, record, vehicle_connected=True)
         # Per entry, not per list: the good block survives, the corrupt ones go.
@@ -1534,9 +1557,7 @@ class MergeIntervalTests(unittest.TestCase):
         head = len(stored) + 1 - bridge.MAX_SESSION_INTERVALS
         self.assertEqual(kept[0]["started_at"], stored[0]["started_at"])
         self.assertEqual(kept[0]["ended_at"], stored[head]["ended_at"])
-        self.assertAlmostEqual(
-            sum(entry["wh"] for entry in kept), 1200.0 + 7.0
-        )
+        self.assertAlmostEqual(sum(entry["wh"] for entry in kept), 1200.0 + 7.0)
         # Aggregates still cover the whole session.
         self.assertEqual(merged["wh"], 1207.0)
         self.assertEqual(merged["started_at"], start)
@@ -1598,7 +1619,9 @@ class FcmTests(unittest.TestCase):
         with mock.patch.object(bridge, "notify") as fake_notify:
             notifier.enqueue("Charger offline")
             notifier.queue.join()
-        fake_notify.assert_called_once_with(db, "Charger offline", counter=notifier.counter)
+        fake_notify.assert_called_once_with(
+            db, "Charger offline", counter=notifier.counter
+        )
 
 
 class CommandTests(unittest.TestCase):
@@ -1688,7 +1711,6 @@ class CommandLoopTests(unittest.TestCase):
         self.assertEqual([call[0] for call in session.calls], ["post"])
         self.assertEqual(db.data["commands"]["cmd"]["status"], "acked")
 
-
     def test_a_failed_config_read_settles_failed_without_a_transport(self):
         # The current policy reads /config before any send. That read raising
         # must not settle like a failed send: no `transport` field, and so no
@@ -1709,8 +1731,9 @@ class CommandLoopTests(unittest.TestCase):
         session = FakeSession([requests.ConnectionError("config down")])
         transport = bridge.ChargerTransport(session)
         logs = []
-        with mock.patch.object(bridge, "log", logs.append), mock.patch.object(
-            bridge, "_stop", _StopAfter(1)
+        with (
+            mock.patch.object(bridge, "log", logs.append),
+            mock.patch.object(bridge, "_stop", _StopAfter(1)),
         ):
             bridge.command_loop(db, _host(), None, transport, 0)
         doc = db.data["commands"]["cmd"]
@@ -1962,8 +1985,9 @@ class SchedulePlanResponseTests(unittest.TestCase):
         stop = _RecordingStop(1)
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [])]))
         logs = []
-        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
-            bridge, "log", logs.append
+        with (
+            mock.patch.object(bridge, "_stop", stop),
+            mock.patch.object(bridge, "log", logs.append),
         ):
             bridge.schedule_loop(db, _host(), None, transport, 60, 300, sink)
         schedule = db.data["status"]["current"].get("schedule")
@@ -1976,8 +2000,9 @@ class SchedulePlanResponseTests(unittest.TestCase):
         stop = _RecordingStop(1)
         transport = bridge.ChargerTransport(FakeSession([FakeResponse(200, [1])]))
         logs = []
-        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
-            bridge, "log", logs.append
+        with (
+            mock.patch.object(bridge, "_stop", stop),
+            mock.patch.object(bridge, "log", logs.append),
         ):
             bridge.schedule_loop(db, _host(), None, transport, 60, 300, sink)
         sink.note_schedule.assert_not_called()
@@ -2181,8 +2206,9 @@ class LoopJitterTests(unittest.TestCase):
             FakeSession([FakeResponse(200, {"firmware": "master"})] * 2)
         )
         logs = []
-        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
-            bridge, "log", logs.append
+        with (
+            mock.patch.object(bridge, "_stop", stop),
+            mock.patch.object(bridge, "log", logs.append),
         ):
             bridge.config_loop(db, _host(), None, transport, 60)
         self.assertEqual(stop.waits, [60, 60])
@@ -2217,23 +2243,23 @@ class LoopWiringTests(unittest.TestCase):
             def start(self):
                 self.target(*self.args, **self.kwargs)
 
+            def join(self, timeout=None):
+                pass  # the reconcile loop's bounded shutdown join (#161)
+
         settings_spy = spy("settings")
-        with mock.patch.object(bridge, "status_loop", spy("status")), mock.patch.object(
-            bridge, "config_loop", spy("config")
-        ), mock.patch.object(bridge, "schedule_loop", spy("schedule")), mock.patch.object(
-            bridge, "command_loop", spy("command")
-        ), mock.patch.object(
-            bridge, "settings_loop", settings_spy
-        ), mock.patch.object(
-            bridge, "notifications_loop", spy("notifications")
-        ), mock.patch.object(
-            bridge, "claims_loop", spy("claims")
-        ), mock.patch.object(
-            bridge.threading, "Thread", _ThreadSpy
-        ), mock.patch.object(
-            bridge, "StatusTracker"
-        ) as tracker, mock.patch.object(
-            bridge, "Notifier"
+        reconcile_spy = spy("reconcile")
+        with (
+            mock.patch.object(bridge, "status_loop", spy("status")),
+            mock.patch.object(bridge, "config_loop", spy("config")),
+            mock.patch.object(bridge, "schedule_loop", spy("schedule")),
+            mock.patch.object(bridge, "command_loop", spy("command")),
+            mock.patch.object(bridge, "settings_loop", settings_spy),
+            mock.patch.object(bridge, "notifications_loop", spy("notifications")),
+            mock.patch.object(bridge, "claims_loop", spy("claims")),
+            mock.patch.object(bridge, "reconcile_loop", reconcile_spy),
+            mock.patch.object(bridge.threading, "Thread", _ThreadSpy),
+            mock.patch.object(bridge, "StatusTracker") as tracker,
+            mock.patch.object(bridge, "Notifier"),
         ):
             bridge.run(
                 FakeDB(),
@@ -2254,11 +2280,15 @@ class LoopWiringTests(unittest.TestCase):
                 "settings",
                 "notifications",
                 "claims",
+                "reconcile",
             },
         )
         for name, args in calls.items():
-            self.assertIs(args[1], host, f"{name} loop got another charger host")
-            if name != "settings":
+            # The reconcile loop (#161) talks to Firestore and the sink, not
+            # to the charger: no host, no transport.
+            if name != "reconcile":
+                self.assertIs(args[1], host, f"{name} loop got another charger host")
+            if name not in ("settings", "reconcile"):
                 self.assertIs(args[3], transport, f"{name} loop got another transport")
         # #95: the schedule loop feeds the same sink the status loop
         # schedules writes through -- one write policy, one document owner.
@@ -2266,13 +2296,22 @@ class LoopWiringTests(unittest.TestCase):
         # #159: the claims loop reads the same claims holder the trigger
         # sources feed.
         self.assertIsInstance(calls["claims"][4], bridge.ClaimsObservations)
-        self.assertEqual(calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60))
-        self.assertEqual(len(threads), 6)
+        # #161: the day reconciler reads the same sink (its gather borrows
+        # the sink's apply lock) and gets the charger-side sample stream the
+        # status loop feeds, on the validated cadence.
+        self.assertIs(calls["reconcile"][1], calls["status"][10])
+        self.assertIsInstance(calls["reconcile"][2], bridge.ChargerDayCounter)
+        self.assertIsInstance(calls["reconcile"][3], bridge.DayReconciler)
+        self.assertEqual(calls["reconcile"][4], 3600.0)
+        self.assertEqual(
+            calls["settings"], (mock.ANY, host, bridge.DEFAULT_CHARGER_HOST, 60)
+        )
+        self.assertEqual(len(threads), 7)
         for thread in threads:
-            self.assertIs(thread.args[1], host)
-            self.assertTrue(thread.daemon)
-            if thread.target is not settings_spy:
+            if thread.target not in (settings_spy, reconcile_spy):
+                self.assertIs(thread.args[1], host)
                 self.assertIs(thread.args[3], transport)
+            self.assertTrue(thread.daemon)
         # The health poll classifies against the observations the status and
         # config loops feed it (D6).
         self.assertIsInstance(calls["notifications"][5], bridge.LiveObservations)
@@ -2281,21 +2320,17 @@ class LoopWiringTests(unittest.TestCase):
     def test_run_leaves_shutdown_logging_to_main(self):
         """main() owns lifecycle logging: run() must not log a second stop line."""
         transport = bridge.ChargerTransport(FakeSession())
-        with mock.patch.object(bridge, "status_loop"), mock.patch.object(
-            bridge, "config_loop"
-        ), mock.patch.object(bridge, "schedule_loop"), mock.patch.object(
-            bridge, "notifications_loop"
-        ), mock.patch.object(
-            bridge, "command_loop"
-        ), mock.patch.object(
-            bridge.threading, "Thread"
-        ), mock.patch.object(
-            bridge, "StatusTracker"
-        ), mock.patch.object(
-            bridge, "Notifier"
-        ), mock.patch.object(
-            bridge, "log"
-        ) as fake_log:
+        with (
+            mock.patch.object(bridge, "status_loop"),
+            mock.patch.object(bridge, "config_loop"),
+            mock.patch.object(bridge, "schedule_loop"),
+            mock.patch.object(bridge, "notifications_loop"),
+            mock.patch.object(bridge, "command_loop"),
+            mock.patch.object(bridge.threading, "Thread"),
+            mock.patch.object(bridge, "StatusTracker"),
+            mock.patch.object(bridge, "Notifier"),
+            mock.patch.object(bridge, "log") as fake_log,
+        ):
             bridge.run(
                 FakeDB(),
                 _host(),
@@ -2312,8 +2347,9 @@ class WatchdogConfigTests(unittest.TestCase):
     """WATCHDOG_* parsing: defaults, overrides, and loud failures."""
 
     def parse(self, **env):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, env, clear=True
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, env, clear=True),
         ):
             return bridge.watchdog_config()
 
@@ -2354,9 +2390,10 @@ class WatchdogConfigTests(unittest.TestCase):
             "WATCHDOG_MAX_PER_HOUR",
         ):
             for value in ("nan", "inf", "-inf", "Infinity"):
-                with self.subTest(variable=name, value=value), self.assertRaises(
-                    ValueError
-                ) as raised:
+                with (
+                    self.subTest(variable=name, value=value),
+                    self.assertRaises(ValueError) as raised,
+                ):
                     self.parse(**{name: value})
                 self.assertIn(name, str(raised.exception))
 
@@ -2375,8 +2412,9 @@ class WatchdogConfigExitTests(unittest.TestCase):
     """main()'s fail-loud wiring: a bad WATCHDOG_* value stops the bridge."""
 
     def exit_message(self, **env):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, env, clear=True
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, env, clear=True),
         ):
             with self.assertRaises(SystemExit) as raised:
                 bridge.watchdog_config_or_exit()
@@ -2405,8 +2443,9 @@ class WatchdogConfigExitTests(unittest.TestCase):
                     self.assertIn(name, self.exit_message(**{name: value}))
 
     def test_a_valid_config_is_returned(self):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, {"WATCHDOG_FAILURES": "5"}, clear=True
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, {"WATCHDOG_FAILURES": "5"}, clear=True),
         ):
             self.assertEqual(
                 bridge.watchdog_config_or_exit(),
@@ -2714,9 +2753,7 @@ class _WatchdogSession:
     def _call(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         item = (
-            self.script.pop(0)
-            if self.script
-            else FakeResponse(200, _status_payload())
+            self.script.pop(0) if self.script else FakeResponse(200, _status_payload())
         )
         if isinstance(item, Exception):
             raise item
@@ -2783,8 +2820,9 @@ class WatchdogLoopTests(unittest.TestCase):
             mqtt,
         )
         stop = _StopAfter(polls, on_wait=lambda: clock.advance(step))
-        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
-            bridge, "_utcnow", clock
+        with (
+            mock.patch.object(bridge, "_stop", stop),
+            mock.patch.object(bridge, "_utcnow", clock),
         ):
             bridge.status_loop(
                 db,
@@ -2889,7 +2927,9 @@ class WatchdogLoopTests(unittest.TestCase):
 
     @staticmethod
     def health_writes(db):
-        return [write for write in db.writes if write[:3] == ("set", "status", "health")]
+        return [
+            write for write in db.writes if write[:3] == ("set", "status", "health")
+        ]
 
     def test_a_healthy_charger_writes_health_once(self):
         db, session, notifier, watchdog = self.run_loop([], polls=4)
@@ -3240,9 +3280,7 @@ class WatchdogLoopTests(unittest.TestCase):
         )
         # No HTTP restart at all: the MQTT publish is the only attempt.
         self.assertEqual(self.posts(session), [])
-        self.assertEqual(
-            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
-        )
+        self.assertEqual(mqtt.published, [("restart", '{"device": "gateway"}', 0)])
         self.assertEqual(
             notifier.bodies,
             ["Charger offline", bridge.WATCHDOG_ALERT_RESTART],
@@ -3284,9 +3322,7 @@ class WatchdogLoopTests(unittest.TestCase):
             polls=3,
             mqtt=mqtt,
         )
-        self.assertEqual(
-            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
-        )
+        self.assertEqual(mqtt.published, [("restart", '{"device": "gateway"}', 0)])
         self.assertEqual(notifier.bodies[-1], bridge.WATCHDOG_ALERT_RESTART)
 
     def test_the_charging_guard_blocks_an_mqtt_restart(self):
@@ -3312,9 +3348,7 @@ class WatchdogLoopTests(unittest.TestCase):
             config=bridge.WatchdogConfig(cooldown=0, max_per_hour=1),
             mqtt=mqtt,
         )
-        self.assertEqual(
-            mqtt.published, [("restart", '{"device": "gateway"}', 0)]
-        )
+        self.assertEqual(mqtt.published, [("restart", '{"device": "gateway"}', 0)])
         self.assertEqual(
             notifier.bodies,
             [
@@ -3463,7 +3497,9 @@ class ChargerHostGrammarTests(unittest.TestCase):
         self.assertIsNone(bridge._normalize_charger_host(host + "e"))
 
     def test_the_label_length_cap(self):
-        self.assertEqual(bridge._normalize_charger_host("a" * 63 + ".local"), "a" * 63 + ".local")
+        self.assertEqual(
+            bridge._normalize_charger_host("a" * 63 + ".local"), "a" * 63 + ".local"
+        )
         self.assertIsNone(bridge._normalize_charger_host("a" * 64 + ".local"))
 
 
@@ -3518,7 +3554,9 @@ class SeedHostTests(unittest.TestCase):
         self.assertEqual(logs, ["charger host: http://192.168.1.50 (app settings)"])
 
     def test_a_stored_hostname_is_accepted(self):
-        host, logs = self.seed({"settings": {"current": {"charger_host": "evse.local"}}})
+        host, logs = self.seed(
+            {"settings": {"current": {"charger_host": "evse.local"}}}
+        )
         self.assertEqual(host, "evse.local")
         self.assertEqual(logs, ["charger host: http://evse.local (app settings)"])
 
@@ -3582,8 +3620,9 @@ class SettingsLoopTests(unittest.TestCase):
         host = host or _host(bootstrap)
         stop = _RecordingStop(polls)
         logs = []
-        with mock.patch.object(bridge, "_stop", stop), mock.patch.object(
-            bridge, "log", logs.append
+        with (
+            mock.patch.object(bridge, "_stop", stop),
+            mock.patch.object(bridge, "log", logs.append),
         ):
             bridge.settings_loop(db, host, bootstrap, 60)
         return host, logs, stop
@@ -3594,7 +3633,10 @@ class SettingsLoopTests(unittest.TestCase):
         )
         self.assertEqual(host.base, "http://192.168.1.50")
         self.assertEqual(
-            logs, ["charger host: http://192.168.0.145 -> http://192.168.1.50 (app settings)"]
+            logs,
+            [
+                "charger host: http://192.168.0.145 -> http://192.168.1.50 (app settings)"
+            ],
         )
 
     def test_a_cleared_key_reverts_to_the_bootstrap(self):
@@ -3609,7 +3651,8 @@ class SettingsLoopTests(unittest.TestCase):
 
     def test_a_blank_value_is_a_clear(self):
         host, logs, _ = self.run_loop(
-            {"settings": {"current": {"charger_host": "   "}}}, host=_host("192.168.1.50")
+            {"settings": {"current": {"charger_host": "   "}}},
+            host=_host("192.168.1.50"),
         )
         self.assertEqual(host.base, "http://192.168.0.145")
         self.assertIn("(environment)", logs[0])
@@ -3634,9 +3677,7 @@ class SettingsLoopTests(unittest.TestCase):
         )
 
     def test_a_read_error_keeps_the_current_host(self):
-        host, logs, _ = self.run_loop(
-            host=_host("192.168.1.50"), fail_reads=True
-        )
+        host, logs, _ = self.run_loop(host=_host("192.168.1.50"), fail_reads=True)
         self.assertEqual(host.base, "http://192.168.1.50")
         self.assertEqual(len(logs), 1)
         self.assertTrue(logs[0].startswith("charger host: settings read failed"))
@@ -3715,9 +3756,7 @@ class HostSwapTests(unittest.TestCase):
         with mock.patch.object(
             bridge, "_stop", _StopAfter(2, lambda: host.set("192.168.1.50"))
         ):
-            bridge.schedule_loop(
-                FakeDB(), host, None, transport, 60, 300, mock.Mock()
-            )
+            bridge.schedule_loop(FakeDB(), host, None, transport, 60, 300, mock.Mock())
         self.assertEqual(
             [call[1] for call in session.calls],
             ["http://charger/schedule/plan", "http://192.168.1.50/schedule/plan"],
@@ -3728,7 +3767,10 @@ class HostSwapTests(unittest.TestCase):
         session = FakeSession([FakeResponse(200, []), FakeResponse(200)])
         host.set("192.168.1.50")
         bridge.sync_schedule(
-            session, host, None, [{"id": 1, "state": "active", "time": "10:00:00", "days": []}]
+            session,
+            host,
+            None,
+            [{"id": 1, "state": "active", "time": "10:00:00", "days": []}],
         )
         self.assertTrue(
             all(call[1].startswith("http://192.168.1.50/") for call in session.calls)
@@ -3769,16 +3811,12 @@ class HostSwapTests(unittest.TestCase):
         host = _host()
         session = FakeSession([FakeResponse(200)])
         host.set("192.168.1.50")
-        bridge.apply_command(
-            session, host, None, {"type": "set_current", "amps": 16}
-        )
+        bridge.apply_command(session, host, None, {"type": "set_current", "amps": 16})
         self.assertEqual(session.calls[0][1], "http://192.168.1.50/override")
 
     def test_the_mqtt_override_reconcile_targets_the_new_host(self):
         host = _host()
-        session = FakeSession(
-            [FakeResponse(200, {"state": 254, "manual_override": 1})]
-        )
+        session = FakeSession([FakeResponse(200, {"state": 254, "manual_override": 1})])
         host.set("192.168.1.50")
         extra = bridge._apply_override_mqtt(
             session, host, None, _SilentMqtt(), "pause", {"type": "pause"}, 0
@@ -3817,9 +3855,7 @@ class HostSwapTests(unittest.TestCase):
     def test_an_unreachable_swapped_host_keeps_the_loop_cycling(self):
         host = _host()
         outage = requests.ConnectionError("No route to host")
-        session = FakeSession(
-            [FakeResponse(200, _status_payload()), outage, outage]
-        )
+        session = FakeSession([FakeResponse(200, _status_payload()), outage, outage])
         db = FakeDB()
         tracker = bridge.StatusTracker(db)
         notifier = _RecordingNotifier()
@@ -3828,9 +3864,12 @@ class HostSwapTests(unittest.TestCase):
             db, host, None, transport, notifier, bridge.WatchdogConfig()
         )
         logs = []
-        with mock.patch.object(
-            bridge, "_stop", _StopAfter(3, lambda: host.set("192.168.1.50"))
-        ), mock.patch.object(bridge, "log", logs.append):
+        with (
+            mock.patch.object(
+                bridge, "_stop", _StopAfter(3, lambda: host.set("192.168.1.50"))
+            ),
+            mock.patch.object(bridge, "log", logs.append),
+        ):
             bridge.status_loop(
                 db, host, None, transport, 10, tracker, notifier, watchdog
             )
@@ -3849,16 +3888,13 @@ class MainSeedingTests(unittest.TestCase):
         db = FakeDB(data)
         db.fail_reads = fail_reads
         logs = []
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, env or {}, clear=True
-        ), mock.patch.object(
-            bridge, "init_firestore", return_value=db
-        ), mock.patch.object(
-            bridge, "run"
-        ) as run, mock.patch.object(
-            bridge, "log", logs.append
-        ), mock.patch.object(
-            bridge, "ChargerTransport"
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, env or {}, clear=True),
+            mock.patch.object(bridge, "init_firestore", return_value=db),
+            mock.patch.object(bridge, "run") as run,
+            mock.patch.object(bridge, "log", logs.append),
+            mock.patch.object(bridge, "ChargerTransport"),
         ):
             bridge.main()
         return run, logs
@@ -3894,9 +3930,7 @@ class MainSeedingTests(unittest.TestCase):
     def test_a_settings_read_failure_still_starts_the_bridge(self):
         run, logs = self.run_main(fail_reads=True)
         self.assertEqual(run.call_args.args[1].base, "http://192.168.0.145")
-        self.assertTrue(
-            any("settings read failed" in line for line in logs), logs
-        )
+        self.assertTrue(any("settings read failed" in line for line in logs), logs)
 
     def test_the_settings_interval_is_wired_and_env_overridable(self):
         run, logs = self.run_main(env={"SETTINGS_INTERVAL": "15"})
@@ -3914,9 +3948,11 @@ class MainSeedingTests(unittest.TestCase):
         self.assertIn("notifications 120s", " ".join(logs))
 
     def test_a_bad_settings_interval_fails_loudly(self):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, {"SETTINGS_INTERVAL": "soon"}, clear=True
-        ), mock.patch.object(bridge, "init_firestore") as init:
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, {"SETTINGS_INTERVAL": "soon"}, clear=True),
+            mock.patch.object(bridge, "init_firestore") as init,
+        ):
             with self.assertRaises(SystemExit) as raised:
                 bridge.main()
         self.assertIn("SETTINGS_INTERVAL", str(raised.exception))
@@ -3937,13 +3973,14 @@ class MainExitTests(unittest.TestCase):
     )
 
     def exit_main(self, env=None, init_raises=None):
-        with mock.patch.dict(bridge._FILE_ENV, {}, clear=True), mock.patch.dict(
-            os.environ, env or {}, clear=True
-        ), mock.patch.object(
-            bridge, "init_firestore", side_effect=init_raises
-        ) as init, mock.patch.object(
-            bridge, "run"
-        ) as run:
+        with (
+            mock.patch.dict(bridge._FILE_ENV, {}, clear=True),
+            mock.patch.dict(os.environ, env or {}, clear=True),
+            mock.patch.object(
+                bridge, "init_firestore", side_effect=init_raises
+            ) as init,
+            mock.patch.object(bridge, "run") as run,
+        ):
             with self.assertRaises(SystemExit) as raised:
                 bridge.main()
         return str(raised.exception.code), init, run
