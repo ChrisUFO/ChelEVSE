@@ -956,6 +956,9 @@ for the hour that retry happens in.
 
 ### Day reconciliation (issue #161)
 
+Operator-facing: what a reconciliation warning means and how to investigate
+one is in [../docs/RECONCILIATION.md](../docs/RECONCILIATION.md).
+
 A read-only audit of that history: every `RECONCILE_INTERVAL` (3600 s;
 `0` disables the loop) the bridge compares today's `history/<date>` total —
 the document's `kwh` plus whatever the accumulator still holds pending for
