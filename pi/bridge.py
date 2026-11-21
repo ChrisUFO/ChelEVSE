@@ -133,6 +133,11 @@ from status_tracker import (  # noqa: E402
     _merge_intervals,
     _merge_session,
 )
+from reconcile import (  # noqa: E402
+    RECONCILE_INTERVAL,
+    ChargerDayCounter,
+    DayReconciler,
+)
 from status_sink import (  # noqa: E402
     MQTT_PENDING_QUEUE,
     StatusSink,
@@ -331,6 +336,8 @@ def redact_config(data):
         key: REDACTED if key in SECRET_CONFIG_KEYS else value
         for key, value in data.items()
     }
+
+
 def settings_loop(db, host, bootstrap, interval, initial_delay=0):
     """Apply ``settings/current.charger_host`` to the running bridge.
 
@@ -510,9 +517,7 @@ def recovery_decision(
             if http_reachable
             else "HTTP unreachable; restarting the gateway over MQTT"
         )
-        return _decision(
-            "restart_gateway", reason, WATCHDOG_ALERT_RESTART, transport
-        )
+        return _decision("restart_gateway", reason, WATCHDOG_ALERT_RESTART, transport)
     reason = (
         "controller is not answering"
         if http_reachable
@@ -714,9 +719,7 @@ class Watchdog:
             )
             self.last_result = self._restart_mqtt(device)
         else:
-            log(
-                f"watchdog: {action} -> POST /restart device={device} ({inputs})"
-            )
+            log(f"watchdog: {action} -> POST /restart device={device} ({inputs})")
             self.last_result = self._restart(device)
         self.last_attempt_at = now
         self.attempts.append(now)
@@ -840,9 +843,7 @@ class Watchdog:
                 self.failed_alerted = True
                 changed = True
         elif (
-            self.episode_attempts
-            and self._cap_reached(now)
-            and not self.failed_alerted
+            self.episode_attempts and self._cap_reached(now) and not self.failed_alerted
         ):
             # This episode already spent an attempt and the hour's allowance is
             # gone while the charger is still down. The last attempt stays on
@@ -1081,9 +1082,7 @@ def _escalate_reconcile_failure(
             "no mqtt snapshot, outage unconfirmed"
         )
         return False
-    landed = sink.apply_offline_if_no_snapshot(
-        mqtt_snapshots, _offline_reason(exc)
-    )
+    landed = sink.apply_offline_if_no_snapshot(mqtt_snapshots, _offline_reason(exc))
     if landed is None:
         log(
             f"status reconcile failed ({_offline_reason(exc)}); "
@@ -1224,10 +1223,13 @@ def status_loop(
             changed,
         ) = _mqtt_transport_state(mqtt, transport_state)
         if changed:
-            previous, transport_state = transport_state, (
-                current,
-                mqtt_connected,
-                announced,
+            previous, transport_state = (
+                transport_state,
+                (
+                    current,
+                    mqtt_connected,
+                    announced,
+                ),
             )
             source = current
             if mqtt_ready:
@@ -1291,9 +1293,7 @@ def status_loop(
                         mqtt_snapshots = mqtt.snapshots
                     reconcile_failures = 0
                     if observations is not None:
-                        observations.note_status(
-                            fields, parse_fault_counters(payload)
-                        )
+                        observations.note_status(fields, parse_fault_counters(payload))
                     if claims is not None:
                         # This applied observation is one reconcile tick for
                         # the claims loop: hand it the reply's claims_version
@@ -1361,9 +1361,7 @@ def _config_source_edge(mqtt, config_event, source, connected, mqtt_mode):
         return None, None
     current = "mqtt" if mqtt_mode else "http"
     if current != source:
-        return current, _config_source_detail(
-            mqtt, config_event, connected, mqtt_mode
-        )
+        return current, _config_source_detail(mqtt, config_event, connected, mqtt_mode)
     return None, None
 
 
@@ -1618,9 +1616,7 @@ def config_loop(
                     # status/config -- one config poll, two consumers (D6).
                     observations.note_config(view)
                 counter.record("config")
-                _consume_config_version_trigger(
-                    mqtt, config_event, mqtt_mode, version
-                )
+                _consume_config_version_trigger(mqtt, config_event, mqtt_mode, version)
                 pending = False
                 retry_delay = 0.0
                 retry_at = 0.0
@@ -1699,10 +1695,7 @@ def _fail_stale_command(doc, counter):
         doc.reference.update({"status": "failed", "error": reason})
     except Exception as exc:
         counter.note_failure(exc)
-        log(
-            f"command {doc.id} stale update failed "
-            f"({exc.__class__.__name__}: {exc})"
-        )
+        log(f"command {doc.id} stale update failed ({exc.__class__.__name__}: {exc})")
         return
     counter.record("command")
     log(f"command {doc.id} failed: {reason}")
@@ -1980,9 +1973,7 @@ def schedule_loop(
                 malformed_logged = False
                 enabled, rules = normalized
                 digest = schedule_hash(enabled, rules)
-                events, desired_event_rules = schedule_events(
-                    rules if enabled else []
-                )
+                events, desired_event_rules = schedule_events(rules if enabled else [])
                 now = time.monotonic()
                 changed = digest != last_hash
                 due = (
@@ -2189,9 +2180,7 @@ def notifications_loop(
         # needs none -- an empty map replaces the stored value.
         if watermark:
             departed = {
-                key: firestore.DELETE_FIELD
-                for key in alerted
-                if key not in watermark
+                key: firestore.DELETE_FIELD for key in alerted if key not in watermark
             }
             if departed:
                 write["alerted"] = {**watermark, **departed}
@@ -2356,9 +2345,7 @@ def claims_loop(
             else:
                 facts = observations.snapshot()
                 if tracker is not None:
-                    facts["charger_online"] = getattr(
-                        tracker, "charger_online", None
-                    )
+                    facts["charger_online"] = getattr(tracker, "charger_online", None)
                 content = claims_project(target, facts)
         stable = claims_comparable(content)
         if stable == last_stable:
