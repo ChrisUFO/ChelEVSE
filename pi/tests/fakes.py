@@ -207,7 +207,12 @@ class FakeDocument:
 
 
 class FakeQuery:
-    """Equality filters, one order_by, and a limit -- enough for the bridge."""
+    """Equality and range filters, one order_by, and a limit.
+
+    Range filters cover the documentId (``__name__``) paths too -- the
+    history collection's month range query (#161) filters on the document
+    id, exactly like the web store's ``documentId()`` ranges.
+    """
 
     def __init__(self, db, collection, filters=(), order=None, count=None):
         self._db = db
@@ -259,11 +264,20 @@ class FakeQuery:
 
     @staticmethod
     def _matches(row, condition):
-        data = row.to_dict() or {}
-        value = data.get(condition.field_path)
-        if condition.op_string == "==":
+        if condition.field_path == "__name__":
+            # A documentId filter compares the id; the server only accepts
+            # string bounds there, and so does the history range query.
+            value = row.id
+        else:
+            value = (row.to_dict() or {}).get(condition.field_path)
+        op = condition.op_string
+        if op == "==":
             return value == condition.value
-        raise AssertionError(f"fake query does not support {condition.op_string}")
+        if op == ">=":
+            return value is not None and value >= condition.value
+        if op == "<":
+            return value is not None and value < condition.value
+        raise AssertionError(f"fake query does not support {op}")
 
 
 class FakeCollection:

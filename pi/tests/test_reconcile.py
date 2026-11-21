@@ -202,7 +202,9 @@ class KnownGoodDayTests(LoopBase):
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
         self.assertEqual(self.notes(), [])
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        # PR-2 (#161): a clean evaluation no longer grants warning
+        # authority -- only an observed midnight rollover does.
+        self.assertFalse(self.reconciler.authorized)
         self.assert_no_writes()
 
     def test_within_one_percent_is_clean(self):
@@ -212,11 +214,13 @@ class KnownGoodDayTests(LoopBase):
 
     def test_the_floor_governs_small_days(self):
         # max(0.2 kwh, 1% of the larger side): small totals use the floor.
+        self.authorize()
         self.note(0.1)
         self.assertEqual(self.evaluate(archive=0.1, charger=0.28), "clean")
         self.assertEqual(self.evaluate(archive=0.1, charger=0.32), "warned")
 
     def test_one_percent_governs_large_days(self):
+        self.authorize()
         self.note(100.0)
         self.assertEqual(self.evaluate(archive=100.0, charger=100.9), "clean")
         self.assertEqual(self.evaluate(archive=100.0, charger=102.0), "warned")
@@ -238,7 +242,8 @@ class ObservationSkewTests(LoopBase):
     coverage at the charger's 48 A ceiling (~59 s on the UK band top)."""
 
     def test_an_aged_same_day_sample_tolerates_the_feed_gap(self):
-        # 13:59: a clean evaluation grants warning authority. 14:00: the
+        # Midnight earned warning authority (the rollover rule, PR-2); the
+        # 13:59 evaluation is clean. 14:00: the
         # hourly HTTP reconcile applied a 5.0 sample; the MQTT snapshots
         # kept the bridge side moving. At 14:00:59 the sample is 59 s old
         # and the bridge total holds ~0.181 kwh (11 kW x 59 s at the 48 A
@@ -246,6 +251,7 @@ class ObservationSkewTests(LoopBase):
         # window still admits the age and the 0.2 floor absorbs the skew
         # -- with a 0.05 floor this exact interleaving warned "bridge
         # high" about energy nobody lost.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -263,6 +269,7 @@ class ObservationSkewTests(LoopBase):
         # gap exceeds what the cadence can explain -- even inside the
         # freshness window, at a power no charger could deliver in the
         # sample's age -- it is a divergence.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -289,7 +296,8 @@ class SampleFreshnessTests(LoopBase):
 
     def test_a_same_day_sample_past_the_freshness_window_is_not_compared(self):
         # The false-warning reproduction at the power that exposes the
-        # band: authority is granted clean at 13:59, the 14:00:00 HTTP
+        # band: authority is earned at midnight (the rollover rule, PR-2),
+        # the 14:00:00 HTTP
         # reconcile then fails (a failed poll advances the next deadline
         # and never notes), the charger delivers ~11 kW via MQTT
         # snapshots, and the tick at 14:00:45 sees a 105 s-old sample
@@ -298,6 +306,7 @@ class SampleFreshnessTests(LoopBase):
         # intervals wide admitted exactly this age and warned "bridge
         # high" about energy nobody lost; the one-interval window
         # suppresses the evaluation instead.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -323,16 +332,18 @@ class SampleFreshnessTests(LoopBase):
         # 59 s old at the default cadence -- just inside the window, which
         # the clamp holds at the tolerance floor's coverage (~59.3 s = the
         # 0.2 floor at 48 A x 253 V, the UK band top): the evaluation
-        # runs -- proven by the authority grant -- and the ceiling-power
+        # runs -- proven by the last-clean stamp a clean evaluation leaves
+        # -- and the ceiling-power
         # skew of that age (12.1 kW x 59 s ~ 0.199 kwh) sits inside the
         # floor: the window and the floor meet at exactly this age, even
         # at the top of the supply band.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(14, 0))
         self.seed_pending(0.199, _at(14, 0, 59))
         self.now = _at(14, 0, 59)
         self.run_loop(1)
-        self.assertTrue(self.reconciler.authorized)
+        self.assertEqual(self.reconciler._last_clean, _at(14, 0, 59))
         self.assertEqual(self.warnings(), [])
         self.assert_no_writes()
 
@@ -345,6 +356,7 @@ class SampleFreshnessTests(LoopBase):
         # observation skew on a day nobody lost energy. run() clamps the
         # window to the tolerance floor's coverage at ceiling power, so
         # the raised cadence suppresses the evaluation instead.
+        self.authorize()
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
@@ -443,12 +455,18 @@ class AbsentCounterTests(LoopBase):
         self.counter.note(None)
         self.run_loop(1)
         self.assertIn("inactive", " ".join(self.logs))
-        self.seed_history(5.0)
+        # The counter appears (firmware upgraded, say) and the totals
+        # diverge: the comparison runs again, as an informational note --
+        # PR-2 (#161): without an observed midnight rollover it can never
+        # be more than that.
+        self.seed_history(12.0)
         self.note(5.0, _at(10))
         self.now = _at(10)
         self.run_loop(1)
+        (note,) = self.notes()
+        self.assertIn("informational", note)
         self.assertEqual(self.warnings(), [])
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.assertFalse(self.reconciler.authorized)
 
 
 class MidDayRestartTests(LoopBase):
@@ -456,10 +474,12 @@ class MidDayRestartTests(LoopBase):
     figures disagree -- exactly one warning with every field, then silence."""
 
     def test_exactly_one_warning_with_all_fields(self):
-        # Morning: the archive and the charger's day counter grow in
-        # lockstep; the 13:58 evaluation is clean (authority granted).
+        # Authority first: the counter's real midnight rollover (23:59 ->
+        # 00:05) unlocks warnings under the PR-2 rule. Morning: the archive
+        # and the charger's day counter grow in lockstep; the 13:58
+        # evaluation is clean.
+        self.authorize()
         self.seed_history(9.0, hours={"09": 4.0, "10": 3.0, "11": 2.0})
-        self.note(0.0, _at(9))
         self.note(9.0, _at(13, 58))
         self.now = _at(13, 58)
         self.run_loop(1)
@@ -504,14 +524,16 @@ class MidDayRestartTests(LoopBase):
         self.assert_no_writes()
 
     def test_a_gap_grown_by_a_kwh_rearms_the_warning(self):
+        self.authorize()
         self.note(5.0)
-        self.evaluate(archive=5.0, charger=5.0)  # clean; authority granted
+        self.evaluate(archive=5.0, charger=5.0)  # clean
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
         self.assertEqual(self.evaluate(archive=7.4, charger=5.0), "held")
         self.assertEqual(self.evaluate(archive=8.05, charger=5.0), "warned")
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_direction_change_rearms_the_warning(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(
@@ -523,6 +545,7 @@ class MidDayRestartTests(LoopBase):
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_clean_evaluation_closes_the_episode(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
@@ -532,6 +555,7 @@ class MidDayRestartTests(LoopBase):
         self.assertEqual(len(self.warnings()), 2)
 
     def test_a_new_day_starts_a_new_episode(self):
+        self.authorize()
         self.note(5.0)
         self.evaluate(archive=5.0, charger=5.0)
         self.assertEqual(self.evaluate(archive=7.0, charger=5.0), "warned")
@@ -567,11 +591,11 @@ class ImplausibleJumpTests(LoopBase):
         self.assertFalse(self.counter.eval_ready)  # ... but not trusted yet
 
     def test_no_false_reconciliation_from_a_rejected_sample(self):
+        self.authorize()
         self.seed_history(10.0)
         self.note(10.0, _at(14))
         self.now = _at(14)
-        self.run_loop(1)  # clean; authority granted
-        self.assertIn("warning authority granted", " ".join(self.logs))
+        self.run_loop(1)  # clean
         self.note(400.0, _at(14, 1))  # corrupt jump: rejected
         self.now = _at(14, 2)
         self.run_loop(1)  # the untrusted sample is not evaluated
@@ -594,9 +618,11 @@ class MidnightOutageTests(LoopBase):
     day's fresh totals; recovery resumes normal reconciliation."""
 
     def test_a_stale_pre_midnight_sample_is_not_compared_against_the_new_day(self):
-        # Day 20 ends healthy: the 23:10 sample reconciles clean against the
-        # archive (authority granted; the tick lands 59 s after the note,
-        # inside the clamped window), then the charger goes unreachable.
+        # Day 20 ends healthy: authority was earned at the midnight
+        # rollover into day 20, the 23:10 sample reconciles clean against
+        # the archive (the tick lands 59 s after the note, inside the
+        # clamped window), then the charger goes unreachable.
+        self.authorize()
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
         self.now = _at(23, 10, 59, day=20)
@@ -620,6 +646,7 @@ class MidnightOutageTests(LoopBase):
         self.assert_no_writes()
 
     def test_recovery_resumes_normal_reconciliation(self):
+        self.authorize()
         self.seed_history(11.0)
         self.note(11.0, _at(23, 10, day=20))
         self.now = _at(23, 10, 59, day=20)
@@ -666,9 +693,11 @@ class AuthorityTests(ReconcileBase):
         self.assertEqual(len(self.notes()), 1)
 
     def test_authority_is_granted_once_and_survives_later_divergences(self):
-        self.note(5.0)
-        self.evaluate(archive=5.0, charger=5.0)
+        # The grant comes from the observed rollover (authorize), and only
+        # from it: later evaluations neither add nor repeat the grant.
+        self.authorize()
         grants = [line for line in self.logs if "authority granted" in line]
+        self.assertEqual(len(grants), 1)
         self.assertEqual(self.evaluate(archive=9.0, charger=5.0), "warned")
         self.assertEqual(
             [line for line in self.logs if "authority granted" in line], grants
@@ -1309,7 +1338,7 @@ class NonResetCounterTests(LoopBase):
         self.now = _at(0, 5, day=21)
         self.run_loop(1)
         (revoked,) = [line for line in self.logs if "warning authority revoked" in line]
-        self.assertIn("did not reset", revoked[0])
+        self.assertIn("did not reset", revoked)
         self.assertFalse(self.reconciler.authorized)
         (note,) = self.notes()  # 5.0 vs 9.1 stays informational
         self.assertIn("bridge low", note)
@@ -1406,7 +1435,7 @@ class MonthKnownGoodTests(MonthLoopBase):
         self.seed_history(12.4)
         self.seed_pending(0.1)
         self.note(12.5)
-        self.note_month(68.0)  # 8.2 + 12.9 + 30.0 + 12.4 + 0.1
+        self.note_month(63.6)  # 8.2 + 12.9 + 30.0 + 12.4 + 0.1
         self.run_loop(1)
         # The day comparison is clean, which is the month's authority gate:
         # exactly one grant line, and the month itself reconciles silently.
@@ -1464,8 +1493,8 @@ class MonthKnownGoodTests(MonthLoopBase):
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
         (note,) = [l for l in self.month_lines() if "note (month" in l]
-        self.assertIn("informational", note[0])
-        self.assertIn("authority not yet granted", note[0])
+        self.assertIn("informational", note)
+        self.assertIn("authority not yet granted", note)
         self.assert_no_writes()
 
     def test_the_month_is_compared_once_per_local_day(self):
@@ -1482,9 +1511,10 @@ class MonthKnownGoodTests(MonthLoopBase):
         self.now = _at(15)
         self.run_loop(1)
         self.assertEqual(len([l for l in self.month_lines() if "(month" in l]), 1)
-        # The next local day compares again -- and the grown gap re-arms.
+        # The next local day compares again -- and the gap grown by another
+        # kWh overnight re-arms the episode.
         self.note(12.5, _at(9, day=21))
-        self.note_month(50.0, _at(9, day=21))
+        self.note_month(60.0, _at(9, day=21))
         self.now = _at(9, day=21)
         self.run_loop(1)
         self.assertEqual(len([l for l in self.month_lines() if "(month" in l]), 2)
