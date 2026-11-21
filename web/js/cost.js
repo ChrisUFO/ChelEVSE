@@ -779,22 +779,26 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
   };
 }
 
-// The period summary's coverage disclosure (#194): the kWh the figure prices,
-// painted beneath it as a small muted caption while the kWh total the summary
-// already shows stays the day documents' own, whenever the stored sessions
-// cover only part of the recorded energy — beyond the same max(250 Wh, 2%)
-// band the interval reconciliation and the buckets' own coverage use, so
-// attribution rounding cannot fire the line. Null when the period is covered
-// within that band, and whenever the $ itself hides (a period with nothing
-// covered keeps today's hidden presentation); no figure is invented, and the
-// kWh totals are never touched. Both energies format the way every kWh in the
-// app does (fmtK).
+// The period summary's coverage disclosure (#194, #211): the kWh the figure
+// prices, painted beneath it as a small muted caption while the kWh total the
+// summary already shows stays the day documents' own, whenever the stored
+// sessions cover only part of the recorded energy — any missing Wh at all
+// (#211): no tolerance floor and nothing that scales with the period's size,
+// so a month can no longer absorb a gap a week would disclose. Both energies
+// are compared at whole-Wh resolution — the charger counter's own 0.001 kWh
+// quantum — so quantization and attribution float noise cannot flicker the
+// line; a gap of exactly zero at that resolution is the only silent one.
+// (The interval reconciliation and the buckets' own per-bucket $-hiding keep
+// their max(250 Wh, 2%) band; this caption no longer shares it.) Null
+// whenever the $ itself hides (a period with nothing covered keeps today's
+// hidden presentation); no figure is invented, and the kWh totals are never
+// touched. Both energies format the way every kWh in the app does (fmtK).
 export function coverageDisclosure(summary) {
   if (!summary || summary.cost == null) return null;
   const recorded = toNumber(summary.recordedWh);
   const covered = toNumber(summary.coveredWh);
   if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
-  if (recorded - covered <= intervalEnergyTolerance(recorded)) return null;
+  if (Math.round(recorded) - Math.round(covered) < 1) return null;
   return `priced ${fmtK(covered / 1000)} of ${fmtK(recorded / 1000)} kWh`;
 }
 
