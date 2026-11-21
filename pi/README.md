@@ -1127,6 +1127,41 @@ usable seed, the first successful poll only establishes state.
 temperatures no longer reach it (#159): they are parsed from the live
 `/status` reply for the health gate only.
 
+### Maintenance: repairing legacy session energy
+
+`pi/repair_session_wh.py` is the one-time, owner-run repair for the
+pre-#195 documents above: sessions whose `wh` carries only the last counter
+epoch's cumulative while their interval list is energy-complete (live
+examples: 15956 Wh against a list summing 48038). The web's guard refuses to
+price such a list — the session falls back to pro-rating a bounded
+undercount — so the repair sets `wh` to the interval sum. Run it when that
+pre-#195 population shows up (the undercount shows as the coverage
+disclosure or `intervals-short`-style pricing); documents written since #195
+never need it.
+
+```bash
+# Always dry-run first (the default) and read the table it prints.
+pi/.venv/bin/python pi/repair_session_wh.py
+# Then write — only the wh field of the documents the criteria select.
+pi/.venv/bin/python pi/repair_session_wh.py --apply
+```
+
+A document is repaired exactly when: `wh` is a finite number ≥ 0,
+`intervals` is a non-empty list, every entry is usable (finite positive
+`wh`, both endpoints parseable, start < end), and
+`sum(intervals) > wh + max(250 Wh, 2%·wh)` — the same tolerance the web's
+guard uses, so a repaired document reconciles by construction. Everything
+else is classified for the report and left alone: `reconcile` (already
+within the band), `intervals-short` (a restart left energy in the aggregate
+and in no interval — `wh` is the better figure), `no-intervals`,
+`unusable-intervals` and `bad-wh`. The decision is pure logic
+(`pi/session_wh_repair.py`, unit-tested), the tool writes no Firestore field
+but `wh`, and it is idempotent: once `wh` equals the interval sum the
+document reconciles, so a rerun writes nothing. It refuses `--apply` without
+a service-account key, printing the expected paths
+(`GOOGLE_APPLICATION_CREDENTIALS`, `FIREBASE_SERVICE_ACCOUNT` from
+`private/bridge.env`, or `private/service-account.json`).
+
 ### Push notifications (FCM)
 
 A single background daemon worker performs every send via the Admin SDK. Three
