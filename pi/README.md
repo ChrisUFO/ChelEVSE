@@ -1034,12 +1034,19 @@ _day_ comparison: the day comparison proving the shared period semantics
 and time-zone alignment is exactly what the month needs, since the month
 counter rides the same observations and resets on the same local clock —
 and the same non-reset evidence that revokes the day's grant revokes the
-month's with it.
+month's with it. The month counter's own non-reset — a `total_month` that
+sails across the month line without dropping, a cumulative counter —
+revokes the grant and withholds it: clean days prove the day's alignment,
+not a cumulative counter's, so the month stays informational until that
+counter is observed resetting at a month boundary.
 
 A divergence near **1000×** at either period is not lost energy — it is a
 Wh-scaled counter (a firmware variant or misconfiguration) — and is
-rejected with its own bounded line naming both totals; it is never warned
-about and never reconciled.
+rejected with its own bounded line naming both totals once the bridge
+total reaches ~1 kWh; below that a ~1000× ratio is what an outage's
+opening looks like (a whisker of observed energy against a charger that
+delivered on its own schedule) and is warned like any divergence. Either
+way it is never reconciled.
 
 **Zero writes, ever.** Reconciliation reads and journals; it never
 corrects, backfills or repairs anything. A divergence is evidence for a

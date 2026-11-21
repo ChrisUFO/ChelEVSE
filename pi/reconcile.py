@@ -583,11 +583,31 @@ class MonthReconciler(DayReconciler):
     same holds in reverse: the loop feeds the day counter's non-resets
     to :meth:`consider_evidence`, and each one revokes a held grant --
     evidence that disproves the shared clock for the day disproves it
-    for the month too.
+    for the month too. The month counter's own boundary evidence is its
+    own (:meth:`consider_month_evidence`): a ``total_month`` that sails
+    across the month line without resetting is not measuring this month
+    (a cumulative counter -- a firmware variant or misconfiguration),
+    so its non-reset revokes a held grant and withholds the clean-day
+    gate until that counter is observed resetting at a month boundary:
+    a clean day proves the day's alignment, not a cumulative counter's.
     """
 
     PERIOD = "month"
     COUNTER = "total_month"
+
+    def __init__(self):
+        super().__init__()
+        # The month counter's own evidence lists get their own seen-indices:
+        # the inherited ones index the day stream's lists, and one index
+        # cannot track two lists.
+        self._month_rollovers_seen = 0
+        self._month_non_resets_seen = 0
+        # True while the month counter's own period alignment is disproven
+        # (a non-reset at the month line): the clean-day gate is withheld
+        # until the counter is observed resetting, or a cumulative
+        # ``total_month`` would walk back through that gate every day and
+        # keep false-warning forever.
+        self._period_misaligned = False
 
     def consider_evidence(self, rollovers, non_resets):
         """Consume the day counter's non-resets: each revokes a held grant.
@@ -613,9 +633,54 @@ class MonthReconciler(DayReconciler):
                     f"clean day comparison"
                 )
 
+    def consider_month_evidence(self, rollovers, non_resets):
+        """Consume the month counter's own boundary evidence.
+
+        The day-fed evidence (:meth:`consider_evidence`) speaks for the
+        shared clock; this is the month counter's own period alignment.
+        A non-reset -- the counter sailing across its month line -- means
+        the ``total_month`` being compared is not this month's total (a
+        cumulative counter, a firmware variant or misconfiguration), so a
+        grant it disproves falls and the clean-day gate is withheld: a
+        clean day proves the day's alignment, not a cumulative counter's.
+        The next observed month rollover -- the counter actually resetting
+        at its boundary -- restores the alignment and clean days grant
+        again: the same evidence-driven shape as the day rule, one
+        boundary deeper.
+        """
+        for observed in rollovers[self._month_rollovers_seen :]:
+            self._month_rollovers_seen += 1
+            if self._period_misaligned:
+                self._period_misaligned = False
+                log(
+                    f"month reconciliation: month counter reset observed "
+                    f"at {observed:%Y-%m-%d %H:%M} local after a non-reset; "
+                    f"period alignment restored -- the next clean day "
+                    f"comparison can re-grant warning authority"
+                )
+        for observed in non_resets[self._month_non_resets_seen :]:
+            self._month_non_resets_seen += 1
+            if self.authorized:
+                self.authorized = False
+                log(
+                    f"month reconciliation: warning authority revoked -- "
+                    f"the month counter did not reset across the local "
+                    f"month boundary before {observed:%Y-%m-%d %H:%M} "
+                    f"local; month comparisons are informational again "
+                    f"until the counter is observed resetting at a month "
+                    f"boundary and a day comparison runs clean"
+                )
+            self._period_misaligned = True
+
     def note_clean_day(self, now_local):
-        """Grant authority after one clean day comparison (once)."""
-        if not self.authorized:
+        """Grant authority after one clean day comparison (once).
+
+        Withheld while the month counter's own alignment is disproven
+        (:meth:`consider_month_evidence`): a clean day says the day's
+        semantics match, not that a cumulative ``total_month`` started
+        measuring the month.
+        """
+        if not self.authorized and not self._period_misaligned:
             self._grant_authority(now_local)
 
     def _grant_authority(self, now_local):

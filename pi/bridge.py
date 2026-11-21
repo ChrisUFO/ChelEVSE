@@ -2563,7 +2563,11 @@ def reconcile_loop(
     rollovers and non-resets) to ``reconciler.consider_evidence``: authority
     is evidence-driven, independent of whether an evaluation runs. The
     month reconciler consumes the same non-resets: a grant the evidence
-    disproves falls for both periods. A
+    disproves falls for both periods, and the month counter's own boundary
+    evidence beside them: a ``total_month`` that sails across its month
+    line without resetting revokes and withholds the month's grant until
+    that counter is observed resetting -- a cumulative month counter is an
+    informational mismatch, not an endless false warning. A
     charger whose replies carry no period counters at all (firmware below
     4.2.2) makes the loop inactive after one informational line: nothing to
     reconcile, nothing to warn about. A rejected (implausible) sample
@@ -2604,10 +2608,18 @@ def reconcile_loop(
         # runs this tick. The month rides the day's non-resets: a counter
         # that stopped resetting disproves the shared clock for both
         # periods, so a month grant one contradicts falls here too,
-        # before the month's next comparison.
+        # before the month's next comparison. The month counter's own
+        # boundary evidence follows beside it: a total_month that sails
+        # across its month line is not measuring this month, so its
+        # non-reset revokes and withholds the month's grant until the
+        # counter is observed resetting there.
         reconciler.consider_evidence(counter.rollovers, counter.non_resets)
         if month_reconciler is not None:
             month_reconciler.consider_evidence(counter.rollovers, counter.non_resets)
+            if month_counter is not None:
+                month_reconciler.consider_month_evidence(
+                    month_counter.rollovers, month_counter.non_resets
+                )
         if not counter.present:
             if not inactive_logged:
                 log(
