@@ -284,16 +284,16 @@ def verify_production(bridge_mod, db, year, month, control_sum):
     """``bridge._month_totals`` itself must return the control's sum.
 
     Day 15 noon of the month, pure wall-clock: the function reads only
-    ``.date()`` and does month arithmetic. Pre-fix (string bounds rejected
-    by the server) its ``except`` swallows the rejection into None --
-    reported as the pre-fix FAIL it is, never a crash of this run.
+    ``.date()`` and does month arithmetic. A read failure inside the
+    function lands in its ``except`` and comes back as None (one journal
+    line above) -- reported as the FAIL it is, never a crash of this run.
     """
     now_local = datetime(year, month, 15, 12, 0, 0)
     result = bridge_mod._month_totals(db, StubSink(), now_local)
     if result is None:
         return {
             "ok": False,
-            "detail": "returned None (query rejected internally - pre-fix expected)",
+            "detail": "returned None (month read failed - journal line above)",
         }
     archive, pending = result
     if pending == 0.0 and abs(archive - control_sum) <= TOLERANCE:

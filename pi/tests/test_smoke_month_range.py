@@ -4,13 +4,13 @@ Everything except the live Firestore calls, exactly the split the smoke's
 pure-helper structure exists for: month bounds (December/January rollover
 both directions), the client-side control scan, the string-probe
 classification (a server-style rejection is a finding, never a crash), the
-DocumentReference-form equality (against stub queries -- ``fakes.py`` is
-not editable in this lane and its ``__name__`` matching compares plain
-strings; the real reference-bounds unwrap lands with the production fix),
-the production-path verdicts through ``bridge._month_totals`` itself, the
-boundary spot-checks, the verdict/summary composition, the CLI contract
-and the credentials refusals. Every scenario also pins the zero-writes
-invariant (#161): ``FakeDB.writes`` stays empty.
+DocumentReference-form equality (real ``FakeCollection.document()``
+bounds -- ``FakeQuery`` unwraps reference ``__name__`` bounds since the
+phase-4a fix), the production-path verdicts through ``bridge._month_totals``
+itself (reference bounds since the same fix), the boundary spot-checks, the
+verdict/summary composition, the CLI contract and the credentials refusals.
+Every scenario also pins the zero-writes invariant (#161): ``FakeDB.writes``
+stays empty.
 """
 
 import argparse
@@ -29,64 +29,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bridge  # noqa: E402
 import smoke_month_range as smoke  # noqa: E402
-from fakes import FakeDB, FakeQuery  # noqa: E402
-
-
-class _RefBound(str):
-    """A DocumentReference stand-in: the id it stands for, as a string.
-
-    ``FakeQuery`` compares a ``__name__`` bound against ``row.id``
-    directly, so a reference-typed bound must compare as its id string for
-    the offline runs. The real fake-side unwrap of reference bounds is the
-    phase-4a fix; this lane may not edit ``fakes.py``.
-    """
-
-    def __new__(cls, doc_id):
-        bound = super().__new__(cls, doc_id)
-        bound.id = doc_id
-        return bound
-
-
-class _RefCollection:
-    """A collection whose ``document()`` hands out reference-typed bounds
-    and whose queries and scans run against the FakeDB data."""
-
-    def __init__(self, db, name):
-        self._db = db
-        self.name = name
-
-    def document(self, doc_id):
-        return _RefBound(doc_id)
-
-    def stream(self):
-        return FakeQuery(self._db, self.name).stream()
-
-    def where(self, filter=None):
-        return FakeQuery(self._db, self.name).where(filter=filter)
+from fakes import FakeCollection, FakeDB, FakeDocument, FakeQuery  # noqa: E402
 
 
 class RefDB(FakeDB):
-    """FakeDB with reference-typed ``__name__`` bounds (see ``_RefBound``)
-    and the ``project`` attribute the smoke's header reads."""
+    """FakeDB with the ``project`` attribute the smoke's header reads."""
 
     project = "chelevse-test"
 
-    def collection(self, name):
-        return _RefCollection(self, name)
 
-
-class _RejectingCollection(_RefCollection):
+class _RejectingCollection(FakeCollection):
     """Production's documented contract: ``__name__`` bounds must be
     references. A plain-string bound raises the server's own refusal at
-    query construction -- inside the smoke's classification try, and inside
-    ``_month_totals``'s except (the pre-fix None)."""
+    query construction -- inside the smoke's classification try."""
 
     def where(self, filter=None):
         if (
             filter is not None
             and filter.field_path == "__name__"
-            and isinstance(filter.value, str)
-            and not isinstance(filter.value, _RefBound)
+            and not isinstance(filter.value, FakeDocument)
         ):
             raise ValueError("__key__ filter value must be a Key")
         return FakeQuery(self._db, self.name).where(filter=filter)
@@ -115,7 +76,7 @@ class _LeakyRange:
         return self._rows
 
 
-class _LeakyCollection(_RefCollection):
+class _LeakyCollection(FakeCollection):
     """Every range leaks: the previous month's range includes the boundary
     document, the shape a non-exclusive upper bound would produce."""
 
@@ -137,7 +98,7 @@ class _ExplodingDB:
         return self
 
     def document(self, doc_id):
-        return _RefBound(doc_id)
+        return FakeDocument(self, "history", doc_id)
 
     def where(self, filter=None):
         return self
@@ -303,8 +264,8 @@ class ProductionPathTests(unittest.TestCase):
     """``bridge._month_totals`` itself, through the smoke's stub sink."""
 
     def test_the_control_sum_comes_back_with_zero_pending(self):
-        # Against fakes the as-merged string bounds work -- exactly the
-        # assumption #208 questions; RejectingDB below pins the other side.
+        # The fixed bridge sends reference bounds; FakeQuery unwraps their
+        # ids, so the plain fake and the live server agree with it.
         db = history_db(NOVEMBER)
         expected = 8.2 + 9.0
         verdict = smoke.verify_production(bridge, db, 2026, 11, expected)
@@ -312,20 +273,30 @@ class ProductionPathTests(unittest.TestCase):
         self.assertIn("== control sum", verdict["detail"])
         self.assertEqual(db.writes, [])
 
-    def test_the_pre_fix_swallowed_rejection_is_reported_as_a_fail(self):
+    def test_reference_bounds_pass_the_servers_string_rejection(self):
+        # RejectingDB enforces the live contract found on 2026-11-21: the
+        # #207 string form raises "__key__ filter value must be a Key".
+        # The fixed production path sends DocumentReference bounds, so it
+        # returns the control sum where the pre-fix path returned None.
         db = history_db(NOVEMBER, cls=RejectingDB)
         out = io.StringIO()
-        with redirect_stdout(out):  # _month_totals journals its failure line
+        with redirect_stdout(out):
             verdict = smoke.verify_production(bridge, db, 2026, 11, 17.2)
+        self.assertTrue(verdict["ok"])
+        self.assertIn("== control sum", verdict["detail"])
+        self.assertEqual(db.writes, [])
+
+    def test_a_swallowed_read_failure_is_reported_as_a_fail(self):
+        out = io.StringIO()
+        with redirect_stdout(out):  # _month_totals journals its failure line
+            verdict = smoke.verify_production(bridge, _ExplodingDB(), 2026, 11, 17.2)
         self.assertEqual(
             verdict,
             {
                 "ok": False,
-                "detail": "returned None (query rejected internally - "
-                "pre-fix expected)",
+                "detail": "returned None (month read failed - journal line above)",
             },
         )
-        self.assertEqual(db.writes, [])
 
     def test_a_wrong_sum_or_pending_fails(self):
         db = history_db(NOVEMBER)
@@ -394,20 +365,20 @@ class RunMonthTests(unittest.TestCase):
         self.assertEqual(smoke.failing_checks(result), [])
         self.assertEqual(db.writes, [])
 
-    def test_the_production_contract_month_reports_without_raising(self):
-        # String bounds rejected + _month_totals swallowing to None: the
-        # expected live outcome pre-fix. Everything that can still be
-        # verified is; only the production path fails the month.
+    def test_a_string_probe_rejection_is_a_finding_not_a_failure(self):
+        # RejectingDB raises on the #207 string form -- the live 2026-11-21
+        # outcome -- while the fixed production path sends reference bounds
+        # and passes; the probe's rejection never gates the month.
         db = history_db(NOVEMBER, cls=RejectingDB)
         out = io.StringIO()
         with redirect_stdout(out):
             result = smoke.run_month(db, bridge, 2026, 11)
-        self.assertFalse(result["ok"])
+        self.assertTrue(result["ok"])
         self.assertEqual(result["string_probe"]["outcome"], "rejected")
         self.assertTrue(result["ref_form"]["ok"])
-        self.assertFalse(result["production"]["ok"])
+        self.assertTrue(result["production"]["ok"])
         self.assertEqual(result["boundary"]["status"], "pass")
-        self.assertEqual(smoke.failing_checks(result), ["production path"])
+        self.assertEqual(smoke.failing_checks(result), [])
         self.assertEqual(db.writes, [])
 
     def test_a_month_without_history_documents_fails_on_the_control_gate(self):
@@ -463,7 +434,7 @@ class SummaryTests(unittest.TestCase):
         failed = green_month("2026-11")
         failed["production"] = {
             "ok": False,
-            "detail": "returned None (query rejected internally - pre-fix expected)",
+            "detail": "returned None (month read failed - journal line above)",
         }
         failed["boundary"] = {"status": "fail", "detail": "..."}
         failed["ok"] = False

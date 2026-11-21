@@ -2497,16 +2497,16 @@ def _month_totals(db, sink, now_local):
     )
     try:
         with sink._lock:
+            history = db.collection("history")
             snapshots = (
-                db.collection("history")
-                .where(
+                history.where(
                     filter=firestore.FieldFilter(
-                        "__name__", ">=", month_start.isoformat()
+                        "__name__", ">=", history.document(month_start.isoformat())
                     )
                 )
                 .where(
                     filter=firestore.FieldFilter(
-                        "__name__", "<", next_month.isoformat()
+                        "__name__", "<", history.document(next_month.isoformat())
                     )
                 )
                 .stream()

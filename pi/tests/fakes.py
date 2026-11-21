@@ -265,18 +265,25 @@ class FakeQuery:
     @staticmethod
     def _matches(row, condition):
         if condition.field_path == "__name__":
-            # A documentId filter compares the id; the server only accepts
-            # string bounds there, and so does the history range query.
+            # A documentId filter compares the id; the server's contract is
+            # reference bounds (production Firestore rejects strings on
+            # __name__: "__key__ filter value must be a Key",
+            # googleapis/python-firestore#153), so the value is unwrapped
+            # when it carries one. Plain strings still compare -- narrow
+            # local uses keep working; the fake does not emulate the
+            # server's rejection.
             value = row.id
+            bound = getattr(condition.value, "id", condition.value)
         else:
             value = (row.to_dict() or {}).get(condition.field_path)
+            bound = condition.value
         op = condition.op_string
         if op == "==":
-            return value == condition.value
+            return value == bound
         if op == ">=":
-            return value is not None and value >= condition.value
+            return value is not None and value >= bound
         if op == "<":
-            return value is not None and value < condition.value
+            return value is not None and value < bound
         raise AssertionError(f"fake query does not support {op}")
 
 
