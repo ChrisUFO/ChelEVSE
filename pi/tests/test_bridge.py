@@ -2330,7 +2330,10 @@ class LoopWiringTests(unittest.TestCase):
             mock.patch.object(bridge, "claims_loop", spy("claims")),
             mock.patch.object(bridge, "reconcile_loop", reconcile_spy),
             mock.patch.object(bridge.threading, "Thread", _ThreadSpy),
-            mock.patch.object(bridge, "StatusTracker") as tracker,
+            # #212 PR-3: run() builds the session-basis tracker (the
+            # StatusTracker subclass that mirrors deltas into the archive
+            # reconciler's basis), so that is the construction to intercept.
+            mock.patch.object(bridge, "SessionBasisTracker") as tracker,
             mock.patch.object(bridge, "Notifier"),
         ):
             bridge.run(
@@ -2399,7 +2402,7 @@ class LoopWiringTests(unittest.TestCase):
             mock.patch.object(bridge, "notifications_loop"),
             mock.patch.object(bridge, "command_loop"),
             mock.patch.object(bridge.threading, "Thread"),
-            mock.patch.object(bridge, "StatusTracker"),
+            mock.patch.object(bridge, "SessionBasisTracker"),
             mock.patch.object(bridge, "Notifier"),
             mock.patch.object(bridge, "log") as fake_log,
         ):
