@@ -204,15 +204,18 @@ class ObservationSkewTests(LoopBase):
         # 13:59: a clean evaluation grants warning authority. 14:00: the
         # hourly HTTP reconcile applied a 5.0 sample; the MQTT snapshots
         # kept the bridge side moving. At 14:00:59 the sample is 59 s old
-        # and the bridge total holds ~0.13 kwh (7.7 kW x 59 s) the charger
-        # has not reported yet: with a 0.05 floor this exact interleaving
-        # warned "bridge high" about energy nobody lost.
+        # and the bridge total holds ~0.181 kwh (11 kW x 59 s at the 48 A
+        # ceiling) the charger has not reported yet: the one-interval
+        # window still admits the age and the 0.2 floor absorbs the skew
+        # -- with a 0.05 floor this exact interleaving warned "bridge
+        # high" about energy nobody lost.
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
         self.run_loop(1)
         self.assertIn("warning authority granted", " ".join(self.logs))
-        self.seed_pending(0.13, _at(14, 0, 59))
+        self.note(5.0, _at(14, 0))
+        self.seed_pending(0.181, _at(14, 0, 59))
         self.now = _at(14, 0, 59)
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
@@ -220,12 +223,15 @@ class ObservationSkewTests(LoopBase):
 
     def test_a_real_divergence_beyond_the_skew_cover_still_warns(self):
         # The floor is a cover for the feed gap, not a blind eye: once the
-        # gap exceeds what the cadence can explain, it is a divergence.
+        # gap exceeds what the cadence can explain -- even inside the
+        # freshness window, at a power no charger could deliver in the
+        # sample's age -- it is a divergence.
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
         self.run_loop(1)
         self.assertIn("warning authority granted", " ".join(self.logs))
+        self.note(5.0, _at(14, 0))
         self.seed_pending(0.35, _at(14, 0, 59))
         self.now = _at(14, 0, 59)
         self.run_loop(1)
@@ -238,24 +244,29 @@ class SampleFreshnessTests(LoopBase):
     """A same-day sample can still be too old to compare (#161): the feed
     skips an HTTP reconcile on a failed poll or an ``mqtt_mark`` discard
     while the bridge side keeps advancing from every applied snapshot, so
-    the skew grows with the sample's age. Past the freshness window (two
-    feed intervals, 120 s at the default cadence) the evaluation waits for
-    a fresh sample instead of warning about energy nobody lost."""
+    the skew grows with the sample's age. Past the freshness window (one
+    feed interval, 60 s at the default cadence -- exactly the skew the
+    tolerance floor covers at the charger's ceiling) the evaluation waits
+    for a fresh sample instead of warning about energy nobody lost."""
 
     def test_a_same_day_sample_past_the_freshness_window_is_not_compared(self):
-        # 13:59: a clean evaluation grants warning authority. The HTTP
-        # reconciles then fail or are discarded twice in a row, so at 14:02
-        # the accepted sample is 180 s old while the bridge side holds
-        # 0.256 kwh (7.7 kW x 120 s) the charger has not reported yet --
-        # without the age guard this exact interleaving warned "bridge
-        # high" about observation skew.
+        # The false-warning reproduction at the power that exposes the
+        # band: authority is granted clean at 13:59, the 14:00:00 HTTP
+        # reconcile then fails (a failed poll advances the next deadline
+        # and never notes), the charger delivers ~11 kW via MQTT
+        # snapshots, and the tick at 14:00:45 sees a 105 s-old sample
+        # with 0.322 kwh (11 kW x 105 s at the 48 A ceiling) of skew on
+        # the bridge side only -- past the 0.2 floor. A window two
+        # intervals wide admitted exactly this age and warned "bridge
+        # high" about energy nobody lost; the one-interval window
+        # suppresses the evaluation instead.
         self.seed_history(5.0)
         self.note(5.0, _at(13, 59))
         self.now = _at(13, 59)
         self.run_loop(1)
         self.assertIn("warning authority granted", " ".join(self.logs))
-        self.seed_pending(0.256, _at(14, 2))
-        self.now = _at(14, 2)
+        self.seed_pending(0.322, _at(14, 0, 45))
+        self.now = _at(14, 0, 45)
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
         self.assertEqual(self.notes(), [])
@@ -264,20 +275,21 @@ class SampleFreshnessTests(LoopBase):
         # The next applied reconcile catches the counter up: comparison
         # resumes and the day is clean -- the guard held the evaluation,
         # not the episode, hostage.
-        self.note(5.256, _at(14, 2, 30))
-        self.now = _at(14, 2, 30)
+        self.note(5.322, _at(14, 1))
+        self.now = _at(14, 1)
         self.run_loop(1)
         self.assertEqual(self.warnings(), [])
         self.assert_no_writes()
 
     def test_a_sample_at_the_window_edge_is_still_compared(self):
-        # Exactly 120 s old (the failed-reconcile instant right before the
-        # next one lands): still within the window, so the evaluation runs
-        # -- proven by the authority grant -- and the floor covers the one
-        # interval of skew it implies.
+        # Exactly 60 s old (the failed-reconcile instant right before the
+        # next one lands): still within the window, so the evaluation
+        # runs -- proven by the authority grant -- and at the ceiling the
+        # one interval of skew (~0.18 kwh) sits inside the 0.2 floor:
+        # the window and the floor meet at exactly this age.
         self.seed_history(5.0)
-        self.note(5.0, _at(13, 59))
-        self.seed_pending(0.13, _at(14, 1))
+        self.note(5.0, _at(14, 0))
+        self.seed_pending(0.184, _at(14, 1))
         self.now = _at(14, 1)
         self.run_loop(1)
         self.assertTrue(self.reconciler.authorized)
@@ -810,7 +822,7 @@ class RunWiringTests(unittest.TestCase):
 
     INTERVALS = (10, 60, 60, 300, 5, 60, 300)
 
-    def run_bridge(self, *, reconcile, events):
+    def run_bridge(self, *, reconcile, events, mqtt=None):
         started = []
 
         class RecordingThread:
@@ -830,10 +842,13 @@ class RunWiringTests(unittest.TestCase):
             def drain_history(self):
                 events.append("drain_history")
 
+        # run() builds the real MqttSource only for an enabled config; the
+        # stub keeps the MQTT wiring case offline and is unused otherwise.
         with (
             mock.patch.object(bridge.threading, "Thread", RecordingThread),
             mock.patch.object(bridge, "StatusSink", RecordingSink),
             mock.patch.object(bridge, "command_loop"),
+            mock.patch.object(bridge, "MqttSource", return_value=mock.Mock()),
         ):
             bridge.run(
                 FakeDB(),
@@ -842,6 +857,7 @@ class RunWiringTests(unittest.TestCase):
                 self.INTERVALS,
                 object(),
                 bridge.WatchdogConfig(enabled=False),
+                mqtt=mqtt,
                 reconcile=reconcile,
             )
         return started
@@ -865,11 +881,28 @@ class RunWiringTests(unittest.TestCase):
 
     def test_the_freshness_window_scales_with_the_feed_cadence(self):
         # No MQTT source: the day counter rides the status poll (10 s in
-        # INTERVALS), so the window passed to the loop is two status
-        # intervals -- not the module constant sized for the MQTT cadence.
+        # INTERVALS), so the window passed to the loop is one status
+        # interval -- not the module constant sized for the MQTT cadence.
         started = self.run_bridge(reconcile=bridge.ReconcileConfig(3600), events=[])
         (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
-        self.assertEqual(thread.kwargs["sample_max_age"], 20.0)
+        self.assertEqual(thread.kwargs["sample_max_age"], 10.0)
+
+    def test_the_freshness_window_in_mqtt_mode_uses_the_reconcile_cadence(self):
+        # MQTT mode (the shipped one): the day counter rides the HTTP
+        # reconcile cadence, so the window passed to the loop is one
+        # reconcile interval of the configured cadence -- and with the
+        # default 60 s that is exactly the module constant. A 2x factor
+        # here would admit ages past the tolerance floor's coverage and
+        # warn about observation skew while charging.
+        config = bridge.MqttConfig(enabled=True, host="broker", topic="chelevse")
+        started = self.run_bridge(
+            reconcile=bridge.ReconcileConfig(3600), events=[], mqtt=config
+        )
+        (thread,) = [t for t in started if t.target.__name__ == "reconcile_loop"]
+        self.assertEqual(thread.kwargs["sample_max_age"], config.reconcile_sec)
+        self.assertEqual(
+            thread.kwargs["sample_max_age"], bridge.RECONCILE_SAMPLE_MAX_AGE_SEC
+        )
 
 
 class ReconcileEnvTests(unittest.TestCase):

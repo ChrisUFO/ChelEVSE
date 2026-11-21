@@ -36,10 +36,13 @@ RECONCILE_INTERVAL = 3600.0
 # feed gap: the charger side advances only at the HTTP reconcile cadence
 # (60 s) while the bridge side advances from every applied snapshot, so up
 # to one interval of delivering power sits on one side only (~0.19 kWh at
-# the charger's 48 A ceiling). It bounds skew one interval wide, not the
-# gap in general: when the feed skips or drops reconciles and the sample
-# ages past that, bridge.reconcile_loop's freshness window
-# (RECONCILE_SAMPLE_MAX_AGE_SEC) suppresses the evaluation instead.
+# the charger's 48 A ceiling). The freshness window
+# (bridge.RECONCILE_SAMPLE_MAX_AGE_SEC, one feed interval) is sized to
+# that cover, and the two must move together: keep ceiling power x feed
+# interval <= TOLERANCE_KWH and the window at one interval -- a window
+# two intervals wide would admit ~0.37 kWh of ceiling skew past this
+# floor, and a single skipped reconcile while charging would warn about
+# observation skew, not lost energy.
 TOLERANCE_KWH = 0.2
 TOLERANCE_FRACTION = 0.01
 # A divergence episode journals one line; it re-arms only when the gap

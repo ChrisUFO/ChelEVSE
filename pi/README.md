@@ -988,11 +988,11 @@ floor covers one reconcile interval of the MQTT-mode feed gap: the charger
 side advances only at the HTTP reconcile cadence (60 s) while the bridge
 side advances from every applied snapshot, so up to a minute of delivering
 power can sit on one side only (~0.19 kWh at the charger's 48 A ceiling).
-It is not a bound on the gap in general — when the feed skips or drops
-reconciles (a failed HTTP poll, an MQTT-snapshot discard) and the latest
-sample ages past the freshness window (two feed intervals, resolved from
-the configured cadence), the evaluation waits for a fresh sample instead
-of warning about observation skew.
+The freshness window is sized to that cover — one feed interval, resolved
+from the configured cadence — so the two cannot disagree: when the feed
+skips or drops reconciles (a failed HTTP poll, an MQTT-snapshot discard)
+and the latest sample ages past the window, the evaluation waits for a
+fresh sample instead of warning about observation skew.
 
 **Zero writes, ever.** Reconciliation reads and journals; it never
 corrects, backfills or repairs anything. A divergence is evidence for a

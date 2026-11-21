@@ -182,15 +182,20 @@ RECONCILE_INITIAL_DELAY = 30
 # Bounded join on shutdown: a tick mid-read when the stop event lands must not
 # straddle the history drain that follows, which takes the same sink lock.
 RECONCILE_JOIN_SEC = 5.0
-# How old the charger sample may be at an evaluation (#161): two feed
-# intervals. In MQTT mode the day counter advances only at the HTTP
-# reconcile cadence while the bridge side advances from every applied
-# snapshot, so the skew grows with the sample's age -- a failed poll or an
-# mqtt_mark discard skips a note, and comparing the aged sample would warn
-# about observation skew, not lost energy. run() resolves the live window
-# from the configured cadence (MQTT reconcile or status poll); this
-# default matches the shipped MQTT one.
-RECONCILE_SAMPLE_MAX_AGE_SEC = 2.0 * MQTT_RECONCILE_SEC
+# How old the charger sample may be at an evaluation (#161): ONE feed
+# interval, sized against the tolerance floor by construction. In MQTT
+# mode the day counter advances only at the HTTP reconcile cadence while
+# the bridge side advances from every applied snapshot, so the skew grows
+# with the sample's age, and the floor (reconcile.TOLERANCE_KWH) absorbs
+# exactly one interval of it at the charger's ceiling (~11 kW x 60 s ~
+# 0.18 kWh against 0.2): a wider window would admit ages the floor cannot
+# explain, so a single skipped or discarded reconcile while charging at
+# the ceiling would warn about observation skew, not lost energy. A
+# missed feed suppresses one evaluation instead (scheduling jitter skips
+# a tick, never warns). run() resolves the live window from the
+# configured cadence (MQTT reconcile or status poll); this default
+# matches the shipped MQTT one.
+RECONCILE_SAMPLE_MAX_AGE_SEC = 1.0 * MQTT_RECONCILE_SEC
 # How often the status/config loops re-check the MQTT connection. The MQTT
 # client itself reconnects in its own network loop; this only bounds how long a
 # fallback or a config-version reaction can take.
@@ -2488,11 +2493,13 @@ def reconcile_loop(
     predates local midnight: an unreachable charger across the rollover
     leaves the counter holding yesterday's total, which cannot clear or
     damn the new day either. And so does a sample older than
-    ``sample_max_age`` (two feed intervals, resolved by :func:`run`): the
+    ``sample_max_age`` (one feed interval, resolved by :func:`run`): the
     feed skipped or dropped a reconcile while the bridge side kept
     advancing, so the growing gap is observation skew, not lost energy,
     and the evaluation waits for a fresh sample instead of warning about
-    it.
+    it. The window is the tolerance floor's coverage at ceiling power
+    (see RECONCILE_SAMPLE_MAX_AGE_SEC), so the two cannot disagree: no
+    admitted sample's skew can outrun the floor.
     """
     inactive_logged = False
     if initial_delay:
@@ -2537,11 +2544,13 @@ def reconcile_loop(
             # The sample is same-day but stale: the feed skipped or dropped
             # HTTP reconciles (a failed poll advances the next deadline, an
             # mqtt_mark discard never notes) while the bridge side kept
-            # advancing from every applied snapshot. The tolerance floor
-            # covers one feed interval of that skew, not an unbounded one,
-            # so this evaluation waits for a fresh sample rather than
-            # warning about energy nobody lost. The status loop already
-            # journals its reconcile failures; nothing new to say here.
+            # advancing from every applied snapshot. The window is one feed
+            # interval -- exactly the skew the tolerance floor covers at
+            # ceiling power -- so a sample older than this is already
+            # beyond what the floor can explain, and this evaluation waits
+            # for a fresh sample rather than warning about energy nobody
+            # lost. The status loop already journals its reconcile
+            # failures; nothing new to say here.
             return
         totals = _day_totals(db, sink, day)
         if totals is None:
@@ -2773,9 +2782,10 @@ def run(
     # The day reconciler (#161): hourly by default, RECONCILE_INTERVAL=0
     # leaves it out entirely. Started after the sink exists (its gather
     # borrows the sink's apply lock) and joined before the shutdown drain.
-    # The sample freshness window scales with the live feed cadence: MQTT
-    # mode feeds the day counter at the HTTP reconcile cadence, plain
-    # polling at the status cadence (see RECONCILE_SAMPLE_MAX_AGE_SEC).
+    # The sample freshness window is one interval of the live feed
+    # cadence: MQTT mode feeds the day counter at the HTTP reconcile
+    # cadence, plain polling at the status cadence (see
+    # RECONCILE_SAMPLE_MAX_AGE_SEC for why exactly one).
     reconcile_conf = reconcile or ReconcileConfig()
     reconcile_feed_sec = mqtt.reconcile_sec if source is not None else status_interval
     reconcile_thread = None
@@ -2785,7 +2795,7 @@ def run(
             args=(db, sink, day_counters, day_reconciler, reconcile_conf.interval),
             kwargs={
                 "initial_delay": RECONCILE_INITIAL_DELAY,
-                "sample_max_age": 2.0 * reconcile_feed_sec,
+                "sample_max_age": 1.0 * reconcile_feed_sec,
             },
             daemon=True,
         )
