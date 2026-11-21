@@ -42,10 +42,13 @@
 // the day documents' own total, so a partially covered period (a lost record,
 // or a counter-reset session whose aggregate prices a fraction of the days'
 // energy) reads as a plausible tariff. seriesCostSummary therefore totals the
-// buckets' attributed Wh beside their recorded kWh, and when the gap exceeds
-// the same max(250 Wh, 2%) band the buckets' own coverage uses, the summary's
-// cost cell says which energy its figure prices on a small muted caption
-// under the figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below).
+// buckets' attributed Wh beside their recorded kWh, and whenever the sessions
+// miss any of that energy — any gap at all, with no tolerance floor and
+// nothing that scales with the period's size (#211) — the summary's cost cell
+// says which energy its figure prices on a small muted caption under the
+// figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below). The
+// max(250 Wh, 2%) band now belongs only to the interval reconciliation and
+// the buckets' own per-bucket $-hiding; the caption no longer shares it.
 // Fully covered periods, hidden figures and every kWh total are untouched.
 //
 // #193 adds the rate-scope flags: `statusCostFallback`/`heldCostFallback` are
@@ -779,23 +782,35 @@ export function seriesCostSummary(points, bucket, settings, sessions = []) {
   };
 }
 
-// The period summary's coverage disclosure (#194): the kWh the figure prices,
-// painted beneath it as a small muted caption while the kWh total the summary
-// already shows stays the day documents' own, whenever the stored sessions
-// cover only part of the recorded energy — beyond the same max(250 Wh, 2%)
-// band the interval reconciliation and the buckets' own coverage use, so
-// attribution rounding cannot fire the line. Null when the period is covered
-// within that band, and whenever the $ itself hides (a period with nothing
-// covered keeps today's hidden presentation); no figure is invented, and the
-// kWh totals are never touched. Both energies format the way every kWh in the
-// app does (fmtK).
+// The period summary's coverage disclosure (#194, #211): the kWh the figure
+// prices, painted beneath it as a small muted caption while the kWh total the
+// summary already shows stays the day documents' own, whenever the stored
+// sessions cover only part of the recorded energy — any missing Wh at all
+// (#211): no tolerance floor and nothing that scales with the period's size,
+// so a month can no longer absorb a gap a week would disclose. Both energies
+// are compared at whole-Wh resolution — the charger counter's own 0.001 kWh
+// quantum — so quantization and attribution float noise cannot flicker the
+// line; a gap of exactly zero at that resolution is the only silent one.
+// (The interval reconciliation and the buckets' own per-bucket $-hiding keep
+// their max(250 Wh, 2%) band; this caption no longer shares it.) Null
+// whenever the $ itself hides (a period with nothing covered keeps today's
+// hidden presentation); no figure is invented, and the kWh totals are never
+// touched. Both energies format the way every kWh in the app does (fmtK) —
+// except when that app formatting renders the two figures alike (fmtK shows
+// no decimals at ≥100 kWh), where the caption falls back to two-decimal
+// figures so a fired line always shows the magnitude it is disclosing.
 export function coverageDisclosure(summary) {
   if (!summary || summary.cost == null) return null;
   const recorded = toNumber(summary.recordedWh);
   const covered = toNumber(summary.coveredWh);
   if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
-  if (recorded - covered <= intervalEnergyTolerance(recorded)) return null;
-  return `priced ${fmtK(covered / 1000)} of ${fmtK(recorded / 1000)} kWh`;
+  if (Math.round(recorded) - Math.round(covered) < 1) return null;
+  const coveredText = fmtK(covered / 1000);
+  const recordedText = fmtK(recorded / 1000);
+  if (coveredText === recordedText) {
+    return `priced ${(covered / 1000).toFixed(2)} of ${(recorded / 1000).toFixed(2)} kWh`;
+  }
+  return `priced ${coveredText} of ${recordedText} kWh`;
 }
 
 // ---------- the per-window rate-scope flag (#193) ----------

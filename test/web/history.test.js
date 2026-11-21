@@ -1976,8 +1976,9 @@ test('the live counter-reset week discloses the energy its $ prices', () => {
   }
 });
 
-test('a covered period discloses nothing, and the tolerance band keeps rounding quiet', () => {
-  // The week's sessions account for its days: no suffix, exactly as before.
+test('a covered period discloses nothing; one missing Wh discloses (#211)', () => {
+  // The week's sessions account for its days: no suffix, exactly as before —
+  // an exactly covered period stays silent at any size.
   const today = new Date(2026, 9, 18, 12);
   const points = periodSeries('week', [{ id: '2026-10-14', kwh: 2 }], today);
   const sessions = [
@@ -1986,18 +1987,103 @@ test('a covered period discloses nothing, and the tolerance band keeps rounding 
   const covered = seriesCostSummary(points, 'day', NIGHTLY, sessions);
   assert.ok(Math.abs(covered.cost - 0.2) < 1e-9);
   assert.equal(coverageDisclosure(covered), null);
-  // The band is the interval reconciliation's own — max(250 Wh, 2%) of the
-  // recorded total, inclusive. A 3 kWh day with 2.75 kWh covered (the 250 Wh
-  // floor, exactly) stays quiet; at 2.74 kWh (260 Wh) the line fires.
+  // #211: the tolerance band is gone. A single missing Wh fires the line —
+  // even when both figures read alike at the caption's 0.01 kWh precision,
+  // the line itself is the disclosure.
   const day = periodSeries('week', [{ id: '2026-10-14', kwh: 3 }], today);
-  const atFloor = seriesCostSummary(day, 'day', NIGHTLY, [
-    { wh: 2750, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
+  const oneWh = seriesCostSummary(day, 'day', NIGHTLY, [
+    { wh: 2999, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
   ]);
-  assert.equal(coverageDisclosure(atFloor), null);
-  const pastFloor = seriesCostSummary(day, 'day', NIGHTLY, [
-    { wh: 2740, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
+  assert.equal(coverageDisclosure(oneWh), 'priced 3.00 of 3.00 kWh');
+  // The compare happens at whole-Wh resolution — the charger counter's own
+  // 0.001 kWh quantum — so quantization and attribution float noise cannot
+  // flicker the caption. Exactly zero at Wh resolution is the only silent
+  // gap: 0.4 Wh of noise under the quantum rounds away…
+  const noise = seriesCostSummary(day, 'day', NIGHTLY, [
+    { wh: 2999.6, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
   ]);
-  assert.equal(coverageDisclosure(pastFloor), 'priced 2.74 of 3.00 kWh');
+  assert.equal(coverageDisclosure(noise), null);
+  // …and a whole covered reading stays quiet outright.
+  const exact = seriesCostSummary(day, 'day', NIGHTLY, [
+    { wh: 3000, started_at: new Date(2026, 9, 14, 1), ended_at: new Date(2026, 9, 14, 2) },
+  ]);
+  assert.equal(coverageDisclosure(exact), null);
+});
+
+test('the same gap discloses on a week and a month alike (#211)', () => {
+  // The shape the issue was filed on: a 4 kWh shortfall showed on a ~90 kWh
+  // week while the same 4 kWh vanished inside a ~330 kWh month — the retired
+  // max(250 Wh, 2%) band scaled with the window (6.6 kWh at month scale) and
+  // absorbed it. The verdict no longer scales with the period: both fire.
+  const weekToday = new Date(2026, 9, 18, 12); // Sun 18 October: week of 12–18
+  const weekDays = [
+    '2026-10-12',
+    '2026-10-13',
+    '2026-10-14',
+    '2026-10-15',
+    '2026-10-16',
+    '2026-10-17',
+    '2026-10-18',
+  ];
+  const week = seriesCostSummary(
+    periodSeries(
+      'week',
+      weekDays.map((id) => ({
+        id,
+        // Six covered days at 12.9 kWh plus Sunday's 13.1: 90.5 kWh recorded.
+        kwh: id === '2026-10-18' ? 13.1 : 12.9,
+      })),
+      weekToday,
+    ),
+    'day',
+    NIGHTLY,
+    // One plug-in through the first six days: 86.5 kWh attributed, so 4 kWh
+    // of the week has no covering session.
+    [{ wh: 86500, started_at: new Date(2026, 9, 12), ended_at: new Date(2026, 9, 18) }],
+  );
+  assert.equal(coverageDisclosure(week), 'priced 86.5 of 90.5 kWh');
+  const monthToday = new Date(2026, 9, 31, 12); // October: 31 days
+  const month = seriesCostSummary(
+    periodSeries(
+      'month',
+      Array.from({ length: 30 }, (_, i) => ({
+        id: `2026-10-${String(i + 1).padStart(2, '0')}`,
+        kwh: 11.02, // 330.6 kWh recorded across the covered days
+      })),
+      monthToday,
+    ),
+    'day',
+    NIGHTLY,
+    // The same 4 kWh short, spread thin enough the old 2% band hid it:
+    // 326.6 kWh attributed of the month's 330.6.
+    [{ wh: 326600, started_at: new Date(2026, 9, 1), ended_at: new Date(2026, 9, 31) }],
+  );
+  assert.equal(coverageDisclosure(month), 'priced 327 of 331 kWh');
+});
+
+test('a fired caption whose app-rounded figures collide shows two decimals (#211)', () => {
+  // fmtK renders ≥100 kWh with no decimals, rounding each figure on its own,
+  // so a 0.3 kWh gap inside the same whole-kWh bracket would print
+  // "330 of 330 kWh" — the line fires, but its magnitude is invisible at
+  // exactly the period scale the issue was filed on. The caption falls back
+  // to two-decimal figures whenever the app formatting renders both sides
+  // alike, so a fired line always shows what is missing.
+  const today = new Date(2026, 9, 31, 12); // October: 31 days
+  const month = seriesCostSummary(
+    periodSeries(
+      'month',
+      Array.from({ length: 30 }, (_, i) => ({
+        id: `2026-10-${String(i + 1).padStart(2, '0')}`,
+        kwh: 11.01, // 330.3 kWh recorded across the covered days
+      })),
+      today,
+    ),
+    'day',
+    NIGHTLY,
+    // 330.0 kWh attributed: fmtK rounds both sides to "330".
+    [{ wh: 330000, started_at: new Date(2026, 9, 1), ended_at: new Date(2026, 9, 31) }],
+  );
+  assert.equal(coverageDisclosure(month), 'priced 330.00 of 330.30 kWh');
 });
 
 test('a period with nothing covered keeps the $ hidden and discloses nothing', () => {
