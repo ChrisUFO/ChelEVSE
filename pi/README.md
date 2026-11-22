@@ -1120,9 +1120,13 @@ every verdict. A day whose final window visit itself failed (a read, or
 the verdict write) is retried for one further local day,
 presence-guarded by its own re-read and on a basis the in-memory
 accumulator still guarantees, before its silence is accepted; the retry
-horizon matches exactly how long that basis holds the day, so a verdict
-is never derived from a half-trimmed basis. A mid-charge restart's lost
-pre-restart ticks are genuinely
+horizon matches exactly how long that basis holds the day. On restart,
+the prime reads and reseeds that same one extra day and reconsiders it when
+it is still unmarked, so a restart between the failed final visit and its
+retry cannot strand the day. The existing straddle rule still applies to
+that extra day: approximate attribution produces `gap_wh: null`, never a
+numeric verdict. A verdict is therefore never derived from a half-trimmed
+or approximate basis. A mid-charge restart's lost pre-restart ticks are genuinely
 absent from the archive, and that loss is exactly what the day's verdict
 discloses on the days it can attribute exactly.
 
