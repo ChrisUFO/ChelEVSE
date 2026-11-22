@@ -37,10 +37,12 @@ import {
 } from '../../web/js/history.js';
 import {
   coverageDisclosure,
+  dayVerdicts,
   pointCostSummary,
   seriesCostSummary,
   seriesWindowUncovered,
   showPlanBanner,
+  verdictCaption,
 } from '../../web/js/screens/history.js';
 import { sessionCostLabel, sessionIntervalsValid } from '../../web/js/cost.js';
 
@@ -2102,6 +2104,192 @@ test("the Day period's hour summary never carries a coverage disclosure", () => 
   assert.ok(Math.abs(summary.coveredWh - 3000) < 1e-9);
   assert.ok(Math.abs(summary.recordedWh - 3000) < 1e-9);
   assert.equal(coverageDisclosure(summary), null);
+});
+
+// ---------- the day-verdict caption (#212) ----------
+//
+// The bridge's seam-B reconciler writes a per-day verdict on each day
+// document — `gap_wh`, the raw signed same-basis delta between the day's
+// recorded Wh and the sessions archive's — under a three-state contract:
+// number = settled verdict, null = not verdictable, absent = evaluated
+// clean, with the last reading holding only for days at or after the
+// `recon_from` marker and outside the reconciler's ~3-day trailing
+// deferral window (an open session may still move a recent day). These
+// pins hold the classification and the caption decision; the executed
+// paint lives in test/web/history-screen.test.js.
+
+// The week of Mon 12 – Sun 18 Oct 2026, all of it at or after the marker
+// and four or more days before the clock: settled territory, where an
+// absent verdict is the reconciler's clean one.
+const VERDICT_WEEK = dayIdsInRange('2026-10-12', '2026-10-18');
+// Thursday 22 October: the week's last day is today−4, one day past the
+// reconciler's three-day trailing window.
+const VERDICT_TODAY = '2026-10-22';
+const VERDICT_FROM = '2026-10-01';
+
+test('a settled window classifies every day: numbers, clean absences, drift sums', () => {
+  const verdicts = dayVerdicts(
+    VERDICT_WEEK,
+    [
+      { id: '2026-10-13', kwh: 1, gap_wh: 2 },
+      { id: '2026-10-15', kwh: 1, gap_wh: -3 },
+      { id: '2026-10-17', kwh: 1 }, // clean: the reconciler writes nothing
+    ],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  // The absent days read as 0 Wh verdicts, so the summary carries the
+  // signed sum and the largest single day's magnitude — the drift-vs-gap
+  // discriminator the caption decision turns on.
+  assert.deepEqual(verdicts, { settled: true, sumWh: -1, maxAbsWh: 3 });
+});
+
+test('a single ≥10 Wh day verdict renders the full caption from the verdict sum', () => {
+  // The owner decision of 2026-11-22: production clean-day verdicts run
+  // ±0.6–3.1 Wh of two-meter drift, so one day 10 Wh out is archive loss,
+  // not drift — the full `priced X of Y` caption fires with X = recorded
+  // minus the verdict sum, whatever the attributed coverage says.
+  const docs = VERDICT_WEEK.map((id) => ({ id, kwh: 3 }));
+  docs[4].gap_wh = 4800; // Thu 16 Oct: the archive gap
+  const verdicts = dayVerdicts(VERDICT_WEEK, docs, VERDICT_FROM, VERDICT_TODAY);
+  assert.equal(verdicts.settled, true);
+  const summary = seriesCostSummary(
+    periodSeries('week', docs, new Date(2026, 9, 18, 12)),
+    'day',
+    NIGHTLY,
+    [],
+  );
+  assert.ok(Math.abs(summary.recordedWh - 21000) < 1e-9);
+  assert.equal(verdictCaption(verdicts, summary), 'priced 16.2 of 21.0 kWh');
+});
+
+test('sub-10 Wh drift renders one quiet tolerance note, never silence', () => {
+  // The production drift shape: every day inside the two-meter
+  // disagreement, the sum nonzero. The full caption would cry wolf over
+  // meter tolerance; suppressing it would hide real drift. The note is
+  // the honest middle — one muted line stating the drift.
+  const drift = dayVerdicts(
+    VERDICT_WEEK,
+    [
+      { id: '2026-10-13', kwh: 1, gap_wh: 3.1 },
+      { id: '2026-10-15', kwh: 1, gap_wh: 0.8 },
+    ],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(drift.settled, true);
+  assert.equal(
+    verdictCaption(drift, { recordedWh: 21000 }),
+    'charger day meters differ by 0.004 kWh over this period — within meter tolerance',
+  );
+  // A larger sub-10 accumulation formats like every kWh (two decimals) —
+  // the owner's example shape.
+  const larger = dayVerdicts(
+    VERDICT_WEEK,
+    [
+      { id: '2026-10-13', kwh: 1, gap_wh: 8 },
+      { id: '2026-10-14', kwh: 1, gap_wh: 7 },
+      { id: '2026-10-15', kwh: 1, gap_wh: 5 },
+    ],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(
+    verdictCaption(larger, { recordedWh: 21000 }),
+    'charger day meters differ by 0.02 kWh over this period — within meter tolerance',
+  );
+});
+
+test('an exactly-zero verdict sum renders nothing — vouched clean is clean', () => {
+  // No verdicts written anywhere: every day evaluated clean. The caption
+  // is null, and the screen's rule (pinned executed) keeps the attribution
+  // compare silent beside it: the exact same-basis verdict is the
+  // authority, not the pro-rated spans.
+  const verdicts = dayVerdicts(VERDICT_WEEK, [], VERDICT_FROM, VERDICT_TODAY);
+  assert.deepEqual(verdicts, { settled: true, sumWh: 0, maxAbsWh: 0 });
+  assert.equal(verdictCaption(verdicts, { recordedWh: 21000 }), null);
+});
+
+test('a day the verdicts cannot vouch for unsettles the whole window', () => {
+  const numbers = VERDICT_WEEK.map((id) => ({ id, kwh: 1, gap_wh: 1 }));
+  // Legacy: the marker starts inside the window, and the days before it
+  // predate the verdicts — their silence is not cleanliness.
+  assert.equal(dayVerdicts(VERDICT_WEEK, numbers, '2026-10-14', VERDICT_TODAY).settled, false);
+  // Null-marked: the reconciler said "not verdictable" out loud.
+  const nulled = numbers.map((doc) => ({ ...doc }));
+  nulled[2].gap_wh = null;
+  assert.equal(dayVerdicts(VERDICT_WEEK, nulled, VERDICT_FROM, VERDICT_TODAY).settled, false);
+  // Malformed: a corrupt verdict is no verdict.
+  const malformed = numbers.map((doc) => ({ ...doc }));
+  malformed[2].gap_wh = '12';
+  assert.equal(dayVerdicts(VERDICT_WEEK, malformed, VERDICT_FROM, VERDICT_TODAY).settled, false);
+  // No marker at all: the feature is off, not half-on.
+  assert.equal(dayVerdicts(VERDICT_WEEK, numbers, null, VERDICT_TODAY), null);
+});
+
+test('the trailing deferral window bounds the absent-means-clean reading', () => {
+  // Today is 2026-10-22 and the reconciler's window is three days: a day
+  // with no verdict yet inside it is unsettled — never clean — because an
+  // open session may still be moving it.
+  const recent = dayVerdicts(
+    dayIdsInRange('2026-10-16', '2026-10-19'),
+    [],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(recent.settled, false);
+  // One day older (today−4): the window has aged the day out, so the same
+  // absence is the reconciler's clean verdict.
+  const aged = dayVerdicts(
+    dayIdsInRange('2026-10-16', '2026-10-18'),
+    [],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.deepEqual(aged, { settled: true, sumWh: 0, maxAbsWh: 0 });
+  // A number verdict inside the window still vouches: the reconciler
+  // writes one only once no open session overlaps the day.
+  const verdicted = dayVerdicts(
+    ['2026-10-20'],
+    [{ id: '2026-10-20', gap_wh: 2 }],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.deepEqual(verdicted, { settled: true, sumWh: 2, maxAbsWh: 2 });
+});
+
+test('a negative verdict sum renders the tolerance note, not a clamped caption', () => {
+  // The pinned edge (owner decision, 2026-11-22): a −12 Wh day alone means
+  // the sessions archive holds more than the day documents recorded. The
+  // `priced X of Y` shape cannot say that — X would exceed Y — and
+  // clamping up to Y would silently claim "all priced", so the honest
+  // render is the tolerance note stating the drift.
+  const verdicts = dayVerdicts(
+    ['2026-10-14'],
+    [{ id: '2026-10-14', gap_wh: -12 }],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(verdicts.maxAbsWh, 12);
+  // 12 Wh formats at the app's two decimals (0.012 kWh → 0.01); the
+  // counter-quantum third decimal is only for drift a two-decimal figure
+  // would print as 0.00.
+  assert.equal(
+    verdictCaption(verdicts, { recordedWh: 12000 }),
+    'charger day meters differ by 0.01 kWh over this period — within meter tolerance',
+  );
+});
+
+test('a verdict sum past the recorded total prices nothing, never more than everything', () => {
+  // Archive loss larger than the window recorded: X clamps at zero rather
+  // than going negative or past Y — a fired line keeps its magnitude.
+  const verdicts = dayVerdicts(
+    ['2026-10-14'],
+    [{ id: '2026-10-14', gap_wh: 50000 }],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(verdictCaption(verdicts, { recordedWh: 36000 }), 'priced 0.00 of 36.0 kWh');
 });
 
 // ---------- the per-window rate-scope flag (#193) ----------

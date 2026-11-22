@@ -10,6 +10,7 @@ import {
   SESSION_LIMIT,
   fetchSessionsInRange,
   mergeCommandWindows,
+  reconMarker,
   retryStore,
   sessionsQueryOptions,
   stopStore,
@@ -404,4 +405,20 @@ test('an advisory id the bridge would refuse is never written', () => {
     assert.throws(() => ackNotification(id, write), /invalid notification id/, String(id));
     assert.equal(written, false, `nothing is written for ${String(id)}`);
   }
+});
+
+// ---------- the seam-B verdict marker (#212) ----------
+
+test('reconMarker takes only a well-formed recon_from date', () => {
+  // The marker is the verdict feature's switch: only a real calendar date
+  // in the bridge's own format turns it on, so a corrupt or partial write
+  // reads as "no marker" — the caption keeps today's behavior rather than
+  // trusting a date it cannot parse. fetchReconMarker adds the two nulls
+  // around this: a missing marker document and a failed read.
+  assert.deepEqual(reconMarker({ recon_from: '2026-10-19' }), { reconFrom: '2026-10-19' });
+  assert.equal(reconMarker({ recon_from: '2026-02-30' }), null); // rolls over
+  assert.equal(reconMarker({ recon_from: '2026-10-9' }), null); // unpadded
+  assert.equal(reconMarker({ recon_from: 20261019 }), null);
+  assert.equal(reconMarker({}), null);
+  assert.equal(reconMarker(null), null);
 });
