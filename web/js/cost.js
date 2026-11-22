@@ -920,7 +920,15 @@ const VERDICT_GAP_WH = 10;
 //     must not cancel it out of the warning), clamped so X never exceeds Y
 //     nor goes negative. The discriminator stays the single positive day —
 //     a month of sub-10 Wh drift days is the tolerance note's shape, not a
-//     caption, per the owner decision;
+//     caption, per the owner decision. Except on a definitional-coverage
+//     period (`opts.definitionalCoverage`, the Day period): the $ there
+//     prices the day document's own hour buckets in full, so `priced X of
+//     Y` would claim partial pricing of a figure that prices everything —
+//     that arm instead states the shortfall on the verdict's own basis
+//     (`X kWh of this day's energy is not in the sessions archive`), never
+//     against the summary's recorded total, which on this period is the
+//     hours sum and can sit under the day `kwh` the bridge verdicted on a
+//     partially-hourly day;
 //   - any other nonzero NET sum renders the quiet tolerance note stating
 //     the |net| drift honestly — including all-negative windows (the
 //     archive holds more than the day documents recorded, which the
@@ -930,10 +938,18 @@ const VERDICT_GAP_WH = 10;
 //     renders nothing: vouched clean is clean.
 // `summary` is the same seriesCostSummary pass whose caption this replaces
 // (it contributes the recorded total); the $ figure itself is untouched.
-export function verdictCaption(verdicts, summary) {
+export function verdictCaption(verdicts, summary, opts = {}) {
   if (!verdicts || !verdicts.settled) return null;
   const sum = Math.round(verdicts.sumWh);
   if (verdicts.maxPosWh >= VERDICT_GAP_WH) {
+    // Definitional coverage (the Day period): see the arm above — the
+    // shortfall comes from the verdicts alone, never the summary's
+    // hours-sum recorded total.
+    if (opts.definitionalCoverage) {
+      const kwh = verdicts.posSumWh / 1000;
+      const short = kwh.toFixed(2) === '0.00' ? kwh.toFixed(3) : kwh.toFixed(2);
+      return `${short} kWh of this day's energy is not in the sessions archive`;
+    }
     const recorded = toNumber(summary && summary.recordedWh);
     if (Number.isFinite(recorded) && recorded > 0) {
       const covered = Math.min(Math.max(recorded - Math.round(verdicts.posSumWh), 0), recorded);

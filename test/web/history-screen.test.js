@@ -7,10 +7,11 @@ import {
   periodAnchor,
   periodById,
   periodBounds,
+  periodSeries,
   periodSpan,
   sessionsRange,
 } from '../../web/js/history.js';
-import { statusCostLabel } from '../../web/js/cost.js';
+import { seriesCostSummary, statusCostLabel } from '../../web/js/cost.js';
 import { fmtMoney } from '../../web/js/format.js';
 
 // Pin the zone before any Date is built (#123): the period-pricing pass below
@@ -951,9 +952,17 @@ test("a paged settled day renders its verdict under the day's own summary", asyn
   // The Day period's hour buckets never carried a caption (their coverage
   // is definitional), so the verdict is the one thing that can put one
   // there: a past Sunday inside the marker, 11 days before the clock.
+  const doc = {
+    id: '2026-11-08',
+    exists: true,
+    kwh: 3,
+    hours: { '02': 3 },
+    gap_wh: 2000,
+    fromCache: false,
+  };
   applyHistory(
     periodById('day'),
-    { id: '2026-11-08', exists: true, kwh: 3, hours: { '02': 3 }, gap_wh: 2000, fromCache: false },
+    doc,
     null,
     new Date(2026, 10, 8, 12), // the paged day: Sunday 8 November
     [],
@@ -962,8 +971,22 @@ test("a paged settled day renders its verdict under the day's own summary", asyn
   );
   showHistorySettings(nightly());
   assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  // The figure prices every Wh shown — the hour buckets price the day
+  // document itself, so covered meets recorded — and the caption must not
+  // claim otherwise: it states the archive shortfall on the verdict's own
+  // basis, never a `priced X of Y` partial-price claim.
+  const summary = seriesCostSummary(
+    periodSeries(periodById('day'), doc, new Date(2026, 10, 8, 12), new Date(2026, 10, 19, 12)),
+    'hour',
+    nightly(),
+    [],
+  );
+  assert.equal(summary.coveredWh, summary.recordedWh);
   assert.equal(element('history-cost-coverage').hidden, false);
-  assert.equal(element('history-cost-coverage').textContent, 'priced 1.00 of 3.00 kWh');
+  assert.equal(
+    element('history-cost-coverage').textContent,
+    "2.00 kWh of this day's energy is not in the sessions archive",
+  );
 });
 
 // ---------- the per-window rate-scope note, executed (#193) ----------

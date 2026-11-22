@@ -372,7 +372,13 @@ function renderSummary() {
       // the #211 any-gap compare exactly as it is.
       disclosure =
         periodVerdicts && periodVerdicts.settled
-          ? verdictCaption(periodVerdicts, summary)
+          ? verdictCaption(periodVerdicts, summary, {
+              // The Day period's $ prices the day document's own hour
+              // buckets in full — definitional coverage — so its caption
+              // arm states the archive shortfall without claiming the
+              // figure prices only part of the day.
+              definitionalCoverage: currentPeriod().source === 'day',
+            })
           : coverageDisclosure(summary);
     }
   } else {

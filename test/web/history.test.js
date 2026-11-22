@@ -2357,6 +2357,34 @@ test('a verdict sum past the recorded total prices nothing, never more than ever
   assert.equal(verdictCaption(verdicts, { recordedWh: 36000 }), 'priced 0.00 of 36.0 kWh');
 });
 
+test('the Day period states its shortfall without a partial-price claim', () => {
+  // The Day period's $ prices the day document's own hour buckets in full
+  // (definitional coverage — pointCostSummary's hour branch), so the
+  // `priced X of Y` shape would assert the figure above prices less than
+  // it does. The verdict's disclosure survives as a shortfall sentence on
+  // the verdict's own basis — which also keeps a partially-hourly day
+  // honest: the summary's recorded total on this period is the hours sum,
+  // a basis the day `kwh` gap can sit under, where the range arithmetic
+  // would clamp X to zero.
+  const verdicts = dayVerdicts(
+    ['2026-10-14'],
+    [{ id: '2026-10-14', kwh: 3, gap_wh: 2000 }],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(
+    verdictCaption(verdicts, { recordedWh: 3000 }, { definitionalCoverage: true }),
+    "2.00 kWh of this day's energy is not in the sessions archive",
+  );
+  assert.equal(
+    verdictCaption(verdicts, { recordedWh: 1000 }, { definitionalCoverage: true }),
+    "2.00 kWh of this day's energy is not in the sessions archive",
+  );
+  // The range periods keep the full caption unchanged: their sessions and
+  // the verdicts share the day-document basis the $ prices from.
+  assert.equal(verdictCaption(verdicts, { recordedWh: 3000 }), 'priced 1.00 of 3.00 kWh');
+});
+
 // ---------- the per-window rate-scope flag (#193) ----------
 //
 // The plan banner is plan-wide (it fires on any gap anywhere); this flag is
