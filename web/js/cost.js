@@ -869,10 +869,12 @@ function dayVerdictWh(id, gapWh, reconFrom, todayId) {
 
 // The period's day-verdict state for one viewed window: null when the marker
 // is off (a bridge without seam B — the whole feature is off, today's caption
-// everywhere), else `{settled, sumWh, maxAbsWh}` — `settled` only when every
-// day of the window carries a vouching verdict, `sumWh` their signed sum and
-// `maxAbsWh` the largest single day's |gap| (the drift-vs-gap
-// discriminator below). `dayIds` are the window's own days oldest first
+// everywhere), else `{settled, sumWh, maxAbsWh, posSumWh, maxPosWh}` —
+// `settled` only when every day of the window carries a vouching verdict,
+// `sumWh` their signed sum, `maxAbsWh` the largest single day's |gap|
+// (informational), and `posSumWh`/`maxPosWh` the sum and largest of the
+// POSITIVE verdicts alone — `maxPosWh` is the drift-vs-gap discriminator
+// below. `dayIds` are the window's own days oldest first
 // (dayIdsInRange, or the Day period's single id); `docs` are the read's day
 // documents, the only place a verdict lives; `todayId` is the clock the
 // window was captured at, which is what the deferral boundary means.
