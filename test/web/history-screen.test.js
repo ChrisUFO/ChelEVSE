@@ -745,6 +745,33 @@ test('one missing Wh renders the caption the tolerance band used to hide (#211)'
   assert.equal(element('history-cost-coverage').textContent, 'priced 2.00 of 2.00 kWh');
 });
 
+// (#210 honesty pin, the range shape) A window whose day documents recorded
+// energy the span pass prices none of renders — as its kWh total, never a
+// false 0.00 (which would read as free beside the recorded bar), with the $
+// and the caption hidden beside it — the same maximal-divergence honesty the
+// #194 caption gives partial divergence. The pure layer pins the pass's null
+// cost in history.test.js; this pins what the screen does with it.
+test('a week with recorded but unpriced energy renders — as its total (#210)', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 9, 18, 12);
+  applyHistory(
+    periodById('week'),
+    { docs: [{ id: '2026-10-18', kwh: 2 }], fromCache: false },
+    null,
+    today,
+    // No session overlaps the window, so nothing prices the recorded 2 kWh.
+    [],
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-total').textContent, '—');
+  assert.equal(element('history-cost-cell').hidden, true);
+  assert.equal(element('history-cost-coverage').hidden, true);
+  // The bar still draws the recorded energy: the archive lost its pricing,
+  // not the reading.
+  assert.equal(element('chart-empty').hidden, true);
+});
+
 // (#210 decision, pinned) The Day period's no-intraday $-hiding escape is
 // REMOVED: it existed because the $ needed the hours map, and the session
 // archive genuinely covers that case — it predates hourly capture — so a day
@@ -766,9 +793,11 @@ test('a day with a total but no hours prices from the session basis (#210)', asy
   // The no-intraday panel still owns the chart — the hours were never
   // recorded and must not draw as 24 zero bars.
   assert.match(element('chart-empty-title').textContent, /No hourly detail/);
-  // Nothing prices the day's recorded energy yet, so the $ hides (the
-  // hide-not-misprice rule, not the old hours-map escape).
-  assert.equal(element('history-total').textContent, '0.00');
+  // Nothing prices the day's recorded energy yet, so both figures hide — the
+  // $ by the hide-not-misprice rule (not the old hours-map escape) and the
+  // kWh with it: a 0.00 there would read as free beside the 4.2 the document
+  // recorded, so the headline renders the app's unknown (—) instead.
+  assert.equal(element('history-total').textContent, '—');
   assert.equal(element('history-cost-cell').hidden, true);
   // A covering session shows the day's real figures: the archive's 4.2 kWh
   // off-peak, with no caption (covered meets the day document's own total).

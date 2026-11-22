@@ -365,8 +365,16 @@ function renderSummary() {
     hasRateSchedule(settings) && series.length && seriesWindowMs
       ? windowCostSummary(pricingSpans(), seriesWindowMs, recorded, settings)
       : null;
+  // Hide-not-misprice, applied to the headline (#210): a window whose day
+  // documents recorded energy the span pass priced none of has no honest kWh
+  // figure — coveredWh / 1000 would paint 0.00 beside the energy the bars
+  // draw, reading as free exactly the way the hidden $ would — so the total
+  // takes the null branch and renders the app's unknown (—). A window the
+  // pass did price keeps its own energy, an empty one included: its 0.00 is
+  // real, and so is its $0.00.
+  const unpriced = !!(summary && recorded > 0 && !(summary.coveredWh > 0));
   const total = hasRateSchedule(settings)
-    ? summary
+    ? summary && !unpriced
       ? summary.coveredWh / 1000
       : null
     : historyState === 'no-intraday' && dayTotal != null
