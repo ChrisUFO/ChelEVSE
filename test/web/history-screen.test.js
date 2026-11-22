@@ -770,6 +770,15 @@ test('a week with recorded but unpriced energy renders — as its total (#210)',
   // The bar still draws the recorded energy: the archive lost its pricing,
   // not the reading.
   assert.equal(element('chart-empty').hidden, true);
+
+  // The same unpriced window under a gapped plan: the #193 note painted above
+  // must hide with the figures it would describe (mirroring the no-data
+  // branch), never stand alone beside — naming the pricing of a total the
+  // summary refuses to show — the "shown at 0.00" wording literally so.
+  showHistorySettings(expiredSeasonPlan());
+  assert.equal(element('history-total').textContent, '—');
+  assert.equal(element('history-cost-cell').hidden, true);
+  assert.equal(element('history-window-note').hidden, true);
 });
 
 // (#210 decision, pinned) The Day period's no-intraday $-hiding escape is
@@ -2947,6 +2956,105 @@ test('a failed reload at a paged offset keeps the bars under the window they wer
       // bars already name.
       await fire('chart-prev', 'click');
       await readFailed();
+      await fire('chart-prev', 'click');
+      await readFailed();
+      assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');
+      assert.equal(bars().length, 0);
+    } finally {
+      periodReads.range = storePeriodRead;
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// (#210, the pricing half of #154's rule above) The label owns the window its
+// bars were read for, and under a schedule so do the figures: renderSummary
+// prices exactly the window its points and sessions were read for
+// (seriesWindowMs), never the window a newer, failed read has re-anchored
+// chartWindow to — the state the variable exists to hold. The schedule-side
+// shape the flat test above cannot see: a drawn, partly covered week retained
+// through a re-anchored Refresh whose read fails. The session payload crosses
+// the fetch→apply seam (the sessions read has no Node stub — see
+// controlPeriodReads' note), the harness's one way to deliver a successful
+// session read.
+test('a failed reload keeps the schedule figures priced for the window on screen (#210)', async () => {
+  freezeClock(new Date(2026, 9, 18, 23, 59, 40).getTime());
+  try {
+    resetHistory();
+    enterHistory();
+    showHistorySettings(nightly());
+    element('period-switch').contains = () => true;
+    const switchTo = element('period-switch').listeners.get('click')[0];
+    const reads = controlPeriodReads();
+    try {
+      // Week, one window back, both reads answered: bars for 5 – 11 Oct drawn
+      // from the document the paged read returned.
+      switchTo({ target: { closest: () => ({ dataset: { period: 'week' } }) } });
+      assert.equal(reads.length, 1);
+      reads[0].settle({ docs: [{ id: '2026-10-12', kwh: 1 }], fromCache: false });
+      await flushReads();
+      const paging = fire('chart-prev', 'click');
+      assert.equal(reads.length, 2);
+      reads[1].settle({ docs: [{ id: '2026-10-05', kwh: 2 }], fromCache: false });
+      await paging;
+      await flushReads();
+      // The same read's session payload: one 1.5 kWh session inside Mon 5 Oct
+      // at the nightly base, pricing 1.5 of the week's recorded 2 kWh — the
+      // partial-coverage shape — applied over the window the paging read named
+      // (an anchor inside it, now the clock that read was built at, so the
+      // window is the full Monday–Sunday week and no bucket is current).
+      applyHistory(
+        periodById('week'),
+        { docs: [{ id: '2026-10-05', kwh: 2 }], fromCache: false },
+        null,
+        new Date(2026, 9, 8, 12),
+        [{ wh: 1500, started_at: new Date(2026, 9, 5, 10), ended_at: new Date(2026, 9, 5, 12) }],
+        new Date(2026, 9, 18, 23, 59, 40),
+      );
+      showHistorySettings(nightly());
+      const bars = () => element('chart-bars').children.slice(1);
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
+      assert.equal(element('history-total').textContent, '1.50');
+      assert.equal(element('history-cost-cell').hidden, false);
+      assert.equal(element('history-cost').textContent, fmtMoney(0.45, 'GBP'));
+      assert.equal(element('history-cost-coverage').textContent, 'priced 1.50 of 2.00 kWh');
+      assert.equal(bars().length, 7);
+
+      // Local midnight passes. The reload builds 12 – 18 Oct from the new clock
+      // and re-anchors chartWindow to it before its read, and the read fails —
+      // so the drawn window is the only series there is, and its figures must
+      // stay the ones its own window priced.
+      mock.timers.setTime(new Date(2026, 9, 19, 0, 0, 20).getTime());
+      periodReads.range = () =>
+        Promise.reject(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+      const reload = fire('history-refresh', 'click');
+      await reload;
+      for (let i = 0; i < 5; i++) await settle();
+      // Priced for 5 – 11 Oct, never for 12 – 18 Oct: pricing the re-anchored
+      // window instead would find the retained sessions outside it and render
+      // both figures unpriced (—) — the exact divergence seriesWindowMs exists
+      // to prevent, live on every failed refresh.
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
+      assert.equal(element('history-total').textContent, '1.50');
+      assert.equal(element('history-cost-cell').hidden, false);
+      assert.equal(element('history-cost').textContent, fmtMoney(0.45, 'GBP'));
+      assert.equal(element('history-cost-coverage').textContent, 'priced 1.50 of 2.00 kWh');
+      assert.equal(bars().length, 7);
+      assert.equal(bars()[0].getAttribute('aria-label'), 'Mon 5 Oct: 2.00 kWh, GBP 0.45');
+      // …and the state note says these are the last values loaded.
+      assert.equal(element('history-state').hidden, false);
+      assert.match(element('history-state').textContent, /last values loaded/);
+
+      // The retained pair is loadAll's alone: the paging read clears the series
+      // with its pricing window before it reads, so the figures cannot survive
+      // it. One step back lands on the 5 – 11 Oct dates the bars still name —
+      // the same label over dead figures — and a second reaches 28 Sep – 4 Oct.
+      await fire('chart-prev', 'click');
+      await readFailed();
+      assert.equal(labelText(), 'Mon 5 – Sun 11 Oct 2026');
+      assert.equal(element('history-total').textContent, '—');
+      assert.equal(element('history-cost-cell').hidden, true);
       await fire('chart-prev', 'click');
       await readFailed();
       assert.equal(labelText(), 'Mon 28 Sep – Sun 4 Oct 2026');

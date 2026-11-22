@@ -385,6 +385,11 @@ function renderSummary() {
   if (total == null) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
+    // The rate-scope note names the pricing of figures this branch removes, so
+    // it hides with them (the same rule the no-data branch at the offline
+    // return applies): a note beside — would describe a figure the summary does
+    // not show — the "shown at 0.00" wording literally so.
+    $('history-window-note').hidden = true;
     $('history-cost-coverage').hidden = true;
     setText($('history-cost-coverage'), '');
     $('history-summary').classList.add('solo');
@@ -630,8 +635,10 @@ function renderHistory() {
     return;
   }
   if (historyState === 'no-intraday') {
-    // The chart has nothing it may draw, but the day's total is a real record:
-    // the summary keeps it and the panel names why the hours are missing.
+    // The chart has nothing it may draw, and the panel names why the hours are
+    // missing. The summary keeps the day's total under One rate; under a
+    // schedule it prices the session basis instead — or hides both figures
+    // when that pass prices none of the day's recorded energy (renderSummary).
     renderSummary();
     showChartEmpty(copy.noIntradayTitle, copy.noIntradayLine);
     setHistoryNote('');

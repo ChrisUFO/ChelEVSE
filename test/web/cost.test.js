@@ -1893,7 +1893,11 @@ test('the live archive attributes across its local midnights exactly once', () =
     '2026-10-22': (10833 * 3600) / 39120 + 1796,
   };
   for (const [id, wh] of Object.entries(expected)) {
-    const bucket = sessionBucketCost(sessions, id, wh / 1000, settings);
+    // spansOf: the re-typed parameter is the span list, so the pin executes
+    // the production input shape (the raw documents coincide with it only
+    // because each interval-bearing fixture carries one interval identical to
+    // its whole span).
+    const bucket = sessionBucketCost(spansOf(...sessions), id, wh / 1000, settings);
     assert.ok(Math.abs(bucket.wh - wh) < 1e-6, `${id} wh ${bucket.wh} != ${wh}`);
     assert.ok(Math.abs(bucket.cost - (wh / 1000) * 0.15303) < 1e-9, id);
     assert.equal(bucket.covered, true, id);
@@ -1913,7 +1917,9 @@ test('the live archive week reconciles with the sessions list figures', () => {
     '2026-10-21',
     '2026-10-22',
   ]) {
-    week += sessionBucketCost(sessions, id, 0, settings).cost;
+    // The span list, as above: the reconciliation the week performs is against
+    // the same span basis the screen's summary prices.
+    week += sessionBucketCost(spansOf(...sessions), id, 0, settings).cost;
   }
   const list = sessions.reduce(
     (sum, item) =>

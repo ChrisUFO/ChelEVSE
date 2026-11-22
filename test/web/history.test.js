@@ -1838,6 +1838,24 @@ test('zero-energy days price fully at 0.00 and uncovered ranges hide', () => {
   assert.equal(hidden.cost, null);
 });
 
+// The defensive whole-window-hide arm of the span pass: one slice the pricer
+// cannot price nulls the window's totals rather than half-pricing it
+// (spansTotals' null-on-one-null). Unreachable from production inputs —
+// sessionCostSpans gates its own output, and a slice no row matches prices at
+// the stored flat fallback (0.00 only when none is stored), never nulls — so
+// this pins the arm directly with the one input the engine rejects.
+test('one unpriceable slice nulls the window pass instead of half-pricing it', () => {
+  assert.deepEqual(
+    windowCostSummary(
+      [{ wh: -1, started_at: new Date(2026, 9, 18, 1), ended_at: new Date(2026, 9, 18, 2) }],
+      rangeWindow('2026-10-18', '2026-10-18'),
+      3,
+      NIGHTLY,
+    ),
+    { cost: null, coveredWh: 0, recordedWh: 3000 },
+  );
+});
+
 test("the Day period's summary prices the session basis; its bars stay display", () => {
   // #210: the Day period's $ is the span pass over its day window, exactly
   // like a range period's — the hours map no longer prices the summary. The
