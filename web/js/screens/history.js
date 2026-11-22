@@ -10,12 +10,19 @@
 // read fetched.
 
 import { $, el, setText } from '../ui.js';
-import { fetchHistory, fetchHistoryDay, fetchSessions, fetchSessionsInRange } from '../store.js';
+import {
+  fetchHistory,
+  fetchHistoryDay,
+  fetchReconMarker,
+  fetchSessions,
+  fetchSessionsInRange,
+} from '../store.js';
 import {
   DEFAULT_PERIOD,
   PERIODS,
   chartIndexAt,
   dayId,
+  dayIdsInRange,
   dayLabel,
   emptySessionsView,
   historyReadState,
@@ -38,6 +45,7 @@ import {
   aggregateCostLabel,
   costSettings,
   coverageDisclosure,
+  dayVerdicts,
   hasRateSchedule,
   liveSessionContribution,
   liveSessionSpan,
@@ -45,6 +53,7 @@ import {
   sessionCostLabel,
   seriesCostSummary,
   seriesWindowUncovered,
+  verdictCaption,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, fmtRate, formatDuration, fmtMoney, toNumber } from '../format.js';
@@ -101,6 +110,13 @@ let historyState = 'idle';
 // series it prices. Cleared with the series; a failed read prices nothing —
 // the figure hides rather than pricing uncovered energy.
 let periodSessions = [];
+// The bridge's per-day verdicts on the applied window (#212): null while the
+// `recon_from` marker is off or no read has settled, else the classification
+// dayVerdicts returned for the window's own days — `settled` only when every
+// day carries a vouching verdict. Kept beside the series it classifies and
+// cleared with it: a period switch, a superseded read and a reset all drop
+// the previous window's verdicts together with its points.
+let periodVerdicts = null;
 // The latest status/current snapshot pushed by the app's listener (#126) — the
 // input the live contribution prices today's bucket from, kept beside the
 // period payload so either input may land first: the contribution is decided
@@ -132,12 +148,14 @@ let scrubPointer = null;
 
 // The bucket/series cost summaries and the coverage disclosure live in
 // js/cost.js beside the pricing helpers they call; re-exported here so the
-// screen's tests keep this path.
+// screen's tests keep this path — the day-verdict pair with them (#212).
 export {
   coverageDisclosure,
+  dayVerdicts,
   pointCostSummary,
   seriesCostSummary,
   seriesWindowUncovered,
+  verdictCaption,
 } from '../cost.js';
 
 // The sessions a period's $ prices: the recorded payload plus, while a charge
@@ -345,7 +363,23 @@ function renderSummary() {
       // what it prices on a small muted caption of its own beneath it, never
       // inside the figure's display type. A covered period paints no caption;
       // the kWh total is untouched either way.
-      disclosure = coverageDisclosure(summary);
+      //
+      // #212: a window whose every day carries a vouching bridge verdict
+      // takes its caption from those verdicts instead — the exact same-basis
+      // measure is the authority, so a clean verdict silences the
+      // attribution compare's noise beside it, and any verdict the marker
+      // cannot vouch for (legacy, null-marked, deferred-but-unsettled) keeps
+      // the #211 any-gap compare exactly as it is.
+      disclosure =
+        periodVerdicts && periodVerdicts.settled
+          ? verdictCaption(periodVerdicts, summary, {
+              // The Day period's $ prices the day document's own hour
+              // buckets in full — definitional coverage — so its caption
+              // arm states the archive shortfall without claiming the
+              // figure prices only part of the day.
+              definitionalCoverage: currentPeriod().source === 'day',
+            })
+          : coverageDisclosure(summary);
     }
   } else {
     // The flat path, byte-identical to the pre-schedule screen.
@@ -832,6 +866,9 @@ function buildWindow(descriptor, now) {
 export const periodReads = {
   day: (day) => fetchHistoryDay(day),
   range: (startId, endId) => fetchHistory(startId, endId),
+  // The seam-B marker, read beside the period's own documents (#212): null
+  // (feature off) on a missing marker or a failed read.
+  marker: () => fetchReconMarker(),
 };
 
 // The selected period's read, chosen by the descriptor: the Day period reads its
@@ -868,10 +905,22 @@ export function fetchPeriodSessions(descriptor, bounds, readRange = fetchSession
 // this one's bars. `anchor` is the window the read was built for and `now` the
 // clock it was captured at (defaulting to the anchor, the pre-paging shape): the
 // series marks a current bucket only when its window contains now, so a paged
-// window marks none. Exported so the executed harness can drive the fetch→apply
-// step readHistory and loadAll perform (with the store seam stubbed): the
-// payload's shape crossing this boundary is what the harness must observe.
-export function applyHistory(descriptor, result, failure, anchor, sessions = [], now = anchor) {
+// window marks none. `recon` is the same read's `history/_reconciliation`
+// marker (#212; null when off) and is applied the same way, as the verdict
+// classification of the window's own days — a paged window's verdicts come from
+// its days, never the clock's. Exported so the executed harness can drive the
+// fetch→apply step readHistory and loadAll perform (with the store seam
+// stubbed): the payload's shape crossing this boundary is what the harness must
+// observe.
+export function applyHistory(
+  descriptor,
+  result,
+  failure,
+  anchor,
+  sessions = [],
+  now = anchor,
+  recon = null,
+) {
   const day = descriptor.source === 'day';
   if (result) historyState = day ? hourReadState(result) : historyReadState(result);
   else historyState = day ? hourReadFailure(failure) : 'error';
@@ -883,6 +932,15 @@ export function applyHistory(descriptor, result, failure, anchor, sessions = [],
   // The window these points were built for — the only place a series acquires the
   // window it is labelled by (see seriesSpan).
   seriesSpan = periodSpan(descriptor, anchor, now);
+  // The same window's verdict classification (#212): per day, whatever the
+  // period's buckets are — the Day period's single day, every day of a range.
+  const bounds = periodBounds(descriptor, anchor, now);
+  periodVerdicts = dayVerdicts(
+    day ? [bounds.endId] : dayIdsInRange(bounds.startId, bounds.endId),
+    day ? [result] : result.docs,
+    recon && recon.reconFrom,
+    dayId(now),
+  );
   const kwh = Number(result.kwh);
   dayTotal = day && Number.isFinite(kwh) && kwh > 0 ? kwh : null;
   historyServer = historyState === 'fresh' || historyState === 'empty';
@@ -917,6 +975,7 @@ async function readHistory() {
   selectedId = null;
   dayTotal = null;
   periodSessions = [];
+  periodVerdicts = null;
   historyServer = false;
   // The previous window's series leaves with its span: the new read's own window
   // names the loading copy, and a failed read falls back to its panel.
@@ -924,10 +983,14 @@ async function readHistory() {
   historyState = 'loading';
   renderHistory();
   // The session read is a sibling, not a gate: a rejected session payload
-  // prices nothing (the $ hides) while the history read still paints.
-  const [hist, sess] = await Promise.allSettled([
+  // prices nothing (the $ hides) while the history read still paints. The
+  // marker read is the same kind of sibling (#212): a rejection or a missing
+  // marker turns the verdict feature off for this window without touching
+  // the rest.
+  const [hist, sess, marker] = await Promise.allSettled([
     fetchPeriod(descriptor, bounds),
     fetchPeriodSessions(descriptor, bounds),
+    periodReads.marker(),
   ]);
   if (gen !== generation || seq !== historySeq) return;
   applyHistory(
@@ -937,6 +1000,7 @@ async function readHistory() {
     readWindow.anchor,
     sess.status === 'fulfilled' ? sess.value : [],
     now,
+    marker.status === 'fulfilled' ? marker.value : null,
   );
   renderHistory();
   releaseChartFocus();
@@ -1046,10 +1110,11 @@ async function loadAll() {
   // names, or the recent list when none is picked — beside the period's own
   // day documents and overlapping sessions.
   const month = pickedMonth();
-  const [hist, sess, periodSess] = await Promise.allSettled([
+  const [hist, sess, periodSess, marker] = await Promise.allSettled([
     fetchPeriod(descriptor, bounds),
     fetchSessions({ range: monthRange(month) }),
     fetchPeriodSessions(descriptor, bounds),
+    periodReads.marker(),
   ]);
   // Signed out (or reset) while the reads were in flight.
   if (gen !== generation) return;
@@ -1072,6 +1137,7 @@ async function loadAll() {
       readWindow.anchor,
       periodSess.status === 'fulfilled' ? periodSess.value : [],
       now,
+      marker.status === 'fulfilled' ? marker.value : null,
     );
     renderHistory();
     releaseChartFocus();
@@ -1346,6 +1412,7 @@ export function resetHistory() {
   chartWindow = null;
   seriesSpan = null;
   periodSessions = [];
+  periodVerdicts = null;
   liveStatus = null;
   settlePending = false;
   settleVerify = false;

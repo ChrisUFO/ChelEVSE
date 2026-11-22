@@ -10,6 +10,7 @@ import {
   SESSION_LIMIT,
   fetchSessionsInRange,
   mergeCommandWindows,
+  reconMarker,
   retryStore,
   sessionsQueryOptions,
   stopStore,
@@ -114,15 +115,19 @@ test("the history range read carries each day's kWh total and no pricing payload
   const end = source.indexOf('\n}\n', start);
   assert.ok(end > start, 'store.js closes fetchHistory');
   const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
-  // The mapping's contract: the id and the kWh total, and nothing else. The
-  // no-`hours` guard scopes to the returned projection alone — the word names
-  // the Day read's own payload, so a correct comment elsewhere in the read
-  // must not trip it; a stray key would have to appear inside the return.
+  // The mapping's contract: the id, the kWh total, and the day's `gap_wh`
+  // verdict carried through untouched (#212 — the caption's classification
+  // reads it; a dropped passthrough silently reverts older windows to the
+  // #211 compare), and nothing else. The no-`hours` guard scopes to the
+  // returned projection alone — the word names the Day read's own payload, so
+  // a correct comment elsewhere in the read must not trip it; a stray key
+  // would have to appear inside the return.
   assert.match(body, /docs: snap\.docs\.map\(\(d\) => \{/);
   assert.match(body, /id: d\.id,/);
   assert.match(body, /kwh: data\.kwh,/);
   const projectionStart = body.indexOf('return {');
   assert.ok(projectionStart >= 0, 'fetchHistory returns its projection');
+  assert.match(body.slice(projectionStart), /gap_wh: data\.gap_wh,/);
   assert.doesNotMatch(body.slice(projectionStart), /hours/);
 });
 
@@ -132,7 +137,9 @@ test("the Day period's single-document read keeps its hours normalization", () =
   // when the stored value is a non-array object — a day recorded before hourly
   // capture has `kwh` and no map and must stay without one rather than gain an
   // empty fabricated map (24 zero bars), so the pinned source shape is the
-  // same sw-shell pattern as the range read's.
+  // same sw-shell pattern as the range read's. The day's `gap_wh` verdict
+  // rides along beside them, untouched, for the same #212 reason as the range
+  // read's passthrough above.
   const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
   const start = source.indexOf('export async function fetchHistoryDay(');
   assert.ok(start >= 0, 'store.js declares fetchHistoryDay');
@@ -143,6 +150,7 @@ test("the Day period's single-document read keeps its hours normalization", () =
     body,
     /hours: exists && hours && typeof hours === 'object' && !Array\.isArray\(hours\) \? hours : null,/,
   );
+  assert.match(body, /gap_wh: data\.gap_wh,/);
 });
 
 // ---------- the range read's paging loop, executed ----------
@@ -404,4 +412,36 @@ test('an advisory id the bridge would refuse is never written', () => {
     assert.throws(() => ackNotification(id, write), /invalid notification id/, String(id));
     assert.equal(written, false, `nothing is written for ${String(id)}`);
   }
+});
+
+// ---------- the seam-B verdict marker (#212) ----------
+
+test('reconMarker takes only a well-formed recon_from date', () => {
+  // The marker is the verdict feature's switch: only a real calendar date
+  // in the bridge's own format turns it on, so a corrupt or partial write
+  // reads as "no marker" — the caption keeps today's behavior rather than
+  // trusting a date it cannot parse. fetchReconMarker adds the two nulls
+  // around this: a missing marker document and a failed read.
+  assert.deepEqual(reconMarker({ recon_from: '2026-10-19' }), { reconFrom: '2026-10-19' });
+  assert.equal(reconMarker({ recon_from: '2026-02-30' }), null); // rolls over
+  assert.equal(reconMarker({ recon_from: '2026-10-9' }), null); // unpadded
+  assert.equal(reconMarker({ recon_from: 20261019 }), null);
+  assert.equal(reconMarker({}), null);
+  assert.equal(reconMarker(null), null);
+});
+
+test("fetchReconMarker reads the bridge's own marker document", () => {
+  // The marker read needs a live Firestore `db`, so like the history reads
+  // above its cross-contract joint is pinned from source: the document id
+  // must stay `_reconciliation` — the bridge reconciler's MARKER_DOC_ID
+  // (pi/archive_reconcile.py). A drift here does not fail anything; it makes
+  // every read report "no marker", which silently turns the whole verdict
+  // feature off (the caption reverts to the #211 compare everywhere).
+  const source = readFileSync(new URL('../../web/js/store.js', import.meta.url), 'utf8');
+  const start = source.indexOf('export async function fetchReconMarker(');
+  assert.ok(start >= 0, 'store.js declares fetchReconMarker');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'store.js closes fetchReconMarker');
+  const body = source.slice(start, end + 2).replace(/\s+/g, ' ');
+  assert.match(body, /doc\(db, 'history', '_reconciliation'\)/);
 });

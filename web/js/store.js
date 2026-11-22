@@ -21,7 +21,7 @@ import {
   documentId,
 } from './firebase.js';
 import { settingsPayload } from './settings.js';
-import { SESSION_LIMIT } from './history.js';
+import { SESSION_LIMIT, dayStartFromId } from './history.js';
 import { acknowledgeableId } from './health.js';
 
 let unsubStatus = null;
@@ -332,7 +332,11 @@ export async function readScheduleBaseline() {
 // the result: the screen must not read a cached empty range as "no history".
 // A range period's $ comes from its overlapping sessions (#123), so a day
 // document contributes its kWh total alone — `hours` rides only on the Day
-// period's own single-document read (fetchHistoryDay below), never here.
+// period's own single-document read (fetchHistoryDay below), never here —
+// except `gap_wh`: the bridge's seam-B verdict on the day (#212), carried
+// through untouched (a number, the explicit null mark, or absent) for the
+// History caption's classification. It is disclosure metadata the bridge
+// owns; nothing here reads or writes it beyond the passthrough.
 export async function fetchHistory(startId, endId) {
   const snap = await getDocs(
     query(
@@ -347,6 +351,7 @@ export async function fetchHistory(startId, endId) {
       return {
         id: d.id,
         kwh: data.kwh,
+        gap_wh: data.gap_wh,
       };
     }),
     fromCache: Boolean(snap.metadata && snap.metadata.fromCache),
@@ -378,8 +383,36 @@ export async function fetchHistoryDay(dayId) {
     exists,
     kwh: exists && Number.isFinite(kwh) ? kwh : 0,
     hours: exists && hours && typeof hours === 'object' && !Array.isArray(hours) ? hours : null,
+    gap_wh: data.gap_wh,
     fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
   };
+}
+
+// The seam-B verdicts' coverage marker (#212): `history/_reconciliation`
+// carries `recon_from`, the first day the bridge's archive reconciler
+// verdicts. The History caption may consume a day's `gap_wh` only for days
+// at or after it — before it, an absent verdict is legacy silence, not a
+// clean evaluation. Pure so the shape rule (a malformed marker is no marker)
+// is testable without Firestore.
+export function reconMarker(data) {
+  const from = data && data.recon_from;
+  if (typeof from !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(from)) return null;
+  return dayStartFromId(from) ? { reconFrom: from } : null;
+}
+
+// The marker document read, once per history data load (beside the period's
+// own reads). A missing marker — a bridge without seam B, or one whose first
+// reconciler run has not landed — turns the whole verdict feature off (null),
+// the safe default; so does a failed read, because absence of the answer must
+// never read as absence of the marker. The marker is written once ever, so a
+// cache-served copy is as good as the server's.
+export async function fetchReconMarker() {
+  try {
+    const snap = await getDoc(doc(db, 'history', '_reconciliation'));
+    return reconMarker(snap && snap.exists() ? snap.data() : null);
+  } catch {
+    return null;
+  }
 }
 
 // The sessions list pages through the whole archive, newest first: page size

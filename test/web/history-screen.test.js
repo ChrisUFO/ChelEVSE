@@ -7,10 +7,11 @@ import {
   periodAnchor,
   periodById,
   periodBounds,
+  periodSeries,
   periodSpan,
   sessionsRange,
 } from '../../web/js/history.js';
-import { statusCostLabel } from '../../web/js/cost.js';
+import { seriesCostSummary, statusCostLabel } from '../../web/js/cost.js';
 import { fmtMoney } from '../../web/js/format.js';
 
 // Pin the zone before any Date is built (#123): the period-pricing pass below
@@ -731,6 +732,261 @@ test('one missing Wh renders the caption the tolerance band used to hide (#211)'
   assert.equal(element('history-cost-cell').hidden, false);
   assert.equal(element('history-cost-coverage').hidden, false);
   assert.equal(element('history-cost-coverage').textContent, 'priced 2.00 of 2.00 kWh');
+});
+
+// ---------- the day-verdict caption, executed (#212) ----------
+//
+// The same fetch→apply seam as the pricing pass, with the read's
+// reconciliation marker beside the payload: a window whose every day is
+// verdict-settled takes its caption from the bridge's per-day `gap_wh`
+// verdicts (the pure classification and caption decision are pinned in
+// history.test.js), and anything the marker cannot vouch for keeps the
+// #211 attribution compare above. The settled fixtures sit a week back from
+// the clock so no day is inside the reconciler's trailing deferral window.
+
+// The week of Mon 2 – Sun 8 Nov 2026: every day at or after the marker
+// ('2026-11-01') and eleven days before the clock (Thu 19 Nov), with one
+// plug-in covering the whole week so the attribution compare stays silent —
+// whatever the caption shows is the verdict's alone. Days absent from
+// `gaps` keep their document (its kWh rides in the series) with no verdict
+// written: the reconciler's clean case.
+function settledNovemberWeek(gaps) {
+  const docs = [
+    '2026-11-02',
+    '2026-11-03',
+    '2026-11-04',
+    '2026-11-05',
+    '2026-11-06',
+    '2026-11-07',
+    '2026-11-08',
+  ].map((id) => {
+    const doc = { id, kwh: 3 };
+    if (gaps[id] !== undefined) doc.gap_wh = gaps[id];
+    return doc;
+  });
+  return {
+    docs,
+    sessions: [
+      { wh: 21000, started_at: new Date(2026, 10, 2, 1), ended_at: new Date(2026, 10, 8, 5) },
+    ],
+  };
+}
+
+test("a settled week's ≥10 Wh verdict renders the full caption the attribution missed", () => {
+  resetHistory();
+  enterHistory();
+  const { docs, sessions } = settledNovemberWeek({ '2026-11-06': 4800 });
+  applyHistory(
+    periodById('week'),
+    { docs, fromCache: false },
+    null,
+    new Date(2026, 10, 2, 12), // the window's anchor: Monday 2 November
+    sessions,
+    new Date(2026, 10, 19, 12), // the clock: Thursday 19 November
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  // The sessions cover the week's every kWh, so the #211 compare is silent
+  // — the 4.8 kWh day verdict alone says its $ prices 16.2 of the 21 kWh
+  // shown, on the same muted caption the compare uses.
+  assert.equal(element('history-cost-cell').hidden, false);
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 16.2 of 21.0 kWh');
+  assert.equal(element('history-total').textContent, '21.0');
+});
+
+test('a settled week of sub-10 Wh drift renders the quiet tolerance note', () => {
+  resetHistory();
+  enterHistory();
+  const { docs, sessions } = settledNovemberWeek({ '2026-11-03': 3.1, '2026-11-05': 0.8 });
+  applyHistory(
+    periodById('week'),
+    { docs, fromCache: false },
+    null,
+    new Date(2026, 10, 2, 12),
+    sessions,
+    new Date(2026, 10, 19, 12),
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  // Every verdict inside the two-meter drift band (owner decision
+  // 2026-11-22): the full caption would cry wolf, so one muted line states
+  // the 3.9 Wh net drift instead — never silence.
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(
+    element('history-cost-coverage').textContent,
+    'charger day meters differ by 0.004 kWh over this period — within meter tolerance',
+  );
+});
+
+test('a clean settled week stays silent, even beside attribution noise', () => {
+  resetHistory();
+  enterHistory();
+  // No verdicts written at all: the marker vouches the week clean, and the
+  // exact same-basis verdict is the authority — so an attribution shortfall
+  // the #211 compare would disclose (here: sessions covering 20 of the
+  // 21 recorded kWh) is silenced rather than contradicted. The $ keeps its
+  // own figure; only the caption is verdict-driven.
+  const { docs } = settledNovemberWeek({});
+  applyHistory(
+    periodById('week'),
+    { docs, fromCache: false },
+    null,
+    new Date(2026, 10, 2, 12),
+    [{ wh: 20000, started_at: new Date(2026, 10, 2, 1), ended_at: new Date(2026, 10, 8, 5) }],
+    new Date(2026, 10, 19, 12),
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost-cell').hidden, false);
+  assert.equal(element('history-cost-coverage').hidden, true);
+  assert.equal(element('history-cost-coverage').textContent, '');
+});
+
+test('any unverdictable day keeps the #211 attribution compare exactly', () => {
+  // a) A period containing today: today itself is never verdicted (the
+  //    reconciler defers the trailing window), so the current week falls
+  //    back to the compare — honest: verdicts only vouch for settled days.
+  resetHistory();
+  enterHistory();
+  const now = new Date(2026, 10, 19, 12);
+  applyHistory(
+    periodById('week'),
+    {
+      docs: [
+        { id: '2026-11-16', kwh: 1, gap_wh: 0.5 },
+        { id: '2026-11-17', kwh: 1 },
+        { id: '2026-11-18', kwh: 1 },
+        // Today: no verdict, inside the deferral window — unsettled.
+        { id: '2026-11-19', kwh: 1 },
+      ],
+      fromCache: false,
+    },
+    null,
+    now,
+    [{ wh: 2000, started_at: new Date(2026, 10, 18, 1), ended_at: new Date(2026, 10, 18, 3) }],
+    now,
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  // The compare fires on the 2 kWh no session covers — today's PR-1
+  // behavior, verdicts aside.
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(element('history-cost-coverage').textContent, 'priced 2.00 of 4.00 kWh');
+
+  // b) A legacy day before the marker: the week of 26 Oct straddles
+  //    recon_from, and the days before it predate the verdicts.
+  resetHistory();
+  enterHistory();
+  applyHistory(
+    periodById('week'),
+    {
+      docs: [
+        { id: '2026-10-26', kwh: 1 },
+        { id: '2026-10-27', kwh: 1 },
+        { id: '2026-10-28', kwh: 1 },
+        { id: '2026-10-29', kwh: 1 },
+        { id: '2026-10-30', kwh: 1 },
+        { id: '2026-10-31', kwh: 1, gap_wh: 900 },
+        { id: '2026-11-01', kwh: 1 },
+      ],
+      fromCache: false,
+    },
+    null,
+    new Date(2026, 9, 26, 12),
+    [{ wh: 4000, started_at: new Date(2026, 9, 27, 1), ended_at: new Date(2026, 9, 27, 3) }],
+    now,
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost-coverage').textContent, 'priced 4.00 of 7.00 kWh');
+
+  // c) A null-marked day inside an otherwise settled week: the reconciler
+  //    said "not verdictable" out loud, so the verdicts cannot vouch.
+  resetHistory();
+  enterHistory();
+  const { docs: nulled } = settledNovemberWeek({ '2026-11-04': null });
+  applyHistory(
+    periodById('week'),
+    { docs: nulled, fromCache: false },
+    null,
+    new Date(2026, 10, 2, 12),
+    [{ wh: 20000, started_at: new Date(2026, 10, 2, 1), ended_at: new Date(2026, 10, 8, 5) }],
+    now,
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost-coverage').textContent, 'priced 20.0 of 21.0 kWh');
+});
+
+test('no marker means no verdicts: the attribution compare alone', () => {
+  resetHistory();
+  enterHistory();
+  // The same ≥10 Wh verdict payload as the full-caption pin, applied with
+  // no marker: the feature is off — a bridge without seam B keeps today's
+  // behavior everywhere, and the fully covered week shows no caption.
+  const { docs, sessions } = settledNovemberWeek({ '2026-11-06': 4800 });
+  applyHistory(
+    periodById('week'),
+    { docs, fromCache: false },
+    null,
+    new Date(2026, 10, 2, 12),
+    sessions,
+    new Date(2026, 10, 19, 12),
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost-coverage').hidden, true);
+  assert.equal(element('history-cost-coverage').textContent, '');
+});
+
+test("a paged settled day renders its verdict under the day's own summary", async () => {
+  resetHistory();
+  enterHistory();
+  // The period switch is driven for real (the fetch→apply seam bypasses
+  // the screen's periodId, and the Day period's hour buckets only price
+  // under the Day descriptor); the read itself rejects in Node as usual.
+  element('period-switch').contains = () => true;
+  const click = element('period-switch').listeners.get('click')[0];
+  await click({ target: { closest: () => ({ dataset: { period: 'day' } }) } });
+  await readFailed();
+  // The Day period's hour buckets never carried a caption (their coverage
+  // is definitional), so the verdict is the one thing that can put one
+  // there: a past Sunday inside the marker, 11 days before the clock.
+  const doc = {
+    id: '2026-11-08',
+    exists: true,
+    kwh: 3,
+    hours: { '02': 3 },
+    gap_wh: 2000,
+    fromCache: false,
+  };
+  applyHistory(
+    periodById('day'),
+    doc,
+    null,
+    new Date(2026, 10, 8, 12), // the paged day: Sunday 8 November
+    [],
+    new Date(2026, 10, 19, 12),
+    { reconFrom: '2026-11-01' },
+  );
+  showHistorySettings(nightly());
+  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  // The figure prices every Wh shown — the hour buckets price the day
+  // document itself, so covered meets recorded — and the caption must not
+  // claim otherwise: it states the archive shortfall on the verdict's own
+  // basis, never a `priced X of Y` partial-price claim.
+  const summary = seriesCostSummary(
+    periodSeries(periodById('day'), doc, new Date(2026, 10, 8, 12), new Date(2026, 10, 19, 12)),
+    'hour',
+    nightly(),
+    [],
+  );
+  assert.equal(summary.coveredWh, summary.recordedWh);
+  assert.equal(element('history-cost-coverage').hidden, false);
+  assert.equal(
+    element('history-cost-coverage').textContent,
+    "2.00 kWh of this day's energy is not in the sessions archive",
+  );
 });
 
 // ---------- the per-window rate-scope note, executed (#193) ----------
