@@ -2139,9 +2139,15 @@ test('a settled window classifies every day: numbers, clean absences, drift sums
     VERDICT_TODAY,
   );
   // The absent days read as 0 Wh verdicts, so the summary carries the
-  // signed sum and the largest single day's magnitude — the drift-vs-gap
-  // discriminator the caption decision turns on.
-  assert.deepEqual(verdicts, { settled: true, sumWh: -1, maxAbsWh: 3 });
+  // signed sum, the largest single day's magnitude, and the positive-only
+  // figures the caption's missing-energy branch turns on.
+  assert.deepEqual(verdicts, {
+    settled: true,
+    sumWh: -1,
+    maxAbsWh: 3,
+    posSumWh: 2,
+    maxPosWh: 2,
+  });
 });
 
 test('a single ≥10 Wh day verdict renders the full caption from the verdict sum', () => {
@@ -2206,7 +2212,13 @@ test('an exactly-zero verdict sum renders nothing — vouched clean is clean', (
   // compare silent beside it: the exact same-basis verdict is the
   // authority, not the pro-rated spans.
   const verdicts = dayVerdicts(VERDICT_WEEK, [], VERDICT_FROM, VERDICT_TODAY);
-  assert.deepEqual(verdicts, { settled: true, sumWh: 0, maxAbsWh: 0 });
+  assert.deepEqual(verdicts, {
+    settled: true,
+    sumWh: 0,
+    maxAbsWh: 0,
+    posSumWh: 0,
+    maxPosWh: 0,
+  });
   assert.equal(verdictCaption(verdicts, { recordedWh: 21000 }), null);
 });
 
@@ -2246,7 +2258,13 @@ test('the trailing deferral window bounds the absent-means-clean reading', () =>
     VERDICT_FROM,
     VERDICT_TODAY,
   );
-  assert.deepEqual(aged, { settled: true, sumWh: 0, maxAbsWh: 0 });
+  assert.deepEqual(aged, {
+    settled: true,
+    sumWh: 0,
+    maxAbsWh: 0,
+    posSumWh: 0,
+    maxPosWh: 0,
+  });
   // A number verdict inside the window still vouches: the reconciler
   // writes one only once no open session overlaps the day.
   const verdicted = dayVerdicts(
@@ -2277,6 +2295,47 @@ test('a negative verdict sum renders the tolerance note, not a clamped caption',
   assert.equal(
     verdictCaption(verdicts, { recordedWh: 12000 }),
     'charger day meters differ by 0.01 kWh over this period — within meter tolerance',
+  );
+});
+
+test('a large positive day verdict survives a larger negative one', () => {
+  // The missing-energy rule (#211's contract): a +4.8 kWh day is archive
+  // loss the caption must warn about, and a −5 kWh day elsewhere in the
+  // window is over-attribution — it must not cancel the loss out of the
+  // warning and relabel it "within meter tolerance". The full caption
+  // keys on the single positive day and prices recorded minus the sum of
+  // POSITIVE verdicts.
+  const verdicts = dayVerdicts(
+    VERDICT_WEEK,
+    [
+      { id: '2026-10-13', kwh: 1, gap_wh: 4800 },
+      { id: '2026-10-15', kwh: 1, gap_wh: -5000 },
+    ],
+    VERDICT_FROM,
+    VERDICT_TODAY,
+  );
+  assert.equal(verdicts.settled, true);
+  assert.equal(verdicts.maxPosWh, 4800);
+  assert.ok(Math.abs(verdicts.sumWh - -200) < 1e-9);
+  assert.equal(verdictCaption(verdicts, { recordedWh: 21000 }), 'priced 16.2 of 21.0 kWh');
+  // The owner rule's other arm holds: a month of sub-10 Wh positive drift
+  // days accumulates well past 10 Wh of posSum without any single-day
+  // signal — still the tolerance note, never a caption.
+  const driftDays = Array.from({ length: 28 }, (_, i) => ({
+    id: `2026-10-${String(i + 1).padStart(2, '0')}`,
+    kwh: 1,
+    gap_wh: 2.3,
+  }));
+  const month = dayVerdicts(
+    driftDays.map((d) => d.id),
+    driftDays,
+    VERDICT_FROM,
+    '2026-11-04',
+  );
+  assert.ok(month.posSumWh > 60);
+  assert.equal(
+    verdictCaption(month, { recordedWh: 300000 }),
+    'charger day meters differ by 0.06 kWh over this period — within meter tolerance',
   );
 });
 

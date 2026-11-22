@@ -885,15 +885,21 @@ export function dayVerdicts(dayIds, docs, reconFrom, todayId) {
   let settled = true;
   let sumWh = 0;
   let maxAbsWh = 0;
+  let posSumWh = 0;
+  let maxPosWh = 0;
   for (const id of dayIds) {
     const wh = dayVerdictWh(id, gaps.get(id), reconFrom, todayId);
     if (wh == null) settled = false;
     else {
       sumWh += wh;
       maxAbsWh = Math.max(maxAbsWh, Math.abs(wh));
+      if (wh > 0) {
+        posSumWh += wh;
+        maxPosWh = Math.max(maxPosWh, wh);
+      }
     }
   }
-  return { settled, sumWh, maxAbsWh };
+  return { settled, sumWh, maxAbsWh, posSumWh, maxPosWh };
 }
 
 // The single-day magnitude that separates drift from a real gap (owner
@@ -906,28 +912,29 @@ const VERDICT_GAP_WH = 10;
 // replacing the #211 attribution compare there — the exact same-basis verdict
 // is the authority, and a clean verdict must silence the attribution noise
 // beside it):
-//   - any single day |gap| ≥ 10 Wh, with a non-negative sum, renders the
-//     full `priced X of Y kWh` caption: X = the recorded total minus the
-//     verdict sum, clamped so X never exceeds Y (a sum past the recorded
-//     total prices nothing rather than more than everything) nor goes
-//     negative;
-//   - a negative sum renders the quiet tolerance note instead — the archive
-//     holds *more* than the day documents recorded, a state the
-//     `priced X of Y` shape cannot say without clamping the drift away;
-//   - any other nonzero sum (all days sub-10 Wh — the production drift
-//     shape) renders that same one-line tolerance note stating the drift
-//     honestly, never a suppression;
-//   - a sum of exactly zero (at whole-Wh resolution, the caption's own)
+//   - any single day with a POSITIVE gap ≥ 10 Wh renders the full
+//     `priced X of Y kWh` caption: X = the recorded total minus the sum of
+//     the POSITIVE verdicts (missing energy; over-attribution on other days
+//     must not cancel it out of the warning), clamped so X never exceeds Y
+//     nor goes negative. The discriminator stays the single positive day —
+//     a month of sub-10 Wh drift days is the tolerance note's shape, not a
+//     caption, per the owner decision;
+//   - any other nonzero NET sum renders the quiet tolerance note stating
+//     the |net| drift honestly — including all-negative windows (the
+//     archive holds more than the day documents recorded, which the
+//     `priced X of Y` shape cannot say) and lone large negative days
+//     (over-coverage is not missing data);
+//   - a net sum of exactly zero (at whole-Wh resolution, the caption's own)
 //     renders nothing: vouched clean is clean.
 // `summary` is the same seriesCostSummary pass whose caption this replaces
 // (it contributes the recorded total); the $ figure itself is untouched.
 export function verdictCaption(verdicts, summary) {
   if (!verdicts || !verdicts.settled) return null;
   const sum = Math.round(verdicts.sumWh);
-  if (verdicts.maxAbsWh >= VERDICT_GAP_WH && sum >= 0) {
+  if (verdicts.maxPosWh >= VERDICT_GAP_WH) {
     const recorded = toNumber(summary && summary.recordedWh);
     if (Number.isFinite(recorded) && recorded > 0) {
-      const covered = Math.min(Math.max(recorded - sum, 0), recorded);
+      const covered = Math.min(Math.max(recorded - Math.round(verdicts.posSumWh), 0), recorded);
       return pricedOfText(covered, recorded);
     }
   }
