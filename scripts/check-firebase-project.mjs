@@ -1,6 +1,7 @@
-// Refuse to deploy if the target Firebase project does not match the
-// service-account key about to be used. Prevents cross-project deploys
-// (e.g. shipping this repo's hosting/rules over another app's project).
+// Refuse to deploy if the web app config is absent/still the example, or if
+// the target Firebase project does not match the service-account key about to
+// be used. Prevents broken hosting releases and cross-project deploys (e.g.
+// shipping this repo's hosting/rules over another app's project).
 //
 // Target resolution order: FIREBASE_PROJECT env, then .firebaserc's
 // projects.default. Key resolution: GOOGLE_APPLICATION_CREDENTIALS, then
@@ -30,6 +31,37 @@ if (!target) {
   fail(
     'no Firebase project selected',
     'set FIREBASE_PROJECT or add {"projects":{"default":"<project-id>"}} to .firebaserc',
+  );
+}
+
+const webConfigPath = 'web/firebase-config.js';
+if (!existsSync(webConfigPath)) {
+  fail(
+    `${webConfigPath} is missing`,
+    'copy web/firebase-config.example.js there and fill in the Firebase web app values',
+  );
+}
+
+let webConfig;
+try {
+  webConfig = readFileSync(webConfigPath, 'utf8');
+} catch {
+  fail(`cannot read ${webConfigPath}`, 'check that the deploy user can read the file');
+}
+
+const templateMarkers = [
+  'AIza...',
+  'your-project.firebaseapp.com',
+  'your-project-id',
+  'your-project.appspot.com',
+  "messagingSenderId: '1234567890'",
+  "appId: '1:1234567890:web:abcdef'",
+];
+const foundMarkers = templateMarkers.filter((marker) => webConfig.includes(marker));
+if (foundMarkers.length) {
+  fail(
+    `${webConfigPath} still contains placeholder values (${foundMarkers.join(', ')})`,
+    'replace the Firebase app fields with the values from the Firebase console; the VAPID placeholder may remain when notifications are disabled',
   );
 }
 

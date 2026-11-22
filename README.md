@@ -281,4 +281,6 @@ npm run deploy           # all three
 Each `deploy*` script first runs the guard, which blocks when
 `FIREBASE_PROJECT` (or `.firebaserc`) and the key in
 `GOOGLE_APPLICATION_CREDENTIALS` / `private/service-account.json` belong to
-different projects. Never bypass it with raw `firebase deploy --force`.
+different projects. It also blocks when the gitignored
+`web/firebase-config.js` is missing or still contains the example Firebase app
+values. Never bypass it with raw `firebase deploy --force`.
