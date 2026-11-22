@@ -805,12 +805,141 @@ export function coverageDisclosure(summary) {
   const covered = toNumber(summary.coveredWh);
   if (!Number.isFinite(recorded) || recorded <= 0 || !Number.isFinite(covered)) return null;
   if (Math.round(recorded) - Math.round(covered) < 1) return null;
-  const coveredText = fmtK(covered / 1000);
-  const recordedText = fmtK(recorded / 1000);
+  return pricedOfText(covered, recorded);
+}
+
+// The `priced X of Y kWh` caption text both disclosures share (#194): the
+// app's own kWh formatting, with the two-decimal fallback that keeps a fired
+// line legible whenever fmtK renders both figures alike.
+function pricedOfText(coveredWh, recordedWh) {
+  const coveredText = fmtK(coveredWh / 1000);
+  const recordedText = fmtK(recordedWh / 1000);
   if (coveredText === recordedText) {
-    return `priced ${(covered / 1000).toFixed(2)} of ${(recorded / 1000).toFixed(2)} kWh`;
+    return `priced ${(coveredWh / 1000).toFixed(2)} of ${(recordedWh / 1000).toFixed(2)} kWh`;
   }
   return `priced ${coveredText} of ${recordedText} kWh`;
+}
+
+// ---------- the day-verdict caption (#212) ----------
+//
+// The bridge's seam-B reconciler writes a per-day verdict on the day
+// documents themselves: `gap_wh`, the raw signed same-basis delta (the day's
+// recorded Wh minus the sessions archive's Wh for that local day), written
+// once and never corrected — detection only discloses. The read contract is
+// three-state: a number is a settled verdict; null marks a day the
+// reconciler cannot verdict honestly (a stored interval straddles its
+// midnight, so the split would be the constant-power approximation); absent
+// means evaluated clean — but only for days at or after the `recon_from`
+// marker, and only once the day has settled: the reconciler defers a day's
+// verdict while an open session may still overlap it (its ~3-day trailing
+// window), so an absent verdict there is "not yet settled", never clean.
+// Verdicts therefore vouch for a period only when every day of the window
+// carries one; anything less and the #211 attribution compare above keeps
+// the caption exactly as it is.
+
+// How many days before today an absent verdict still counts as deferred: the
+// reconciler's own trailing window (pi/archive_reconcile.py
+// TRAILING_WINDOW_DAYS), so the two sides of this contract agree on when a
+// day's silence becomes the clean verdict.
+const VERDICT_DEFERRAL_DAYS = 3;
+
+// Whether a day sits inside that trailing window. Calendar-day distance, not
+// milliseconds: a DST transition makes today−3 up to an hour more or less
+// than 72 h of wall clock, and the reconciler's window is calendar days.
+// An unparsable id can never be vouched for, so it reads as deferred.
+function deferredDay(id, todayId) {
+  const day = dayStartFromId(id);
+  const today = dayStartFromId(todayId);
+  if (!day || !today) return true;
+  const back = Math.round((today.getTime() - day.getTime()) / 86400000);
+  return back >= 0 && back <= VERDICT_DEFERRAL_DAYS;
+}
+
+// One day's verdict in Wh — a number when the verdict vouches for the day,
+// null when it cannot: before `recon_from` (legacy), the explicit null mark
+// (unverdictable), a malformed value, or an absent verdict still inside the
+// deferral window. `gapWh` is the day document's own `gap_wh` field,
+// undefined when the day carries none.
+function dayVerdictWh(id, gapWh, reconFrom, todayId) {
+  if (!reconFrom || id < reconFrom) return null;
+  if (typeof gapWh === 'number' && Number.isFinite(gapWh)) return gapWh;
+  if (gapWh === undefined && !deferredDay(id, todayId)) return 0;
+  return null;
+}
+
+// The period's day-verdict state for one viewed window: null when the marker
+// is off (a bridge without seam B — the whole feature is off, today's caption
+// everywhere), else `{settled, sumWh, maxAbsWh}` — `settled` only when every
+// day of the window carries a vouching verdict, `sumWh` their signed sum and
+// `maxAbsWh` the largest single day's |gap| (the drift-vs-gap
+// discriminator below). `dayIds` are the window's own days oldest first
+// (dayIdsInRange, or the Day period's single id); `docs` are the read's day
+// documents, the only place a verdict lives; `todayId` is the clock the
+// window was captured at, which is what the deferral boundary means.
+export function dayVerdicts(dayIds, docs, reconFrom, todayId) {
+  if (!reconFrom || !Array.isArray(dayIds) || dayIds.length === 0) return null;
+  const gaps = new Map();
+  for (const doc of Array.isArray(docs) ? docs : []) {
+    if (doc && typeof doc.id === 'string') gaps.set(doc.id, doc.gap_wh);
+  }
+  let settled = true;
+  let sumWh = 0;
+  let maxAbsWh = 0;
+  for (const id of dayIds) {
+    const wh = dayVerdictWh(id, gaps.get(id), reconFrom, todayId);
+    if (wh == null) settled = false;
+    else {
+      sumWh += wh;
+      maxAbsWh = Math.max(maxAbsWh, Math.abs(wh));
+    }
+  }
+  return { settled, sumWh, maxAbsWh };
+}
+
+// The single-day magnitude that separates drift from a real gap (owner
+// decision, 2026-11-22): production clean-day verdicts run ±0.6–3.1 Wh of
+// two-meter disagreement, so 10 Wh is a full quantum beyond anything the
+// meters argue about — one day that far out is archive loss, not drift.
+const VERDICT_GAP_WH = 10;
+
+// The verdict-driven caption for a period whose every day is settled (#212,
+// replacing the #211 attribution compare there — the exact same-basis verdict
+// is the authority, and a clean verdict must silence the attribution noise
+// beside it):
+//   - any single day |gap| ≥ 10 Wh, with a non-negative sum, renders the
+//     full `priced X of Y kWh` caption: X = the recorded total minus the
+//     verdict sum, clamped so X never exceeds Y (a sum past the recorded
+//     total prices nothing rather than more than everything) nor goes
+//     negative;
+//   - a negative sum renders the quiet tolerance note instead — the archive
+//     holds *more* than the day documents recorded, a state the
+//     `priced X of Y` shape cannot say without clamping the drift away;
+//   - any other nonzero sum (all days sub-10 Wh — the production drift
+//     shape) renders that same one-line tolerance note stating the drift
+//     honestly, never a suppression;
+//   - a sum of exactly zero (at whole-Wh resolution, the caption's own)
+//     renders nothing: vouched clean is clean.
+// `summary` is the same seriesCostSummary pass whose caption this replaces
+// (it contributes the recorded total); the $ figure itself is untouched.
+export function verdictCaption(verdicts, summary) {
+  if (!verdicts || !verdicts.settled) return null;
+  const sum = Math.round(verdicts.sumWh);
+  if (verdicts.maxAbsWh >= VERDICT_GAP_WH && sum >= 0) {
+    const recorded = toNumber(summary && summary.recordedWh);
+    if (Number.isFinite(recorded) && recorded > 0) {
+      const covered = Math.min(Math.max(recorded - sum, 0), recorded);
+      return pricedOfText(covered, recorded);
+    }
+  }
+  if (sum !== 0) {
+    const kwh = Math.abs(sum) / 1000;
+    // The drift formats like every kWh (two decimals), falling back to the
+    // counter's own 0.001 kWh quantum whenever that would print 0.00 — a
+    // fired note always shows the magnitude it states.
+    const drift = kwh.toFixed(2) === '0.00' ? kwh.toFixed(3) : kwh.toFixed(2);
+    return `charger day meters differ by ${drift} kWh over this period — within meter tolerance`;
+  }
+  return null;
 }
 
 // ---------- the per-window rate-scope flag (#193) ----------

@@ -2397,9 +2397,11 @@ test('both history read paths end with the midnight re-check', () => {
   // The read it chooses between is indirected (the harness substitutes it to drive
   // a read it controls), so the object must hold both of the store's reads: an
   // indirected read that stopped being the store's would fail no other test.
+  // #212 adds the seam-B marker read beside them — the verdict feature's one
+  // extra document per history data load, through the same seam.
   assert.match(
     source,
-    /export const periodReads = \{\s*day: \(day\) => fetchHistoryDay\(day\),\s*range: \(startId, endId\) => fetchHistory\(startId, endId\),\s*\};/,
+    /export const periodReads = \{[\s\S]*?day: \(day\) => fetchHistoryDay\(day\),[\s\S]*?range: \(startId, endId\) => fetchHistory\(startId, endId\),[\s\S]*?marker: \(\) => fetchReconMarker\(\),[\s\S]*?\};/,
   );
   // The sessions read is the $ counterpart: Day resolves empty, a range pages
   // the widened started_at window (sessionsRange), and only Firestore can
@@ -2410,11 +2412,16 @@ test('both history read paths end with the midnight re-check', () => {
   // `now` is the clock the window was captured at, passed as applyHistory's 6th
   // argument: dropping it makes the series mark a past bucket current again.
   // The pure tests prove periodSeries honours `now`; only this pin proves the
-  // read paths pass it.
+  // read paths pass it. #212 adds the 7th argument beside it — the same
+  // read's reconciliation marker — so a window's verdict classification is
+  // applied with the window it belongs to, and dropping either the marker
+  // read or its hand-off fails here (a payload applied without its marker
+  // reads as feature-off).
   for (const name of ['readHistory', 'loadAll']) {
+    assert.match(body(name), /periodReads\.marker\(\)/, name);
     assert.match(
       body(name),
-      /applyHistory\(\s*descriptor,[\s\S]*?readWindow\.anchor,[\s\S]*?\bnow,\s*\)/,
+      /applyHistory\(\s*descriptor,[\s\S]*?readWindow\.anchor,[\s\S]*?\bnow,\s*marker\.status === 'fulfilled' \? marker\.value : null,\s*\)/,
       name,
     );
   }
