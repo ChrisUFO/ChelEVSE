@@ -1844,15 +1844,19 @@ test('zero-energy days price fully at 0.00 and uncovered ranges hide', () => {
 // sessionCostSpans gates its own output, and a slice no row matches prices at
 // the stored flat fallback (0.00 only when none is stored), never nulls — so
 // this pins the arm directly with the one input the engine rejects.
+// recordedKwh is 0 because it is the discriminator: with recorded energy the
+// summary's unpriced-energy guard nulls a skip-the-slice arm's $0.00 too, so
+// only beside zero recorded energy does the null arm's {cost: null} diverge
+// from that arm's real $0.00.
 test('one unpriceable slice nulls the window pass instead of half-pricing it', () => {
   assert.deepEqual(
     windowCostSummary(
       [{ wh: -1, started_at: new Date(2026, 9, 18, 1), ended_at: new Date(2026, 9, 18, 2) }],
       rangeWindow('2026-10-18', '2026-10-18'),
-      3,
+      0,
       NIGHTLY,
     ),
-    { cost: null, coveredWh: 0, recordedWh: 3000 },
+    { cost: null, coveredWh: 0, recordedWh: 0 },
   );
 });
 
