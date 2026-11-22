@@ -18,6 +18,7 @@ import {
   liveCostLabel,
   liveSessionContribution,
   liveSessionSpan,
+  periodCostSpans,
   sessionBucketCost,
   sessionCostLabel,
   sessionCostSpans,
@@ -1397,16 +1398,50 @@ test('a settled live charge prices exactly once across the transition', () => {
   const at = date(2026, 1, 5, 3, 0).getTime();
   const status = liveStatus(3, at, 7200, 2000);
   const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
-  const merged = [...[recorded], liveSessionContribution(status, [recorded], settings)].filter(
-    Boolean,
-  );
+  const merged = periodCostSpans(status, [recorded], settings, true);
   const totals = sessionBucketCost(merged, '2026-01-05', 2, settings);
   assert.ok(Math.abs(totals.cost - 0.2) < 1e-9);
   assert.ok(Math.abs(totals.wh - 2000) < 1e-9);
   // And without the recording — mid-charge — the contribution alone carries
   // the same figure, so the settled number is the one the estimate promised.
-  const live = [liveSessionContribution(status, [], settings)].filter(Boolean);
+  const live = periodCostSpans(status, [], settings, true);
   assert.ok(Math.abs(sessionBucketCost(live, '2026-01-05', 2, settings).cost - 0.2) < 1e-9);
+});
+
+// ---------- the one span list (#210) ----------
+
+test('periodCostSpans is the only pricing input: spans, sessions, live alike', () => {
+  const settings = nightly();
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  // Closed sessions enter as their sessionCostSpans — the reconciling
+  // intervals, exact attribution — and nothing else happens without `live`.
+  const recorded = {
+    wh: 3000,
+    started_at: date(2026, 1, 4, 18, 0),
+    ended_at: date(2026, 1, 4, 19, 0),
+    intervals: [
+      { started_at: date(2026, 1, 4, 18, 0), ended_at: date(2026, 1, 4, 19, 0), wh: 3000 },
+    ],
+  };
+  assert.deepEqual(periodCostSpans(null, [recorded], settings), recorded.intervals);
+  assert.deepEqual(periodCostSpans(status, [recorded], settings, false), recorded.intervals);
+  // With `live` the contribution joins the list as one span object — a
+  // concatenation, never a pseudo-session shape riding the sessions array.
+  assert.deepEqual(periodCostSpans(status, [recorded], settings, true), [
+    ...recorded.intervals,
+    liveSessionSpan(status),
+  ]);
+  // A settled charge contributes no span at all, and unusable sessions are
+  // skipped exactly as the pass has always skipped them.
+  const settled = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
+  assert.deepEqual(periodCostSpans(status, [settled], settings, true), spansOf(settled));
+  assert.deepEqual(
+    periodCostSpans(status, [null, 'x', { wh: 1000 }, settled], settings, true),
+    spansOf(settled),
+  );
+  // Junk envelopes contribute nothing either way.
+  assert.deepEqual(periodCostSpans(status, null, settings, true), [liveSessionSpan(status)]);
 });
 
 // ---------- residual attribution: the resumed block's uncovered tail (#128) ----------

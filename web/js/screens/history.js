@@ -48,12 +48,11 @@ import {
   dayVerdicts,
   hasRateSchedule,
   hourCost,
-  liveSessionContribution,
   liveSessionSpan,
+  periodCostSpans,
   rangeWindow,
   sessionBucketCost,
   sessionCostLabel,
-  sessionCostSpans,
   seriesWindowUncovered,
   verdictCaption,
   windowCostSummary,
@@ -160,6 +159,7 @@ let scrubPointer = null;
 export {
   coverageDisclosure,
   dayVerdicts,
+  periodCostSpans,
   rangeWindow,
   sessionBucketCost,
   seriesWindowUncovered,
@@ -167,27 +167,23 @@ export {
   windowCostSummary,
 } from '../cost.js';
 
-// The spans a render prices (#210): every recorded session's spans plus,
-// while a charge is live and the series includes a current bucket (today, or
-// this month — the window the live window can overlap), the live session's
-// contribution — one list of span objects, the only pricing input. There is
-// no pseudo-session merge and no bucket-kind branch: the summary and the
-// day/month bars all price this list over their own windows, exactly the
-// shape sessionCostSpans yields. The settle guard runs here, against the
-// recorded payload as merged, so whichever of the two inputs — the session
-// document or the status snapshot — lands first, a charge a recorded session
-// already covers prices exactly once.
+// The spans a render prices (#210): the period's recorded sessions plus, while
+// a charge is live and the series includes a current bucket (today, or this
+// month — the window the live window can overlap), the live session's
+// contribution — one list of span objects built by periodCostSpans (js/cost.js),
+// the only pricing input. There is no pseudo-session merge and no bucket-kind
+// branch: the summary and the day/month bars all price this list over their
+// own windows. The settle guard runs inside it, against the recorded payload
+// as merged, so whichever of the two inputs — the session document or the
+// status snapshot — lands first, a charge a recorded session already covers
+// prices exactly once.
 function pricingSpans() {
-  const spans = [];
-  for (const session of periodSessions) {
-    const sessionSpans = sessionCostSpans(session);
-    if (sessionSpans) spans.push(...sessionSpans);
-  }
-  if (series.some((point) => point.isCurrent)) {
-    const live = liveSessionContribution(liveStatus, periodSessions, settings);
-    if (live) spans.push(live);
-  }
-  return spans;
+  return periodCostSpans(
+    liveStatus,
+    periodSessions,
+    settings,
+    series.some((point) => point.isCurrent),
+  );
 }
 
 // One bucket's cost label, or null to hide: flat keeps aggregateCostLabel's
@@ -1372,7 +1368,7 @@ export function showHistorySettings(data) {
 // write's own `updated_at` exactly like the Status tab's figure and cannot
 // slide on a repaint. The charging→stopped edge is also the bridge's
 // session-record edge, so it queues one settle re-read through the same
-// guarded path a period switch takes; the guard inside pricingSessions covers
+// guarded path a period switch takes; the guard inside pricingSpans covers
 // the listener that lands first. Bounded to the visible tab: a push while
 // hidden only updates the snapshot, and activateHistory renders or re-reads
 // on return.

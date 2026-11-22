@@ -615,15 +615,15 @@ function recordedInWindow(sessions, liveStart, liveEnd) {
   return { recordedWh, tailStart };
 }
 
-// The live window merged into a period's pricing sessions, or null: schedule
+// The live window's contribution to a period's pricing, or null: schedule
 // only (a flat day total already prices the accruing kWh, so the flat output
 // is byte-identical with or without a charge in progress), live-gated and
-// settle-guarded. The returned span flows through sessionBucketCost beside the
-// recorded sessions, so its cost lands in exactly the buckets its window
-// overlaps — today's bar, and yesterday's when the charge crossed local
-// midnight — with the same constant-power split every other span prices by,
-// and its Wh counts toward the bucket's coverage, so a live-covered today
-// shows its bar $.
+// settle-guarded. The returned span joins the period's span list
+// (periodCostSpans below), so its cost lands in exactly the buckets its
+// window overlaps — today's bar, and yesterday's when the charge crossed
+// local midnight — with the same constant-power split every other span
+// prices by, and its Wh counts toward the bucket's coverage, so a
+// live-covered today shows its bar $.
 //
 // With nothing recorded inside the window this is the whole live span,
 // byte-identical to #126's fresh-charge contribution. Once a recorded span
@@ -674,6 +674,28 @@ export function liveSessionContribution(status, sessions, settings) {
   if (residualWh < 0) return null;
   if (tailStart >= liveEnd) return null;
   return { started_at: tailStart, ended_at: liveEnd, wh: residualWh };
+}
+
+// The span list a period prices (#210): every closed session's spans plus,
+// when `live` (the rendered series includes a current bucket, so the live
+// window can overlap this period), the live session's contribution. The
+// contribution is itself one span object — the same shape sessionCostSpans
+// yields — so the merge is a concatenation, not a pseudo-session riding the
+// sessions array: the pricing pipeline has exactly one input type and the
+// span model is the only path. Sessions whose spans are unusable contribute
+// nothing (sessionCostSpans' null), exactly as the window pass has always
+// skipped them.
+export function periodCostSpans(status, sessions, settings, live = false) {
+  const spans = [];
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const sessionSpans = sessionCostSpans(session);
+    if (sessionSpans) spans.push(...sessionSpans);
+  }
+  if (live) {
+    const contribution = liveSessionContribution(status, sessions, settings);
+    if (contribution) spans.push(contribution);
+  }
+  return spans;
 }
 
 // Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:
