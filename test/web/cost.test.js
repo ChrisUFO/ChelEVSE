@@ -15,9 +15,9 @@ import {
   heldCostLabel,
   heldCostUncovered,
   hourCost,
-  liveCostLabel,
   liveSessionContribution,
   liveSessionSpan,
+  periodCostSpans,
   sessionBucketCost,
   sessionCostLabel,
   sessionCostSpans,
@@ -82,18 +82,18 @@ test('the test process runs in a DST-observing local timezone', () => {
 test('flat output is byte-identical to fmtCost for every helper', () => {
   const now = date(2026, 1, 5, 12, 0);
   // Status: kWh from Wh, flat rate and currency exactly as before.
-  assert.equal(liveCostLabel(12345, 3600, now, FLAT), fmtCost(12.345, 0.245, 'GBP'));
-  assert.equal(liveCostLabel(12345, 3600, now, FLAT), 'GBP 3.02');
+  assert.equal(statusCostLabel(liveAt(now, 3600, 12345), FLAT), fmtCost(12.345, 0.245, 'GBP'));
+  assert.equal(statusCostLabel(liveAt(now, 3600, 12345), FLAT), 'GBP 3.02');
   // The elapsed span is irrelevant without a schedule, including when missing.
-  assert.equal(liveCostLabel(12345, null, now, FLAT), 'GBP 3.02');
-  assert.equal(liveCostLabel(12345, 0, now, FLAT), 'GBP 3.02');
+  assert.equal(statusCostLabel(liveAt(now, null, 12345), FLAT), 'GBP 3.02');
+  assert.equal(statusCostLabel(liveAt(now, 0, 12345), FLAT), 'GBP 3.02');
   // A finished session: Wh → kWh → flat cost.
   const item = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000);
   assert.equal(sessionCostLabel(item, FLAT), fmtCost(2, 0.245, 'GBP'));
   // Aggregate: kWh input straight through fmtCost.
   assert.equal(aggregateCostLabel(12.345, FLAT), fmtCost(12.345, 0.245, 'GBP'));
   // Absent rate/currency and unusable energy keep today's null (hidden).
-  assert.equal(liveCostLabel(1000, 3600, now, null), null);
+  assert.equal(statusCostLabel(liveAt(now, 3600, 1000), null), null);
   assert.equal(aggregateCostLabel(null, FLAT), null);
   assert.equal(aggregateCostLabel('', FLAT), null);
   assert.equal(sessionCostLabel(null, FLAT), null);
@@ -102,7 +102,7 @@ test('flat output is byte-identical to fmtCost for every helper', () => {
 test('an empty or unusable rates list is the flat path', () => {
   const empty = { ...FLAT, rates: [] };
   assert.equal(aggregateCostLabel(10, empty), 'GBP 2.45');
-  assert.equal(liveCostLabel(1000, null, date(2026, 1, 5), empty), 'GBP 0.25');
+  assert.equal(statusCostLabel(liveAt(date(2026, 1, 5), null, 1000), empty), 'GBP 0.25');
   // normalizeRateSchedule drops malformed rows, so a corrupt list is no schedule.
   const corrupt = { ...FLAT, rates: [{ id: 'bad' }] };
   assert.equal(costSettings(corrupt).rates.length, 0);
@@ -111,33 +111,44 @@ test('an empty or unusable rates list is the flat path', () => {
 
 // ---------- live session ----------
 
+// The Status tab's live label, driven the way its callers do: a charging
+// snapshot whose updated_at/elapsed/energy are the span's inputs (#210 —
+// liveCostLabel's primitive form is gone; the span is the only path).
+function liveAt(at, elapsed, wh, overrides = {}) {
+  const ms = at instanceof Date ? at.getTime() : at;
+  return liveStatus(3, ms, elapsed, wh, overrides);
+}
+
 test('live cost uses the schedule over the elapsed interval', () => {
   // 1 kWh drawn over one hour inside the off-peak window.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 3, 0), nightly(), true), 'GBP 0.10');
+  assert.equal(statusCostLabel(liveAt(date(2026, 1, 5, 3, 0), 3600, 1000), nightly()), 'GBP 0.10');
   // Same energy outside the window pays the fallback.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 12, 0), nightly(), true), 'GBP 0.30');
+  assert.equal(statusCostLabel(liveAt(date(2026, 1, 5, 12, 0), 3600, 1000), nightly()), 'GBP 0.30');
   // Straddling the 06:00 boundary: half the hour at each rate.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 5, 6, 30), nightly(), true), 'GBP 0.20');
+  assert.equal(statusCostLabel(liveAt(date(2026, 1, 5, 6, 30), 3600, 1000), nightly()), 'GBP 0.20');
   // The 22:00–06:00 wrap keeps the early hours of the next day cheap.
   const wrap = nightly({ start: '22:00', end: '06:00' });
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 1, 6, 0, 30), wrap, true), 'GBP 0.10');
+  assert.equal(statusCostLabel(liveAt(date(2026, 1, 6, 0, 30), 3600, 1000), wrap), 'GBP 0.10');
   // Numeric text from a hand-edited status document parses like a number.
-  assert.equal(liveCostLabel('1000', '3600', date(2026, 1, 5, 3, 0), nightly(), true), 'GBP 0.10');
+  assert.equal(
+    statusCostLabel(liveStatus(3, date(2026, 1, 5, 3, 0).getTime(), '3600', '1000'), nightly()),
+    'GBP 0.10',
+  );
 });
 
 test('a schedule hides the live cost when the interval cannot be priced', () => {
   const now = date(2026, 1, 5, 3, 0);
   // No elapsed duration: the fallback would misprice a window that applies now.
-  assert.equal(liveCostLabel(1000, null, now, nightly(), true), null);
-  assert.equal(liveCostLabel(1000, 0, now, nightly(), true), null);
-  assert.equal(liveCostLabel(1000, -60, now, nightly(), true), null);
-  assert.equal(liveCostLabel(1000, '', now, nightly(), true), null);
+  assert.equal(statusCostLabel(liveAt(now, null, 1000), nightly()), null);
+  assert.equal(statusCostLabel(liveAt(now, 0, 1000), nightly()), null);
+  assert.equal(statusCostLabel(liveAt(now, -60, 1000), nightly()), null);
+  assert.equal(statusCostLabel(liveAt(now, '', 1000), nightly()), null);
   // No usable clock.
-  assert.equal(liveCostLabel(1000, 3600, null, nightly(), true), null);
-  assert.equal(liveCostLabel(1000, 3600, Number.NaN, nightly(), true), null);
+  assert.equal(statusCostLabel(liveStatus(3, null, 3600, 1000), nightly()), null);
+  assert.equal(statusCostLabel(liveStatus(3, Number.NaN, 3600, 1000), nightly()), null);
   // Not charging: the interval would cover idle time that drew no energy.
-  assert.equal(liveCostLabel(1000, 3600, now, nightly()), null);
-  assert.equal(liveCostLabel(1000, 3600, now, nightly(), false), null);
+  assert.equal(statusCostLabel(liveAt(now, 3600, 1000, { state_label: 'ready' }), nightly()), null);
+  assert.equal(statusCostLabel(liveAt(now, 3600, 1000, { state_label: 'ready' }), nightly()), null);
 });
 
 // ---------- live status snapshot ----------
@@ -218,6 +229,17 @@ test('the live "understates cost" marker follows the interval it describes', () 
   }
   assert.equal(statusCostUncovered(liveStatus(3, outside, 3600), FLAT), false);
   assert.equal(statusCostUncovered(null, windowOnlyNoFlat()), false);
+  // #210: the label reads the same span the period pass prices
+  // (liveSessionSpan), so its energy gate is the span's too — a charging
+  // write with nothing on the meter yet hides the figure, and the marker
+  // never stands alone beside a hidden figure.
+  assert.equal(statusCostLabel(liveStatus(3, outside, 3600, 0), windowOnlyNoFlat()), null);
+  assert.equal(statusCostUncovered(liveStatus(3, outside, 3600, 0), windowOnlyNoFlat()), false);
+  assert.equal(statusCostFallback(liveStatus(3, outside, 3600, 0), windowOnly()), false);
+  assert.deepEqual(
+    { started_at: outside - 3600_000, ended_at: outside, wh: 1000 },
+    liveSessionSpan(liveStatus(3, outside, 3600, 1000)),
+  );
 });
 
 test('live cost ends at the snapshot write, not the render instant', () => {
@@ -329,7 +351,7 @@ test('a held session prices the frozen window, not the current clock', () => {
 
 test('a held session hides when elapsed or anchor is unusable', () => {
   const anchor = date(2026, 1, 5, 6, 30).getTime();
-  // The same degenerate inputs liveCostLabel hides on.
+  // The same degenerate inputs the live span's gates hide on.
   for (const elapsed of [null, undefined, 0, -60, '', 'x', Number.NaN]) {
     assert.equal(heldCostLabel(1000, elapsed, anchor, nightly()), null, String(elapsed));
   }
@@ -348,7 +370,10 @@ test('held flat output is byte-identical to the live and fmtCost paths', () => {
   assert.equal(heldCostLabel(12345, 3600, now.getTime(), FLAT), 'GBP 3.02');
   assert.equal(heldCostLabel(12345, null, null, FLAT), 'GBP 3.02');
   assert.equal(heldCostLabel(12345, null, null, FLAT), fmtCost(12.345, 0.245, 'GBP'));
-  assert.equal(heldCostLabel(12345, null, null, FLAT), liveCostLabel(12345, null, now, FLAT));
+  assert.equal(
+    heldCostLabel(12345, null, null, FLAT),
+    statusCostLabel(liveAt(now, null, 12345), FLAT),
+  );
   assert.equal(heldCostLabel(1000, 3600, null, { ...FLAT, rates: [] }), 'GBP 0.25');
   assert.equal(heldCostLabel(null, 3600, now.getTime(), FLAT), null);
 });
@@ -892,8 +917,8 @@ test('a date-season rate prices the edge days, and a season rate every hour', ()
     'GBP 0.50',
   );
   // The season rate prices any hour, live included.
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 7, 1, 3, 0), summer, true), 'GBP 0.20');
-  assert.equal(liveCostLabel(1000, 3600, date(2026, 6, 14, 3, 0), summer, true), 'GBP 0.30');
+  assert.equal(statusCostLabel(liveAt(date(2026, 7, 1, 3, 0), 3600, 1000), summer), 'GBP 0.20');
+  assert.equal(statusCostLabel(liveAt(date(2026, 6, 14, 3, 0), 3600, 1000), summer), 'GBP 0.30');
 });
 
 // The #188 defect: season rows scoped 15 June – 15 September expired in
@@ -1009,6 +1034,16 @@ test('hours no base or window covers price at the stored flat fallback', () => {
 
 // ---------- session-attributed period pricing (#123) ----------
 
+// The pricing input is the span list (#210): closed sessions enter as their
+// sessionCostSpans, live contributions as the span objects they already are
+// (sessionCostSpans' fallback yields a plain span unchanged), so one helper
+// maps the fixtures the way the screen's pricingSpans does.
+function spansOf(...items) {
+  return items.flatMap((item) =>
+    Array.isArray(item) ? spansOf(...item) : sessionCostSpans(item) || [],
+  );
+}
+
 test('sessionCostSpans returns the intervals, the span, or nothing', () => {
   // A reconciling intervals list is the intervals themselves, wh as numbers.
   const paused = pausedSession();
@@ -1065,11 +1100,11 @@ test('a session attributes its exact intervals across local midnights', () => {
   const item = pausedSession();
   // 3 kWh in the 18:00–19:00 peak on 5 January, 2 kWh in the 03:00–04:00
   // off-peak block on 6 January — each day prices its own block.
-  const fifth = sessionBucketCost([item], '2026-01-05', 3, nightly());
+  const fifth = sessionBucketCost(spansOf(item), '2026-01-05', 3, nightly());
   assert.ok(Math.abs(fifth.cost - 0.9) < 1e-9);
   assert.ok(Math.abs(fifth.wh - 3000) < 1e-9);
   assert.equal(fifth.covered, true);
-  const sixth = sessionBucketCost([item], '2026-01-06', 2, nightly());
+  const sixth = sessionBucketCost(spansOf(item), '2026-01-06', 2, nightly());
   assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
   assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
   assert.equal(sixth.covered, true);
@@ -1229,7 +1264,7 @@ test('a week of mixed sessions sums to exactly their per-session figures', () =>
   ];
   let buckets = 0;
   for (const id of ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09']) {
-    buckets += sessionBucketCost(sessions, id, 0, settings).cost;
+    buckets += sessionBucketCost(spansOf(...sessions), id, 0, settings).cost;
   }
   const labels =
     costForIntervals(sessions[0].intervals, settings) +
@@ -1387,16 +1422,50 @@ test('a settled live charge prices exactly once across the transition', () => {
   const at = date(2026, 1, 5, 3, 0).getTime();
   const status = liveStatus(3, at, 7200, 2000);
   const recorded = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
-  const merged = [...[recorded], liveSessionContribution(status, [recorded], settings)].filter(
-    Boolean,
-  );
+  const merged = periodCostSpans(status, [recorded], settings, true);
   const totals = sessionBucketCost(merged, '2026-01-05', 2, settings);
   assert.ok(Math.abs(totals.cost - 0.2) < 1e-9);
   assert.ok(Math.abs(totals.wh - 2000) < 1e-9);
   // And without the recording — mid-charge — the contribution alone carries
   // the same figure, so the settled number is the one the estimate promised.
-  const live = [liveSessionContribution(status, [], settings)].filter(Boolean);
+  const live = periodCostSpans(status, [], settings, true);
   assert.ok(Math.abs(sessionBucketCost(live, '2026-01-05', 2, settings).cost - 0.2) < 1e-9);
+});
+
+// ---------- the one span list (#210) ----------
+
+test('periodCostSpans is the only pricing input: spans, sessions, live alike', () => {
+  const settings = nightly();
+  const at = date(2026, 1, 5, 3, 0).getTime();
+  const status = liveStatus(3, at, 7200, 2000);
+  // Closed sessions enter as their sessionCostSpans — the reconciling
+  // intervals, exact attribution — and nothing else happens without `live`.
+  const recorded = {
+    wh: 3000,
+    started_at: date(2026, 1, 4, 18, 0),
+    ended_at: date(2026, 1, 4, 19, 0),
+    intervals: [
+      { started_at: date(2026, 1, 4, 18, 0), ended_at: date(2026, 1, 4, 19, 0), wh: 3000 },
+    ],
+  };
+  assert.deepEqual(periodCostSpans(null, [recorded], settings), recorded.intervals);
+  assert.deepEqual(periodCostSpans(status, [recorded], settings, false), recorded.intervals);
+  // With `live` the contribution joins the list as one span object — a
+  // concatenation, never a pseudo-session shape riding the sessions array.
+  assert.deepEqual(periodCostSpans(status, [recorded], settings, true), [
+    ...recorded.intervals,
+    liveSessionSpan(status),
+  ]);
+  // A settled charge contributes no span at all, and unusable sessions are
+  // skipped exactly as the pass has always skipped them.
+  const settled = session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 3, 0), 2000);
+  assert.deepEqual(periodCostSpans(status, [settled], settings, true), spansOf(settled));
+  assert.deepEqual(
+    periodCostSpans(status, [null, 'x', { wh: 1000 }, settled], settings, true),
+    spansOf(settled),
+  );
+  // Junk envelopes contribute nothing either way.
+  assert.deepEqual(periodCostSpans(status, null, settings, true), [liveSessionSpan(status)]);
 });
 
 // ---------- residual attribution: the resumed block's uncovered tail (#128) ----------
@@ -1554,7 +1623,7 @@ test('interior idle in a merged record prices nothing in the residual', () => {
     ended_at: at,
     wh: 1875,
   });
-  const totals = sessionBucketCost([recorded, tail], '2026-01-05', 3, settings);
+  const totals = sessionBucketCost(spansOf(recorded, tail), '2026-01-05', 3, settings);
   // The window's own energy sums exactly: 750 + 375 recorded, 1875 residual.
   assert.ok(Math.abs(totals.wh - 3000) < 1e-9);
   assert.ok(Math.abs(totals.cost - 0.75) < 1e-9);
@@ -1824,7 +1893,11 @@ test('the live archive attributes across its local midnights exactly once', () =
     '2026-10-22': (10833 * 3600) / 39120 + 1796,
   };
   for (const [id, wh] of Object.entries(expected)) {
-    const bucket = sessionBucketCost(sessions, id, wh / 1000, settings);
+    // spansOf: the re-typed parameter is the span list, so the pin executes
+    // the production input shape (the raw documents coincide with it only
+    // because each interval-bearing fixture carries one interval identical to
+    // its whole span).
+    const bucket = sessionBucketCost(spansOf(...sessions), id, wh / 1000, settings);
     assert.ok(Math.abs(bucket.wh - wh) < 1e-6, `${id} wh ${bucket.wh} != ${wh}`);
     assert.ok(Math.abs(bucket.cost - (wh / 1000) * 0.15303) < 1e-9, id);
     assert.equal(bucket.covered, true, id);
@@ -1844,7 +1917,9 @@ test('the live archive week reconciles with the sessions list figures', () => {
     '2026-10-21',
     '2026-10-22',
   ]) {
-    week += sessionBucketCost(sessions, id, 0, settings).cost;
+    // The span list, as above: the reconciliation the week performs is against
+    // the same span basis the screen's summary prices.
+    week += sessionBucketCost(spansOf(...sessions), id, 0, settings).cost;
   }
   const list = sessions.reduce(
     (sum, item) =>

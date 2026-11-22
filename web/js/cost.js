@@ -7,10 +7,12 @@
 // string `fmtCost` produced before schedules existed, which keeps flat output
 // byte-identical.
 //
-// Interval costs:
+// Interval costs — every one of them a span priced by the same engine (#210):
 //   - live session   [updated_at - elapsed, updated_at] of the status snapshot
 //   - held session   [anchor - elapsed, anchor], the last live window frozen
 //   - finished session its stored started_at/ended_at
+// The Status tab's labels construct these spans and price them through the
+// same slice machinery the period pass uses; there is no second pricer.
 //
 // A finished session carries `intervals: [{started_at, ended_at, wh}]`, one per
 // contiguous charging block (the bridge writes them since #57). Those are priced
@@ -24,32 +26,41 @@
 // interval hides the figure rather than pro-rating over a tariff it cannot read.
 //
 // A day's history document has carried hourly buckets alongside its kWh total
-// since #60/#77, and #110 priced periods from them bucket by bucket. #123 makes
-// period pricing session-primary instead: a period's summary and its
-// Week/Month/Year bars cost the sum of the *stored sessions* overlapping the
-// range — every session prices exactly (the sessions list's own rule below),
-// so the archive is itself the pricing record. The session-attribution exports
-// (sessionCostSpans / sessionBucketCost) slice each session at local day and
-// month boundaries and price the slices through costForInterval, so a period's
-// per-bucket costs sum to exactly the per-session figures the sessions list
-// shows. The buckets keep exactly one job: the Day period's hourly bars
-// (hourCost below). `aggregateCostLabel` itself still returns null whenever a
-// schedule exists, because one aggregate kWh figure cannot be split across
-// windows; it stays the flat path these schedule helpers never touch.
+// since #60/#77, and #110 priced periods from them bucket by bucket. #123 made
+// period pricing session-primary, and #210 finishes it: ONE span pass serves
+// every period. A period's summary — Day included — and its Week/Month/Year
+// bars cost the span list of the *stored sessions* overlapping the range
+// (windowCostSummary / sessionBucketCost): every session prices exactly (the
+// sessions list's own rule below), the spans are sliced at local day and month
+// boundaries and priced through costForInterval, so a period's per-bucket
+// costs sum to exactly the per-session figures the sessions list shows — and
+// the summary's headline kWh is derived in the same pass as its priced energy,
+// so the figure and the energy beside it cannot diverge by construction. The
+// day documents' `kwh`/`hours` are chart series only (bar heights); the Day
+// period's hour bars keep pricing from the hours map as pure display
+// (hourCost below), never as the summary's basis. `aggregateCostLabel` itself
+// still returns null whenever a schedule exists, because one aggregate kWh
+// figure cannot be split across windows; it stays the flat path these
+// schedule helpers never touch.
 //
-// #194 adds the summary's coverage disclosure: the period screens' $ prices
-// only the sessions that overlap the window, while the kWh shown beside it is
-// the day documents' own total, so a partially covered period (a lost record,
-// or a counter-reset session whose aggregate prices a fraction of the days'
-// energy) reads as a plausible tariff. seriesCostSummary therefore totals the
-// buckets' attributed Wh beside their recorded kWh, and whenever the sessions
-// miss any of that energy — any gap at all, with no tolerance floor and
-// nothing that scales with the period's size (#211) — the summary's cost cell
-// says which energy its figure prices on a small muted caption under the
-// figure ("priced 13.7 of 48.1 kWh", coverageDisclosure below). The
-// max(250 Wh, 2%) band now belongs only to the interval reconciliation and
-// the buckets' own per-bucket $-hiding; the caption no longer shares it.
-// Fully covered periods, hidden figures and every kWh total are untouched.
+// #194 added the summary's coverage disclosure and #211 made it any-gap: the
+// pass's attributed Wh is measured against the day documents' recorded kWh
+// (`recordedWh` on the summary), so an archive that lost a record — or a
+// counter-reset session whose aggregate prices a fraction of the days'
+// energy — is disclosed on a small muted caption under the figure ("priced
+// 13.7 of 48.1 kWh", coverageDisclosure below) whenever the sessions miss any
+// of that energy, at whole-Wh resolution with no tolerance floor and nothing
+// that scales with the period's size. Because headline and priced share one
+// pass, the tolerance-swallowing class #211 retired cannot recur: there is no
+// second aggregation for a tolerance to disagree with. The max(250 Wh, 2%)
+// band now belongs only to the interval reconciliation and the buckets' own
+// per-bucket $-hiding; the caption no longer shares it. Fully covered periods,
+// hidden figures and every kWh total are untouched.
+//
+// #212 lets the bridge's per-day seam-B verdicts (`gap_wh`) take the caption
+// over from that compare when every day of the window is settled — one logic
+// for every period, with no Day carve-out (#210): the Day period prices from
+// the same session basis the ranges do, so its coverage is comparable.
 //
 // #193 adds the rate-scope flags: `statusCostFallback`/`heldCostFallback` are
 // the informational inverse of the "understates cost" warning's no-fallback
@@ -61,9 +72,10 @@
 //
 // While a charge is live, that same interval is also today's history figure
 // (#126): the period screens merge `liveSessionContribution` — the live window
-// as one pseudo-session — into the sessions a period prices, so the Week/
-// Month/Year summary and today's bar carry the estimate the Status tab shows,
-// attributed across local midnights by the same span machinery (#125). The
+// as one more span — into the span list a period prices (periodCostSpans), so
+// the Week/Month/Year summary, today's bar and the Day period's summary carry
+// the estimate the Status tab shows, attributed across local midnights by the
+// same span machinery (#125). The
 // contribution is schedule-path only (a flat day total already accrues live)
 // and settles exactly once: whichever of the two listener deliveries around a
 // charge's end — the session document or the stopped status write — lands
@@ -138,83 +150,68 @@ function snapshotMillis(status) {
   return updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
 }
 
-// Live session cost: the schedule over the elapsed part of the session, or the
-// flat rate when no schedule exists.
+// ---------- the Status tab's figures (#210: derived from the span pass) ----------
 //
-// A schedule needs a positive elapsed duration and a snapshot that says the
-// charger is charging; without either the cost is hidden rather than guessed
-// from the flat fallback, because the fallback would silently misprice a tariff
-// whose windows apply right now. `now` must be the snapshot's `updated_at`, not
-// the render instant, so re-rendering a paused or cached write cannot slide the
-// interval forward over hours that added no energy.
-export function liveCostLabel(wh, elapsed, now, settings, charging = false) {
+// The Status tab prices the very same span objects History prices. The live
+// window is liveSessionSpan's — `[updated_at − elapsed, updated_at]`, anchored
+// to the status write so a paused, cached or stale write cannot slide it over
+// idle hours — and the held/adopted windows are spans built from their frozen
+// anchor pairs. All four labels below construct their span and hand it to the
+// same slice machinery the period pass prices by (spanCost over the span's own
+// window — numerically costForInterval's constant-power split, the single
+// engine); there is no second, Status-shaped pricer.
+
+// Live cost straight from a status document. A schedule needs a live charging
+// write with a positive elapsed duration and energy on the meter (the span's
+// own gates); without one the cost is hidden rather than guessed from the flat
+// fallback, because the fallback would silently misprice a tariff whose
+// windows apply right now. The bridge keeps the last good state and elapsed
+// while the charger is unreachable and stamps a fresh `updated_at` on every
+// failed poll, so without the offline gate those markers would re-price the
+// frozen interval at whatever windows apply now. The flat path ignores all of
+// it, so its output stays byte-identical.
+export function statusCostLabel(status, settings) {
+  if (!status) return null;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(now);
-  if (!charging || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
-  const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
+  if (!hasRateSchedule(normalized)) return flatCostLabel(status.session_energy, normalized);
+  const span = liveSessionSpan(status);
+  if (!span) return null;
+  const cost = spanCost(span, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Live cost straight from a status document. The interval ends at the write's
-// own `updated_at` (a missing or malformed timestamp hides it) and is priced only
-// for a live charging write — the gate the session clock uses. The bridge keeps
-// the last good state and elapsed while the charger is unreachable and stamps a
-// fresh `updated_at` on every failed poll, so without the offline check those
-// markers would re-price the frozen interval at whatever windows apply now. The
-// flat path ignores all of it, so its output stays byte-identical.
-export function statusCostLabel(status, settings) {
-  if (!status) return null;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  return liveCostLabel(
-    status.session_energy,
-    status.elapsed,
-    endMs,
-    settings,
-    liveCharging(status),
-  );
-}
-
-// Whether the live cost interval includes a slice no base/window prices at a
-// row. Only a non-empty schedule can have such a slice, and — since #188 — the
-// marker means the figure genuinely understates cost: the stored flat rate
-// prices the slice when one is finite, so the marker fires only when no finite
-// flat fallback exists. The status screen adds the marker beside the cost, not
-// a second number.
+// Whether the live span includes a slice no base/window prices at a row. Only
+// a non-empty schedule can have such a slice, and — since #188 — the marker
+// means the figure genuinely understates cost: the stored flat rate prices the
+// slice when one is finite, so the marker fires only when no finite flat
+// fallback exists. The status screen adds the marker beside the cost, not a
+// second number.
 export function statusCostUncovered(status, settings) {
-  if (!status) return false;
+  const span = liveStatusSpan(status, settings);
+  if (!span) return false;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate != null) return false;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  const seconds = toNumber(status.elapsed);
-  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
-    return false;
-  }
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return normalized.rate == null && intervalUncovered(span.started_at, span.ended_at, normalized);
 }
 
-// The informational twin of that marker (#193): the interval has an uncovered
+// The informational twin of that marker (#193): the span has an uncovered
 // slice AND a finite flat fallback prices it — the exact inverse of the
 // warning's no-fallback gate, so the two predicates are mutually exclusive by
 // the rate they read. The figure is policy-correct, so nothing warns; the
 // Status tile adds a subdued line naming the fallback that part prices at,
 // beside the cost (the warning stays the only warning-coloured line).
 export function statusCostFallback(status, settings) {
-  if (!status) return false;
+  const span = liveStatusSpan(status, settings);
+  if (!span) return false;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate == null) return false;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  const seconds = toNumber(status.elapsed);
-  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
-    return false;
-  }
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return normalized.rate != null && intervalUncovered(span.started_at, span.ended_at, normalized);
+}
+
+// The shared gate the two markers read: the same span the figure prices, and
+// only under a schedule (a flat plan covers every instant by definition).
+function liveStatusSpan(status, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return null;
+  return liveSessionSpan(status);
 }
 
 // ---------- held session (plugged in, not charging) ----------
@@ -280,32 +277,35 @@ export function adoptedAnchor(status) {
 }
 
 // Held session cost: the schedule over the frozen interval
-// [anchorMs - elapsed, anchorMs], the window the last live render priced.
-// Null rules mirror liveCostLabel's: no schedule takes the flat path
-// (byte-identical, the anchor ignored), and a missing or unusable elapsed or
-// anchor hides the figure rather than guessing a window.
+// [anchorMs - elapsed, anchorMs] — one span handed to the same pricer the
+// live figure and the period pass use (#210) — the window the last live
+// render priced. Null rules mirror the span's: no schedule takes the flat
+// path (byte-identical, the anchor ignored), and a missing or unusable
+// elapsed or anchor hides the figure rather than guessing a window.
 export function heldCostLabel(wh, elapsed, anchorMs, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
-  const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
+  const span = heldSpan(wh, elapsed, anchorMs);
+  if (!span) return null;
+  const cost = spanCost(span, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Whether the held interval includes a slice no base/window prices at a row —
+// The frozen window as one span object, or null when the pair cannot name a
+// window — the construction the three held labels share.
+function heldSpan(wh, elapsed, anchorMs) {
+  const seconds = toNumber(elapsed);
+  const endMs = endMillis(anchorMs);
+  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
+  return { started_at: endMs - seconds * 1000, ended_at: endMs, wh };
+}
+
+// Whether the held span includes a slice no base/window prices at a row —
 // the same marker the live figure carries, evaluated over the frozen window,
 // and gated the same way: with a finite flat fallback the slice prices at that
 // rate, so only a missing fallback makes the figure understate cost.
 export function heldCostUncovered(elapsed, anchorMs, settings) {
-  const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate != null) return false;
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return heldSpanMarker(elapsed, anchorMs, settings, (normalized) => normalized.rate == null);
 }
 
 // The informational twin of the held warning (#193), gated exactly like the
@@ -313,13 +313,18 @@ export function heldCostUncovered(elapsed, anchorMs, settings) {
 // flat rate prices, so the figure is honest and only the fallback deserves
 // naming — on the subdued line, never the warning.
 export function heldCostFallback(elapsed, anchorMs, settings) {
+  return heldSpanMarker(elapsed, anchorMs, settings, (normalized) => normalized.rate != null);
+}
+
+// The two markers share everything but the rate they read: the span over the
+// frozen window, its uncovered slices, and the schedule-only gate.
+function heldSpanMarker(elapsed, anchorMs, settings, wantsRate) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate == null) return false;
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  if (!wantsRate(normalized)) return false;
+  const span = heldSpan(1, elapsed, anchorMs);
+  if (!span) return false;
+  return intervalUncovered(span.started_at, span.ended_at, normalized);
 }
 
 // ---------- interval reconciliation ----------
@@ -472,22 +477,42 @@ function bucketSlice(span, window, settings) {
   return { cost, wh: sliceWh };
 }
 
-// The bucket's totals across every span of every session: `{cost, wh}`, or null
-// as soon as one slice is unpriceable — the bucket then hides rather than
-// showing a figure that prices only part of its energy.
-function bucketTotals(sessions, window, settings) {
+// One span priced over its own window — the same slice the window pass prices
+// when a span sits inside a bucket (#210). The Status tab's live and held
+// figures derive from this: their windows are spans, and the span model is
+// the only pricing path, so the two screens can never disagree about the
+// engine that priced the same charge. The energy gate is costForInterval's
+// own (an unusable or negative `wh` hides the figure); heldSpan passes its
+// `wh` through ungated, so the pricer's null rules stay the single gate.
+function spanCost(span, settings) {
+  const energy = toNumber(span && span.wh);
+  if (!Number.isFinite(energy) || energy < 0) return null;
+  const startMs = valueMillis(span.started_at);
+  const endMs = valueMillis(span.ended_at);
+  if (startMs == null || endMs == null || endMs <= startMs) return null;
+  const slice = bucketSlice(span, { start: startMs, end: endMs }, settings);
+  return slice ? slice.cost : null;
+}
+
+// The totals across every span of the list: `{cost, wh}`, or null as soon as
+// one slice is unpriceable — the whole window then hides rather than showing a
+// figure that prices only part of its energy. The input is span objects
+// (#210): the closed sessions' sessionCostSpans and the live contribution's
+// span are the same shape, so there is exactly one pricing input and no
+// pseudo-session to special-case.
+function spansTotals(spans, window, settings) {
   let cost = 0;
   let wh = 0;
-  for (const session of Array.isArray(sessions) ? sessions : []) {
-    const spans = sessionCostSpans(session);
-    if (!spans) continue;
-    for (const span of spans) {
-      const slice = bucketSlice(span, window, settings);
-      if (slice === null) return null;
-      if (!slice) continue;
-      cost += slice.cost;
-      wh += slice.wh;
-    }
+  for (const span of Array.isArray(spans) ? spans : []) {
+    // A malformed entry is skipped like the series builders skip one —
+    // sessionCostSpans never yields it, but the exported pricing entry
+    // points take caller input.
+    if (!span || typeof span !== 'object') continue;
+    const slice = bucketSlice(span, window, settings);
+    if (slice === null) return null;
+    if (!slice) continue;
+    cost += slice.cost;
+    wh += slice.wh;
   }
   return { cost, wh };
 }
@@ -501,30 +526,44 @@ function bucketCovered(kwh, wh) {
   return wh >= totalWh - intervalEnergyTolerance(totalWh);
 }
 
-// One local day ('YYYY-MM-DD') or month ('YYYY-MM-DD'→day, 'YYYY-MM'→month)
-// bucket priced from the sessions that overlap it — the Week/Month/Year bars'
-// and the period summary's only pricing source. Each session's spans
-// (sessionCostSpans) are sliced at the bucket's edges and each slice is priced
-// over its own wall-clock span by costForInterval, with the slice's energy
-// pro-rated by its share of the span's real duration — the same constant-power
-// split costForInterval applies inside a span, and every bucket edge is a
-// local midnight costForInterval already splits at, so a session's bucket costs
-// sum to exactly its per-session figure (the reconciliation the summary leans
-// on). kWh totals stay the day documents' (display); `kwh` here only measures
-// coverage, with the same max(250 Wh, 2%) tolerance the interval
-// reconciliation uses: attributed Wh that accounts for the bucket means
-// covered, energy with no covering session hides its figure, never priced
-// free.
+// One local day ('YYYY-MM-DD') or month ('YYYY-MM'→month) bucket priced from
+// the span list — the Week/Month/Year bars' pricing source, slicing the same
+// pass the period summary prices (windowCostSummary below) at one bucket's
+// edges. Each span is sliced at the bucket's local-midnight boundaries and
+// priced over its own wall-clock span by costForInterval, with the slice's
+// energy pro-rated by its share of the span's real duration — the same
+// constant-power split costForInterval applies inside a span, and every
+// bucket edge is a local midnight costForInterval already splits at, so a
+// session's bucket costs sum to exactly its per-session figure (the
+// reconciliation the summary leans on). kWh totals stay the day documents'
+// (display); `kwh` here only measures coverage, with the same max(250 Wh, 2%)
+// tolerance the interval reconciliation uses: attributed Wh that accounts for
+// the bucket means covered, energy with no covering span hides its figure,
+// never priced free.
 // Returns {cost, wh, covered}, or null without a usable schedule or bucket id
 // (the flat path is and stays aggregateCostLabel's).
-export function sessionBucketCost(sessions, id, kwh, settings) {
+export function sessionBucketCost(spans, id, kwh, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return null;
   const window = bucketWindow(id);
   if (!window) return null;
-  const totals = bucketTotals(sessions, window, normalized);
+  const totals = spansTotals(spans, window, normalized);
   if (!totals) return null;
   return { cost: totals.cost, wh: totals.wh, covered: bucketCovered(kwh, totals.wh) };
+}
+
+// The ms window a day-id range names — a period's whole bounds: the first
+// day's local midnight to the midnight after its last day, the range twin of
+// bucketWindow, so the one summary pass prices exactly the window its series
+// was built for.
+export function rangeWindow(startId, endId) {
+  const first = dayStartFromId(startId);
+  const last = dayStartFromId(endId);
+  if (!first || !last || last < first) return null;
+  return {
+    start: first.getTime(),
+    end: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1).getTime(),
+  };
 }
 
 // ---------- the live session's period contribution (#126, residual #128) ----------
@@ -589,15 +628,15 @@ function recordedInWindow(sessions, liveStart, liveEnd) {
   return { recordedWh, tailStart };
 }
 
-// The live window merged into a period's pricing sessions, or null: schedule
+// The live window's contribution to a period's pricing, or null: schedule
 // only (a flat day total already prices the accruing kWh, so the flat output
 // is byte-identical with or without a charge in progress), live-gated and
-// settle-guarded. The returned span flows through sessionBucketCost beside the
-// recorded sessions, so its cost lands in exactly the buckets its window
-// overlaps — today's bar, and yesterday's when the charge crossed local
-// midnight — with the same constant-power split every other span prices by,
-// and its Wh counts toward the bucket's coverage, so a live-covered today
-// shows its bar $.
+// settle-guarded. The returned span joins the period's span list
+// (periodCostSpans below), so its cost lands in exactly the buckets its
+// window overlaps — today's bar, and yesterday's when the charge crossed
+// local midnight — with the same constant-power split every other span
+// prices by, and its Wh counts toward the bucket's coverage, so a
+// live-covered today shows its bar $.
 //
 // With nothing recorded inside the window this is the whole live span,
 // byte-identical to #126's fresh-charge contribution. Once a recorded span
@@ -650,6 +689,28 @@ export function liveSessionContribution(status, sessions, settings) {
   return { started_at: tailStart, ended_at: liveEnd, wh: residualWh };
 }
 
+// The span list a period prices (#210): every closed session's spans plus,
+// when `live` (the rendered series includes a current bucket, so the live
+// window can overlap this period), the live session's contribution. The
+// contribution is itself one span object — the same shape sessionCostSpans
+// yields — so the merge is a concatenation, not a pseudo-session riding the
+// sessions array: the pricing pipeline has exactly one input type and the
+// span model is the only path. Sessions whose spans are unusable contribute
+// nothing (sessionCostSpans' null), exactly as the window pass has always
+// skipped them.
+export function periodCostSpans(status, sessions, settings, live = false) {
+  const spans = [];
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const sessionSpans = sessionCostSpans(session);
+    if (sessionSpans) spans.push(...sessionSpans);
+  }
+  if (live) {
+    const contribution = liveSessionContribution(status, sessions, settings);
+    if (contribution) spans.push(contribution);
+  }
+  return spans;
+}
+
 // Aggregate daily/period cost from a kWh total. Null whenever a schedule exists:
 // one kWh figure cannot be split across the windows it was drawn in, so the
 // screens keep the energy figure and drop the cost instead of mispricing it.
@@ -665,14 +726,15 @@ export function aggregateCostLabel(kwh, settings) {
 // ---------- schedule-priced hour buckets ----------
 //
 // Since #60/#77 every history/<YYYY-MM-DD> document also carries an hourly
-// `hours` map ({"00"…"23": kWh}). #123 leaves these buckets exactly one job:
+// `hours` map ({"00"…"23": kWh}). #210 leaves these buckets exactly one job:
 // the Day period's hourly bars, each priced over its own wall-clock hour by
-// costForInterval — the same engine the live and per-session costs use. Period
-// pricing is session-primary (sessionBucketCost above); buckets no longer
-// participate, so there is one pricing source per bucket and no energy is
-// priced twice. The flat path is and stays aggregateCostLabel's — these
-// helpers price only under a schedule (null without one), so flat output stays
-// byte-identical and there is exactly one flat implementation.
+// costForInterval — pure display, the same engine the live and per-session
+// costs use. Period pricing — the Day period's summary included — is the span
+// pass (windowCostSummary above); the hours map is a chart series, so there is
+// one pricing source per figure and no energy is priced twice. The flat path
+// is and stays aggregateCostLabel's — these helpers price only under a
+// schedule (null without one), so flat output stays byte-identical and there
+// is exactly one flat implementation.
 
 // Approximation (accepted, unchanged from #110): a bucket's span is local
 // midnight + hour·3600 s, i.e. the real hours after midnight, so a DST-shifted
@@ -704,80 +766,40 @@ export function hourCost(dayId, hour, kwh, settings) {
   const from = hourStartMs(start, index);
   return costForInterval(energy * 1000, from, from + 3600000, normalized);
 }
-// A point's recorded energy in Wh — the day documents' own kWh total, the
-// figure the summary shows beside its $. Normalized the way `sumSeries` reads
-// a series (an unusable bucket reads as zero), so the disclosure's recorded
-// total can never disagree with the kWh on screen.
-function recordedWh(point) {
-  const kwh = toNumber(point && point.kwh);
-  return Number.isFinite(kwh) && kwh > 0 ? kwh * 1000 : 0;
+// A recorded total in Wh — the day documents' own kWh, normalized the way
+// `sumSeries` reads a series (an unusable reading is zero), so the summary's
+// recorded total can never disagree with the day totals the chart draws.
+function recordedWh(kwh) {
+  const total = toNumber(kwh);
+  return Number.isFinite(total) && total > 0 ? total * 1000 : 0;
 }
 
-// One rendered bucket's schedule-priced cost and what of its energy it covers.
-// Pure — `settings` arrives per call — and schedule-only by design: the flat
-// path is aggregateCostLabel's and stays byte-identical, so a flat misuse
-// returns a hidden figure, never a flat price. `sessions` is the period read's
-// overlapping-sessions payload and prices exactly one bucket kind:
-//   hour bucket   one wall-clock hour of the day the Day period's read
-//                 targeted, priced from the day document's own `hours` map —
-//                 the one bucket path left (#123)
-//   day bucket    the sessions' energy attributed to that local day
-//   month bucket  the sessions' energy attributed to that local month
-// Attribution reconciles with the sessions list by construction, and kWh
-// totals stay the day documents' — `point.kwh` only measures coverage, so a
-// bucket whose recorded energy has no covering session hides its figure
-// instead of pricing itself free. `coveredWh` carries that same attribution as
-// energy — the Wh the bucket's figure actually prices — so the summary can
-// total covered against recorded (#194). An hour bucket prices the day
-// document's own energy, so its coverage is definitional: what it recorded is
-// what it priced, and the Day summary never carries a coverage disclosure.
-export function pointCostSummary(point, bucket, settings, sessions = []) {
-  if (bucket === 'hour') {
-    const cost = hourCost(point.dayId, point.id, point.kwh, settings);
-    return {
-      cost,
-      pricedEnergy: point.kwh > 0,
-      unpricedEnergy: false,
-      coveredWh: recordedWh(point),
-    };
-  }
-  const totals = sessionBucketCost(sessions, point.id, point.kwh, settings);
-  if (!totals) {
-    return { cost: null, pricedEnergy: false, unpricedEnergy: point.kwh > 0, coveredWh: 0 };
-  }
+// The one period summary (#210): a window priced once, from the same span list
+// its bars price, with the headline energy derived in the same pass as the
+// priced energy — `coveredWh` is both, so the kWh the summary shows and the $
+// beside it cannot diverge by construction (the tolerance-swallowing class
+// #211 retired cannot recur: there is no second aggregation to disagree with
+// the first). `recordedKwh` is the day documents' own total for the window —
+// the range series' sum, the day document's `kwh` on the Day period: the pass
+// never prices from it. It is the caption's Y (the basis the bridge's
+// day-verdicts measured) and the hide rule's guard — the one honest measure of
+// energy the archive might be missing. Hide-not-misprice: a window whose day
+// documents recorded energy the span list prices none of hides its figure (a
+// 0.00 there would read as free); an empty window is a real $0.00. Returns
+// `{cost, coveredWh, recordedWh}`, or `{cost: null}` under a flat config —
+// the flat path is and stays aggregateCostLabel's.
+export function windowCostSummary(spans, window, recordedKwh, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return { cost: null };
+  const recorded = recordedWh(recordedKwh);
+  if (!window) return { cost: null, coveredWh: 0, recordedWh: recorded };
+  const totals = spansTotals(spans, window, normalized);
+  if (!totals) return { cost: null, coveredWh: 0, recordedWh: recorded };
+  const pricedEnergy = totals.wh > 0;
+  const unpricedEnergy = recorded > 0 && !pricedEnergy;
   return {
-    cost: totals.cost,
-    pricedEnergy: totals.wh > 0,
-    unpricedEnergy: !totals.covered,
+    cost: unpricedEnergy ? null : totals.cost,
     coveredWh: totals.wh,
-  };
-}
-
-// The summary's schedule-priced total over one rendered series: the sum of
-// every priced bucket, hidden when the range's energy is unpriceable and
-// nothing priced sits beside it (a 0.00 there would read as free). Buckets
-// with no energy are fully priced at 0.00 — an empty range is a $0.00 range.
-// `coveredWh`/`recordedWh` total the same two energies the buckets measure
-// (#194), so the summary can disclose when its $ prices only part of the kWh
-// shown beside it; kWh totals stay the day documents' own.
-export function seriesCostSummary(points, bucket, settings, sessions = []) {
-  if (!hasRateSchedule(settings)) return { cost: null };
-  let cost = 0;
-  let pricedEnergy = false;
-  let unpricedEnergy = false;
-  let coveredWh = 0;
-  let recorded = 0;
-  for (const point of points || []) {
-    const one = pointCostSummary(point, bucket, settings, sessions);
-    if (one.cost != null) cost += one.cost;
-    if (one.pricedEnergy) pricedEnergy = true;
-    if (one.unpricedEnergy) unpricedEnergy = true;
-    coveredWh += one.coveredWh;
-    recorded += recordedWh(point);
-  }
-  return {
-    cost: unpricedEnergy && !pricedEnergy ? null : cost,
-    coveredWh,
     recordedWh: recorded,
   };
 }
@@ -913,22 +935,16 @@ const VERDICT_GAP_WH = 10;
 // The verdict-driven caption for a period whose every day is settled (#212,
 // replacing the #211 attribution compare there — the exact same-basis verdict
 // is the authority, and a clean verdict must silence the attribution noise
-// beside it):
+// beside it). One logic for every period (#210): Day prices from the same
+// session basis the ranges do, so its coverage is comparable and no period
+// carries a carve-out:
 //   - any single day with a POSITIVE gap ≥ 10 Wh renders the full
 //     `priced X of Y kWh` caption: X = the recorded total minus the sum of
 //     the POSITIVE verdicts (missing energy; over-attribution on other days
 //     must not cancel it out of the warning), clamped so X never exceeds Y
 //     nor goes negative. The discriminator stays the single positive day —
 //     a month of sub-10 Wh drift days is the tolerance note's shape, not a
-//     caption, per the owner decision. Except on a definitional-coverage
-//     period (`opts.definitionalCoverage`, the Day period): the $ there
-//     prices the day document's own hour buckets in full, so `priced X of
-//     Y` would claim partial pricing of a figure that prices everything —
-//     that arm instead states the shortfall on the verdict's own basis
-//     (`X kWh of this day's energy is not in the sessions archive`), never
-//     against the summary's recorded total, which on this period is the
-//     hours sum and can sit under the day `kwh` the bridge verdicted on a
-//     partially-hourly day;
+//     caption, per the owner decision;
 //   - any other nonzero NET sum renders the quiet tolerance note stating
 //     the |net| drift honestly — including all-negative windows (the
 //     archive holds more than the day documents recorded, which the
@@ -936,20 +952,12 @@ const VERDICT_GAP_WH = 10;
 //     (over-coverage is not missing data);
 //   - a net sum of exactly zero (at whole-Wh resolution, the caption's own)
 //     renders nothing: vouched clean is clean.
-// `summary` is the same seriesCostSummary pass whose caption this replaces
+// `summary` is the same windowCostSummary pass whose caption this replaces
 // (it contributes the recorded total); the $ figure itself is untouched.
-export function verdictCaption(verdicts, summary, opts = {}) {
+export function verdictCaption(verdicts, summary) {
   if (!verdicts || !verdicts.settled) return null;
   const sum = Math.round(verdicts.sumWh);
   if (verdicts.maxPosWh >= VERDICT_GAP_WH) {
-    // Definitional coverage (the Day period): see the arm above — the
-    // shortfall comes from the verdicts alone, never the summary's
-    // hours-sum recorded total.
-    if (opts.definitionalCoverage) {
-      const kwh = verdicts.posSumWh / 1000;
-      const short = kwh.toFixed(2) === '0.00' ? kwh.toFixed(3) : kwh.toFixed(2);
-      return `${short} kWh of this day's energy is not in the sessions archive`;
-    }
     const recorded = toNumber(summary && summary.recordedWh);
     if (Number.isFinite(recorded) && recorded > 0) {
       const covered = Math.min(Math.max(recorded - Math.round(verdicts.posSumWh), 0), recorded);

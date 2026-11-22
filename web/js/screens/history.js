@@ -47,13 +47,15 @@ import {
   coverageDisclosure,
   dayVerdicts,
   hasRateSchedule,
-  liveSessionContribution,
+  hourCost,
   liveSessionSpan,
-  pointCostSummary,
+  periodCostSpans,
+  rangeWindow,
+  sessionBucketCost,
   sessionCostLabel,
-  seriesCostSummary,
   seriesWindowUncovered,
   verdictCaption,
+  windowCostSummary,
 } from '../cost.js';
 import { planHasUnpriced } from '../settings.js';
 import { fmtK, fmtRate, formatDuration, fmtMoney, toNumber } from '../format.js';
@@ -89,6 +91,11 @@ let chartWindow = null;
 // label follows the series, never the read; the read's own window still names the
 // loading copy, which paints only with no series on screen.
 let seriesSpan = null;
+// The ms window the applied series was built for — the span pass's window
+// (#210): the summary prices exactly the window its points and sessions were
+// read for, never the window a newer, failed read names. Set with the series
+// in applyHistory and cleared with it.
+let seriesWindowMs = null;
 // The sessions list's whole view state — page one of the recent list or of a
 // browsed month, plus every page appended since. Kept as one object because
 // the paging rules (accumulate, adopt a view, conclude exhaustion) belong to
@@ -146,40 +153,54 @@ let scrubPointer = null;
 
 // ---------- summary + chart costing ----------
 
-// The bucket/series cost summaries and the coverage disclosure live in
+// The bucket/window cost summaries and the coverage disclosure live in
 // js/cost.js beside the pricing helpers they call; re-exported here so the
 // screen's tests keep this path — the day-verdict pair with them (#212).
 export {
   coverageDisclosure,
   dayVerdicts,
-  pointCostSummary,
-  seriesCostSummary,
+  periodCostSpans,
+  rangeWindow,
+  sessionBucketCost,
   seriesWindowUncovered,
   verdictCaption,
+  windowCostSummary,
 } from '../cost.js';
 
-// The sessions a period's $ prices: the recorded payload plus, while a charge
-// is in progress, the live session's contribution (#126) — merged only for a
-// range whose series includes a current bucket (today, or this month); the Day
-// period's hour bars price from the day document's buckets and never see it.
-// The settle guard runs here, against the recorded payload as merged, so
-// whichever of the two inputs — the session document or the status snapshot —
-// lands first, a charge a recorded session already covers prices exactly once.
-function pricingSessions() {
-  if (!series.some((point) => point.isCurrent)) return periodSessions;
-  const live = liveSessionContribution(liveStatus, periodSessions, settings);
-  return live ? [...periodSessions, live] : periodSessions;
+// The spans a render prices (#210): the period's recorded sessions plus, while
+// a charge is live and the series includes a current bucket (today, or this
+// month — the window the live window can overlap), the live session's
+// contribution — one list of span objects built by periodCostSpans (js/cost.js),
+// the only pricing input. There is no pseudo-session merge and no bucket-kind
+// branch: the summary and the day/month bars all price this list over their
+// own windows. The settle guard runs inside it, against the recorded payload
+// as merged, so whichever of the two inputs — the session document or the
+// status snapshot — lands first, a charge a recorded session already covers
+// prices exactly once.
+function pricingSpans() {
+  return periodCostSpans(
+    liveStatus,
+    periodSessions,
+    settings,
+    series.some((point) => point.isCurrent),
+  );
 }
 
 // One bucket's cost label, or null to hide: flat keeps aggregateCostLabel's
-// byte-identical path; under a schedule a bucket whose energy is entirely
-// without covering sessions hides rather than showing a figure that covers
-// none of it.
+// byte-identical path. Under a schedule an hour bar prices the day document's
+// own bucket over its wall-clock hour — pure display, never the summary's
+// basis — and a day or month bar prices the span list attributed to its
+// bucket, hiding when the bucket's recorded energy is entirely without
+// covering spans (the per-bucket data-validity band, bucketCovered's).
 function seriesCost(point) {
   if (!hasRateSchedule(settings)) return aggregateCostLabel(point.kwh, settings);
-  const summary = pointCostSummary(point, currentPeriod().bucket, settings, pricingSessions());
-  if (summary.cost == null || (summary.unpricedEnergy && !summary.pricedEnergy)) return null;
-  return fmtMoney(summary.cost, settings.currency);
+  if (currentPeriod().bucket === 'hour') {
+    const cost = hourCost(point.dayId, point.id, point.kwh, settings);
+    return cost == null ? null : fmtMoney(cost, settings.currency);
+  }
+  const totals = sessionBucketCost(pricingSpans(), point.id, point.kwh, settings);
+  if (!totals || (!(totals.wh > 0) && !totals.covered)) return null;
+  return fmtMoney(totals.cost, settings.currency);
 }
 
 // ---------- summary + chart ----------
@@ -324,11 +345,39 @@ function paintPeriodSwitch() {
 function renderSummary() {
   renderPlanBanner();
   renderWindowNote();
-  // The summary total is the series sum, except for a day whose hours were never
-  // recorded: its daily total is real, so the copy and the number agree instead
-  // of showing "—" beside "today has a total".
-  const total =
-    historyState === 'no-intraday' && dayTotal != null
+  // The window's recorded total (kWh) — the day documents' own, never the
+  // pricing pass's: a range series' points are the day docs' totals, and the
+  // Day period's is its document's own `kwh` (the hours map is the chart
+  // series, which a partially-hourly day can under-report).
+  const recorded =
+    currentPeriod().source === 'day' && dayTotal != null
+      ? dayTotal
+      : series.length
+        ? sumSeries(series)
+        : 0;
+  // One pass (#210): under a schedule the headline kWh and the $ both come
+  // from the span list over the window the series was built for — the same
+  // energy, so the kWh shown cannot claim more than the figure prices. The
+  // day documents' totals feed the bars alone; `recorded` rides along as the
+  // caption's Y and the hide rule's guard. The flat path keeps the
+  // pre-schedule day-document headline, byte-identical.
+  const summary =
+    hasRateSchedule(settings) && series.length && seriesWindowMs
+      ? windowCostSummary(pricingSpans(), seriesWindowMs, recorded, settings)
+      : null;
+  // Hide-not-misprice, applied to the headline (#210): a window whose day
+  // documents recorded energy the span pass priced none of has no honest kWh
+  // figure — coveredWh / 1000 would paint 0.00 beside the energy the bars
+  // draw, reading as free exactly the way the hidden $ would — so the total
+  // takes the null branch and renders the app's unknown (—). A window the
+  // pass did price keeps its own energy, an empty one included: its 0.00 is
+  // real, and so is its $0.00.
+  const unpriced = !!(summary && recorded > 0 && !(summary.coveredWh > 0));
+  const total = hasRateSchedule(settings)
+    ? summary && !unpriced
+      ? summary.coveredWh / 1000
+      : null
+    : historyState === 'no-intraday' && dayTotal != null
       ? dayTotal
       : series.length
         ? sumSeries(series)
@@ -336,6 +385,11 @@ function renderSummary() {
   if (total == null) {
     setText($('history-total'), '—');
     $('history-cost-cell').hidden = true;
+    // The rate-scope note names the pricing of figures this branch removes, so
+    // it hides with them (the same rule the no-data branch at the offline
+    // return applies): a note beside — would describe a figure the summary does
+    // not show — the "shown at 0.00" wording literally so.
+    $('history-window-note').hidden = true;
     $('history-cost-coverage').hidden = true;
     setText($('history-cost-coverage'), '');
     $('history-summary').classList.add('solo');
@@ -344,43 +398,26 @@ function renderSummary() {
   setText($('history-total'), fmtK(total));
   let cost = null;
   let disclosure = null;
-  if (hasRateSchedule(settings)) {
-    if (historyState === 'no-intraday') {
-      // Today has a total but no hours behind it: the panel copy explains and
-      // the cost stays hidden, exactly as before hourly pricing existed.
-      cost = null;
-    } else {
-      const summary = seriesCostSummary(
-        series,
-        currentPeriod().bucket,
-        settings,
-        pricingSessions(),
-      );
-      cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
-      // Partial coverage (#194): the $ prices only part of the kWh shown
-      // beside it — a lost record, or a counter-reset session whose aggregate
-      // prices a fraction of the day documents' energy — so the figure says
-      // what it prices on a small muted caption of its own beneath it, never
-      // inside the figure's display type. A covered period paints no caption;
-      // the kWh total is untouched either way.
-      //
-      // #212: a window whose every day carries a vouching bridge verdict
-      // takes its caption from those verdicts instead — the exact same-basis
-      // measure is the authority, so a clean verdict silences the
-      // attribution compare's noise beside it, and any verdict the marker
-      // cannot vouch for (legacy, null-marked, deferred-but-unsettled) keeps
-      // the #211 any-gap compare exactly as it is.
-      disclosure =
-        periodVerdicts && periodVerdicts.settled
-          ? verdictCaption(periodVerdicts, summary, {
-              // The Day period's $ prices the day document's own hour
-              // buckets in full — definitional coverage — so its caption
-              // arm states the archive shortfall without claiming the
-              // figure prices only part of the day.
-              definitionalCoverage: currentPeriod().source === 'day',
-            })
-          : coverageDisclosure(summary);
-    }
+  if (summary) {
+    cost = summary.cost == null ? null : fmtMoney(summary.cost, settings.currency);
+    // Partial coverage (#194): the archive the $ prices holds less energy
+    // than the day documents recorded — a lost record, or a counter-reset
+    // session whose aggregate prices a fraction of it — so the figure says
+    // what it prices on a small muted caption of its own beneath it, never
+    // inside the figure's display type. A covered period paints no caption;
+    // the kWh total is untouched either way.
+    //
+    // #212: a window whose every day carries a vouching bridge verdict
+    // takes its caption from those verdicts instead — the exact same-basis
+    // measure is the authority, so a clean verdict silences the attribution
+    // compare's noise beside it, and any verdict the marker cannot vouch
+    // for (legacy, null-marked, deferred-but-unsettled) keeps the #211
+    // any-gap compare exactly as it is. One logic for every period (#210):
+    // Day prices from the same session basis, so no carve-out remains.
+    disclosure =
+      periodVerdicts && periodVerdicts.settled
+        ? verdictCaption(periodVerdicts, summary)
+        : coverageDisclosure(summary);
   } else {
     // The flat path, byte-identical to the pre-schedule screen.
     cost = aggregateCostLabel(total, settings);
@@ -598,8 +635,10 @@ function renderHistory() {
     return;
   }
   if (historyState === 'no-intraday') {
-    // The chart has nothing it may draw, but the day's total is a real record:
-    // the summary keeps it and the panel names why the hours are missing.
+    // The chart has nothing it may draw, and the panel names why the hours are
+    // missing. The summary keeps the day's total under One rate; under a
+    // schedule it prices the session basis instead — or hides both figures
+    // when that pass prices none of the day's recorded energy (renderSummary).
     renderSummary();
     showChartEmpty(copy.noIntradayTitle, copy.noIntradayLine);
     setHistoryNote('');
@@ -880,20 +919,20 @@ function fetchPeriod(descriptor, bounds) {
     : periodReads.range(bounds.startId, bounds.endId);
 }
 
-// The period's session archive read, the $ counterpart of fetchPeriod (#123):
-// every session overlapping the range, independent of the sessions list's own
-// page. The Day period needs none — its hour bars keep the day document's
-// buckets — so it resolves to an empty payload, and a rejected range read
-// settles empty too: the history read still paints its kWh while the cost
-// hides rather than pricing energy it has no session for. The paged read's
-// envelope ({docs, fromCache}) is unwrapped to its docs at exactly this point —
-// applyHistory expects the sessions themselves, and `fromCache` has no consumer
-// on this path. The read itself arrives as a parameter (defaulting to the
-// store's) so the executed harness can drive a successful read through the
-// real function — Node cannot bind Firestore, and this unwrap is exactly the
-// wiring a source pin could not guard.
+// The period's session archive read, the $ counterpart of fetchPeriod (#123,
+// #210): every session overlapping the range — the Day period's included,
+// because its summary prices the same session basis every period does; its
+// hour bars alone price the day document's own buckets (display). A rejected
+// range read settles empty in the callers' allSettled: the history read still
+// paints its kWh while the cost hides rather than pricing energy it has no
+// session for. The paged read's envelope ({docs, fromCache}) is unwrapped to
+// its docs at exactly this point — applyHistory expects the sessions
+// themselves, and `fromCache` has no consumer on this path. The read itself
+// arrives as a parameter (defaulting to the store's) so the executed harness
+// can drive a successful read through the real function — Node cannot bind
+// Firestore, and this unwrap is exactly the wiring a source pin could not
+// guard. `descriptor` is deliberately unread: no period branches here anymore.
 export function fetchPeriodSessions(descriptor, bounds, readRange = fetchSessionsInRange) {
-  if (descriptor.source === 'day') return Promise.resolve([]);
   const range = sessionsRange(bounds);
   return range ? readRange(range).then((read) => read.docs) : Promise.resolve([]);
 }
@@ -930,11 +969,13 @@ export function applyHistory(
   periodSessions = Array.isArray(sessions) ? sessions : [];
   series = periodSeries(descriptor, day ? result : result.docs, anchor, now);
   // The window these points were built for — the only place a series acquires the
-  // window it is labelled by (see seriesSpan).
+  // window it is labelled by (see seriesSpan), and the one the span pass prices
+  // (see seriesWindowMs).
   seriesSpan = periodSpan(descriptor, anchor, now);
   // The same window's verdict classification (#212): per day, whatever the
   // period's buckets are — the Day period's single day, every day of a range.
   const bounds = periodBounds(descriptor, anchor, now);
+  seriesWindowMs = rangeWindow(bounds.startId, bounds.endId);
   periodVerdicts = dayVerdicts(
     day ? [bounds.endId] : dayIdsInRange(bounds.startId, bounds.endId),
     day ? [result] : result.docs,
@@ -977,9 +1018,11 @@ async function readHistory() {
   periodSessions = [];
   periodVerdicts = null;
   historyServer = false;
-  // The previous window's series leaves with its span: the new read's own window
-  // names the loading copy, and a failed read falls back to its panel.
+  // The previous window's series leaves with its span and its pricing window:
+  // the new read's own window names the loading copy, and a failed read falls
+  // back to its panel.
   seriesSpan = null;
+  seriesWindowMs = null;
   historyState = 'loading';
   renderHistory();
   // The session read is a sibling, not a gate: a rejected session payload
@@ -1340,7 +1383,7 @@ export function showHistorySettings(data) {
 // write's own `updated_at` exactly like the Status tab's figure and cannot
 // slide on a repaint. The charging→stopped edge is also the bridge's
 // session-record edge, so it queues one settle re-read through the same
-// guarded path a period switch takes; the guard inside pricingSessions covers
+// guarded path a period switch takes; the guard inside pricingSpans covers
 // the listener that lands first. Bounded to the visible tab: a push while
 // hidden only updates the snapshot, and activateHistory renders or re-reads
 // on return.
@@ -1411,6 +1454,7 @@ export function resetHistory() {
   periodOffset = 0;
   chartWindow = null;
   seriesSpan = null;
+  seriesWindowMs = null;
   periodSessions = [];
   periodVerdicts = null;
   liveStatus = null;
