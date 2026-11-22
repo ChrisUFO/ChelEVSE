@@ -2273,7 +2273,13 @@ test('the trailing deferral window bounds the absent-means-clean reading', () =>
     VERDICT_FROM,
     VERDICT_TODAY,
   );
-  assert.deepEqual(verdicted, { settled: true, sumWh: 2, maxAbsWh: 2 });
+  assert.deepEqual(verdicted, {
+    settled: true,
+    sumWh: 2,
+    maxAbsWh: 2,
+    posSumWh: 2,
+    maxPosWh: 2,
+  });
 });
 
 test('a negative verdict sum renders the tolerance note, not a clamped caption', () => {
