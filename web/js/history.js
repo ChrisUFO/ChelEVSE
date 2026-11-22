@@ -432,13 +432,19 @@ export function periodBounds(period, anchor = new Date(), now = anchor) {
 // so a real plug-in is bounded by its charging pattern — a week covers the
 // weekly schedule shape. A longer plug-in's pre-range energy is not attributed
 // (catching it would need an `ended_at` query Firestore does not offer here).
+// (catching it would need an `ended_at` query Firestore does not offer here).
+// #210 decision: Day windows share this unchanged — every period derives its
+// read from the same sessionsRange arithmetic, so a Day window's lookback is
+// exactly as deep as a Week's from its own first midnight, and no period gets
+// a second, period-shaped depth.
 export const SESSIONS_LOOKBACK_DAYS = 7;
 
-// The sessions read that prices a range period (#123): every session
-// overlapping the window the day ids name, as a half-open `started_at` range.
+// The sessions read that prices a period (#123, #210): every session
+// overlapping the window the day ids name — the Day period's single-day
+// window included, same as every range — as a half-open `started_at` range.
 // The end is the midnight after the last day — a session starting on the last
 // day must be included — and the start is the range's first midnight minus the
-// plug-in lookback above. Day-period reads never call this.
+// plug-in lookback above.
 export function sessionsRange(bounds) {
   const first = dayStartFromId(bounds && bounds.startId);
   const last = dayStartFromId(bounds && bounds.endId);

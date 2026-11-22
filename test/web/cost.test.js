@@ -1009,6 +1009,16 @@ test('hours no base or window covers price at the stored flat fallback', () => {
 
 // ---------- session-attributed period pricing (#123) ----------
 
+// The pricing input is the span list (#210): closed sessions enter as their
+// sessionCostSpans, live contributions as the span objects they already are
+// (sessionCostSpans' fallback yields a plain span unchanged), so one helper
+// maps the fixtures the way the screen's pricingSpans does.
+function spansOf(...items) {
+  return items.flatMap((item) =>
+    Array.isArray(item) ? spansOf(...item) : sessionCostSpans(item) || [],
+  );
+}
+
 test('sessionCostSpans returns the intervals, the span, or nothing', () => {
   // A reconciling intervals list is the intervals themselves, wh as numbers.
   const paused = pausedSession();
@@ -1065,11 +1075,11 @@ test('a session attributes its exact intervals across local midnights', () => {
   const item = pausedSession();
   // 3 kWh in the 18:00–19:00 peak on 5 January, 2 kWh in the 03:00–04:00
   // off-peak block on 6 January — each day prices its own block.
-  const fifth = sessionBucketCost([item], '2026-01-05', 3, nightly());
+  const fifth = sessionBucketCost(spansOf(item), '2026-01-05', 3, nightly());
   assert.ok(Math.abs(fifth.cost - 0.9) < 1e-9);
   assert.ok(Math.abs(fifth.wh - 3000) < 1e-9);
   assert.equal(fifth.covered, true);
-  const sixth = sessionBucketCost([item], '2026-01-06', 2, nightly());
+  const sixth = sessionBucketCost(spansOf(item), '2026-01-06', 2, nightly());
   assert.ok(Math.abs(sixth.cost - 0.2) < 1e-9);
   assert.ok(Math.abs(sixth.wh - 2000) < 1e-9);
   assert.equal(sixth.covered, true);
@@ -1229,7 +1239,7 @@ test('a week of mixed sessions sums to exactly their per-session figures', () =>
   ];
   let buckets = 0;
   for (const id of ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09']) {
-    buckets += sessionBucketCost(sessions, id, 0, settings).cost;
+    buckets += sessionBucketCost(spansOf(...sessions), id, 0, settings).cost;
   }
   const labels =
     costForIntervals(sessions[0].intervals, settings) +
@@ -1554,7 +1564,7 @@ test('interior idle in a merged record prices nothing in the residual', () => {
     ended_at: at,
     wh: 1875,
   });
-  const totals = sessionBucketCost([recorded, tail], '2026-01-05', 3, settings);
+  const totals = sessionBucketCost(spansOf(recorded, tail), '2026-01-05', 3, settings);
   // The window's own energy sums exactly: 750 + 375 recorded, 1875 residual.
   assert.ok(Math.abs(totals.wh - 3000) < 1e-9);
   assert.ok(Math.abs(totals.cost - 0.75) < 1e-9);

@@ -11,7 +11,7 @@ import {
   periodSpan,
   sessionsRange,
 } from '../../web/js/history.js';
-import { seriesCostSummary, statusCostLabel } from '../../web/js/cost.js';
+import { statusCostLabel, windowCostSummary } from '../../web/js/cost.js';
 import { fmtMoney } from '../../web/js/format.js';
 
 // Pin the zone before any Date is built (#123): the period-pricing pass below
@@ -621,13 +621,23 @@ test('the period sessions read keeps its empty and rejecting edges', async () =>
   const fail = async () => {
     throw new Error('offline');
   };
-  // The Day period never reads the archive: no store call, an empty payload.
-  assert.deepEqual(await fetchPeriodSessions(periodById('day'), bounds, fail), []);
+  // #210: the Day period reads the archive through the same widened window a
+  // range does — the read derives from the bounds alone, so the Day payload
+  // is whatever the archive answers, never a period-shaped constant.
+  const seen = [];
+  const readRange = async (range) => {
+    seen.push(range);
+    return { docs: [], fromCache: false };
+  };
+  assert.deepEqual(await fetchPeriodSessions(periodById('day'), bounds, readRange), []);
+  assert.deepEqual(seen, [sessionsRange(bounds)]);
   // A range period with no derivable window (malformed bounds) reads nothing.
   assert.deepEqual(await fetchPeriodSessions(periodById('week'), {}, fail), []);
   // A rejected range read rejects — the callers' allSettled fallback owns the
-  // empty payload, so the fetch itself must not swallow the failure.
+  // empty payload, so the fetch itself must not swallow the failure. The Day
+  // period rejects the same way: its read is the same read.
   await assert.rejects(fetchPeriodSessions(periodById('week'), bounds, fail), /offline/);
+  await assert.rejects(fetchPeriodSessions(periodById('day'), bounds, fail), /offline/);
 });
 
 // ---------- the summary's coverage disclosure, executed (#194) ----------
@@ -703,13 +713,14 @@ test('a partially covered week renders the disclosure under the summary $', () =
   );
   showHistorySettings(novemberPlan());
   // USD 1.54 prices 13.7 kWh at 0.1127 — said on the #194 caption, the small
-  // muted line under the figure, while the 48.1 the summary shows stays the
-  // day documents' own total and the figure keeps the display size alone.
+  // muted line under the figure. #210: the headline kWh is the pass's own
+  // energy — what the figure prices — while the 48.1 the caption names stays
+  // the day documents' own total, the basis the disclosure measures.
   assert.equal(element('history-cost-cell').hidden, false);
   assert.equal(element('history-cost').textContent, 'USD 1.54');
   assert.equal(element('history-cost-coverage').hidden, false);
   assert.equal(element('history-cost-coverage').textContent, 'priced 13.7 of 48.1 kWh');
-  assert.equal(element('history-total').textContent, '48.1');
+  assert.equal(element('history-total').textContent, '13.7');
 });
 
 test('one missing Wh renders the caption the tolerance band used to hide (#211)', () => {
@@ -943,15 +954,16 @@ test("a paged settled day renders its verdict under the day's own summary", asyn
   resetHistory();
   enterHistory();
   // The period switch is driven for real (the fetch→apply seam bypasses
-  // the screen's periodId, and the Day period's hour buckets only price
+  // the screen's periodId, and the Day period's hour bars only price
   // under the Day descriptor); the read itself rejects in Node as usual.
   element('period-switch').contains = () => true;
   const click = element('period-switch').listeners.get('click')[0];
   await click({ target: { closest: () => ({ dataset: { period: 'day' } }) } });
   await readFailed();
-  // The Day period's hour buckets never carried a caption (their coverage
-  // is definitional), so the verdict is the one thing that can put one
-  // there: a past Sunday inside the marker, 11 days before the clock.
+  // A past Sunday inside the marker, 11 days before the clock, whose archive
+  // holds 1 kWh of the 3 the day document recorded: the Day period prices
+  // the session basis (#210), so its coverage is comparable and the settled
+  // verdict renders the range caption — the #218 Day carve-out is gone.
   const doc = {
     id: '2026-11-08',
     exists: true,
@@ -960,33 +972,29 @@ test("a paged settled day renders its verdict under the day's own summary", asyn
     gap_wh: 2000,
     fromCache: false,
   };
+  const sessions = [
+    { wh: 1000, started_at: new Date(2026, 10, 8, 1), ended_at: new Date(2026, 10, 8, 2) },
+  ];
   applyHistory(
     periodById('day'),
     doc,
     null,
     new Date(2026, 10, 8, 12), // the paged day: Sunday 8 November
-    [],
+    sessions,
     new Date(2026, 10, 19, 12),
     { reconFrom: '2026-11-01' },
   );
   showHistorySettings(nightly());
-  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
-  // The figure prices every Wh shown — the hour buckets price the day
-  // document itself, so covered meets recorded — and the caption must not
-  // claim otherwise: it states the archive shortfall on the verdict's own
-  // basis, never a `priced X of Y` partial-price claim.
-  const summary = seriesCostSummary(
-    periodSeries(periodById('day'), doc, new Date(2026, 10, 8, 12), new Date(2026, 10, 19, 12)),
-    'hour',
-    nightly(),
-    [],
-  );
-  assert.equal(summary.coveredWh, summary.recordedWh);
+  // The $ prices the session's off-peak kWh and the headline is the pass's
+  // own energy; the verdict says the archive is missing 2 of the 3 recorded.
+  assert.equal(element('history-cost').textContent, fmtMoney(0.1, 'GBP'));
+  assert.equal(element('history-total').textContent, '1.00');
   assert.equal(element('history-cost-coverage').hidden, false);
-  assert.equal(
-    element('history-cost-coverage').textContent,
-    "2.00 kWh of this day's energy is not in the sessions archive",
-  );
+  assert.equal(element('history-cost-coverage').textContent, 'priced 1.00 of 3.00 kWh');
+  // The hour bars keep their own display pricing from the day document's
+  // buckets — the chart's series, never the summary's basis. No bucket of a
+  // past window is current, so the newest (23:00) is selected.
+  assert.equal(element('chart-day').textContent, '23:00–24:00');
 });
 
 // ---------- the per-window rate-scope note, executed (#193) ----------
@@ -1606,7 +1614,7 @@ test('the flat path is byte-identical with a charge in progress', () => {
   assert.equal(element('history-cost-cell').hidden, false);
 });
 
-test("the Day period's hour bars price from the day document, live input or not", async () => {
+test("the Day period's hour bars keep the day document's pricing as display", async () => {
   resetHistory();
   enterHistory();
   // Switch the screen to the Day period through its real click listener; the
@@ -1615,17 +1623,24 @@ test("the Day period's hour bars price from the day document, live input or not"
   const switchClick = element('period-switch').listeners.get('click')[0];
   element('period-switch').contains = () => true;
   await switchClick({ target: { closest: () => ({ dataset: { period: 'day' } }) } });
-  const today = new Date(2026, 9, 18, 12);
+  const today = new Date(2026, 9, 18, 11, 30);
   const descriptor = periodById('day');
-  applyHistory(descriptor, { id: '2026-10-18', kwh: 1, hours: { 12: 1 } }, null, today, []);
+  applyHistory(descriptor, { id: '2026-10-18', kwh: 0.5, hours: { 11: 0.5 } }, null, today, []);
   showHistorySettings(nightly());
-  // The in-progress 12:00 hour at the all-day base — before and after a live
-  // push: the live contribution never reaches the hour path, so the Day
-  // period's pricing is exactly #125's.
-  assert.equal(element('chart-cost').textContent, fmtMoney(0.3, 'GBP'));
-  showHistoryStatus(statusAt(3, today.getTime(), 3600, 500));
-  assert.equal(element('chart-cost').textContent, fmtMoney(0.3, 'GBP'));
-  assert.equal(element('history-cost').textContent, fmtMoney(0.3, 'GBP'));
+  // The in-progress 11:00 hour prices its own bucket over its wall-clock
+  // hour — the display path, byte-identical to #125's — before and after a
+  // live push: the live contribution never reaches the hour bars.
+  assert.equal(element('chart-cost').textContent, fmtMoney(0.15, 'GBP'));
+  // Before any live input the summary hides (#126's pre-push shape): the day
+  // recorded half a kWh the span list prices none of.
+  assert.equal(element('history-cost-cell').hidden, true);
+  // The push makes the session basis whole: the summary carries the live
+  // window's figure — the same one the Status tab prices — and the headline
+  // is the pass's own energy, while the bars keep the document's buckets.
+  showHistoryStatus(statusAt(3, today.getTime(), 1800, 500));
+  assert.equal(element('chart-cost').textContent, fmtMoney(0.15, 'GBP'));
+  assert.equal(element('history-cost').textContent, fmtMoney(0.15, 'GBP'));
+  assert.equal(element('history-total').textContent, '0.50');
 });
 
 test('a settle that lands while the tab is hidden is caught up on the next visible push', async () => {
@@ -1720,13 +1735,15 @@ test('a settle that lands while the tab is hidden is caught up on the return vis
   );
   showHistorySettings(nightly());
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
-  assert.equal(element('history-total').textContent, '1.00');
+  // #210: the headline is the pass's own energy — the record's 1.03 kWh, the
+  // archive's figure, beside the day document's 1.00 (the caption's basis).
+  assert.equal(element('history-total').textContent, '1.03');
 
   // The settle armed the verification re-read; a hidden push holds it, and
   // the return visit — not the next push — spends it.
   element('panel-history').hidden = true;
   showHistoryStatus(statusAt(1, today.getTime() + 180_000, 7440, 1030));
-  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-total').textContent, '1.03');
   element('panel-history').hidden = false;
   activateHistory();
   assert.match(element('chart-empty-title').textContent, /Loading/);
@@ -1739,12 +1756,12 @@ test('a settle that lands while the tab is hidden is caught up on the return vis
     [recorded],
   );
   showHistorySettings(nightly());
-  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-total').textContent, '1.03');
 
   // Both flags are spent: another return visit re-renders, never re-reads —
   // a read would have cleared the total synchronously.
   activateHistory();
-  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-total').textContent, '1.03');
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
 });
 
