@@ -7,10 +7,12 @@
 // string `fmtCost` produced before schedules existed, which keeps flat output
 // byte-identical.
 //
-// Interval costs:
+// Interval costs — every one of them a span priced by the same engine (#210):
 //   - live session   [updated_at - elapsed, updated_at] of the status snapshot
 //   - held session   [anchor - elapsed, anchor], the last live window frozen
 //   - finished session its stored started_at/ended_at
+// The Status tab's labels construct these spans and price them through the
+// same slice machinery the period pass uses; there is no second pricer.
 //
 // A finished session carries `intervals: [{started_at, ended_at, wh}]`, one per
 // contiguous charging block (the bridge writes them since #57). Those are priced
@@ -70,9 +72,10 @@
 //
 // While a charge is live, that same interval is also today's history figure
 // (#126): the period screens merge `liveSessionContribution` — the live window
-// as one pseudo-session — into the sessions a period prices, so the Week/
-// Month/Year summary and today's bar carry the estimate the Status tab shows,
-// attributed across local midnights by the same span machinery (#125). The
+// as one more span — into the span list a period prices (periodCostSpans), so
+// the Week/Month/Year summary, today's bar and the Day period's summary carry
+// the estimate the Status tab shows, attributed across local midnights by the
+// same span machinery (#125). The
 // contribution is schedule-path only (a flat day total already accrues live)
 // and settles exactly once: whichever of the two listener deliveries around a
 // charge's end — the session document or the stopped status write — lands
@@ -147,83 +150,68 @@ function snapshotMillis(status) {
   return updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
 }
 
-// Live session cost: the schedule over the elapsed part of the session, or the
-// flat rate when no schedule exists.
+// ---------- the Status tab's figures (#210: derived from the span pass) ----------
 //
-// A schedule needs a positive elapsed duration and a snapshot that says the
-// charger is charging; without either the cost is hidden rather than guessed
-// from the flat fallback, because the fallback would silently misprice a tariff
-// whose windows apply right now. `now` must be the snapshot's `updated_at`, not
-// the render instant, so re-rendering a paused or cached write cannot slide the
-// interval forward over hours that added no energy.
-export function liveCostLabel(wh, elapsed, now, settings, charging = false) {
+// The Status tab prices the very same span objects History prices. The live
+// window is liveSessionSpan's — `[updated_at − elapsed, updated_at]`, anchored
+// to the status write so a paused, cached or stale write cannot slide it over
+// idle hours — and the held/adopted windows are spans built from their frozen
+// anchor pairs. All four labels below construct their span and hand it to the
+// same slice machinery the period pass prices by (spanCost over the span's own
+// window — numerically costForInterval's constant-power split, the single
+// engine); there is no second, Status-shaped pricer.
+
+// Live cost straight from a status document. A schedule needs a live charging
+// write with a positive elapsed duration and energy on the meter (the span's
+// own gates); without one the cost is hidden rather than guessed from the flat
+// fallback, because the fallback would silently misprice a tariff whose
+// windows apply right now. The bridge keeps the last good state and elapsed
+// while the charger is unreachable and stamps a fresh `updated_at` on every
+// failed poll, so without the offline gate those markers would re-price the
+// frozen interval at whatever windows apply now. The flat path ignores all of
+// it, so its output stays byte-identical.
+export function statusCostLabel(status, settings) {
+  if (!status) return null;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(now);
-  if (!charging || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
-  const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
+  if (!hasRateSchedule(normalized)) return flatCostLabel(status.session_energy, normalized);
+  const span = liveSessionSpan(status);
+  if (!span) return null;
+  const cost = spanCost(span, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Live cost straight from a status document. The interval ends at the write's
-// own `updated_at` (a missing or malformed timestamp hides it) and is priced only
-// for a live charging write — the gate the session clock uses. The bridge keeps
-// the last good state and elapsed while the charger is unreachable and stamps a
-// fresh `updated_at` on every failed poll, so without the offline check those
-// markers would re-price the frozen interval at whatever windows apply now. The
-// flat path ignores all of it, so its output stays byte-identical.
-export function statusCostLabel(status, settings) {
-  if (!status) return null;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  return liveCostLabel(
-    status.session_energy,
-    status.elapsed,
-    endMs,
-    settings,
-    liveCharging(status),
-  );
-}
-
-// Whether the live cost interval includes a slice no base/window prices at a
-// row. Only a non-empty schedule can have such a slice, and — since #188 — the
-// marker means the figure genuinely understates cost: the stored flat rate
-// prices the slice when one is finite, so the marker fires only when no finite
-// flat fallback exists. The status screen adds the marker beside the cost, not
-// a second number.
+// Whether the live span includes a slice no base/window prices at a row. Only
+// a non-empty schedule can have such a slice, and — since #188 — the marker
+// means the figure genuinely understates cost: the stored flat rate prices the
+// slice when one is finite, so the marker fires only when no finite flat
+// fallback exists. The status screen adds the marker beside the cost, not a
+// second number.
 export function statusCostUncovered(status, settings) {
-  if (!status) return false;
+  const span = liveStatusSpan(status, settings);
+  if (!span) return false;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate != null) return false;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  const seconds = toNumber(status.elapsed);
-  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
-    return false;
-  }
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return normalized.rate == null && intervalUncovered(span.started_at, span.ended_at, normalized);
 }
 
-// The informational twin of that marker (#193): the interval has an uncovered
+// The informational twin of that marker (#193): the span has an uncovered
 // slice AND a finite flat fallback prices it — the exact inverse of the
 // warning's no-fallback gate, so the two predicates are mutually exclusive by
 // the rate they read. The figure is policy-correct, so nothing warns; the
 // Status tile adds a subdued line naming the fallback that part prices at,
 // beside the cost (the warning stays the only warning-coloured line).
 export function statusCostFallback(status, settings) {
-  if (!status) return false;
+  const span = liveStatusSpan(status, settings);
+  if (!span) return false;
   const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate == null) return false;
-  const updated = status.updated_at;
-  const endMs = updated && typeof updated.toMillis === 'function' ? updated.toMillis() : null;
-  const seconds = toNumber(status.elapsed);
-  if (!liveCharging(status) || !Number.isFinite(seconds) || seconds <= 0 || endMs == null) {
-    return false;
-  }
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return normalized.rate != null && intervalUncovered(span.started_at, span.ended_at, normalized);
+}
+
+// The shared gate the two markers read: the same span the figure prices, and
+// only under a schedule (a flat plan covers every instant by definition).
+function liveStatusSpan(status, settings) {
+  const normalized = costSettings(settings);
+  if (!hasRateSchedule(normalized)) return null;
+  return liveSessionSpan(status);
 }
 
 // ---------- held session (plugged in, not charging) ----------
@@ -289,32 +277,35 @@ export function adoptedAnchor(status) {
 }
 
 // Held session cost: the schedule over the frozen interval
-// [anchorMs - elapsed, anchorMs], the window the last live render priced.
-// Null rules mirror liveCostLabel's: no schedule takes the flat path
-// (byte-identical, the anchor ignored), and a missing or unusable elapsed or
-// anchor hides the figure rather than guessing a window.
+// [anchorMs - elapsed, anchorMs] — one span handed to the same pricer the
+// live figure and the period pass use (#210) — the window the last live
+// render priced. Null rules mirror the span's: no schedule takes the flat
+// path (byte-identical, the anchor ignored), and a missing or unusable
+// elapsed or anchor hides the figure rather than guessing a window.
 export function heldCostLabel(wh, elapsed, anchorMs, settings) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return flatCostLabel(wh, normalized);
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
-  const cost = costForInterval(wh, endMs - seconds * 1000, endMs, normalized);
+  const span = heldSpan(wh, elapsed, anchorMs);
+  if (!span) return null;
+  const cost = spanCost(span, normalized);
   return cost == null ? null : fmtMoney(cost, normalized.currency);
 }
 
-// Whether the held interval includes a slice no base/window prices at a row —
+// The frozen window as one span object, or null when the pair cannot name a
+// window — the construction the three held labels share.
+function heldSpan(wh, elapsed, anchorMs) {
+  const seconds = toNumber(elapsed);
+  const endMs = endMillis(anchorMs);
+  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return null;
+  return { started_at: endMs - seconds * 1000, ended_at: endMs, wh };
+}
+
+// Whether the held span includes a slice no base/window prices at a row —
 // the same marker the live figure carries, evaluated over the frozen window,
 // and gated the same way: with a finite flat fallback the slice prices at that
 // rate, so only a missing fallback makes the figure understate cost.
 export function heldCostUncovered(elapsed, anchorMs, settings) {
-  const normalized = costSettings(settings);
-  if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate != null) return false;
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  return heldSpanMarker(elapsed, anchorMs, settings, (normalized) => normalized.rate == null);
 }
 
 // The informational twin of the held warning (#193), gated exactly like the
@@ -322,13 +313,18 @@ export function heldCostUncovered(elapsed, anchorMs, settings) {
 // flat rate prices, so the figure is honest and only the fallback deserves
 // naming — on the subdued line, never the warning.
 export function heldCostFallback(elapsed, anchorMs, settings) {
+  return heldSpanMarker(elapsed, anchorMs, settings, (normalized) => normalized.rate != null);
+}
+
+// The two markers share everything but the rate they read: the span over the
+// frozen window, its uncovered slices, and the schedule-only gate.
+function heldSpanMarker(elapsed, anchorMs, settings, wantsRate) {
   const normalized = costSettings(settings);
   if (!hasRateSchedule(normalized)) return false;
-  if (normalized.rate == null) return false;
-  const seconds = toNumber(elapsed);
-  const endMs = endMillis(anchorMs);
-  if (!Number.isFinite(seconds) || seconds <= 0 || endMs == null) return false;
-  return intervalUncovered(endMs - seconds * 1000, endMs, normalized);
+  if (!wantsRate(normalized)) return false;
+  const span = heldSpan(1, elapsed, anchorMs);
+  if (!span) return false;
+  return intervalUncovered(span.started_at, span.ended_at, normalized);
 }
 
 // ---------- interval reconciliation ----------
@@ -479,6 +475,23 @@ function bucketSlice(span, window, settings) {
   const cost = costForInterval(sliceWh, from, to, settings);
   if (cost == null) return null;
   return { cost, wh: sliceWh };
+}
+
+// One span priced over its own window — the same slice the window pass prices
+// when a span sits inside a bucket (#210). The Status tab's live and held
+// figures derive from this: their windows are spans, and the span model is
+// the only pricing path, so the two screens can never disagree about the
+// engine that priced the same charge. The energy gate is costForInterval's
+// own (an unusable or negative `wh` hides the figure); heldSpan passes its
+// `wh` through ungated, so the pricer's null rules stay the single gate.
+function spanCost(span, settings) {
+  const energy = toNumber(span && span.wh);
+  if (!Number.isFinite(energy) || energy < 0) return null;
+  const startMs = valueMillis(span.started_at);
+  const endMs = valueMillis(span.ended_at);
+  if (startMs == null || endMs == null || endMs <= startMs) return null;
+  const slice = bucketSlice(span, { start: startMs, end: endMs }, settings);
+  return slice ? slice.cost : null;
 }
 
 // The totals across every span of the list: `{cost, wh}`, or null as soon as
