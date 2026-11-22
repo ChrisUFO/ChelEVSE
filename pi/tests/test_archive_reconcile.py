@@ -758,6 +758,33 @@ class BackfillTests(ArchiveBase):
 class RestartTests(ArchiveBase):
     """The trailing window recomputes from day docs + one sessions read."""
 
+    def test_restart_recovers_the_day_just_past_the_trailing_window(self):
+        # A final-visit read/write failure enrolls the oldest window day in
+        # the process-local revisit set.  If the bridge restarts before the
+        # next tick, that set disappears; the restart prime must therefore
+        # cover exactly the one-day retry horizon as well as the ordinary
+        # trailing window, reseed its exact basis, and reconsider the day.
+        self.seed_marker()
+        self.seed_day("2026-11-18", 4.0)
+        self.seed_session(_at(18, 12), _at(18, 15), 4000.0, 3000.0)
+        self.recon._started_at = _at(19, 8)
+
+        # On Nov 22 the 18th is one day past the three-day window: without
+        # restart recovery it is neither read nor considered, so its missing
+        # 1000 Wh remains indistinguishable from a verified-clean day.
+        self.tick(_at(22, 9))
+
+        self.assertEqual(self.day_doc("2026-11-18")["gap_wh"], 1000.0)
+        self.assertEqual(self.recon._revisit, set())
+        with self.sink._lock:
+            self.assertEqual(
+                self.recon.basis.basis_for_day("2026-11-18"), 3000.0
+            )
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-18"],
+            [("set", "history", "2026-11-18", {"gap_wh": 1000.0}, ["gap_wh"])],
+        )
+
     def collection_counter(self):
         counts = {}
         original = self.db.collection
@@ -825,9 +852,10 @@ class RestartTests(ArchiveBase):
         )
         # The bounded recompute: one sessions range read; the marker read
         # plus one day-doc range in the prime, one get for the one
-        # exactly-attributable candidate day, plus the two unknown marks.
+        # exactly-attributable in-window candidate day, one presence-guarded
+        # get for the restart retry-horizon day, plus the two unknown marks.
         self.assertEqual(counts["sessions"], 1)
-        self.assertEqual(counts["history"], 5)
+        self.assertEqual(counts["history"], 6)
         # Steady state after that: a further tick reads and writes nothing.
         counts2, counting2 = self.collection_counter()
         with mock.patch.object(self.db, "collection", counting2):
