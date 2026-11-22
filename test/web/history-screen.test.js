@@ -745,6 +745,48 @@ test('one missing Wh renders the caption the tolerance band used to hide (#211)'
   assert.equal(element('history-cost-coverage').textContent, 'priced 2.00 of 2.00 kWh');
 });
 
+// (#210 decision, pinned) The Day period's no-intraday $-hiding escape is
+// REMOVED: it existed because the $ needed the hours map, and the session
+// archive genuinely covers that case — it predates hourly capture — so a day
+// with a total but no hours prices from sessions under a schedule, while the
+// flat path keeps the day document's total byte-identically.
+test('a day with a total but no hours prices from the session basis (#210)', async () => {
+  resetHistory();
+  enterHistory();
+  // Put the screen on the Day period through its real listener; the read it
+  // starts rejects in Node as usual, and the apply step below is the payload
+  // that read would deliver.
+  element('period-switch').contains = () => true;
+  const switchClick = element('period-switch').listeners.get('click')[0];
+  await switchClick({ target: { closest: () => ({ dataset: { period: 'day' } }) } });
+  await readFailed();
+  const doc = { id: '2026-11-05', exists: true, kwh: 4.2, hours: null, fromCache: false };
+  applyHistory(periodById('day'), doc, null, new Date(2026, 10, 5, 12), []);
+  showHistorySettings(nightly());
+  // The no-intraday panel still owns the chart — the hours were never
+  // recorded and must not draw as 24 zero bars.
+  assert.match(element('chart-empty-title').textContent, /No hourly detail/);
+  // Nothing prices the day's recorded energy yet, so the $ hides (the
+  // hide-not-misprice rule, not the old hours-map escape).
+  assert.equal(element('history-total').textContent, '0.00');
+  assert.equal(element('history-cost-cell').hidden, true);
+  // A covering session shows the day's real figures: the archive's 4.2 kWh
+  // off-peak, with no caption (covered meets the day document's own total).
+  applyHistory(periodById('day'), doc, null, new Date(2026, 10, 5, 12), [
+    { wh: 4200, started_at: new Date(2026, 10, 5, 1), ended_at: new Date(2026, 10, 5, 3) },
+  ]);
+  showHistorySettings(nightly());
+  assert.match(element('chart-empty-title').textContent, /No hourly detail/);
+  assert.equal(element('history-total').textContent, '4.20');
+  assert.equal(element('history-cost').textContent, fmtMoney(0.42, 'GBP'));
+  assert.equal(element('history-cost-coverage').hidden, true);
+  // Flat keeps the day document's own total and its flat cost, exactly as
+  // before schedules existed.
+  showHistorySettings({ rate: 0.25, currency: 'GBP' });
+  assert.equal(element('history-total').textContent, '4.20');
+  assert.equal(element('history-cost').textContent, 'GBP 1.05');
+});
+
 // ---------- the day-verdict caption, executed (#212) ----------
 //
 // The same fetch→apply seam as the pricing pass, with the read's

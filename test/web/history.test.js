@@ -2219,6 +2219,55 @@ test("the Day period's summary carries the coverage disclosure like any period",
   assert.equal(coverageDisclosure(nothing), null);
 });
 
+test('a fully reconciled window shows covered == recorded on every period (#210)', () => {
+  // The one-source pin: a fixture whose day documents and sessions archive
+  // agree (the bridge accumulates both from the same counter) must show
+  // covered == recorded on Day, Week, Month and Year alike — headline,
+  // priced energy and recorded total are one pass, so a reintroduced second
+  // aggregation (the tolerance-swallowing class #211 retired) fails here on
+  // whichever period reintroduced it.
+  const days = [
+    '2026-10-12',
+    '2026-10-13',
+    '2026-10-14',
+    '2026-10-15',
+    '2026-10-16',
+    '2026-10-17',
+    '2026-10-18',
+  ];
+  const sessions = days.map((id, i) => ({
+    id: `s${i}`,
+    wh: 2000,
+    started_at: new Date(2026, 9, 12 + i, 1),
+    ended_at: new Date(2026, 9, 12 + i, 3),
+  }));
+  const docs = days.map((id) => ({ id, kwh: 2, hours: { '01': 1, '02': 1 } }));
+  const now = new Date(2026, 9, 18, 12);
+  for (const [period, anchor, recordedKwh] of [
+    ['day', new Date(2026, 9, 14, 12), 2],
+    ['week', now, null],
+    ['month', now, null],
+    ['year', now, null],
+  ]) {
+    const bounds = periodBounds(period, anchor, now);
+    const points = periodSeries(period, period === 'day' ? docs[2] : docs, anchor, now);
+    const recorded = recordedKwh ?? sumSeries(points);
+    const summary = windowCostSummary(
+      spansOf(...sessions),
+      rangeWindow(bounds.startId, bounds.endId),
+      recorded,
+      NIGHTLY,
+    );
+    assert.ok(summary.cost != null, period);
+    assert.ok(Math.abs(summary.coveredWh - summary.recordedWh) < 1e-6, period);
+    assert.equal(coverageDisclosure(summary), null, period);
+    // Off-peak 2 kWh per day: the pass prices exactly the energy it shows.
+    const expectedDays = period === 'day' ? 1 : days.length;
+    assert.ok(Math.abs(summary.coveredWh - 2000 * expectedDays) < 1e-6, period);
+    assert.ok(Math.abs(summary.cost - 0.2 * expectedDays) < 1e-9, period);
+  }
+});
+
 // ---------- the day-verdict caption (#212) ----------
 //
 // The bridge's seam-B reconciler writes a per-day verdict on each day
