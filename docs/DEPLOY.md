@@ -175,9 +175,15 @@ Alternatively create `.firebaserc` (gitignored) for the CLI and the guard:
 `npm run deploy*` script. It refuses to deploy when the target project and the
 service-account key belong to different projects — the failure mode it prevents
 is shipping another app's rules or hosting into this project (or the reverse).
+It also refuses to start when `web/firebase-config.js` is missing or still has
+the example Firebase app values, so a clone without its gitignored deployment
+config cannot replace the live PWA with the setup fallback.
 
 - **Target:** `FIREBASE_PROJECT`, else `.firebaserc` → `projects.default`.
 - **Key:** `GOOGLE_APPLICATION_CREDENTIALS`, else `private/service-account.json`.
+- **Web config:** `web/firebase-config.js` must exist and its Firebase app fields
+  must not contain the example placeholders. The `<public Web Push key>` value
+  may remain when notifications are intentionally disabled.
 - A missing key prints a warning and continues (the Firebase CLI's own auth then
   decides); a mismatched key blocks the deploy with an explanation.
 - `--force` is not a fix. Correct the target or the key.
