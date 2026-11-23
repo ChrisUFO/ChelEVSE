@@ -793,7 +793,10 @@ class RestartTests(ArchiveBase):
         # enrollment site is the sole barrier between that approximation and
         # a numeric verdict, which is written once and therefore permanent.
         self.seed_marker()
-        self.seed_day("2026-11-17", 2.0)
+        # The 17th's doc is 3000 Wh against the straddler's 2000 Wh duration
+        # share, so the approximation's gap is a nonzero +1000 Wh: removing
+        # the guard writes a number that a behavioral assertion can see.
+        self.seed_day("2026-11-17", 3.0)
         self.seed_day("2026-11-18", 2.0)
         self.seed_session(_at(16, 22), _at(17, 2), 4000.0, 4000.0)
         self.recon._started_at = _at(20, 12)
@@ -811,19 +814,28 @@ class RestartTests(ArchiveBase):
         with mock.patch.object(self.recon, "_consider_day", recording):
             self.tick(_at(21, 9))
 
-        # Never handed to the recompute: the guard is the only thing that
-        # stops the approximation from becoming a numeric verdict (a day
-        # doc above the split would write that difference), and a verdict
-        # is written once, so it is exact or absent.
-        self.assertNotIn("2026-11-17", considered)
+        # The outcome: the archive keeps only the explicit unknown mark,
+        # never the approximation's +1000 Wh.
         self.assertIn("2026-11-17", self.recon._inexact)
         self.assertNotIn("2026-11-17", self.recon._revisit)
-        # The explicit unknown mark, never the approximation's number.
         self.assertIsNone(self.day_doc("2026-11-17")["gap_wh"])
         self.assertEqual(
             [w for w in self.verdict_writes() if w[2] == "2026-11-17"],
             [("set", "history", "2026-11-17", {"gap_wh": None}, ["gap_wh"])],
         )
+        # No numeric verdict for the day, at any point in the tick.
+        self.assertEqual(
+            [
+                w
+                for w in self.verdict_writes()
+                if w[2] == "2026-11-17"
+                and isinstance(w[3].get("gap_wh"), (int, float))
+            ],
+            [],
+        )
+        # Defence in depth: the guard's mechanism, which is what produces
+        # the outcome above.
+        self.assertNotIn("2026-11-17", considered)
         # The before-side day is before ``start``: the presence guard is
         # blind to a document the prime never read, so the queue must skip
         # it rather than blind-null whatever verdict it stores.
