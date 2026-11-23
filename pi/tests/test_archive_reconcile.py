@@ -968,40 +968,44 @@ class RestartTests(ArchiveBase):
         self.assertIsNone(self.day_doc("2026-11-19")["gap_wh"])
         self.assertIsNone(self.day_doc("2026-11-20")["gap_wh"])
 
-    def test_a_pre_window_verdict_survives_a_window_start_straddle(self):
+    def test_a_pre_start_verdict_survives_a_start_straddle(self):
         # The mirror of the pre-marker clamp: on a restart the prime reads
         # day docs only over [start, today) -- start = max(marker,
-        # today - window_days) -- so a stored interval straddling the
-        # window-start midnight touches a day whose document was never
-        # read. The presence guard cannot see that day's stored verdict
-        # (docs.get(day) is None by construction), so the unknown-mark
-        # queue must be bounded at the read range's start, which subsumes
-        # the marker bound: the pre-window day's numeric verdict survives
-        # a window-start straddle restart intact -- no blind null write,
-        # ever (a mark is write-once, so the overwrite would be
-        # permanent).
+        # today - (window_days + 1)), the trailing window widened by its
+        # one-day retry horizon -- so a stored interval straddling the
+        # start midnight touches a day whose document was never read. The
+        # presence guard cannot see that day's stored verdict (docs.get(day)
+        # is None by construction), so the unknown-mark queue must be
+        # bounded at the read range's start, which subsumes the marker
+        # bound: the pre-start day's numeric verdict survives a start
+        # straddle restart intact -- no blind null write, ever (a mark is
+        # write-once, so the overwrite would be permanent). The bound still
+        # matters with the widened start: the straddler crossing the
+        # (start - 1)/start midnight is read from the sessions archive even
+        # though its before-side day is pre-range, so the horizon day is
+        # reconsidered while the before-side day must stay untouched.
         self.seed_marker()
-        self.seed_day("2026-11-17", 3.0)
-        self.db.data["history"]["2026-11-17"]["gap_wh"] = 5000.0
-        self.seed_day("2026-11-18", 2.0)
-        self.seed_session(_at(17, 22), _at(18, 2), 4000.0, 4000.0)
-        self.recon._started_at = _at(21, 12)
-        self.tick(_at(21, 13))
-        # start = 2026-11-18 (today - 3): the 17th was never read, never
-        # queued, never written -- the previous process's verdict on it
-        # is intact.
+        self.seed_day("2026-11-16", 3.0)
+        self.db.data["history"]["2026-11-16"]["gap_wh"] = 5000.0
+        self.seed_day("2026-11-17", 2.0)
+        self.seed_session(_at(16, 22), _at(17, 2), 4000.0, 4000.0)
+        self.recon._started_at = _at(20, 12)
+        self.tick(_at(21, 9))
+        # start = 2026-11-17 (today - (3 + 1)): the 16th was never read,
+        # never queued, never written -- the previous process's verdict on
+        # it is intact.
         self.assertEqual(
-            [w for w in self.verdict_writes() if w[2] == "2026-11-17"], []
+            [w for w in self.verdict_writes() if w[2] == "2026-11-16"], []
         )
-        self.assertNotIn("2026-11-17", self.recon._unmarked_inexact)
-        self.assertEqual(self.day_doc("2026-11-17")["gap_wh"], 5000.0)
-        # The in-window straddle-touched day still gets its unknown mark.
-        self.assertIn("2026-11-18", self.recon._inexact)
+        self.assertNotIn("2026-11-16", self.recon._unmarked_inexact)
+        self.assertEqual(self.day_doc("2026-11-16")["gap_wh"], 5000.0)
+        # The in-range straddle-touched day still gets its unknown mark.
+        self.assertIn("2026-11-17", self.recon._inexact)
         self.assertEqual(
             self.verdict_writes(),
-            [("set", "history", "2026-11-18", {"gap_wh": None}, ["gap_wh"])],
+            [("set", "history", "2026-11-17", {"gap_wh": None}, ["gap_wh"])],
         )
-        self.assertIsNone(self.day_doc("2026-11-18")["gap_wh"])
+        self.assertIsNone(self.day_doc("2026-11-17")["gap_wh"])
 
     def test_a_delayed_prime_does_not_double_count_this_process_sessions(self):
         # The reseed only takes intervals closed at or before the process
