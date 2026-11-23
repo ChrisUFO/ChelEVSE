@@ -785,6 +785,52 @@ class RestartTests(ArchiveBase):
             [("set", "history", "2026-11-18", {"gap_wh": 1000.0}, ["gap_wh"])],
         )
 
+    def test_the_restart_retry_horizon_never_gets_an_approximate_verdict(self):
+        # The retry-horizon enrollment is exactness-guarded: a straddling
+        # stored interval makes the horizon day's rebuilt basis the
+        # constant-power approximation, and ``_consider_day`` recomputes
+        # without consulting ``_inexact`` -- so the ``_inexact`` test at the
+        # enrollment site is the sole barrier between that approximation and
+        # a numeric verdict, which is written once and therefore permanent.
+        self.seed_marker()
+        self.seed_day("2026-11-17", 2.0)
+        self.seed_day("2026-11-18", 2.0)
+        self.seed_session(_at(16, 22), _at(17, 2), 4000.0, 4000.0)
+        self.recon._started_at = _at(20, 12)
+
+        # On Nov 21 the retry horizon is the 17th (start = today - (3 + 1)),
+        # and the straddler's before-side is pre-range, so the 17th is the
+        # one inexact day the horizon could have re-enrolled.
+        considered = []
+        original = self.recon._consider_day
+
+        def recording(day, *args, **kwargs):
+            considered.append(day)
+            return original(day, *args, **kwargs)
+
+        with mock.patch.object(self.recon, "_consider_day", recording):
+            self.tick(_at(21, 9))
+
+        # Never handed to the recompute: the guard is the only thing that
+        # stops the approximation from becoming a numeric verdict (a day
+        # doc above the split would write that difference), and a verdict
+        # is written once, so it is exact or absent.
+        self.assertNotIn("2026-11-17", considered)
+        self.assertIn("2026-11-17", self.recon._inexact)
+        self.assertNotIn("2026-11-17", self.recon._revisit)
+        # The explicit unknown mark, never the approximation's number.
+        self.assertIsNone(self.day_doc("2026-11-17")["gap_wh"])
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-17"],
+            [("set", "history", "2026-11-17", {"gap_wh": None}, ["gap_wh"])],
+        )
+        # The before-side day is before ``start``: the presence guard is
+        # blind to a document the prime never read, so the queue must skip
+        # it rather than blind-null whatever verdict it stores.
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-16"], []
+        )
+
     def collection_counter(self):
         counts = {}
         original = self.db.collection
