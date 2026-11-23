@@ -814,11 +814,15 @@ class RestartTests(ArchiveBase):
         with mock.patch.object(self.recon, "_consider_day", recording):
             self.tick(_at(21, 9))
 
-        # The outcome: the archive keeps only the explicit unknown mark,
-        # never the approximation's +1000 Wh.
         self.assertIn("2026-11-17", self.recon._inexact)
         self.assertNotIn("2026-11-17", self.recon._revisit)
+        # The document's final state: the explicit unknown mark. Field
+        # readers see only this, so it is the three-state contract's pin --
+        # but it does NOT detect a numeric verdict, because the null mark's
+        # drain lands after the recompute and overwrites the number.
         self.assertIsNone(self.day_doc("2026-11-17")["gap_wh"])
+        # The write log is what detects the approximation: the 17th's one
+        # and only write is the explicit unknown mark, never a number.
         self.assertEqual(
             [w for w in self.verdict_writes() if w[2] == "2026-11-17"],
             [("set", "history", "2026-11-17", {"gap_wh": None}, ["gap_wh"])],
@@ -841,6 +845,30 @@ class RestartTests(ArchiveBase):
         # it rather than blind-null whatever verdict it stores.
         self.assertEqual(
             [w for w in self.verdict_writes() if w[2] == "2026-11-16"], []
+        )
+
+    def test_a_young_marker_never_enrols_a_pre_marker_day(self):
+        # The horizon day is only a retry candidate when it is at or after
+        # the marker (``restart_revisit >= marker_start``): a marker newer
+        # than the horizon makes the clamp False and there is no day to
+        # re-enroll. Forcing it True would enroll a legacy day, and
+        # ``_consider_day`` has no marker check of its own -- so a numeric
+        # ``gap_wh`` would be written to a day the marker exists precisely
+        # to leave unverdictable.
+        self.seed_marker("2026-11-19")
+        self.seed_day("2026-11-17", 3.0)
+        self.seed_day("2026-11-18", 2.0)
+        self.seed_session(_at(17, 12), _at(17, 15), 3000.0, 3000.0)
+        self.recon._started_at = _at(20, 12)
+
+        # On Nov 21 the horizon is the 17th, four days before the marker.
+        self.tick(_at(21, 9))
+
+        self.assertTrue(self.recon._primed)
+        self.assertNotIn("2026-11-17", self.recon._revisit)
+        self.assertNotIn("gap_wh", self.day_doc("2026-11-17"))
+        self.assertEqual(
+            [w for w in self.verdict_writes() if w[2] == "2026-11-17"], []
         )
 
     def collection_counter(self):
@@ -993,9 +1021,10 @@ class RestartTests(ArchiveBase):
         # straddle restart intact -- no blind null write, ever (a mark is
         # write-once, so the overwrite would be permanent). The bound still
         # matters with the widened start: the straddler crossing the
-        # (start - 1)/start midnight is read from the sessions archive even
-        # though its before-side day is pre-range, so the horizon day is
-        # reconsidered while the before-side day must stay untouched.
+        # (start - 1)/start midnight attributes an approximate share to the
+        # horizon day, so that day is marked inexact and takes the unknown
+        # mark rather than being enrolled, while the before-side day --
+        # which the prime never read -- must stay untouched.
         self.seed_marker()
         self.seed_day("2026-11-16", 3.0)
         self.db.data["history"]["2026-11-16"]["gap_wh"] = 5000.0
@@ -1005,11 +1034,11 @@ class RestartTests(ArchiveBase):
         self.tick(_at(21, 9))
         # start = 2026-11-17 (today - (3 + 1)): the 16th was never read,
         # never queued, never written -- the previous process's verdict on
-        # it is intact.
+        # it is intact. The write log is what pins it: the drain pops the
+        # queue entry in the same tick, so queue membership would not.
         self.assertEqual(
             [w for w in self.verdict_writes() if w[2] == "2026-11-16"], []
         )
-        self.assertNotIn("2026-11-16", self.recon._unmarked_inexact)
         self.assertEqual(self.day_doc("2026-11-16")["gap_wh"], 5000.0)
         # The in-range straddle-touched day still gets its unknown mark.
         self.assertIn("2026-11-17", self.recon._inexact)
