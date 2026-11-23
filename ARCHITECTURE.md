@@ -330,7 +330,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 
 ### Deploy pipeline
 
-`npm run deploy:*` scripts each run `scripts/check-firebase-project.mjs` first. The guard resolves the target from `FIREBASE_PROJECT` or `.firebaserc`, resolves the key from `GOOGLE_APPLICATION_CREDENTIALS` or `private/service-account.json`, and blocks a mismatch. **Caveat:** with no key present the guard warns and exits 0, so a deploy is only truly guarded when credentials resolve.
+`npm run deploy:*` scripts each run `scripts/check-firebase-project.mjs` first. The guard resolves the target from `FIREBASE_PROJECT` or `.firebaserc`, resolves the key from `GOOGLE_APPLICATION_CREDENTIALS` or `private/service-account.json`, and blocks a mismatch; the hosting-capable scripts pass `--require-web-config`, which also blocks a missing `web/firebase-config.js` or one still holding the example app values. **Caveat:** with no key present the guard warns and exits 0, so a deploy is only truly guarded when credentials resolve.
 
 - `deploy:dry-run` compiles rules and validates the release without publishing.
 - Rules first, then indexes (wait for the index to build), then hosting. `npm run deploy` does all three.
@@ -384,7 +384,7 @@ Rules cannot iterate a list, and per-element checks on the 20/24-entry arrays ex
 - **Date-precision seasons and season rates (#65):** shipped in #75. Dates are the primary visible scope: native Starts/Ends pickers with a 2024 reference year, All year, a repeat hint, and Edit dates on a collapsed header; legacy month scopes keep **Advanced: month ranges**.
 - **Unified season pricing (#76):** shipped in PR #75 (this change), closing #76. Two explicit modes (One rate / Seasons & time-of-use), no fallback: a season is dates + a base + optional daily overrides, gaps cost 0.00 with Fill gaps/Add base warnings, and the checker/history/status name uncovered dates, unpriced hours and unpriced live time. No new schema field: the all-day, every-day row is the base.
 - **OTA is not implemented.** The bridge has no firmware upload/version/rollback path. `ARCHITECTURE.md` and `docs/DEPLOY.md` historically described OTA as an HTTP responsibility; treat firmware updates as manual until the code exists.
-- **Deploy guard is weak without a key:** `check-firebase-project.mjs` warns and exits 0 when no credentials resolve. Deploy commands in README/DEPLOY also use a key filename that differs from the operator convention.
+- **Deploy guard is weak without a key:** `check-firebase-project.mjs` warns and exits 0 when no credentials resolve (and only the hosting scripts' `--require-web-config` pass checks the web config). Deploy commands in README/DEPLOY also use a key filename that differs from the operator convention.
 - **Rules test coverage:** add read-authorization tests for `status`, `history`, `sessions` and `users`; the core data paths are currently unexercised.
 - **Command hardening:** rules do not require `created_at` or reject extra keys; the bridge treats a missing/malformed `created_at` as not stale, so a crafted pending doc can bypass the 10-minute sweep and sit indefinitely. There is no command claim/lease, so two bridge instances would double-apply.
 - **Settings listener error handling:** `settings/current` has no error callback; a permission/backend failure leaves the card silently empty instead of showing an error.

@@ -175,18 +175,31 @@ Alternatively create `.firebaserc` (gitignored) for the CLI and the guard:
 `npm run deploy*` script. It refuses to deploy when the target project and the
 service-account key belong to different projects — the failure mode it prevents
 is shipping another app's rules or hosting into this project (or the reverse).
+The hosting-capable scripts (`deploy`, `deploy:dry-run`, `deploy:hosting`) pass
+`--require-web-config`, which additionally refuses to start when
+`web/firebase-config.js` is missing or still has the example Firebase app
+values, so a clone without its gitignored deployment config cannot replace the
+live PWA with the setup fallback. The Firestore-only scripts (`deploy:rules`,
+`deploy:indexes`) do not pass the flag: they publish nothing from `web/`, so
+they run in a checkout without that file.
 
 - **Target:** `FIREBASE_PROJECT`, else `.firebaserc` → `projects.default`.
 - **Key:** `GOOGLE_APPLICATION_CREDENTIALS`, else `private/service-account.json`.
+- **Web config** (`--require-web-config` only): `web/firebase-config.js` must
+  exist and its Firebase app fields must not contain the example placeholders.
+  The `<public Web Push key>` value may remain when notifications are
+  intentionally disabled.
 - A missing key prints a warning and continues (the Firebase CLI's own auth then
   decides); a mismatched key blocks the deploy with an explanation.
 - `--force` is not a fix. Correct the target or the key.
 
-Check it by hand before the first deploy:
+Check it by hand before the first deploy (add `--require-web-config` to include
+the web config check, which is what the hosting scripts run):
 
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=private/service-account.json \
-  FIREBASE_PROJECT=<project-id> node scripts/check-firebase-project.mjs
+  FIREBASE_PROJECT=<project-id> \
+  node scripts/check-firebase-project.mjs --require-web-config
 ```
 
 Expected: `✔ deploy guard: <project-id> (key ... belongs to <project-id>)`.
