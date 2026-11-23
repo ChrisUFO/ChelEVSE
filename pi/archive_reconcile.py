@@ -40,7 +40,9 @@ basis never settled inside the window and absence is the clean verdict.
 A day whose final window visit itself failed (a read, or the verdict
 write) is retried for one further local day -- presence-guarded by the
 same re-read, on a basis the accumulator still guarantees -- before its
-silence is accepted.
+silence is accepted. A restart prime covers that same one-day retry horizon
+and re-enrolls its oldest unmarked exact day, so restarting between the
+failed final visit and its retry cannot strand the day.
 The verdict itself is exact: ``gap_wh`` is the raw
 same-basis delta with **no tolerance band** (the band rule stays seam A's);
 a session straddling midnight cancels precisely because both sides attribute
@@ -309,7 +311,8 @@ class ArchiveReconciler:
         # day, presence-guarded by its own re-read on every retry, then
         # dropped loudly: past that bound the live basis no longer
         # guarantees the day, and a verdict derived from a trimmed
-        # basis would be permanently wrong.
+        # basis would be permanently wrong. A restart rebuilds exactly
+        # this extra day and re-enrolls it when it is still unmarked.
         self._revisit = set()
 
     # -- the tick ------------------------------------------------------------
@@ -568,14 +571,19 @@ class ArchiveReconciler:
         )
         today = now_local.date()
         zone = now_local.tzinfo
+        restart_revisit_day = None
         if first_run:
             start = max(self.recon_from, today - timedelta(days=self.backfill_days))
         else:
             self._recon_from_iso = stored[RECON_FROM_FIELD]
+            restart_revisit = today - timedelta(days=self.window_days + 1)
+            marker_start = date.fromisoformat(self._recon_from_iso)
             start = max(
-                date.fromisoformat(self._recon_from_iso),
-                today - timedelta(days=self.window_days),
+                marker_start,
+                restart_revisit,
             )
+            if restart_revisit >= marker_start:
+                restart_revisit_day = restart_revisit.isoformat()
         window_start = today - timedelta(days=self.window_days)
         try:
             docs = self._read_day_docs(start, today)
@@ -678,20 +686,32 @@ class ArchiveReconciler:
                 f"{verdicts} divergent day(s) verdicted, "
                 f"{len(docs)} day document(s) read in one pass"
             )
-        # Reseed the trailing window (today included: a restart mid-day has
-        # closed blocks already stored beside the ticks this process will
-        # observe -- disjoint parts of today, added not replaced). Last, and
-        # once: every read and write this depends on has landed, so a retried
-        # prime cannot double count. The reseed is the one accumulator
-        # mutation off the status thread, so it takes the sink's apply lock:
+        # Reseed the trailing window, plus its one-day retry horizon on a
+        # restart (today included: a restart mid-day has closed blocks already
+        # stored beside the ticks this process will observe -- disjoint parts
+        # of today, added not replaced). Last, and once: every read and write
+        # this depends on has landed, so a retried prime cannot double count.
+        # The reseed is the one accumulator mutation off the status thread,
+        # so it takes the sink's apply lock:
         # ``observe`` mutates the same ``_by_day`` dict under that lock on
         # the status thread, and either side's read-modify-write landing
         # inside the other's would drop a day's basis -- a corrupted verdict,
         # written once and therefore permanently wrong.
         with sink._lock:
-            for offset in range(self.window_days + 1):
+            reseed_days = self.window_days + 1 + bool(restart_revisit_day)
+            for offset in range(reseed_days):
                 day = (today - timedelta(days=offset)).isoformat()
                 self.basis.seed(day, archived.get(day, 0.0))
+        if restart_revisit_day is not None:
+            data = docs.get(restart_revisit_day)
+            marked = isinstance(data, dict) and GAP_FIELD in data
+            if restart_revisit_day not in self._inexact and not marked:
+                # The prior process's final-visit failure was held only in
+                # memory. Reconsider the one day that could have been waiting
+                # for that retry; clean and already-marked days stay write-free,
+                # while a real gap or still-open session gets its verdict or
+                # explicit unknown mark through the normal last-visit path.
+                self._revisit.add(restart_revisit_day)
         self._primed = True
         return True
 
