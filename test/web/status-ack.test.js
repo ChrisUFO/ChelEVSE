@@ -527,6 +527,23 @@ test('every row offers Dismiss: with the capability fact, without it, and once a
   showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
   assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
   assert.deepEqual(actionChildren(rowOf()), [dismissOf(rowOf())]);
+
+  // Active — a live, corroborated condition — is dismissible like the rest,
+  // and its Dismiss empties the card exactly as a record's does.
+  showHealth(
+    doc({ advisories: [{ ...doc().advisories[0], classification: 'active', corroborated: true }] }),
+  );
+  assert.equal(rowOf().getAttribute('data-presentation'), 'active');
+  assert.equal(element('health-card').getAttribute('data-tone'), 'err');
+  assert.deepEqual(actionChildren(rowOf()), [
+    dismissOf(rowOf()),
+    ackOf(rowOf()),
+    messageOf(rowOf()),
+  ]);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-card').getAttribute('data-tone'), 'muted');
+  assert.equal(element('health-title').textContent, 'No advisories');
 });
 
 test('activating Dismiss removes the row at once, and the last one empties the card', (t) => {

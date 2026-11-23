@@ -57,6 +57,16 @@ test('a dismissal is written at once and read back by a later store', () => {
   assert.deepEqual(reloaded.read('uid-a'), {
     'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
   });
+
+  // A second page (another tab) writing its own account is a read-modify-write
+  // of the one key: the first account's record survives it. The page has its
+  // own clock.
+  const later = createDismissalStore({ storage, now: () => T0 + 1000 });
+  later.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
+  assert.deepEqual(persisted(storage), {
+    'uid-a': { 'fault.no_ground': { severity: 'critical', dismissedAt: T0 } },
+    'uid-b': { 'thermal.high_temp': { severity: 'warning', dismissedAt: T0 + 1000 } },
+  });
 });
 
 test('records are scoped per account', () => {
