@@ -41,8 +41,8 @@ function fixture(t, config) {
   return root;
 }
 
-function runGuard(cwd) {
-  return spawnSync(process.execPath, [guard], {
+function runGuard(cwd, args = ['--require-web-config']) {
+  return spawnSync(process.execPath, [guard, ...args], {
     cwd,
     encoding: 'utf8',
     env: {
@@ -75,9 +75,30 @@ test('deploy guard accepts real web config with push left disabled', (t) => {
   assert.doesNotMatch(result.stderr, /deploy blocked/);
 });
 
-test('every hosting deploy script runs the guard', () => {
+test('deploy guard skips the web config for rules/indexes deploys', (t) => {
+  const result = runGuard(fixture(t), []);
+
+  assert.equal(result.status, 0);
+  assert.doesNotMatch(result.stderr, /deploy blocked/);
+});
+
+test('every deploy script runs the guard with the web config only where needed', () => {
   const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8'));
-  for (const hook of ['predeploy', 'predeploy:dry-run', 'predeploy:hosting']) {
-    assert.equal(pkg.scripts[hook], 'node scripts/check-firebase-project.mjs');
+  const hostingHooks = ['predeploy', 'predeploy:dry-run', 'predeploy:hosting'];
+  const firestoreHooks = ['predeploy:rules', 'predeploy:indexes'];
+
+  for (const hook of hostingHooks) {
+    assert.equal(
+      pkg.scripts[hook],
+      'node scripts/check-firebase-project.mjs --require-web-config',
+      `${hook} must check the web config because it publishes web/`,
+    );
+  }
+  for (const hook of firestoreHooks) {
+    assert.equal(
+      pkg.scripts[hook],
+      'node scripts/check-firebase-project.mjs',
+      `${hook} publishes no web/ and must not require the web config`,
+    );
   }
 });
