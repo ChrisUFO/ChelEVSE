@@ -30,8 +30,10 @@ import {
 } from '../cost.js';
 import { retryStore, ackNotification, sendCommand as postCommand } from '../store.js';
 import { currentCapability } from '../current.js';
-import { ackControlState, createAckTracker, healthState } from '../health.js';
+import { ackControlState, createAckTracker, dismissControlState, healthState } from '../health.js';
+import { createDismissalStore } from '../health-dismissals.js';
 import { claimsState } from '../claims.js';
+import { auth } from '../firebase.js';
 
 const CMD_TEXT = {
   pause: { busy: () => 'Sending stop…', done: () => 'Stop command applied.' },
@@ -69,9 +71,19 @@ let healthSignature = null;
 // The last projection the card painted: the control repaint reads the same rows
 // the list was built from.
 let healthView = null;
-// The acknowledgement controls themselves (`id → {area, button, message}`), so a
+// The acknowledgement controls themselves (`id → {button, message}`), so a
 // busy row repaints in place instead of rebuilding the list under the pointer.
 let ackNodes = new Map();
+// The Dismiss controls (`id → button`, #205). They have no states to repaint,
+// so the map exists for one thing: a rebuild destroys every row, and a control
+// that still holds the owner's focus is owed the same hand-off an ack control
+// is (`renderHealth`).
+let dismissNodes = new Map();
+// The row whose Dismiss control the owner just activated (#205). Its click
+// handler re-renders synchronously, and that render is the only one that reads
+// the flag — the control is about to be destroyed with its row — so unlike
+// `ackFocusId` it can never outlive the attempt it describes.
+let dismissFocusId = null;
 // The row whose control held the owner's focus when it was disabled. The browser
 // blurs a control the instant it becomes unfocusable (HTML's focus fix-up rule,
 // down to <body> here), so by the time the success rebuild runs
@@ -93,6 +105,22 @@ const acks = createAckTracker({
     if (row) paintAckRow(row);
   },
 });
+// The account the Health card's dismissals are scoped to (#205): the same
+// accessor screens/notifications.js reads, so the two cards cannot disagree
+// about who is signed in. Empty signed out — and then nothing is read or
+// written, because a record under no account would be every visitor's.
+function currentUid() {
+  return auth && auth.currentUser && typeof auth.currentUser.uid === 'string'
+    ? auth.currentUser.uid
+    : '';
+}
+// The reader the card asks; `initStatus` is where a different one can be handed
+// in.
+let accountUid = currentUid;
+// Dismissal records: durable per-account state (localStorage, kept by the
+// DOM-free store). Sign-out does not clear them — the next session of that
+// account expects to find its rows still hidden.
+const dismissals = createDismissalStore();
 // Set when the owner activates Retry. The render that clears the failure hides
 // the control that had their focus, so that render — and only a render a retry
 // preceded — has to put focus somewhere useful. Any snapshot moves nothing.
@@ -364,11 +392,19 @@ function renderStatus() {
 // wait, and only the first is success: the snapshot, the command settling
 // `failed`, a rejected write, or the bounded wait. A failure paints a short
 // reason and leaves the row exactly as it was.
+//
+// Dismissal (#205) is the card's other control and the opposite kind: a local
+// hide for this account in this browser. It writes no command — nothing here
+// reaches the bridge or Firestore — so there is nothing to wait for: the click
+// records the dismissal and the rebuild it triggers removes the row at once.
+// health.js decides what a record hides and when it is retired; the store
+// keeps them; this file only hands one the other.
 
-// One row: the three facts, and — while the advisory is not acknowledged — the
-// control that mutes it. The button is built once per row and repainted in place
-// (`paintAckRow`), so a click never loses the control it started on while the
-// acknowledgement is in flight.
+// One row: the three facts, the Dismiss control every row carries, and — while
+// the advisory is not acknowledged — the control that mutes it. The ack button
+// is built once per row and repainted in place (`paintAckRow`), so a click
+// never loses the control it started on while the acknowledgement is in
+// flight. Both controls share the row's one action line.
 function healthRow(row) {
   const item = el('li', 'health-item');
   item.setAttribute('data-presentation', row.presentation);
@@ -388,9 +424,18 @@ function healthRow(row) {
   const meta = el('p', 'health-meta');
   meta.textContent = [row.id, row.seen].filter(Boolean).join(' · ');
   item.append(meta);
+  const actions = el('div', 'health-actions');
+  const dismiss = dismissControlState(row);
+  if (dismiss.show) {
+    const button = el('button', 'btn small ghost', dismiss.label);
+    button.type = 'button';
+    button.setAttribute('aria-label', dismiss.ariaLabel);
+    button.addEventListener('click', () => dismissRow(row));
+    actions.append(button);
+    dismissNodes.set(row.id, button);
+  }
   const control = ackControlState(row);
   if (control.show) {
-    const area = el('div', 'health-ack');
     const button = el('button', 'btn small', control.label);
     button.type = 'button';
     button.setAttribute('aria-label', control.ariaLabel);
@@ -402,11 +447,28 @@ function healthRow(row) {
     message.setAttribute('role', 'status');
     message.hidden = !control.message;
     message.textContent = control.message;
-    area.append(button, message);
-    item.append(area);
-    ackNodes.set(row.id, { area, button, message });
+    actions.append(button, message);
+    ackNodes.set(row.id, { button, message });
   }
+  if (actions.children.length) item.append(actions);
   return item;
+}
+
+// Dismiss one advisory for the signed-in account (#205). The record is written
+// through the store and the rebuild the render below performs is what removes
+// the row — the same paint path a snapshot uses, so nothing can drift between
+// a dismissed row and a listed one.
+function dismissRow(row) {
+  // The control this click leaves focus on is destroyed by that rebuild, along
+  // with its row, and the browser's focus fix-up has already dropped focus to
+  // <body> by the time the row is gone. Record the hand-off where it happens,
+  // exactly as `paintAckRow` does for a control it disables.
+  dismissFocusId = row.id;
+  // Signed out there is no account to scope the dismissal to, so nothing is
+  // recorded — and nothing is applied on the next render either.
+  const uid = accountUid();
+  if (uid) dismissals.dismiss(uid, row);
+  renderHealth();
 }
 
 // Busy and failure, painted onto the control the row already has. Nothing here
@@ -416,7 +478,10 @@ function paintAckRow(row) {
   if (!nodes) return;
   const state = acks.state(row.id);
   const control = ackControlState(row, state);
-  nodes.area.hidden = !control.show;
+  // The row offered the control when it was built, and one whose
+  // `canAcknowledge` has moved is rebuilt rather than repainted, so `show` is
+  // true whenever this runs — it still decides, so the paint has one shape.
+  nodes.button.hidden = !control.show;
   nodes.button.textContent = control.label;
   // Disabling the control the owner just activated takes their focus with it
   // inside the same click dispatch: a focused element that becomes unfocusable
@@ -426,7 +491,7 @@ function paintAckRow(row) {
   if (control.disabled && nodes.button === document.activeElement) ackFocusId = row.id;
   nodes.button.disabled = control.disabled;
   nodes.button.setAttribute('aria-label', control.ariaLabel);
-  nodes.message.hidden = !control.message;
+  nodes.message.hidden = !control.show || !control.message;
   setText(nodes.message, control.message);
   // The attempt ended without a rebuild (a failure): retire the flag here, so it
   // cannot outlive the attempt it describes.
@@ -449,7 +514,29 @@ function settleAckFocus(control, nodes) {
 }
 
 function renderHealth() {
-  const state = healthState({ doc: health, error: healthError, nowMs: Date.now() });
+  // Spend the dismiss intent here, on every render: the click handler sets it
+  // and re-renders at once, so a flag read at the top of this function always
+  // describes this render. (A signed-out click records nothing and so rebuilds
+  // nothing — clearing it here is what keeps that flag from sitting around for
+  // an unrelated rebuild to spend.)
+  const dismissed = dismissFocusId;
+  dismissFocusId = null;
+  const uid = accountUid();
+  // Signed out, no record is read, so none is applied: the card lists what the
+  // charger reports, for everyone.
+  const stored = uid ? dismissals.read(uid) : {};
+  const state = healthState({
+    doc: health,
+    error: healthError,
+    nowMs: Date.now(),
+    dismissals: stored,
+  });
+  // The projection has already pruned the records against the ids this report
+  // lists. Persisting its answer is the screen's whole write path — it never
+  // edits storage itself — and `null` (health unknown) says leave them alone:
+  // that state is no evidence an advisory is gone. An unchanged map writes
+  // nothing, so a steady report costs no storage write.
+  if (uid && state.dismissals) dismissals.replace(uid, state.dismissals);
   // The snapshot is the only success signal: an advisory it no longer lists as
   // acknowledgeable ends whatever acknowledgement was waiting on it, and the
   // row's own rebuild is what makes it read "Acknowledged".
@@ -470,7 +557,10 @@ function renderHealth() {
   // The signature carries everything the row renders — including whether it
   // offers the ack control: the bridge-capability fact can flip beneath an
   // otherwise identical advisory list (a bridge upgraded under this web), and
-  // a rebuild is what makes the control appear or disappear (#159).
+  // a rebuild is what makes the control appear or disappear (#159). It is
+  // taken over the rows that are listed, after dismissals, so a dismissal is
+  // itself a signature change: the row a Dismiss removed, and the one a new
+  // severity brought back, each rebuild the list (#205).
   const signature = state.advisories
     .map(
       (row) =>
@@ -481,21 +571,24 @@ function renderHealth() {
     healthSignature = signature;
     // A rebuild recreates every row, so a control the owner was on will not
     // survive it — this is the acknowledgement's own success path, where the
-    // control disappears because the row now reads Acknowledged. Two facts say
-    // their focus is about to be destroyed: a control that still holds it
-    // (`heldControl` — a remote ack, or a control tabbed to but never pressed),
-    // and the control whose disable displaced it (`ackFocusId`, because the
-    // browser had already dropped focus to <body> by now — an attempt that ends
-    // as a failure retires that flag in `paintAckRow` instead, so one it left
-    // here really was in flight). Either hands focus to the card's title — the
-    // same fell-away policy the Retry screens use, so focus that is still on a
-    // live element is never stolen.
-    const heldControl = [...ackNodes.values()].some(
-      (nodes) => nodes.button === document.activeElement,
-    );
-    const displaced = ackFocusId;
+    // control disappears because the row now reads Acknowledged, and the
+    // dismissal's, where the whole row goes. Three facts say a focus is about
+    // to be destroyed: a control that still holds it (`heldControl` — a
+    // remote ack, a Dismiss tabbed to, or a control pressed in a browser that
+    // keeps its focus), the control whose disable displaced it (`ackFocusId`,
+    // because the browser had already dropped focus to <body> by now — an
+    // attempt that ends as a failure retires that flag in `paintAckRow`
+    // instead, so one it left here really was in flight), and the Dismiss
+    // control its own click just activated (`dismissed`). Any of them hands
+    // focus to the card's title — the same fell-away policy the Retry screens
+    // use, so focus that is still on a live element is never stolen.
+    const heldControl =
+      [...ackNodes.values()].some((nodes) => nodes.button === document.activeElement) ||
+      [...dismissNodes.values()].includes(document.activeElement);
+    const displaced = ackFocusId || dismissed;
     ackFocusId = null;
     ackNodes = new Map();
+    dismissNodes = new Map();
     $('health-list').replaceChildren(...state.advisories.map(healthRow));
     if ((heldControl || displaced) && focusFellAway()) {
       $('health-title').focus({ preventScroll: true });
@@ -655,7 +748,14 @@ function stopTicker() {
 
 // ---------- screen lifecycle ----------
 
-export function initStatus() {
+// `uid` reads the signed-in account the Health card's dismissals are scoped
+// to. The app passes nothing: the card reads Firebase Auth's current user, the
+// way the notification card does. The option exists because that reader is the
+// one dependency the DOM harness cannot supply any other way — `firebase.js`
+// keeps `auth` unbound until `initFirebase()` runs, and a live binding cannot
+// be handed a value from outside the module.
+export function initStatus({ uid = currentUid } = {}) {
+  accountUid = uid;
   // First paint: no status/config snapshot has been applied yet, so the
   // current controls start disabled rather than looking usable for the round
   // trip that fills them. `current` is null here, which is the same
@@ -737,6 +837,11 @@ export function leaveStatus() {
   acks.reset();
   ackNodes = new Map();
   ackFocusId = null;
+  // The Dismiss controls go with the rows. The records stay: they are durable
+  // per-account state, not this session's, and the next session of that
+  // account expects to find its rows still hidden.
+  dismissNodes = new Map();
+  dismissFocusId = null;
   healthView = null;
   schedule = null;
   settings = null;
