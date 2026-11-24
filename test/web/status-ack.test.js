@@ -645,6 +645,31 @@ test('a rebuild leaves focus alone when the owner moved off a Dismiss control', 
   assert.deepEqual(focusLog, [], 'no hand-off steals a live focus');
 });
 
+test('a spent Dismiss leaves no flag for a later rebuild to spend', (t) => {
+  signIn(t);
+  // Nothing is focused when the owner activates Dismiss — a mouse click in a
+  // browser that does not focus buttons — so the hand-off the click owes is
+  // paid by the rebuild the click itself triggers.
+  body.focus({ preventScroll: true });
+  click(dismissOf(rowOf()));
+  assert.equal(document.activeElement, element('health-title'));
+
+  // The owner then clicked the card's text: focus fell to <body>, so nothing
+  // in the list is holding it any more.
+  body.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  // An unrelated health update rebuilds the list. Nothing the owner was on is
+  // going away, so focus stays where it is; the spent dismissal's flag must
+  // not pull it to the card title a second time.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND] }));
+
+  assert.equal(rows().length, 1, 'only the new advisory is listed');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+  assert.equal(document.activeElement, body);
+  assert.deepEqual(focusLog, [], 'a spent dismissal owns no focus hand-off');
+});
+
 test('the record is persisted under the signed-in account, and a steady report writes nothing', (t) => {
   const uid = signIn(t);
   const before = Date.now();
@@ -770,6 +795,39 @@ test('dismissing a row mid-acknowledgement ends the wait and strands no focus', 
   assert.deepEqual(rows(), []);
   assert.equal(element('health-title').textContent, 'No advisories');
   assert.equal(element('feedback').textContent, '');
+});
+
+test('dismissing another row leaves a surviving row’s acknowledgement in flight', async (t) => {
+  signIn(t);
+  showHealth(twoRows());
+  const [, otherRow] = rows();
+  const ack = ackOf(rowOf());
+  click(ack);
+  assert.equal(ack.textContent, 'Acknowledging…');
+
+  click(dismissOf(otherRow));
+
+  // The rebuild recreated the surviving row, and its new control still reads
+  // as the attempt in flight — busy and disabled, no reason — because the
+  // snapshot it was rebuilt from still lists that advisory as acknowledgeable.
+  assert.equal(rows().length, 1);
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'No ground');
+  const control = ackOf(rowOf());
+  assert.notEqual(control, ack, 'the survivor was rebuilt, not repainted');
+  assert.equal(control.textContent, 'Acknowledging…');
+  assert.equal(control.disabled, true);
+  assert.equal(messageOf(rowOf()).hidden, true);
+
+  // The write's refusal then lands on that row: the reason is shown and the
+  // control is enabled again, exactly as on a row nothing dismissed.
+  await flush();
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(control.disabled, false);
+  assert.equal(messageOf(rowOf()).hidden, false);
+  assert.equal(
+    messageOf(rowOf()).textContent,
+    'Couldn’t send — check your connection and try again.',
+  );
 });
 
 test('a dismissed row returns when its severity changes, and after it leaves and is relisted', (t) => {
