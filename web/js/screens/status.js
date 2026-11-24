@@ -837,11 +837,6 @@ export function leaveStatus() {
   acks.reset();
   ackNodes = new Map();
   ackFocusId = null;
-  // The Dismiss controls go with the rows. The records stay: they are durable
-  // per-account state, not this session's, and the next session of that
-  // account expects to find its rows still hidden.
-  dismissNodes = new Map();
-  dismissFocusId = null;
   healthView = null;
   schedule = null;
   settings = null;

@@ -134,38 +134,6 @@ test('dismissing the same advisory again overwrites its record', () => {
   });
 });
 
-test('prune keeps the listed ids, drops the rest, and writes only on a change', () => {
-  const { dismissals, storage } = store();
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
-  dismissals.dismiss('uid-a', { id: 'thermal.high_temp', severity: 'warning' });
-  dismissals.dismiss('uid-a', { id: 'wear.relay_life', severity: 'info' });
-  assert.equal(storage.sets, 3);
-
-  // The snapshot still lists one of the three.
-  const surviving = dismissals.prune('uid-a', ['thermal.high_temp', 'fault.stuck_relay']);
-  assert.deepEqual(Object.keys(surviving), ['thermal.high_temp']);
-  assert.equal(storage.sets, 4, 'the change is written through');
-  assert.deepEqual(Object.keys(persisted(storage)['uid-a']), ['thermal.high_temp']);
-
-  // The same prune again: nothing changed, so nothing is written.
-  assert.deepEqual(dismissals.prune('uid-a', ['thermal.high_temp']), surviving);
-  assert.equal(storage.sets, 4, 'an unchanged map writes nothing');
-  assert.deepEqual(dismissals.read('uid-a'), surviving, 'read answers the surviving map');
-});
-
-test('pruning the last record retires the account and the key', () => {
-  const { dismissals, storage } = store();
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
-  dismissals.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
-
-  assert.deepEqual(dismissals.prune('uid-a', []), {});
-  assert.deepEqual(Object.keys(persisted(storage)), ['uid-b'], 'the other account stays');
-
-  assert.deepEqual(dismissals.prune('uid-b', []), {});
-  assert.equal(storage.getItem(DISMISSALS_KEY), null, 'no account left: no key');
-  assert.deepEqual(dismissals.read('uid-a'), {});
-});
-
 test('replace stores a map health.js already pruned, and only when it changed', () => {
   const { dismissals, storage } = store();
   dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
@@ -186,9 +154,16 @@ test('replace stores a map health.js already pruned, and only when it changed', 
     'uid-a': { 'thermal.high_temp': { severity: 'warning', dismissedAt: T0 } },
   });
 
-  // An empty map retires the account.
+  // An empty map retires the account — only that account. Another one's entry
+  // stays until its own last record goes, and the key goes with the last of
+  // them, so the store never grows a tombstone.
+  const other = createDismissalStore({ storage, now: () => T0 });
+  other.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
   assert.deepEqual(dismissals.replace('uid-a', {}), {});
-  assert.equal(storage.getItem(DISMISSALS_KEY), null);
+  assert.deepEqual(Object.keys(persisted(storage)), ['uid-b'], 'the other account stays');
+
+  assert.deepEqual(other.replace('uid-b', {}), {});
+  assert.equal(storage.getItem(DISMISSALS_KEY), null, 'no account left: no key');
 
   // Records outside the stored shape are dropped rather than persisted.
   dismissals.replace('uid-a', {
@@ -262,7 +237,6 @@ test('without an account nothing is read or written', () => {
   assert.deepEqual(dismissals.read(null), {});
   assert.deepEqual(dismissals.read(undefined), {});
   assert.equal(dismissals.dismiss('', { id: 'fault.no_ground', severity: 'critical' }), null);
-  assert.deepEqual(dismissals.prune('', ['fault.no_ground']), {});
   assert.deepEqual(
     dismissals.replace('', { 'fault.no_ground': { severity: 'a', dismissedAt: 1 } }),
     {},
@@ -277,7 +251,7 @@ test('without any storage the records last for the page only', () => {
   assert.deepEqual(dismissals.read('uid-a'), {
     'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
   });
-  assert.deepEqual(dismissals.prune('uid-a', []), {});
+  assert.deepEqual(dismissals.replace('uid-a', {}), {});
   assert.deepEqual(dismissals.read('uid-a'), {});
 });
 
@@ -310,8 +284,8 @@ test('a refused remove is swallowed and the key name is configurable', () => {
   storage.removeItem = () => {
     throw new Error('SecurityError');
   };
-  assert.deepEqual(custom.prune('uid-a', []), {});
-  assert.deepEqual(custom.read('uid-a'), {}, 'the in-memory map is the prune');
+  assert.deepEqual(custom.replace('uid-a', {}), {});
+  assert.deepEqual(custom.read('uid-a'), {}, 'the refused remove leaves the copy answering');
 });
 
 test('an id or account spelled like a prototype key stays an own key', () => {

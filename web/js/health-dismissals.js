@@ -145,11 +145,6 @@ export function createDismissalStore({
     else write(JSON.stringify(next));
   }
 
-  // Records only for the ids `keep` names, in a fresh map.
-  function retaining(records, keep) {
-    return Object.fromEntries(Object.entries(records).filter(([id]) => keep.has(id)));
-  }
-
   return {
     read,
 
@@ -162,17 +157,6 @@ export function createDismissalStore({
       const record = { severity, dismissedAt: now() };
       commit(uid, { ...read(uid), [id]: record });
       return record;
-    },
-
-    // Drop every record whose id `ids` does not name. Nothing is written
-    // while the map is unchanged, so a steady snapshot costs no storage write.
-    // Returns the surviving map.
-    prune(uid, ids) {
-      if (!isUid(uid)) return {};
-      const current = read(uid);
-      const next = retaining(current, new Set(Array.isArray(ids) ? ids : []));
-      if (!sameRecords(current, next)) commit(uid, next);
-      return next;
     },
 
     // Make `records` this account's whole map — the path the screen uses for
