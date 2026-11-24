@@ -6,8 +6,9 @@
 //
 // under one localStorage key. What a record hides and when one is retired is
 // health.js's decision (an advisory is hidden while its severity is unchanged,
-// and a record leaves once the snapshot stops listing its id) — this module
-// only keeps them, so that logic stays unit-testable without any storage.
+// and a record leaves once the snapshot stops listing its id or lists it at
+// another severity) — this module only keeps them, so that logic stays
+// unit-testable without any storage.
 //
 // Tolerant by design, three ways: a store that is unreadable or not this shape
 // reads as empty rather than throwing into a render; a refused write is
@@ -190,8 +191,8 @@ export function createDismissalStore({
     },
 
     // Make `records` this account's whole map — the path the screen uses for
-    // a map health.js has already pruned. Records outside the stored shape
-    // are dropped, and an unchanged map writes nothing.
+    // the records health.js found still hiding a row. Records outside the
+    // stored shape are dropped, and an unchanged map writes nothing.
     replace(uid, records) {
       if (!isUid(uid)) return {};
       const next = recordsOf(records);

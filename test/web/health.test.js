@@ -958,10 +958,11 @@ test('reset cancels a wait and forgets the attempt', () => {
 // ---------- dismissal (#205) ----------
 //
 // A dismissal record hides a row while the severity it names is the one the
-// snapshot reports; it is retired when a usable report stops listing the id,
-// and never on an unknown state. The records themselves are
-// health-dismissals.js's business (test/web/health-dismissals.test.js); what
-// is pinned here is what the one pass that builds the card does with them.
+// snapshot reports; it is retired when a usable report stops listing the id or
+// lists it at another severity, and never on an unknown state. The records
+// themselves are health-dismissals.js's business
+// (test/web/health-dismissals.test.js); what is pinned here is what the one
+// pass that builds the card does with them.
 
 const T0 = 1794876000000;
 const record = (severity) => ({ severity, dismissedAt: T0 });
@@ -1038,12 +1039,14 @@ test('a record that does not name the row’s severity hides nothing', () => {
   assert.equal(shapeless.advisories.length, 3);
 });
 
-test('a record outlives a severity change while the id stays listed', () => {
+test('a record is retired by a severity change, not kept for a return to it', () => {
   // The keying is id + severity, so the record says "this advisory, at this
-  // rating, is dealt with". While the snapshot keeps listing the id the record
-  // is kept — which means a condition that changes and then returns to the
-  // dismissed rating is hidden again. Pinned so that it is a decision, not an
-  // accident; a record is retired by absence, never by a different severity.
+  // rating, is dealt with" — and it lasts only while it hides a row. The
+  // moment the snapshot lists the id at another rating the advisory has
+  // changed: it is shown, and its record goes with the report that shows it.
+  // So a condition that changes and then returns to the dismissed rating is
+  // shown too, until the owner dismisses it again. Pinned so that it is a
+  // decision, not an accident.
   const records = { 'fault.no_ground': record('critical') };
   // The same ring, with the firmware now rating that advisory `warning`.
   const changed = visit(
@@ -1055,10 +1058,16 @@ test('a record outlives a severity change while the id stays listed', () => {
     ['fault.stuck_relay', 'fault.no_ground', 'thermal.high_temp'],
     'the changed advisory is listed again',
   );
-  assert.deepEqual(Object.keys(changed.dismissals), ['fault.no_ground']);
+  assert.deepEqual(changed.dismissals, {}, 'and its record is retired on that report');
+  // The input is never mutated: the screen keeps owning the map it passed.
+  assert.deepEqual(records, { 'fault.no_ground': record('critical') });
 
+  // Back at the dismissed severity without having left the ring: nothing is
+  // left to hide it with, and it offers Dismiss again.
   const back = visit(threeRows(), { dismissals: changed.dismissals });
-  assert.deepEqual(ids(back), ['fault.stuck_relay', 'thermal.high_temp']);
+  assert.deepEqual(ids(back), ['fault.stuck_relay', 'fault.no_ground', 'thermal.high_temp']);
+  assert.equal(back.title, '3 advisories');
+  assert.equal(dismissControlState(back.advisories[1]).show, true);
 });
 
 test('absence retires the record, and the projection answers the pruned map', () => {

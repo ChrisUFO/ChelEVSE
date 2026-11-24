@@ -783,6 +783,9 @@ test('a dismissed row returns when its severity changes, and after it leaves and
   assert.equal(chipOf(rowOf(), 'health-severity').textContent, 'Warning');
   assert.equal(element('health-title').textContent, '1 recorded advisory');
   assert.equal(dismissOf(rowOf()).textContent, 'Dismiss');
+  // The record went with that report — it lasts only while it hides a row —
+  // so the row would be shown as well if it returned to Critical as it is.
+  assert.equal(stored(), null, 'the retired record is not kept');
 
   // Dismissed at the new rating too, and then the charger clears it: the
   // record goes with it…

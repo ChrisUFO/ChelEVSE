@@ -45,15 +45,18 @@
 // stays listed until it is dismissed as well, and dismissing one changes
 // nothing the charger reports.
 //
-// A dismissal record is keyed by advisory id plus the severity it hid, and is
-// retired the moment a usable report stops listing that id. A row therefore
+// A dismissal record is keyed by advisory id plus the severity it hid, and
+// lasts only while it hides a row: it is retired the moment a usable report
+// stops listing that id, or lists it at another severity. A row therefore
 // returns exactly when the advisory genuinely changes — the firmware rates the
 // condition differently, or it cleared and was raised again — and an unchanged
-// one stays hidden. `counter_token` was considered as the discriminator and set
-// aside: it is the bridge's classification watermark (`pi/health.py`), a
-// bridge-internal detail, so keying on it would turn a future refinement of
-// that classifier into a silent web behaviour change. Severity and absence are
-// the facts the owner can see.
+// one stays hidden. A changed advisory stays shown from then on: if it returns
+// to the dismissed severity without leaving the ring, nothing hides it again
+// until the owner dismisses it once more. `counter_token` was considered as
+// the discriminator and set aside: it is the bridge's classification watermark
+// (`pi/health.py`), a bridge-internal detail, so keying on it would turn a
+// future refinement of that classifier into a silent web behaviour change.
+// Severity and absence are the facts the owner can see.
 
 import { dateLabel } from './format.js';
 
@@ -565,12 +568,15 @@ function isDismissed(records, row) {
   return Boolean(record) && typeof record === 'object' && record.severity === row.severity;
 }
 
-// The records whose ids `rows` still list: one whose advisory the snapshot no
-// longer carries is retired here, on a report that lists the ring at all —
-// an unknown state returns no map instead, precisely so it retires nothing.
+// The records that still hide a row. A record survives a usable report only
+// while the row it hides is on it: one whose advisory the snapshot no longer
+// carries is retired here, and so is one whose advisory it lists at another
+// severity — that advisory changed, and the record was about the rating it
+// hid. An unknown state returns no map instead, precisely so it retires
+// nothing.
 function retainedDismissals(records, rows) {
-  const listed = new Set(rows.map((row) => row.id));
-  return Object.fromEntries(Object.entries(records).filter(([id]) => listed.has(id)));
+  const hidden = new Set(rows.filter((row) => isDismissed(records, row)).map((row) => row.id));
+  return Object.fromEntries(Object.entries(records).filter(([id]) => hidden.has(id)));
 }
 
 /**
@@ -590,8 +596,8 @@ function retainedDismissals(records, rows) {
  *              (never at the same time as an `incomplete` headline)
  *   advisories the rows to list — the snapshot's, less the dismissed ones
  *   dismissals the records the screen should keep: on a usable report, the
- *              input pruned to the ids that report lists; `null` on every
- *              unknown state
+ *              input reduced to the records that still hide a row on it;
+ *              `null` on every unknown state
  *
  * A row offers its Acknowledge control only when the document positively
  * carries `ack_command: true` — the bridge-build capability fact — so a web
@@ -650,10 +656,10 @@ export function healthState({ doc, error = false, nowMs = Date.now(), dismissals
     .filter((entry) => entry && typeof entry === 'object')
     .map((entry) => advisoryRow(entry, acks, nowMs, canAckCommand))
     .sort(compareRows);
-  // Dismissals (#205): the records are pruned against every id the snapshot
-  // lists — before anything is hidden, so a dismissed row still counts as
-  // listed while it is — and a row is hidden only while its record names the
-  // severity the snapshot reports: a different rating is a changed advisory.
+  // Dismissals (#205): a row is hidden only while its record names the
+  // severity the snapshot reports — a different rating is a changed advisory
+  // — and the records are reduced to the ones still hiding a row, so the
+  // record for a changed advisory retires on the very report that shows it.
   const records =
     dismissals && typeof dismissals === 'object' && !Array.isArray(dismissals) ? dismissals : {};
   const kept = retainedDismissals(records, listed);
