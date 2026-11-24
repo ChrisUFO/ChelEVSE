@@ -269,7 +269,7 @@ test('a write that cannot leave says so and leaves the row unacknowledged', asyn
   const message = messageOf(row);
   assert.equal(message.hidden, false);
   assert.equal(message.textContent, 'Couldn’t send — check your connection and try again.');
-  // Back to idle, ready for another try — and still recorded, never dismissed.
+  // Back to idle, ready for another try — and still recorded, never acknowledged.
   assert.equal(button.textContent, 'Acknowledge');
   assert.equal(button.disabled, false);
   assert.equal(chipOf(row, 'health-state').textContent, 'Recorded');

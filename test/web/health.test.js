@@ -357,7 +357,7 @@ test('a counter-derived critical is recorded, and stays critical', () => {
   assert.equal(row.name, 'No ground');
   assert.equal(row.seen, 'First seen 8 Nov');
   assert.equal(state.title, '1 acknowledged advisory');
-  assert.match(state.detail, /Dismissed on the charger, kept here for the record/);
+  assert.match(state.detail, /Acknowledged on the charger, kept here for the record/);
   // Nothing ties health to whether power is flowing, and nothing calls it fine.
   assert.doesNotMatch(copyOf(state), /charging|is safe|all clear|healthy|emergency/i);
 });
@@ -392,7 +392,7 @@ test('an unacknowledged historical advisory reads as recorded, not active', () =
 test('acks[<id>] counts as acknowledged before the next poll reports it', () => {
   // The ack command writes `acks.<id>` immediately; the gateway's own `acked`
   // flag only reaches this document at the next 300 s health poll (D5). An
-  // entry the owner just acknowledged must read as dismissed, not active.
+  // entry the owner just acknowledged must read as acknowledged, not active.
   const entry = {
     id: 'thermal.high_temp',
     severity: 'warning',

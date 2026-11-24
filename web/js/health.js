@@ -15,7 +15,7 @@
 //                 bridge already polls corroborates the condition *now*.
 //
 // So a counter-derived critical reads as **recorded**, not as a live emergency,
-// and an acknowledged entry stays listed as dismissed-and-kept-for-the-record
+// and an acknowledged entry stays listed as acknowledged-and-kept-for-the-record
 // rather than disappearing. The card never infers safety: "No advisories" is a
 // statement about the gateway's list, an open firmware gate makes even that
 // incomplete, and a missing/unreadable/stale document is "Health unknown".
@@ -450,7 +450,7 @@ function summary(counts) {
   }
   return {
     title: plural(acknowledged, 'acknowledged advisory', 'acknowledged advisories'),
-    detail: 'Dismissed on the charger, kept here for the record.',
+    detail: 'Acknowledged on the charger, kept here for the record.',
   };
 }
 
