@@ -208,6 +208,12 @@ test('a refused write still hides the row for this page', () => {
     'thermal.high_temp',
     'wear.relay_life',
   ]);
+
+  // Storage took that one, so the page reads storage again from here: another
+  // page's change to the account is no longer hidden behind a refused copy.
+  createDismissalStore({ storage, now: () => T0 }).replace('uid-a', {});
+  assert.equal(map.size, 0);
+  assert.deepEqual(dismissals.read('uid-a'), {});
 });
 
 test('a store that cannot be read yields empty', () => {
@@ -223,6 +229,49 @@ test('a store that cannot be read yields empty', () => {
   const { dismissals } = store(storage);
   dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
   assert.deepEqual(Object.keys(dismissals.read('uid-a')), ['fault.no_ground']);
+});
+
+test('a page whose write storage took reads storage again and sees another page’s change', () => {
+  // Two tabs of one account share the key — the app sets that up on purpose.
+  // Tab A dismissed an advisory and storage took it; while A sat in the
+  // background the charger cleared it and tab B's next report retired the
+  // record; the charger then raised it again at the same severity.
+  const storage = memoryStorage();
+  const tabA = createDismissalStore({ storage, now: () => T0 });
+  const tabB = createDismissalStore({ storage, now: () => T0 });
+  tabA.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  assert.deepEqual(Object.keys(persisted(storage)['uid-a']), ['fault.no_ground']);
+
+  // Tab B's report no longer lists it: the screen hands the projection's
+  // pruned — here empty — map back, which retires the account's entry.
+  assert.deepEqual(tabB.replace('uid-a', {}), {});
+  assert.equal(storage.getItem(DISMISSALS_KEY), null);
+
+  // Tab A reads that, not a copy of the write it made before: its copy still
+  // holds the record, and answering from it would hide an advisory the
+  // charger lists again.
+  assert.deepEqual(tabB.read('uid-a'), {});
+  assert.deepEqual(tabA.read('uid-a'), {}, 'the retirement reaches tab A');
+});
+
+test('a page’s next dismissal starts from storage and cannot undo another page’s', () => {
+  // The same two tabs: A dismissed one advisory and B another, then A dismisses
+  // a third. A dismissal rewrites the account's whole map, so it starts from
+  // what storage holds now — B's record included. From the map A itself wrote
+  // two changes ago it would drop B's record, and that advisory would list
+  // again in both tabs.
+  const storage = memoryStorage();
+  const tabA = createDismissalStore({ storage, now: () => T0 });
+  const tabB = createDismissalStore({ storage, now: () => T0 });
+  tabA.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  tabB.dismiss('uid-a', { id: 'thermal.high_temp', severity: 'warning' });
+
+  tabA.dismiss('uid-a', { id: 'wear.relay_life', severity: 'info' });
+
+  const expected = ['fault.no_ground', 'thermal.high_temp', 'wear.relay_life'];
+  assert.deepEqual(Object.keys(persisted(storage)['uid-a']), expected);
+  assert.deepEqual(Object.keys(tabA.read('uid-a')), expected);
+  assert.deepEqual(Object.keys(tabB.read('uid-a')), expected);
 });
 
 test('without an account nothing is read or written', () => {

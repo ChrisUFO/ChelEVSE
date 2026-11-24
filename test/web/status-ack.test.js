@@ -455,10 +455,11 @@ test('sign-out teardown leaves no control or focus behind', () => {
 //
 // The row's other control, on the same harness. Each case signs an account in
 // and starts from an empty store: a record is scoped to an account, and the
-// screen's store is module state. It also keeps every account it has written
-// for in memory for the page's life — that is the session-only hide — so a
-// case cannot reset an account an earlier one already dismissed under. Each
-// sign-in therefore starts a fresh account. What a record hides and when it is
+// screen's store is module state. Clearing the store does reset an account an
+// earlier case dismissed under — the store reads storage again once storage
+// has taken a write — but never an account whose write was refused: that copy
+// is the page's for life, which is the session-only hide. Each sign-in
+// therefore starts a fresh account. What a record hides and when it is
 // retired is health.js's (test/web/health.test.js); here it is that the
 // control, the click, the focus hand-off and the persistence are wired the way
 // those rules assume.
@@ -671,8 +672,8 @@ test('the record is persisted under the signed-in account, and a steady report w
 });
 
 test('a record an earlier page load wrote is applied on this one', (t) => {
-  // The screen's own writes above are answered from its in-memory copy; this
-  // is the reload case — a record only storage knows about.
+  // The reload case: a record only storage knows about, which no store in
+  // this page has committed.
   const EARLIER = 'uid-earlier-page';
   signIn(t, EARLIER);
   assert.equal(rows().length, 1, 'nothing stored: the row lists');

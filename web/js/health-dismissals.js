@@ -12,9 +12,12 @@
 // Tolerant by design, three ways: a store that is unreadable or not this shape
 // reads as empty rather than throwing into a render; a refused write is
 // swallowed; and because that refusal must not undo the click the owner just
-// made, every change is written to an in-memory copy first. So a private-mode
-// or over-quota storage degrades to a hide that lasts this page's session,
-// instead of to a button that does nothing.
+// made, every change is kept in an in-memory copy as well. That copy is a
+// fallback only — `read` goes to storage first, so pages that share the key
+// stay in step — and answers for an account whose last write was refused, or
+// when storage cannot be read. So a private-mode or over-quota storage
+// degrades to a hide that lasts this page's session, instead of to a button
+// that does nothing.
 
 export const DISMISSALS_KEY = 'chelevse.healthDismissals';
 
@@ -77,43 +80,68 @@ export function createDismissalStore({
   key = DISMISSALS_KEY,
   now = Date.now,
 } = {}) {
-  // Each account's map as this page last wrote it, whether or not storage
-  // took it. `read` prefers a copy here over what storage holds for that uid.
+  // Each account's map as this page last committed it — kept whatever storage
+  // did with it, but a fallback, never the first answer. Storage is the
+  // record: two tabs of one account share the one key, so a page whose write
+  // was taken reads what storage holds *now*, and sees another page's change.
+  // A page that preferred its own copy would keep hiding an advisory another
+  // tab's report had retired, and would rewrite the account's whole map from
+  // that copy on its next dismissal. The copy answers only for an account in
+  // `refused` — storage did not take its last commit, so the copy is the only
+  // record of it — or when storage cannot be read at all.
   const written = new Map();
+  const refused = new Set();
 
+  // The whole store as stored, or null when there is no storage to read. A
+  // storage that will not answer rejects, so `read` can tell that from an
+  // empty key and fall back to the copy.
   function readRaw() {
     if (!storage) return null;
-    try {
-      return storage.getItem(key);
-    } catch {
-      return null;
-    }
+    return storage.getItem(key);
   }
 
+  // Both answer whether storage took the change, which is what `read` goes by.
   function write(raw) {
-    if (!storage) return;
+    if (!storage) return false;
     try {
       storage.setItem(key, raw);
     } catch {
       // Private-mode and quota failures must not break the card.
+      return false;
     }
+    return true;
   }
 
   function remove() {
-    if (!storage) return;
+    if (!storage) return false;
     try {
       storage.removeItem(key);
     } catch {
       // Same tolerance as write.
+      return false;
     }
+    return true;
+  }
+
+  // The copy — empty for an account this page has never committed.
+  function copyOf(uid) {
+    return { ...(written.get(uid) || {}) };
   }
 
   function read(uid) {
     if (!isUid(uid)) return {};
-    if (written.has(uid)) return { ...written.get(uid) };
+    // A commit storage refused exists only here: the hide this page made.
+    if (refused.has(uid)) return copyOf(uid);
+    let raw;
+    try {
+      raw = readRaw();
+    } catch {
+      // Unreadable: the copy is the best this page has.
+      return copyOf(uid);
+    }
     let all;
     try {
-      all = JSON.parse(readRaw());
+      all = JSON.parse(raw);
     } catch {
       return {};
     }
@@ -141,8 +169,10 @@ export function createDismissalStore({
     const others = { ...all };
     delete others[uid];
     const next = Object.keys(records).length ? { ...others, [uid]: records } : others;
-    if (!Object.keys(next).length) remove();
-    else write(JSON.stringify(next));
+    // Whether storage took it decides which of the two `read` believes next.
+    const took = Object.keys(next).length ? write(JSON.stringify(next)) : remove();
+    if (took) refused.delete(uid);
+    else refused.add(uid);
   }
 
   return {
