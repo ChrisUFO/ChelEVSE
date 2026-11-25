@@ -8,8 +8,8 @@
 // health.js's decision (an advisory is hidden while its severity and the fact
 // of whether the charger reported it as present are both unchanged, and a
 // record leaves once the snapshot lists its id at another severity or with
-// that fact turned, or a snapshot that leaves no firmware gate open stops
-// listing it) — this module only keeps them, so that logic stays
+// that fact turned, or a snapshot that leaves no gate that may still close
+// stops listing it) — this module only keeps them, so that logic stays
 // unit-testable without any storage. `reportedPresent` comes from the row the
 // screen hands `dismiss`, never from anything here.
 //

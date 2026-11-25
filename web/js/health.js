@@ -50,16 +50,16 @@
 // (`reportedPresent` — the fact behind the Active chip, read before
 // acknowledgement is considered). It lasts only while it hides a row: it is
 // retired the moment a usable report lists that id at another severity or
-// with that fact the other way, or a report that leaves no gate open stops
-// listing it. A row therefore returns exactly when the advisory genuinely
-// changes — the firmware rates the condition differently, the charger starts
-// or stops reporting the condition now (a fault tripped again), or it cleared
-// and was raised again — and an unchanged one stays hidden. A changed
-// advisory stays shown from then on: if it returns to the dismissed severity
-// and presence without leaving the ring, nothing hides it again until the
-// owner dismisses it once more. Acknowledgement is no part of the key — it is
-// the owner's own action, not something the charger reports — so
-// acknowledging a dismissed row, or taking that back, leaves it hidden.
+// with that fact the other way, or a report that leaves no gate that may
+// still close stops listing it. A row therefore returns exactly when the
+// advisory genuinely changes — the firmware rates the condition differently,
+// the charger starts or stops reporting the condition now (a fault tripped
+// again), or it cleared and was raised again — and an unchanged one stays
+// hidden. A changed advisory stays shown from then on: if it returns to the
+// dismissed severity and presence without leaving the ring, nothing hides it
+// again until the owner dismisses it once more. Acknowledgement is no part of
+// the key — it is the owner's own action, not something the charger reports —
+// so acknowledging a dismissed row, or taking that back, leaves it hidden.
 // Silence is not a change either: while a firmware gate may still close, the
 // gateway reports none of that gate's checks, so a report under one retires
 // only what it lists changed and keeps the records of the ids it leaves out —
@@ -611,12 +611,13 @@ function isDismissed(records, row) {
 // The records that outlive a usable report. A record is retired by evidence
 // that its advisory changed, and by nothing else: the snapshot lists the id at
 // another severity or with the other present state — the record was about the
-// rating and the presence it hid — or a snapshot that leaves no gate open does
-// not list the id at all. Under a gate that may still close (`gateOpen`) the gateway reports none of that gate's rules, so
-// an id the snapshot leaves out may merely be unreported: its record is kept
-// until a snapshot that can list it does not. What the snapshot does list is
-// evidence whatever the gates say. An unknown state returns no map instead,
-// precisely so it retires nothing.
+// rating and the presence it hid — or a snapshot that leaves no gate that may
+// still close does not list the id at all. Under such a gate (`gateOpen`) the
+// gateway reports none of that gate's rules, so an id the snapshot leaves out
+// may merely be unreported: its record is kept until a snapshot that can list
+// it does not. What the snapshot does list is evidence whatever the gates
+// say. An unknown state returns no map instead, precisely so it retires
+// nothing.
 function retainedDismissals(records, rows, gateOpen) {
   const listed = new Set(rows.map((row) => row.id));
   const hidden = new Set(rows.filter((row) => isDismissed(records, row)).map((row) => row.id));
@@ -645,8 +646,8 @@ function retainedDismissals(records, rows, gateOpen) {
  *   dismissals the records the screen should keep: on a usable report, the
  *              input less every record the report is evidence against — its
  *              advisory is listed at another severity or with the other present
- *              state, or left out of a report that leaves no gate open; `null`
- *              on every unknown state
+ *              state, or left out of a report that leaves no gate that may
+ *              still close; `null` on every unknown state
  *
  * A row offers its Acknowledge control only when the document positively
  * carries `ack_command: true` — the bridge-build capability fact — so a web

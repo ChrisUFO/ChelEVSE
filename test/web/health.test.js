@@ -959,8 +959,8 @@ test('reset cancels a wait and forgets the attempt', () => {
 //
 // A dismissal record hides a row while the severity it names is the one the
 // snapshot reports; it is retired when a usable report lists the id at another
-// severity or a report that leaves no gate open stops listing it — never on
-// an unknown state, nor on the silence of a gate that may still close. The
+// severity or a report that leaves no gate that may still close stops listing
+// it — never on an unknown state, nor on the silence of such a gate. The
 // records themselves are health-dismissals.js's business
 // (test/web/health-dismissals.test.js); what is pinned here is what the one
 // pass that builds the card does with them.
