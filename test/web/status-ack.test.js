@@ -1161,7 +1161,7 @@ test('a restart report that still lists rows retires nothing it is silent about'
   assert.deepEqual(stored(), before);
 
   // A report that leaves the safety check out is the clearing that retires it
-  // — on this charger's firmware (7.12) too: its relay gate never closes, so
+  // — on this charger's firmware (row 7.12) too: its relay gate never closes, so
   // every report there is `incomplete`, and it prunes on absence all the same,
   // that gate being no answer the gateway still owes.
   const deployed = {

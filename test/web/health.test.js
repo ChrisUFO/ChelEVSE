@@ -957,13 +957,14 @@ test('reset cancels a wait and forgets the attempt', () => {
 
 // ---------- dismissal (#205) ----------
 //
-// A dismissal record hides a row while the severity it names is the one the
-// snapshot reports; it is retired when a usable report lists the id at another
-// severity or a report that leaves no gate that may still close stops listing
-// it — never on an unknown state, nor on the silence of such a gate. The
-// records themselves are health-dismissals.js's business
-// (test/web/health-dismissals.test.js); what is pinned here is what the one
-// pass that builds the card does with them.
+// A dismissal record hides a row while the severity and the present fact it
+// names are the ones the snapshot reports; it is retired when a usable report
+// lists the id at another severity or with the other present state, or a
+// report that leaves no gate that may still close stops listing it — never on
+// an unknown state, nor on the silence of such a gate. The records themselves
+// are health-dismissals.js's business (test/web/health-dismissals.test.js);
+// what is pinned here is what the one pass that builds the card does with
+// them.
 
 const T0 = 1794876000000;
 // A record as the store keeps one (#205): the severity it hid, and whether the
@@ -1056,13 +1057,13 @@ test('a record that does not name the row’s severity hides nothing', () => {
 });
 
 test('a record is retired by a severity change, not kept for a return to it', () => {
-  // The keying is id + severity, so the record says "this advisory, at this
-  // rating, is dealt with" — and it lasts only while it hides a row. The
-  // moment the snapshot lists the id at another rating the advisory has
-  // changed: it is shown, and its record goes with the report that shows it.
-  // So a condition that changes and then returns to the dismissed rating is
-  // shown too, until the owner dismisses it again. Pinned so that it is a
-  // decision, not an accident.
+  // The keying is id, the severity and the present fact, so the record says
+  // "this advisory, at this rating, is dealt with" — and it lasts only while
+  // it hides a row. The moment the snapshot lists the id at another rating the
+  // advisory has changed: it is shown, and its record goes with the report
+  // that shows it. So a condition that changes and then returns to the
+  // dismissed rating is shown too, until the owner dismisses it again. Pinned
+  // so that it is a decision, not an accident.
   const records = { 'fault.no_ground': record('critical', false) };
   // The same ring, with the firmware now rating that advisory `warning`.
   const changed = visit(

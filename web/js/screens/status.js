@@ -478,12 +478,13 @@ function healthRow(row) {
 //
 // The row is read from the live projection by its id, never taken from the
 // control's own build. The list is rebuilt only when something a row renders
-// changes, and whether the charger reports the condition present is not
-// rendered: an acknowledged row reads Acknowledged either way, so its node
-// outlives the report that flips that fact. The record is keyed on the fact
-// (`isDismissed`), so one written from the older row would match nothing — the
-// click would hide no row, and the render below would discard the record: a
-// Dismiss that silently does nothing for as long as nothing else rebuilds.
+// changes, and an acknowledged row does not render whether the charger
+// reports the condition present: it reads Acknowledged either way, so its
+// node outlives the report that flips that fact. The record is keyed on the
+// fact (`isDismissed`), so one written from the older row would match
+// nothing — the click would hide no row, and the render below would discard
+// the record: a Dismiss that silently does nothing for as long as nothing
+// else rebuilds.
 function dismissRow(id, pointer) {
   // A control dispatched after its row left the projection — its node went
   // with the rebuild that dropped the advisory — has nothing left to hide.
@@ -603,11 +604,13 @@ function renderHealth() {
   // itself a signature change: the row a Dismiss removed, and the one a
   // changed advisory brought back — a new severity, or the charger reporting
   // the condition as present or not — each rebuild the list (#205). Whether
-  // the charger reports the condition present is not itself in the signature:
-  // it is not rendered, and on an acknowledged row the chip reads the same
-  // whichever way it stands. A flip on a row that stays listed therefore
-  // rebuilds nothing — which is why the Dismiss click reads its row from the
-  // live projection (`dismissRow`) and not from its node.
+  // the charger reports the condition present is not itself in the signature.
+  // A row that is not acknowledged renders it — as its Active or Recorded
+  // chip, which is in the signature — so a flip there rebuilds. An
+  // acknowledged row reads Acknowledged whichever way it stands, so a flip on
+  // a row that stays listed and is acknowledged rebuilds nothing — which is
+  // why the Dismiss click reads its row from the live projection
+  // (`dismissRow`) and not from its node.
   const signature = state.advisories
     .map(
       (row) =>
