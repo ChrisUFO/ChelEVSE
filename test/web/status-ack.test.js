@@ -795,6 +795,31 @@ test('dismissing a row mid-acknowledgement ends the wait and strands no focus', 
   assert.deepEqual(rows(), []);
   assert.equal(element('health-title').textContent, 'No advisories');
   assert.equal(element('feedback').textContent, '');
+
+  // It was the dismissal that ended the wait, though — not that refusal
+  // landing. A second attempt, dismissed the same way, and the advisory then
+  // listed again at another severity while its write is still out: only the
+  // dismissal can have ended the attempt, and the new row's control is idle.
+  showHealth(doc({ advisories: [{ ...doc().advisories[0], severity: 'warning' }] }));
+  assert.equal(rows().length, 1, 're-rated, so listed again');
+  const second = ackOf(rowOf());
+  click(second);
+  assert.equal(second.textContent, 'Acknowledging…');
+
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'back at the dismissed rating, so listed again');
+  const control = ackOf(rowOf());
+  assert.notEqual(control, second, 'the row was rebuilt');
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(control.disabled, false);
+  assert.equal(messageOf(rowOf()).hidden, true);
+
+  // The second write's refusal then lands on nothing.
+  await flush();
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(messageOf(rowOf()).hidden, true);
 });
 
 test('dismissing another row leaves a surviving row’s acknowledgement in flight', async (t) => {
