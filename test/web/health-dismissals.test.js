@@ -40,47 +40,64 @@ function store(storage = memoryStorage(), extra = {}) {
 // What the key holds, as the next page load would read it.
 const persisted = (storage) => JSON.parse(storage.getItem(DISMISSALS_KEY) ?? 'null');
 
-test('a dismissal is written at once and read back by a later store', () => {
-  const { dismissals, storage, tick } = store();
-  const record = dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+// An advisory as the projection hands it to `dismiss`: the three parts of a
+// dismissal's key (#205). `recorded` is one the charger did not report as
+// present when dismissed, `active` one it did.
+const recorded = (id, severity) => ({ id, severity, reportedPresent: false });
+const active = (id, severity) => ({ id, severity, reportedPresent: true });
 
-  // The record carries the severity it hid, for the resurface rule, and the
+test('a dismissal is written at once and read back by a later store', () => {
+  const { dismissals, storage } = store();
+  const record = dismissals.dismiss('uid-a', active('fault.no_ground', 'critical'));
+
+  // The record carries the two facts a row must still match to stay hidden —
+  // the severity it hid, and that the charger reported it as present — and the
   // stamp of the click.
-  assert.deepEqual(record, { severity: 'critical', dismissedAt: T0 });
+  assert.deepEqual(record, { severity: 'critical', dismissedAt: T0, reportedPresent: true });
   assert.deepEqual(persisted(storage), {
-    'uid-a': { 'fault.no_ground': { severity: 'critical', dismissedAt: T0 } },
+    'uid-a': {
+      'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: true },
+    },
   });
   assert.deepEqual(dismissals.read('uid-a'), { 'fault.no_ground': record });
 
   // A reload: a new store over the same storage sees exactly what was written.
   const reloaded = createDismissalStore({ storage });
   assert.deepEqual(reloaded.read('uid-a'), {
-    'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
+    'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: true },
   });
 
   // A second page (another tab) writing its own account is a read-modify-write
   // of the one key: the first account's record survives it. The page has its
   // own clock.
   const later = createDismissalStore({ storage, now: () => T0 + 1000 });
-  later.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
+  later.dismiss('uid-b', recorded('thermal.high_temp', 'warning'));
   assert.deepEqual(persisted(storage), {
-    'uid-a': { 'fault.no_ground': { severity: 'critical', dismissedAt: T0 } },
-    'uid-b': { 'thermal.high_temp': { severity: 'warning', dismissedAt: T0 + 1000 } },
+    'uid-a': {
+      'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: true },
+    },
+    'uid-b': {
+      'thermal.high_temp': { severity: 'warning', dismissedAt: T0 + 1000, reportedPresent: false },
+    },
   });
 });
 
 test('records are scoped per account', () => {
   const { dismissals, storage } = store();
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
-  dismissals.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
+  dismissals.dismiss('uid-b', recorded('thermal.high_temp', 'warning'));
 
   assert.deepEqual(Object.keys(dismissals.read('uid-a')), ['fault.no_ground']);
   assert.deepEqual(Object.keys(dismissals.read('uid-b')), ['thermal.high_temp']);
   // An account with no record reads empty — never another account's.
   assert.deepEqual(dismissals.read('uid-c'), {});
   assert.deepEqual(persisted(storage), {
-    'uid-a': { 'fault.no_ground': { severity: 'critical', dismissedAt: T0 } },
-    'uid-b': { 'thermal.high_temp': { severity: 'warning', dismissedAt: T0 } },
+    'uid-a': {
+      'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
+    },
+    'uid-b': {
+      'thermal.high_temp': { severity: 'warning', dismissedAt: T0, reportedPresent: false },
+    },
   });
 });
 
@@ -92,18 +109,21 @@ test('an unreadable or wrong-shaped store reads as empty, never throws', () => {
   }
 
   // Per record: anything not in the stored shape is dropped on its own, and
-  // the well-formed record beside it is kept.
+  // the well-formed record beside it is kept. That includes a record with no
+  // present fact, or one that is not a boolean: the field has no fallback.
   storage.setItem(
     DISMISSALS_KEY,
     JSON.stringify({
       'uid-a': {
-        'fault.no_ground': { severity: 'critical', dismissedAt: T0 }, // kept
+        'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false }, // kept
         'safety.vent_check': { severity: 'warning' }, // no stamp
         'thermal.high_temp': { dismissedAt: T0 }, // no severity
         'wear.relay_life': { severity: 3, dismissedAt: T0 }, // severity not a string
         'fault.stuck_relay': { severity: 'critical', dismissedAt: 'yesterday' },
         'fault.gfci_tripped': { severity: 'info', dismissedAt: Number.NaN }, // not finite
         'wear.relay_cold_open': { severity: 'info', dismissedAt: Infinity },
+        'wear.relay_transit_drift': { severity: 'info', dismissedAt: T0 }, // no present fact
+        'wear.stuck_relay_recovery': { severity: 'info', dismissedAt: T0, reportedPresent: 'no' },
         'safety.ground_check': 'critical', // not a record object
         'safety.diode_check': null,
         'safety.relay_check': ['critical', T0],
@@ -112,32 +132,82 @@ test('an unreadable or wrong-shaped store reads as empty, never throws', () => {
   );
   const dismissals = createDismissalStore({ storage });
   assert.deepEqual(dismissals.read('uid-a'), {
-    'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
+    'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
   });
 
   // A non-object store is not merged into either: the next write replaces it.
   storage.setItem(DISMISSALS_KEY, 'garbage');
   const { dismissals: writer } = store(storage);
-  writer.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  writer.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   assert.deepEqual(Object.keys(persisted(storage)), ['uid-a']);
+});
+
+test('a record says whether the charger reported the advisory as present', () => {
+  // The third part of a dismissal's key (health.js's rule), kept from the row
+  // the screen hands over — `true` for a live condition, `false` for a record
+  // — and read back by a later store.
+  const { dismissals, storage } = store();
+  const live = dismissals.dismiss('uid-a', active('fault.no_ground', 'critical'));
+  const standing = dismissals.dismiss('uid-a', recorded('thermal.high_temp', 'warning'));
+  assert.equal(live.reportedPresent, true);
+  assert.equal(standing.reportedPresent, false);
+  assert.deepEqual(createDismissalStore({ storage }).read('uid-a'), {
+    'fault.no_ground': live,
+    'thermal.high_temp': standing,
+  });
+
+  // Required, with no fallback. This record shape is unreleased, so there is
+  // no earlier one to read a record without the fact back from: whichever way
+  // it is missing, the entry is wrong-shaped and dropped, and its row lists.
+  storage.setItem(
+    DISMISSALS_KEY,
+    JSON.stringify({
+      'uid-a': {
+        'fault.no_ground': { severity: 'critical', dismissedAt: T0 }, // the fact is missing
+        'thermal.high_temp': { severity: 'warning', dismissedAt: T0, reportedPresent: 'false' },
+        'wear.relay_life': { severity: 'info', dismissedAt: T0, reportedPresent: null },
+      },
+    }),
+  );
+  const reloaded = createDismissalStore({ storage });
+  assert.deepEqual(reloaded.read('uid-a'), {}, 'none of them is a record');
+
+  // `replace` drops one rather than persisting it, beside a well-formed one.
+  assert.deepEqual(
+    reloaded.replace('uid-a', {
+      'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
+      'thermal.high_temp': standing,
+    }),
+    { 'thermal.high_temp': standing },
+  );
+  assert.deepEqual(Object.keys(persisted(storage)['uid-a']), ['thermal.high_temp']);
+
+  // And the fact is part of what makes a record the same: with only it
+  // changed, the screen's map is not the stored one, and is written.
+  const written = storage.sets;
+  dismissals.replace('uid-a', {
+    'thermal.high_temp': { ...standing, reportedPresent: true },
+  });
+  assert.equal(storage.sets, written + 1);
+  assert.deepEqual(persisted(storage)['uid-a']['thermal.high_temp'].reportedPresent, true);
 });
 
 test('dismissing the same advisory again overwrites its record', () => {
   const { dismissals, tick } = store();
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   tick(5000);
-  const again = dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'warning' });
+  const again = dismissals.dismiss('uid-a', recorded('fault.no_ground', 'warning'));
 
   assert.equal(again.dismissedAt, T0 + 5000);
   assert.deepEqual(dismissals.read('uid-a'), {
-    'fault.no_ground': { severity: 'warning', dismissedAt: T0 + 5000 },
+    'fault.no_ground': { severity: 'warning', dismissedAt: T0 + 5000, reportedPresent: false },
   });
 });
 
 test('replace stores a map health.js already pruned, and only when it changed', () => {
   const { dismissals, storage } = store();
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
-  dismissals.dismiss('uid-a', { id: 'thermal.high_temp', severity: 'warning' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
+  dismissals.dismiss('uid-a', recorded('thermal.high_temp', 'warning'));
   const written = storage.sets;
 
   // The screen hands the projection's map back on every usable report; an
@@ -151,14 +221,16 @@ test('replace stores a map health.js already pruned, and only when it changed', 
   });
   assert.equal(storage.sets, written + 1);
   assert.deepEqual(persisted(storage), {
-    'uid-a': { 'thermal.high_temp': { severity: 'warning', dismissedAt: T0 } },
+    'uid-a': {
+      'thermal.high_temp': { severity: 'warning', dismissedAt: T0, reportedPresent: false },
+    },
   });
 
   // An empty map retires the account — only that account. Another one's entry
   // stays until its own last record goes, and the key goes with the last of
   // them, so the store never grows a tombstone.
   const other = createDismissalStore({ storage, now: () => T0 });
-  other.dismiss('uid-b', { id: 'thermal.high_temp', severity: 'warning' });
+  other.dismiss('uid-b', recorded('thermal.high_temp', 'warning'));
   assert.deepEqual(dismissals.replace('uid-a', {}), {});
   assert.deepEqual(Object.keys(persisted(storage)), ['uid-b'], 'the other account stays');
 
@@ -167,8 +239,9 @@ test('replace stores a map health.js already pruned, and only when it changed', 
 
   // Records outside the stored shape are dropped rather than persisted.
   dismissals.replace('uid-a', {
-    'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
-    'safety.vent_check': { severity: 'warning' },
+    'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
+    'safety.vent_check': { severity: 'warning' }, // no stamp
+    'safety.temp_check': { severity: 'warning', dismissedAt: T0 }, // no present fact
   });
   assert.deepEqual(Object.keys(persisted(storage)['uid-a']), ['fault.no_ground']);
 });
@@ -187,22 +260,22 @@ test('a refused write still hides the row for this page', () => {
   };
   const { dismissals } = store(storage);
 
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   // Storage never took it, but this page reads the record it just wrote.
   assert.equal(map.size, 0);
   assert.deepEqual(dismissals.read('uid-a'), {
-    'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
+    'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
   });
 
   // A second dismissal rides the same in-memory copy.
-  dismissals.dismiss('uid-a', { id: 'thermal.high_temp', severity: 'warning' });
+  dismissals.dismiss('uid-a', recorded('thermal.high_temp', 'warning'));
   assert.deepEqual(Object.keys(dismissals.read('uid-a')), ['fault.no_ground', 'thermal.high_temp']);
   assert.equal(map.size, 0);
 
   // When storage accepts a write again, the account's whole map lands — the
   // records the refusals hid are not lost by the next successful one.
   refused = false;
-  dismissals.dismiss('uid-a', { id: 'wear.relay_life', severity: 'info' });
+  dismissals.dismiss('uid-a', recorded('wear.relay_life', 'info'));
   assert.deepEqual(Object.keys(JSON.parse(map.get(DISMISSALS_KEY))['uid-a']), [
     'fault.no_ground',
     'thermal.high_temp',
@@ -227,7 +300,7 @@ test('a store that cannot be read yields empty', () => {
   // Writing still keeps the in-memory copy: the read failure is not also a
   // hide that silently does nothing.
   const { dismissals } = store(storage);
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   assert.deepEqual(Object.keys(dismissals.read('uid-a')), ['fault.no_ground']);
 });
 
@@ -239,7 +312,7 @@ test('a page whose write storage took reads storage again and sees another page�
   const storage = memoryStorage();
   const tabA = createDismissalStore({ storage, now: () => T0 });
   const tabB = createDismissalStore({ storage, now: () => T0 });
-  tabA.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  tabA.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   assert.deepEqual(Object.keys(persisted(storage)['uid-a']), ['fault.no_ground']);
 
   // Tab B's report no longer lists it: the screen hands the projection's
@@ -263,10 +336,10 @@ test('a page’s next dismissal starts from storage and cannot undo another page
   const storage = memoryStorage();
   const tabA = createDismissalStore({ storage, now: () => T0 });
   const tabB = createDismissalStore({ storage, now: () => T0 });
-  tabA.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
-  tabB.dismiss('uid-a', { id: 'thermal.high_temp', severity: 'warning' });
+  tabA.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
+  tabB.dismiss('uid-a', recorded('thermal.high_temp', 'warning'));
 
-  tabA.dismiss('uid-a', { id: 'wear.relay_life', severity: 'info' });
+  tabA.dismiss('uid-a', recorded('wear.relay_life', 'info'));
 
   const expected = ['fault.no_ground', 'thermal.high_temp', 'wear.relay_life'];
   assert.deepEqual(Object.keys(persisted(storage)['uid-a']), expected);
@@ -278,7 +351,11 @@ test('without an account nothing is read or written', () => {
   const { dismissals, storage } = store();
   storage.setItem(
     DISMISSALS_KEY,
-    JSON.stringify({ 'uid-a': { 'fault.no_ground': { severity: 'critical', dismissedAt: T0 } } }),
+    JSON.stringify({
+      'uid-a': {
+        'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
+      },
+    }),
   );
   const sets = storage.sets;
 
@@ -296,15 +373,15 @@ test('without an account nothing is read or written', () => {
 
 test('without any storage the records last for the page only', () => {
   const { dismissals } = store(null);
-  dismissals.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  dismissals.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   assert.deepEqual(dismissals.read('uid-a'), {
-    'fault.no_ground': { severity: 'critical', dismissedAt: T0 },
+    'fault.no_ground': { severity: 'critical', dismissedAt: T0, reportedPresent: false },
   });
   assert.deepEqual(dismissals.replace('uid-a', {}), {});
   assert.deepEqual(dismissals.read('uid-a'), {});
 });
 
-test('an advisory with no usable id or severity records nothing', () => {
+test('an advisory with no usable id, severity or present fact records nothing', () => {
   const { dismissals, storage } = store();
   for (const advisory of [
     null,
@@ -314,6 +391,8 @@ test('an advisory with no usable id or severity records nothing', () => {
     { severity: 'critical' },
     { id: 7, severity: 'critical' },
     { id: 'fault.no_ground', severity: 3 },
+    { id: 'fault.no_ground', severity: 'critical' }, // no present fact
+    { id: 'fault.no_ground', severity: 'critical', reportedPresent: 'false' },
   ]) {
     assert.equal(dismissals.dismiss('uid-a', advisory), null, JSON.stringify(advisory));
   }
@@ -326,7 +405,7 @@ test('a refused remove is swallowed and the key name is configurable', () => {
   assert.equal(DISMISSALS_KEY, 'chelevse.healthDismissals');
   storage.setItem('other.key', JSON.stringify({ 'uid-a': {} }));
   const custom = createDismissalStore({ storage, key: 'other.key', now: () => T0 });
-  custom.dismiss('uid-a', { id: 'fault.no_ground', severity: 'critical' });
+  custom.dismiss('uid-a', recorded('fault.no_ground', 'critical'));
   assert.ok(storage.getItem('other.key').includes('fault.no_ground'));
   assert.equal(storage.getItem(DISMISSALS_KEY), null, 'the default key is untouched');
 
@@ -343,17 +422,21 @@ test('an id or account spelled like a prototype key stays an own key', () => {
   const storage = memoryStorage();
   storage.setItem(
     DISMISSALS_KEY,
-    '{"__proto__": {"polluted": true}, "uid-a": {"__proto__": {"severity": "critical", "dismissedAt": 1}}}',
+    '{"__proto__": {"polluted": true}, "uid-a": {"__proto__": {"severity": "critical", "dismissedAt": 1, "reportedPresent": false}}}',
   );
   const dismissals = createDismissalStore({ storage });
   const records = dismissals.read('uid-a');
   assert.equal(Object.hasOwn(records, '__proto__'), true);
   assert.equal(Object.getPrototypeOf(records), Object.prototype);
   assert.equal({}.polluted, undefined);
-  assert.deepEqual(records.__proto__, { severity: 'critical', dismissedAt: 1 });
+  assert.deepEqual(records.__proto__, {
+    severity: 'critical',
+    dismissedAt: 1,
+    reportedPresent: false,
+  });
 
   // And a write does not leak one back out.
-  dismissals.dismiss('constructor', { id: '__proto__', severity: 'info' });
+  dismissals.dismiss('constructor', recorded('__proto__', 'info'));
   const stored = persisted(storage);
   assert.equal(Object.getPrototypeOf(stored), Object.prototype);
   assert.equal(Object.hasOwn(stored, '__proto__'), true, 'the own key is preserved as written');

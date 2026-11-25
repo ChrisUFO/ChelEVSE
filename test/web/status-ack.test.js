@@ -709,7 +709,13 @@ test('a record an earlier page load wrote is applied on this one', (t) => {
   storage.set(
     DISMISSALS_KEY,
     JSON.stringify({
-      [EARLIER]: { 'fault.no_ground': { severity: 'critical', dismissedAt: 1794876000000 } },
+      [EARLIER]: {
+        'fault.no_ground': {
+          severity: 'critical',
+          dismissedAt: 1794876000000,
+          reportedPresent: false,
+        },
+      },
     }),
   );
   showHealth(doc());
@@ -885,6 +891,36 @@ test('a dismissed row returns when its severity changes, and after it leaves and
   assert.equal(rows().length, 1);
   assert.equal(element('health-card').getAttribute('data-state'), 'advisories');
   assert.equal(element('health-list').hidden, false);
+});
+
+test('a dismissed record returns when the charger starts reporting it as present', (t) => {
+  const uid = signIn(t);
+  const standing = doc().advisories[0];
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  const record = stored()[uid]['fault.no_ground'];
+  assert.equal(record.severity, 'critical');
+  assert.equal(record.reportedPresent, false, 'dismissed as the record it was');
+
+  // Tripped again: the same id at the same severity, now Active from live
+  // controller state. The row is back, as the live condition it now is…
+  const tripped = doc({
+    advisories: [{ ...standing, classification: 'active', corroborated: true }],
+  });
+  showHealth(tripped);
+  assert.equal(rows().length, 1, 'the same severity does not keep it hidden');
+  assert.equal(rowOf().getAttribute('data-presentation'), 'active');
+  assert.equal(chipOf(rowOf(), 'health-severity').textContent, 'Critical');
+  assert.equal(element('health-title').textContent, '1 active advisory');
+  assert.equal(element('health-card').getAttribute('data-tone'), 'err');
+  assert.equal(dismissOf(rowOf()).textContent, 'Dismiss');
+  // …and its record went with the report that shows it.
+  assert.equal(stored(), null, 'the record is not kept');
+
+  // Dismissed again, the record now says the condition was present.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(stored()[uid]['fault.no_ground'].reportedPresent, true);
 });
 
 test('health unknown leaves the records alone', (t) => {

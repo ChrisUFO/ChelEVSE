@@ -583,8 +583,9 @@ function renderHealth() {
   // otherwise identical advisory list (a bridge upgraded under this web), and
   // a rebuild is what makes the control appear or disappear (#159). It is
   // taken over the rows that are listed, after dismissals, so a dismissal is
-  // itself a signature change: the row a Dismiss removed, and the one a new
-  // severity brought back, each rebuild the list (#205).
+  // itself a signature change: the row a Dismiss removed, and the one a
+  // changed advisory brought back — a new severity, or the charger reporting
+  // the condition as present or not — each rebuild the list (#205).
   const signature = state.advisories
     .map(
       (row) =>

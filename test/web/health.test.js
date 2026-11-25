@@ -966,7 +966,10 @@ test('reset cancels a wait and forgets the attempt', () => {
 // pass that builds the card does with them.
 
 const T0 = 1794876000000;
-const record = (severity) => ({ severity, dismissedAt: T0 });
+// A record as the store keeps one (#205): the severity it hid, and whether the
+// charger reported the advisory as present at the time — the two a row must
+// still match to stay hidden.
+const record = (severity, reportedPresent) => ({ severity, dismissedAt: T0, reportedPresent });
 // One row of each presentation: an active critical, the recorded critical
 // from above, and an acknowledged warning.
 const ACTIVE = {
@@ -986,6 +989,9 @@ const ACKED = {
   corroborated: false,
 };
 const threeRows = () => report({ advisories: [ACTIVE, RECORDED, ACKED] });
+// The standing record tripped again: the same id at the same severity, now
+// Active from live controller state.
+const TRIPPED = { ...RECORDED, classification: 'active', corroborated: true };
 const ids = (state) => state.advisories.map((row) => row.id);
 
 test('a record hides its row while the severity is unchanged, whatever its presentation', () => {
@@ -998,28 +1004,33 @@ test('a record hides its row while the severity is unchanged, whatever its prese
   assert.deepEqual(visit(threeRows()).dismissals, {});
 
   // Active, recorded and acknowledged alike.
-  const active = visit(threeRows(), { dismissals: { 'fault.stuck_relay': record('critical') } });
+  const active = visit(threeRows(), {
+    dismissals: { 'fault.stuck_relay': record('critical', true) },
+  });
   assert.deepEqual(ids(active), ['fault.no_ground', 'thermal.high_temp']);
 
   const recorded = visit(threeRows(), {
-    dismissals: { 'fault.no_ground': record('critical') },
+    dismissals: { 'fault.no_ground': record('critical', false) },
   });
   assert.deepEqual(ids(recorded), ['fault.stuck_relay', 'thermal.high_temp']);
 
   const acked = visit(threeRows(), {
-    dismissals: { 'thermal.high_temp': record('warning') },
+    dismissals: { 'thermal.high_temp': record('warning', false) },
   });
   assert.deepEqual(ids(acked), ['fault.stuck_relay', 'fault.no_ground']);
 
   // Several at once, and the survivors keep their order.
   const both = visit(threeRows(), {
-    dismissals: { 'fault.no_ground': record('critical'), 'thermal.high_temp': record('warning') },
+    dismissals: {
+      'fault.no_ground': record('critical', false),
+      'thermal.high_temp': record('warning', false),
+    },
   });
   assert.deepEqual(ids(both), ['fault.stuck_relay']);
 
   // A record for an advisory this snapshot does not list hides nothing.
   const elsewhere = visit(threeRows(), {
-    dismissals: { 'wear.relay_life': record('info') },
+    dismissals: { 'wear.relay_life': record('info', false) },
   });
   assert.equal(elsewhere.advisories.length, 3);
 });
@@ -1028,16 +1039,20 @@ test('a record that does not name the row’s severity hides nothing', () => {
   // The row is shown again — and dismissible again — the moment the firmware
   // rates the condition differently: that is the resurface rule.
   const worsened = visit(threeRows(), {
-    dismissals: { 'fault.no_ground': record('warning') },
+    dismissals: { 'fault.no_ground': record('warning', false) },
   });
   assert.deepEqual(ids(worsened), ['fault.stuck_relay', 'fault.no_ground', 'thermal.high_temp']);
   assert.equal(worsened.advisories[1].canAcknowledge, true);
   assert.equal(dismissControlState(worsened.advisories[1]).show, true);
   assert.equal(worsened.title, '3 advisories');
 
-  // A record with no severity, or not a record, is not a match either.
-  const shapeless = visit(threeRows(), { dismissals: { 'fault.no_ground': { dismissedAt: T0 } } });
-  assert.equal(shapeless.advisories.length, 3);
+  // A record with no severity, one with no present fact, or not a record at
+  // all, is not a match either: a record in any other shape shows the row.
+  for (const shape of [{ dismissedAt: T0 }, { severity: 'critical', dismissedAt: T0 }]) {
+    const shapeless = visit(threeRows(), { dismissals: { 'fault.no_ground': shape } });
+    assert.equal(shapeless.advisories.length, 3, JSON.stringify(shape));
+    assert.deepEqual(shapeless.dismissals, {}, 'and it is retired with the row shown');
+  }
 });
 
 test('a record is retired by a severity change, not kept for a return to it', () => {
@@ -1048,7 +1063,7 @@ test('a record is retired by a severity change, not kept for a return to it', ()
   // So a condition that changes and then returns to the dismissed rating is
   // shown too, until the owner dismisses it again. Pinned so that it is a
   // decision, not an accident.
-  const records = { 'fault.no_ground': record('critical') };
+  const records = { 'fault.no_ground': record('critical', false) };
   // The same ring, with the firmware now rating that advisory `warning`.
   const changed = visit(
     report({ advisories: [ACTIVE, { ...RECORDED, severity: 'warning' }, ACKED] }),
@@ -1061,7 +1076,7 @@ test('a record is retired by a severity change, not kept for a return to it', ()
   );
   assert.deepEqual(changed.dismissals, {}, 'and its record is retired on that report');
   // The input is never mutated: the screen keeps owning the map it passed.
-  assert.deepEqual(records, { 'fault.no_ground': record('critical') });
+  assert.deepEqual(records, { 'fault.no_ground': record('critical', false) });
 
   // Back at the dismissed severity without having left the ring: nothing is
   // left to hide it with, and it offers Dismiss again.
@@ -1071,22 +1086,154 @@ test('a record is retired by a severity change, not kept for a return to it', ()
   assert.equal(dismissControlState(back.advisories[1]).show, true);
 });
 
+// The third part of the key: whether the charger reported the condition as
+// present when the row was dismissed (`reportedPresent`, the fact behind the
+// Active chip). For a counter-derived fault it is the part that changes when
+// the fault trips again — the id stays in the ring and the severity is the
+// rule's fixed rating — so each way round the row returns and its record is
+// retired, exactly as for a severity change.
+
+test('a dismissed record returns when the charger starts reporting it as present', () => {
+  // Dismissed as it stands on this charger: a counter the controller state no
+  // longer backs.
+  const records = { 'fault.no_ground': record('critical', false) };
+  const standing = visit(report({ advisories: [RECORDED] }), { dismissals: records });
+  assert.deepEqual(ids(standing), []);
+  assert.deepEqual(standing.dismissals, records);
+
+  // Tripped again. The row is back, as the live condition it now is…
+  const live = visit(report({ advisories: [TRIPPED] }), { dismissals: standing.dismissals });
+  assert.deepEqual(ids(live), ['fault.no_ground']);
+  assert.equal(live.advisories[0].presentation, 'active');
+  assert.equal(live.advisories[0].reportedPresent, true);
+  assert.equal(live.advisories[0].severity, 'critical', 'the rating never moved');
+  assert.equal(live.title, '1 active advisory');
+  assert.equal(live.tone, 'err');
+
+  // …and its record went with the very report that shows it: nothing hides it
+  // again until the owner dismisses it once more.
+  assert.deepEqual(live.dismissals, {});
+  assert.equal(dismissControlState(live.advisories[0]).show, true);
+  assert.equal(
+    visit(report({ advisories: [TRIPPED] }), { dismissals: live.dismissals }).advisories.length,
+    1,
+    'still shown on the next report',
+  );
+  // Dismissed again, it is hidden on the fact it now carries.
+  const again = visit(report({ advisories: [TRIPPED] }), {
+    dismissals: { 'fault.no_ground': record('critical', true) },
+  });
+  assert.deepEqual(ids(again), []);
+  // The input is never mutated.
+  assert.deepEqual(records, { 'fault.no_ground': record('critical', false) });
+});
+
+test('a dismissed live condition returns when the charger stops reporting it as present', () => {
+  // Dismissed while Active, and then the fault clears: the same id at the same
+  // severity, a record again.
+  const live = visit(report({ advisories: [TRIPPED] }), {
+    dismissals: { 'fault.no_ground': record('critical', true) },
+  });
+  assert.deepEqual(ids(live), []);
+
+  const cleared = visit(report({ advisories: [RECORDED] }), { dismissals: live.dismissals });
+  assert.deepEqual(ids(cleared), ['fault.no_ground'], 'not the condition that was dismissed');
+  assert.equal(cleared.advisories[0].presentation, 'recorded');
+  assert.equal(cleared.advisories[0].reportedPresent, false);
+  assert.equal(cleared.title, '1 recorded advisory');
+  assert.deepEqual(cleared.dismissals, {}, 'and its record is retired');
+});
+
+test('acknowledging a row, or taking that back, leaves its dismissal alone', () => {
+  // Acknowledgement is the owner's own action, not something the charger
+  // reports, so it is no part of the key: the present fact is read before it
+  // is considered — the bridge still reports `corroborated` for an entry it
+  // has muted. A dismissed row stays hidden while it is acknowledged, by
+  // whatever says so…
+  const standing = { 'fault.no_ground': record('critical', false) };
+  const live = { 'fault.stuck_relay': record('critical', true) };
+  for (const [why, doc, records] of [
+    ['the gateway’s flag', report({ advisories: [{ ...RECORDED, acked: true }] }), standing],
+    [
+      'the bridge’s record of an app acknowledgement',
+      report({ advisories: [RECORDED], acks: { 'fault.no_ground': 1 } }),
+      standing,
+    ],
+    [
+      'the classification',
+      report({ advisories: [{ ...RECORDED, classification: 'acknowledged' }] }),
+      standing,
+    ],
+    [
+      'the gateway’s flag, on a live condition',
+      report({ advisories: [{ ...ACTIVE, acked: true }] }),
+      live,
+    ],
+    [
+      'the classification, on a live condition',
+      report({ advisories: [{ ...ACTIVE, acked: true, classification: 'acknowledged' }] }),
+      live,
+    ],
+  ]) {
+    // Each fixture really is acknowledged, before any dismissal is applied.
+    assert.equal(
+      visit(doc).advisories[0].presentation,
+      'acknowledged',
+      `${why}: the fixture reads as it claims`,
+    );
+    const state = visit(doc, { dismissals: records });
+    assert.deepEqual(ids(state), [], `${why}: the dismissed row stays hidden`);
+    assert.deepEqual(state.dismissals, records, `${why}: and its record stands`);
+  }
+
+  // …and after the acknowledgement is undone, on both kinds of row.
+  for (const [entry, records] of [
+    [RECORDED, standing],
+    [ACTIVE, live],
+  ]) {
+    const state = visit(report({ advisories: [entry] }), { dismissals: records });
+    assert.deepEqual(ids(state), [], entry.id);
+    assert.deepEqual(state.dismissals, records, entry.id);
+  }
+  // The input is never mutated.
+  assert.deepEqual(standing, { 'fault.no_ground': record('critical', false) });
+});
+
+test('whether the charger reports a condition present is read the way its presentation is', () => {
+  // The fact behind the chip, from the same facts in the same order: the
+  // bridge's classification first, the corroboration fact only when it is
+  // missing. For a row nothing has acknowledged, it and Active are one
+  // statement.
+  for (const [entry, present] of [
+    [ACTIVE, true],
+    [RECORDED, false],
+    [{ ...RECORDED, corroborated: true }, false],
+    [{ ...ACTIVE, corroborated: false }, true],
+    [{ id: 'fault.no_ground', severity: 'critical', acked: false, corroborated: true }, true],
+    [{ id: 'fault.no_ground', severity: 'critical', acked: false }, false],
+  ]) {
+    const row = visit(report({ advisories: [entry] })).advisories[0];
+    assert.equal(row.reportedPresent, present, JSON.stringify(entry));
+    assert.equal(row.presentation, present ? 'active' : 'recorded');
+  }
+});
+
 test('absence retires the record, and the projection answers the pruned map', () => {
   // Pruning runs against every id the snapshot lists — including the rows a
   // record hides, so a dismissed row is not "absent" merely because it is
   // hidden.
   const records = {
-    'fault.stuck_relay': record('critical'),
-    'fault.no_ground': record('critical'),
-    'thermal.high_temp': record('warning'),
-    'wear.relay_life': record('info'),
+    'fault.stuck_relay': record('critical', true),
+    'fault.no_ground': record('critical', false),
+    'thermal.high_temp': record('warning', false),
+    'wear.relay_life': record('info', false),
   };
   const allHidden = visit(threeRows(), { dismissals: records });
   assert.deepEqual(allHidden.advisories, []);
   assert.deepEqual(allHidden.dismissals, {
-    'fault.stuck_relay': record('critical'),
-    'fault.no_ground': record('critical'),
-    'thermal.high_temp': record('warning'),
+    'fault.stuck_relay': record('critical', true),
+    'fault.no_ground': record('critical', false),
+    'thermal.high_temp': record('warning', false),
   });
   // The input is never mutated: the screen keeps owning the map it passed.
   assert.deepEqual(Object.keys(records), [
@@ -1112,9 +1259,9 @@ test('absence retires the record, and the projection answers the pruned map', ()
 
 test('a new advisory id is shown whatever was dismissed before', () => {
   const records = {
-    'fault.stuck_relay': record('critical'),
-    'fault.no_ground': record('critical'),
-    'thermal.high_temp': record('warning'),
+    'fault.stuck_relay': record('critical', true),
+    'fault.no_ground': record('critical', false),
+    'thermal.high_temp': record('warning', false),
   };
   const state = visit(
     report({
@@ -1142,14 +1289,19 @@ test('a dismissed row leaves the counts, the summary, the tone and the state', (
 
   // The live critical gone: nothing live is left, so the marker is muted and
   // the summary counts two.
-  const active = visit(threeRows(), { dismissals: { 'fault.stuck_relay': record('critical') } });
+  const active = visit(threeRows(), {
+    dismissals: { 'fault.stuck_relay': record('critical', true) },
+  });
   assert.deepEqual(active.counts, { active: 0, recorded: 1, acknowledged: 1 });
   assert.equal(active.title, '2 advisories');
   assert.equal(active.detail, '1 recorded, 1 acknowledged.');
   assert.equal(active.tone, 'muted');
 
   const one = visit(threeRows(), {
-    dismissals: { 'fault.stuck_relay': record('critical'), 'fault.no_ground': record('critical') },
+    dismissals: {
+      'fault.stuck_relay': record('critical', true),
+      'fault.no_ground': record('critical', false),
+    },
   });
   assert.deepEqual(one.counts, { active: 0, recorded: 0, acknowledged: 1 });
   assert.equal(one.title, '1 acknowledged advisory');
@@ -1158,9 +1310,9 @@ test('a dismissed row leaves the counts, the summary, the tone and the state', (
   // All dismissed: the card's existing presentation for an empty list, exactly.
   const all = visit(threeRows(), {
     dismissals: {
-      'fault.stuck_relay': record('critical'),
-      'fault.no_ground': record('critical'),
-      'thermal.high_temp': record('warning'),
+      'fault.stuck_relay': record('critical', true),
+      'fault.no_ground': record('critical', false),
+      'thermal.high_temp': record('warning', false),
     },
   });
   assert.equal(all.state, 'none');
@@ -1177,9 +1329,9 @@ test('a dismissed row leaves the counts, the summary, the tone and the state', (
   const gate = { settings_known: true, relay_health_known: false };
   const gated = visit(report({ gates: gate, advisories: [ACTIVE, RECORDED, ACKED] }), {
     dismissals: {
-      'fault.stuck_relay': record('critical'),
-      'fault.no_ground': record('critical'),
-      'thermal.high_temp': record('warning'),
+      'fault.stuck_relay': record('critical', true),
+      'fault.no_ground': record('critical', false),
+      'thermal.high_temp': record('warning', false),
     },
   });
   assert.equal(gated.state, 'incomplete');
@@ -1194,8 +1346,8 @@ test('a dismissed row leaves the counts, the summary, the tone and the state', (
   // With one row left the list is the headline and the gate rides the caveat.
   const partial = visit(report({ gates: gate, advisories: [ACTIVE, RECORDED, ACKED] }), {
     dismissals: {
-      'fault.stuck_relay': record('critical'),
-      'fault.no_ground': record('critical'),
+      'fault.stuck_relay': record('critical', true),
+      'fault.no_ground': record('critical', false),
     },
   });
   assert.equal(partial.state, 'advisories');
@@ -1211,7 +1363,7 @@ test('an unknown state retires nothing: dismissals is null on every unknown path
   // them is evidence that an advisory is *gone*. Returning a map here would
   // prune every record the owner holds and resurrect each advisory once the
   // report came back; `null` tells the screen to leave the records alone.
-  const records = { 'fault.no_ground': record('critical') };
+  const records = { 'fault.no_ground': record('critical', false) };
   const stale = report({ checked_at: seconds(NOW - HEALTH_STALE_AFTER_MS - 1000) });
   const undated = report({ checked_at: undefined });
   for (const [why, state] of [
@@ -1234,7 +1386,7 @@ test('an unknown state retires nothing: dismissals is null on every unknown path
     assert.deepEqual(state.advisories, []);
   }
   // The input is left exactly as it was.
-  assert.deepEqual(records, { 'fault.no_ground': record('critical') });
+  assert.deepEqual(records, { 'fault.no_ground': record('critical', false) });
 });
 
 test('a gate that may still close keeps the records it is silent about', () => {
@@ -1252,7 +1404,7 @@ test('a gate that may still close keeps the records it is silent about', () => {
     corroborated: true,
   };
   const closed = report({ advisories: [GROUND] });
-  const records = { 'safety.ground_check': record('warning') };
+  const records = { 'safety.ground_check': record('warning', true) };
   const under = (gates, listed = []) =>
     visit(report({ gates, advisories: listed }), { dismissals: records });
 
@@ -1289,6 +1441,15 @@ test('a gate that may still close keeps the records it is silent about', () => {
     1,
     'and the return to the dismissed severity is shown',
   );
+  // The other present state is evidence the same way: a dismissed live check
+  // the report now lists as a record.
+  const rested = under(GATE, [{ ...GROUND, classification: 'historical', corroborated: false }]);
+  assert.deepEqual(ids(rested), ['safety.ground_check']);
+  assert.deepEqual(
+    rested.dismissals,
+    {},
+    'a listed change of presence retires its record under a gate',
+  );
 
   // A dismissed row the report still lists stays hidden, record and all.
   const hidden = under(GATE, [GROUND]);
@@ -1304,8 +1465,8 @@ test('a gate that may still close keeps the records it is silent about', () => {
     }),
     {
       dismissals: {
-        'safety.ground_check': record('warning'),
-        'wear.relay_life': record('info'),
+        'safety.ground_check': record('warning', true),
+        'wear.relay_life': record('info', false),
       },
     },
   );
@@ -1314,7 +1475,7 @@ test('a gate that may still close keeps the records it is silent about', () => {
   assert.deepEqual(unsupported.dismissals, {}, 'an unsupported gate prunes on absence');
 
   // The input is never mutated.
-  assert.deepEqual(records, { 'safety.ground_check': record('warning') });
+  assert.deepEqual(records, { 'safety.ground_check': record('warning', true) });
 });
 
 test('Dismiss is offered on every row and gated by nothing; Acknowledge stays gated', () => {
@@ -1394,7 +1555,7 @@ test('a dismissals input that is not a record map hides nothing', () => {
   // A record that is only inherited is not a record: the lookup is by own key,
   // so nothing on a prototype can hide a row.
   const inherited = visit(threeRows(), {
-    dismissals: Object.create({ 'fault.no_ground': record('critical') }),
+    dismissals: Object.create({ 'fault.no_ground': record('critical', false) }),
   });
   assert.equal(inherited.advisories.length, 3);
   // …and the map it answers is a plain object, never that prototype.

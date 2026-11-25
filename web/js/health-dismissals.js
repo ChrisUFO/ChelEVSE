@@ -2,13 +2,16 @@
 // DOM-free and storage-injected, modelled on notification-session.js: the
 // screen hands it a signed-in uid and an advisory, and it keeps
 //
-//   { "<uid>": { "<advisory id>": { severity, dismissedAt } } }
+//   { "<uid>": { "<advisory id>": { severity, dismissedAt, reportedPresent } } }
 //
 // under one localStorage key. What a record hides and when one is retired is
-// health.js's decision (an advisory is hidden while its severity is unchanged,
-// and a record leaves once the snapshot lists its id at another severity, or a
-// snapshot that leaves no firmware gate open stops listing it) — this module
-// only keeps them, so that logic stays unit-testable without any storage.
+// health.js's decision (an advisory is hidden while its severity and the fact
+// of whether the charger reported it as present are both unchanged, and a
+// record leaves once the snapshot lists its id at another severity or with
+// that fact turned, or a snapshot that leaves no firmware gate open stops
+// listing it) — this module only keeps them, so that logic stays
+// unit-testable without any storage. `reportedPresent` comes from the row the
+// screen hands `dismiss`, never from anything here.
 //
 // Tolerant by design, three ways: a store that is unreadable or not this shape
 // reads as empty rather than throwing into a render; a refused write is
@@ -38,6 +41,8 @@ function isUid(uid) {
   return typeof uid === 'string' && uid !== '';
 }
 
+// Every field is required: a record that lacks one is not in this module's
+// shape and is no record.
 function isRecord(value) {
   return (
     Boolean(value) &&
@@ -45,19 +50,31 @@ function isRecord(value) {
     !Array.isArray(value) &&
     typeof value.severity === 'string' &&
     typeof value.dismissedAt === 'number' &&
-    Number.isFinite(value.dismissedAt)
+    Number.isFinite(value.dismissedAt) &&
+    typeof value.reportedPresent === 'boolean'
   );
 }
 
 // Only records in the exact shape this module writes survive a read — a
 // hand-edited or older-shaped entry is dropped, never guessed at. Built from
 // entries so an id cannot become a prototype (`__proto__` stays an own key).
+// That goes for `reportedPresent` with no fallback: this record shape is
+// unreleased, so there is no earlier shape to read a record without it back
+// from. One is wrong-shaped, dropped here, and its row lists — the safe
+// direction, a shown advisory rather than a hidden one.
 function recordsOf(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return Object.fromEntries(
     Object.entries(value)
       .filter(([, record]) => isRecord(record))
-      .map(([id, record]) => [id, { severity: record.severity, dismissedAt: record.dismissedAt }]),
+      .map(([id, record]) => [
+        id,
+        {
+          severity: record.severity,
+          dismissedAt: record.dismissedAt,
+          reportedPresent: record.reportedPresent,
+        },
+      ]),
   );
 }
 
@@ -69,7 +86,8 @@ function sameRecords(a, b) {
       (id) =>
         Object.hasOwn(b, id) &&
         b[id].severity === a[id].severity &&
-        b[id].dismissedAt === a[id].dismissedAt,
+        b[id].dismissedAt === a[id].dismissedAt &&
+        b[id].reportedPresent === a[id].reportedPresent,
     )
   );
 }
@@ -180,12 +198,19 @@ export function createDismissalStore({
     read,
 
     // Hide one advisory for this account. Returns the record, or null when
-    // there is no account or no advisory to key it by.
+    // there is no account, no advisory to key it by, or a row that does not
+    // carry every part of the key.
     dismiss(uid, advisory) {
       if (!isUid(uid) || !advisory) return null;
-      const { id, severity } = advisory;
-      if (typeof id !== 'string' || typeof severity !== 'string') return null;
-      const record = { severity, dismissedAt: now() };
+      const { id, severity, reportedPresent } = advisory;
+      if (
+        typeof id !== 'string' ||
+        typeof severity !== 'string' ||
+        typeof reportedPresent !== 'boolean'
+      ) {
+        return null;
+      }
+      const record = { severity, dismissedAt: now(), reportedPresent };
       commit(uid, { ...read(uid), [id]: record });
       return record;
     },

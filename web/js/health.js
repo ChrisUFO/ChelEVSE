@@ -45,23 +45,30 @@
 // stays listed until it is dismissed as well, and dismissing one changes
 // nothing the charger reports.
 //
-// A dismissal record is keyed by advisory id plus the severity it hid, and
-// lasts only while it hides a row: it is retired the moment a usable report
-// lists that id at another severity, or a report that leaves no gate open
-// stops listing it. A row therefore returns exactly when the advisory
-// genuinely changes — the firmware rates the condition differently, or it
-// cleared and was raised again — and an unchanged one stays hidden. A changed
+// A dismissal record is keyed by advisory id, the severity it hid, and
+// whether the charger reported the condition as present when it was dismissed
+// (`reportedPresent` — the fact behind the Active chip, read before
+// acknowledgement is considered). It lasts only while it hides a row: it is
+// retired the moment a usable report lists that id at another severity or
+// with that fact the other way, or a report that leaves no gate open stops
+// listing it. A row therefore returns exactly when the advisory genuinely
+// changes — the firmware rates the condition differently, the charger starts
+// or stops reporting the condition now (a fault tripped again), or it cleared
+// and was raised again — and an unchanged one stays hidden. A changed
 // advisory stays shown from then on: if it returns to the dismissed severity
-// without leaving the ring, nothing hides it again until the owner dismisses
-// it once more. Silence is not a change either: while a firmware gate may
-// still close, the gateway reports none of that gate's checks, so a report
-// under one retires only what it lists re-rated and keeps the records of the
-// ids it leaves out — for the same reason an unknown state keeps them all.
-// `counter_token` was considered as the discriminator and set aside: it is
-// the bridge's classification watermark (`pi/health.py`), a bridge-internal
-// detail, so keying on it would turn a future refinement of that classifier
-// into a silent web behaviour change. Severity and absence are the facts the
-// owner can see.
+// and presence without leaving the ring, nothing hides it again until the
+// owner dismisses it once more. Acknowledgement is no part of the key — it is
+// the owner's own action, not something the charger reports — so
+// acknowledging a dismissed row, or taking that back, leaves it hidden.
+// Silence is not a change either: while a firmware gate may still close, the
+// gateway reports none of that gate's checks, so a report under one retires
+// only what it lists changed and keeps the records of the ids it leaves out —
+// for the same reason an unknown state keeps them all. `counter_token` was
+// considered as the discriminator and set aside: it is the bridge's
+// classification watermark (`pi/health.py`), a bridge-internal detail, so
+// keying on it would turn a future refinement of that classifier into a
+// silent web behaviour change. Severity, presence and absence are the facts
+// the owner can see.
 
 import { dateLabel } from './format.js';
 
@@ -491,19 +498,32 @@ function unknownState(reason, checkedAt, nowMs) {
   };
 }
 
-// Acknowledged wins over the stored classification: `acks[<id>]` is the ack
-// command's own record, written before the next 300 s poll can report the
-// gateway's `acked` flag (D5). An entry with no usable classification falls back
-// to the corroboration fact rather than defaulting to either extreme.
+// Whether the charger reports the condition as present now: the fact that
+// makes a row Active before acknowledgement is considered, and the third part
+// of a dismissal's key (#205). Read where the presentation is, from the same
+// facts in the same order — the bridge's classification first, the
+// corroboration fact only when it is missing — so the two can never disagree.
+// It deliberately ignores every acknowledgement: that is the owner's own
+// action, and the bridge still reports `corroborated` for an entry it has
+// muted (`pi/health.py`, `classify`).
+function reportedPresentOf(entry) {
+  return (
+    entry.classification === 'active' ||
+    (entry.classification !== 'historical' && entry.corroborated === true)
+  );
+}
+
+// Acknowledged wins over the rest: `acks[<id>]` is the ack command's own
+// record, written before the next 300 s poll can report the gateway's `acked`
+// flag (D5). An entry nothing has acknowledged is Active or Recorded by
+// whether the charger reports it as present.
 function presentationOf(entry, acks) {
   if (entry.acked === true) return 'acknowledged';
   if (typeof entry.id === 'string' && acks && Object.hasOwn(acks, entry.id)) {
     return 'acknowledged';
   }
   if (entry.classification === 'acknowledged') return 'acknowledged';
-  if (entry.classification === 'active') return 'active';
-  if (entry.classification === 'historical') return 'recorded';
-  return entry.corroborated === true ? 'active' : 'recorded';
+  return reportedPresentOf(entry) ? 'active' : 'recorded';
 }
 
 function advisoryRow(entry, acks, nowMs, canAckCommand) {
@@ -518,6 +538,10 @@ function advisoryRow(entry, acks, nowMs, canAckCommand) {
     severityLabel: severity ? SEVERITY_LABEL[severity] || capitalise(severity) : '',
     presentation,
     presentationLabel: PRESENTATION_LABEL[presentation],
+    // The charger's own fact, kept apart from the presentation so that an
+    // acknowledgement cannot move it: a dismissed row stays hidden only while
+    // this is still what it was when dismissed (`isDismissed`).
+    reportedPresent: reportedPresentOf(entry),
     seen: firstSeen ? `First seen ${dateLabel(firstSeen, nowMs)}` : '',
     since: firstSeen || 0,
     // An acknowledged advisory has nothing left to mute, so it offers no
@@ -568,19 +592,27 @@ function countRows(rows) {
   return counts;
 }
 
-// A dismissal record in the shape `health-dismissals.js` stores; anything else
-// (a null, a record with no severity) hides nothing, whatever else it says.
+// A dismissal record in the shape `health-dismissals.js` stores, matching the
+// row on every part of the key: the id (the lookup), the severity it hid, and
+// whether the charger reported the condition as present. Anything else — a
+// null, a record with no severity or no present fact — hides nothing, whatever
+// else it says: a record that is not in the key's shape shows the row.
 function isDismissed(records, row) {
   if (!Object.hasOwn(records, row.id)) return false;
   const record = records[row.id];
-  return Boolean(record) && typeof record === 'object' && record.severity === row.severity;
+  return (
+    Boolean(record) &&
+    typeof record === 'object' &&
+    record.severity === row.severity &&
+    record.reportedPresent === row.reportedPresent
+  );
 }
 
 // The records that outlive a usable report. A record is retired by evidence
 // that its advisory changed, and by nothing else: the snapshot lists the id at
-// another severity — the record was about the rating it hid — or a snapshot
-// that leaves no gate open does not list the id at all. Under a gate that may
-// still close (`gateOpen`) the gateway reports none of that gate's rules, so
+// another severity or with the other present state — the record was about the
+// rating and the presence it hid — or a snapshot that leaves no gate open does
+// not list the id at all. Under a gate that may still close (`gateOpen`) the gateway reports none of that gate's rules, so
 // an id the snapshot leaves out may merely be unreported: its record is kept
 // until a snapshot that can list it does not. What the snapshot does list is
 // evidence whatever the gates say. An unknown state returns no map instead,
@@ -599,7 +631,8 @@ function retainedDismissals(records, rows, gateOpen) {
  * `doc` is the document's data (null/absent when the listener reported no
  * document), `error` says the listener failed, `nowMs` is the clock the 24 h
  * guard and the date labels read, and `dismissals` is the signed-in account's
- * record map (`{ "<id>": { severity, dismissedAt } }`; none by default).
+ * record map (`{ "<id>": { severity, dismissedAt, reportedPresent } }`; none by
+ * default).
  *
  * Returns `{state, reason, tone, title, detail, meta, incomplete, gates,
  * caveat, advisories, counts, dismissals}`:
@@ -611,17 +644,20 @@ function retainedDismissals(records, rows, gateOpen) {
  *   advisories the rows to list — the snapshot's, less the dismissed ones
  *   dismissals the records the screen should keep: on a usable report, the
  *              input less every record the report is evidence against — its
- *              advisory is listed at another severity, or left out of a report
- *              that leaves no gate open; `null` on every unknown state
+ *              advisory is listed at another severity or with the other present
+ *              state, or left out of a report that leaves no gate open; `null`
+ *              on every unknown state
  *
  * A row offers its Acknowledge control only when the document positively
  * carries `ack_command: true` — the bridge-build capability fact — so a web
  * deploy ahead of its bridge shows no control it could not serve (#159).
  *
  * Dismissals (#205) are applied here, in the same pass, so the card has one
- * notion of what is listed: a row whose record names the severity the snapshot
- * reports is left out before the counts, the summary, the tone and the state
- * are taken, so an all-dismissed list reads exactly like an empty one.
+ * notion of what is listed: a row whose record names the severity and the
+ * presence the snapshot reports is left out before the counts, the summary,
+ * the tone and the state are taken, so an all-dismissed list reads exactly
+ * like an empty one. Acknowledgement is no part of that match — a dismissed
+ * row stays hidden through one and through its undo.
  * Pruning goes the other way and only on a usable report: an unknown state
  * (absent document, listener error, unreachable, unsupported, unreadable,
  * stale) is not evidence that an advisory is *gone* — a bridge outage would
@@ -680,10 +716,11 @@ export function healthState({ doc, error = false, nowMs = Date.now(), dismissals
     .map((entry) => advisoryRow(entry, acks, nowMs, canAckCommand))
     .sort(compareRows);
   // Dismissals (#205): a row is hidden only while its record names the
-  // severity the snapshot reports — a different rating is a changed advisory
-  // — and a changed advisory's record retires on the very report that shows
-  // it. A gate that may still close keeps the gateway silent about that
-  // gate's checks, so the report retires nothing it merely leaves out
+  // severity and the presence the snapshot reports — a different rating, or
+  // the charger reporting the condition as present or not, is a changed
+  // advisory — and a changed advisory's record retires on the very report
+  // that shows it. A gate that may still close keeps the gateway silent about
+  // that gate's checks, so the report retires nothing it merely leaves out
   // (`retainedDismissals`); an unsupported relay gate is not one waiting to
   // close, and prunes like a complete report.
   const records =
