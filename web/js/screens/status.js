@@ -84,6 +84,16 @@ let dismissNodes = new Map();
 // the flag — the control is about to be destroyed with its row — so unlike
 // `ackFocusId` it can never outlive the attempt it describes.
 let dismissFocusId = null;
+// Until when a further pointer activation of a Dismiss control is taken for
+// the second half of a double-click and ignored (#205). A dismissal rebuilds
+// the list synchronously, so the next row's Dismiss slides under the pointer
+// inside the same gesture: without this a double-click hides two advisories,
+// the second by accident, with no way back but the manual reset. Only pointer
+// activations are guarded. A keyboard or assistive one carries no click
+// count, and the hand-off above has already taken focus to the card title, so
+// it cannot land on the row that slid up.
+const DISMISS_DOUBLE_CLICK_MS = 500;
+let dismissGuardUntil = 0;
 // The row whose control held the owner's focus when it was disabled. The browser
 // blurs a control the instant it becomes unfocusable (HTML's focus fix-up rule,
 // down to <body> here), so by the time the success rebuild runs
@@ -430,7 +440,9 @@ function healthRow(row) {
     const button = el('button', 'btn small ghost', dismiss.label);
     button.type = 'button';
     button.setAttribute('aria-label', dismiss.ariaLabel);
-    button.addEventListener('click', () => dismissRow(row));
+    // `detail` is the click count: 0 for a keyboard or programmatic
+    // activation, 1 or more from a pointer.
+    button.addEventListener('click', (event) => dismissRow(row, event.detail > 0));
     actions.append(button);
     dismissNodes.set(row.id, button);
   }
@@ -457,8 +469,18 @@ function healthRow(row) {
 // Dismiss one advisory for the signed-in account (#205). The record is written
 // through the store and the rebuild the render below performs is what removes
 // the row — the same paint path a snapshot uses, so nothing can drift between
-// a dismissed row and a listed one.
-function dismissRow(row) {
+// a dismissed row and a listed one. `pointer` says the activation came from a
+// pointer.
+function dismissRow(row, pointer) {
+  // The second click of a double-click, landing on the Dismiss that slid
+  // under the pointer when the first click's rebuild removed its row: not a
+  // decision the owner made, so it is ignored. The window is anchored to the
+  // last activation taken and never extended by one ignored.
+  const now = Date.now();
+  if (pointer) {
+    if (now < dismissGuardUntil) return;
+    dismissGuardUntil = now + DISMISS_DOUBLE_CLICK_MS;
+  }
   // The control this click leaves focus on is destroyed by that rebuild, along
   // with its row, and the browser's focus fix-up has already dropped focus to
   // <body> by the time the row is gone. Record the hand-off where it happens,
@@ -839,6 +861,8 @@ export function leaveStatus() {
   acks.reset();
   ackNodes = new Map();
   ackFocusId = null;
+  // The next session's first click is no one's double-click.
+  dismissGuardUntil = 0;
   healthView = null;
   schedule = null;
   settings = null;

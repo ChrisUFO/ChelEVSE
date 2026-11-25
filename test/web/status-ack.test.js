@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DISMISSALS_KEY, createDismissalStore } from '../../web/js/health-dismissals.js';
 
@@ -214,8 +214,11 @@ const chipOf = (row, className) =>
 // A macrotask turn: the click's write settles off the microtask queue.
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-const click = (button) => {
-  for (const listener of button.listeners.get('click') || []) listener();
+// An activation of a control. A keyboard one by default — the `click` a
+// focused button fires, which carries no click count; a pointer click passes
+// its own event, that count being what tells the two apart.
+const click = (button, event = { detail: 0 }) => {
+  for (const listener of button.listeners.get('click') || []) listener(event);
 };
 
 test('an unacknowledged row offers one real button that names its advisory', () => {
@@ -972,4 +975,68 @@ test('sign-out teardown drops the controls and keeps the records', (t) => {
   assert.deepEqual(rows(), []);
   assert.equal(element('health-title').textContent, 'Health unknown');
   assert.deepEqual(stored(), before, 'records are durable per-account state');
+});
+
+test('a double-click on Dismiss removes one row, not the one that slides under the pointer', (t) => {
+  // The clock is held, so the guard's window can be shown to open and lapse.
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.after(() => mock.timers.reset());
+  const uid = signIn(t);
+  showHealth(twoRows());
+  assert.equal(rows().length, 2);
+
+  // A pointer click. The list rebuilds at once, and the next row's Dismiss
+  // takes the place of the button just pressed — where the second click of
+  // the same gesture lands.
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.equal(rows().length, 1, 'the second click of the gesture is ignored');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+  assert.deepEqual(Object.keys(stored()[uid]), ['fault.no_ground']);
+
+  // The keyboard is never guarded: an activation with no click count is
+  // taken at once, inside the window.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.deepEqual(Object.keys(stored()[uid]).sort(), ['fault.no_ground', 'safety.ground_check']);
+
+  // Both dismissed; bring the rows back by a report that leaves them out,
+  // and let the first gesture's window lapse.
+  showHealth(doc({ advisories: [] }));
+  showHealth(twoRows());
+  assert.equal(rows().length, 2);
+  mock.timers.tick(500);
+
+  // A new gesture opens the window again. One millisecond short of its end
+  // the pointer is still guarded…
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+  mock.timers.tick(499);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.equal(rows().length, 1, 'inside the window');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+
+  // …and at its end it is trusted again.
+  mock.timers.tick(1);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.deepEqual(rows(), []);
+});
+
+test('sign-out drops the Dismiss guard: the next session’s first click is taken', (t) => {
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.after(() => mock.timers.reset());
+  const uid = signIn(t);
+  showHealth(twoRows());
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+
+  // Sign out and back in inside the window, then click: the last session's
+  // gesture guards nothing.
+  switchTo('');
+  switchTo(uid);
+  showHealth(twoRows());
+  assert.equal(rows().length, 1, 'the first row is still dismissed');
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.deepEqual(rows(), []);
 });
