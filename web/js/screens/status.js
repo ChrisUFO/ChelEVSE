@@ -68,8 +68,11 @@ let claims = null;
 // What the advisory list currently shows, so a snapshot that only moves the
 // document's write stamp does not rebuild the rows under a text selection.
 let healthSignature = null;
-// The last projection the card painted: the control repaint reads the same rows
-// the list was built from.
+// The last projection the card painted. The ack control's repaint and the
+// Dismiss click read their row from here, by id, rather than from the object
+// their node was built with — which can be older: the list is rebuilt only
+// when something a row renders changes, so a node can outlive a report that
+// moved something a row does not render.
 let healthView = null;
 // The acknowledgement controls themselves (`id → {button, message}`), so a
 // busy row repaints in place instead of rebuilding the list under the pointer.
@@ -441,8 +444,9 @@ function healthRow(row) {
     button.type = 'button';
     button.setAttribute('aria-label', dismiss.ariaLabel);
     // `detail` is the click count: 0 for a keyboard or programmatic
-    // activation, 1 or more from a pointer.
-    button.addEventListener('click', (event) => dismissRow(row, event.detail > 0));
+    // activation, 1 or more from a pointer. The control hands over its row's
+    // id alone — the row itself is read at the click (`dismissRow`).
+    button.addEventListener('click', (event) => dismissRow(row.id, event.detail > 0));
     actions.append(button);
     dismissNodes.set(row.id, button);
   }
@@ -471,7 +475,20 @@ function healthRow(row) {
 // the row — the same paint path a snapshot uses, so nothing can drift between
 // a dismissed row and a listed one. `pointer` says the activation came from a
 // pointer.
-function dismissRow(row, pointer) {
+//
+// The row is read from the live projection by its id, never taken from the
+// control's own build. The list is rebuilt only when something a row renders
+// changes, and whether the charger reports the condition present is not
+// rendered: an acknowledged row reads Acknowledged either way, so its node
+// outlives the report that flips that fact. The record is keyed on the fact
+// (`isDismissed`), so one written from the older row would match nothing — the
+// click would hide no row, and the render below would discard the record: a
+// Dismiss that silently does nothing for as long as nothing else rebuilds.
+function dismissRow(id, pointer) {
+  // A control dispatched after its row left the projection — its node went
+  // with the rebuild that dropped the advisory — has nothing left to hide.
+  const row = healthView?.advisories.find((candidate) => candidate.id === id);
+  if (!row) return;
   // The second click of a double-click, landing on the Dismiss that slid
   // under the pointer when the first click's rebuild removed its row: not a
   // decision the owner made, so it is ignored. The window is anchored to the
@@ -485,7 +502,7 @@ function dismissRow(row, pointer) {
   // with its row, and the browser's focus fix-up has already dropped focus to
   // <body> by the time the row is gone. Record the hand-off where it happens,
   // exactly as `paintAckRow` does for a control it disables.
-  dismissFocusId = row.id;
+  dismissFocusId = id;
   // Signed out there is no account to scope the dismissal to, so nothing is
   // recorded — and nothing is applied on the next render either.
   const uid = accountUid();
@@ -585,7 +602,12 @@ function renderHealth() {
   // taken over the rows that are listed, after dismissals, so a dismissal is
   // itself a signature change: the row a Dismiss removed, and the one a
   // changed advisory brought back — a new severity, or the charger reporting
-  // the condition as present or not — each rebuild the list (#205).
+  // the condition as present or not — each rebuild the list (#205). Whether
+  // the charger reports the condition present is not itself in the signature:
+  // it is not rendered, and on an acknowledged row the chip reads the same
+  // whichever way it stands. A flip on a row that stays listed therefore
+  // rebuilds nothing — which is why the Dismiss click reads its row from the
+  // live projection (`dismissRow`) and not from its node.
   const signature = state.advisories
     .map(
       (row) =>

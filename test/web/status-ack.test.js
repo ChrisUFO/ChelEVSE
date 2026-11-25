@@ -923,6 +923,55 @@ test('a dismissed record returns when the charger starts reporting it as present
   assert.equal(stored()[uid]['fault.no_ground'].reportedPresent, true);
 });
 
+test('a Dismiss on an acknowledged row records the presence the card holds at the click', (t) => {
+  // An acknowledged row's chip stays Acknowledged whichever way the charger
+  // reports its condition, so when that fact flips nothing the row renders
+  // changes: the list is not rebuilt, and the control is still the one built
+  // from the earlier report. The record is keyed on that fact, so the click has
+  // to read it from what the card shows now — written from the older row, the
+  // record would hide nothing and the click's own render would discard it,
+  // leaving a Dismiss that silently does nothing.
+  const acknowledged = (corroborated) =>
+    doc({
+      advisories: [
+        {
+          ...doc().advisories[0],
+          acked: true,
+          classification: 'acknowledged',
+          corroborated,
+        },
+      ],
+    });
+  // The fact flips each way: a fault tripped again, and one that comes to rest.
+  for (const [was, now] of [
+    [false, true],
+    [true, false],
+  ]) {
+    const uid = signIn(t);
+    showHealth(acknowledged(was));
+    assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
+    const built = dismissOf(rowOf());
+
+    showHealth(acknowledged(now));
+    assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
+    assert.equal(dismissOf(rowOf()), built, 'nothing the row renders changed, so no rebuild');
+
+    click(built);
+    assert.deepEqual(rows(), [], `presence ${was} → ${now}: the row goes`);
+    assert.equal(
+      stored()[uid]['fault.no_ground'].reportedPresent,
+      now,
+      'the record carries the fact the card holds now',
+    );
+
+    // Hidden on from there, and back the moment the charger reports the other.
+    showHealth(acknowledged(now));
+    assert.deepEqual(rows(), []);
+    showHealth(acknowledged(was));
+    assert.equal(rows().length, 1);
+  }
+});
+
 test('health unknown leaves the records alone', (t) => {
   signIn(t);
   click(dismissOf(rowOf()));
