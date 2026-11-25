@@ -880,6 +880,44 @@ test('health unknown leaves the records alone', (t) => {
   assert.equal(element('health-title').textContent, 'No advisories');
 });
 
+test('a gate that may still close retires nothing, so the row stays hidden when it closes', (t) => {
+  const uid = signIn(t);
+  // A safety check — the family a gateway that has not answered its settings
+  // query yet reports nothing about.
+  showHealth(doc({ advisories: [GROUND] }));
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  const before = stored();
+  assert.deepEqual(Object.keys(before[uid]), ['safety.ground_check']);
+  localStorageShim.sets = 0;
+
+  // The gateway restarts: the report is usable, its safety gate is open, and
+  // the advisory is simply not reported. That is silence, not a clearing, so
+  // nothing is retired — and nothing is written, the screen's whole write path
+  // being the projection's answer.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [], gates: open }));
+  assert.equal(element('health-title').textContent, 'Health incomplete');
+  assert.deepEqual(stored(), before, 'a report under an open gate retires no record');
+  assert.equal(localStorageShim.sets, 0, 'and writes nothing');
+
+  // Steady while the gate stays open: still nothing.
+  showHealth(doc({ advisories: [], gates: open, checked_at: Date.now() / 1000 - 5 }));
+  assert.deepEqual(stored(), before);
+  assert.equal(localStorageShim.sets, 0);
+
+  // The gate closes and the advisory is listed again, unchanged: still hidden.
+  showHealth(doc({ advisories: [GROUND] }));
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+  assert.deepEqual(stored(), before);
+
+  // A complete report that leaves it out is the clearing that retires it.
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'the other advisory lists');
+  assert.equal(stored(), null, 'the record went with the advisory');
+});
+
 test('a refused storage write still hides the row for this page', (t) => {
   const uid = signIn(t);
   localStorageShim.refuse = true;

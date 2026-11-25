@@ -531,11 +531,13 @@ function renderHealth() {
     nowMs: Date.now(),
     dismissals: stored,
   });
-  // The projection has already reduced the records to the ones this report
-  // still hides a row for. Persisting its answer is the screen's whole write
-  // path — it never edits storage itself — and `null` (health unknown) says
-  // leave them alone: that state is no evidence an advisory is gone. An
-  // unchanged map writes nothing, so a steady report costs no storage write.
+  // Persisting the projection's answer is the screen's whole write path — it
+  // never edits storage itself. The map holds every record this report is no
+  // evidence against: one still hiding a row, or one whose advisory a gate
+  // that may still close keeps the report silent about. `null` (health
+  // unknown) says leave them alone: that state is no evidence an advisory is
+  // gone. An unchanged map writes nothing, so a steady report costs no storage
+  // write.
   if (uid && state.dismissals) dismissals.replace(uid, state.dismissals);
   // The snapshot is the only success signal: an advisory it no longer lists as
   // acknowledgeable ends whatever acknowledgement was waiting on it, and the

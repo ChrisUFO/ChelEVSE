@@ -6,9 +6,9 @@
 //
 // under one localStorage key. What a record hides and when one is retired is
 // health.js's decision (an advisory is hidden while its severity is unchanged,
-// and a record leaves once the snapshot stops listing its id or lists it at
-// another severity) — this module only keeps them, so that logic stays
-// unit-testable without any storage.
+// and a record leaves once the snapshot lists its id at another severity, or a
+// snapshot that leaves no firmware gate open stops listing it) — this module
+// only keeps them, so that logic stays unit-testable without any storage.
 //
 // Tolerant by design, three ways: a store that is unreadable or not this shape
 // reads as empty rather than throwing into a render; a refused write is

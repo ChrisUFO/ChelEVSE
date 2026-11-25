@@ -47,16 +47,21 @@
 //
 // A dismissal record is keyed by advisory id plus the severity it hid, and
 // lasts only while it hides a row: it is retired the moment a usable report
-// stops listing that id, or lists it at another severity. A row therefore
-// returns exactly when the advisory genuinely changes — the firmware rates the
-// condition differently, or it cleared and was raised again — and an unchanged
-// one stays hidden. A changed advisory stays shown from then on: if it returns
-// to the dismissed severity without leaving the ring, nothing hides it again
-// until the owner dismisses it once more. `counter_token` was considered as
-// the discriminator and set aside: it is the bridge's classification watermark
-// (`pi/health.py`), a bridge-internal detail, so keying on it would turn a
-// future refinement of that classifier into a silent web behaviour change.
-// Severity and absence are the facts the owner can see.
+// lists that id at another severity, or a report that leaves no gate open
+// stops listing it. A row therefore returns exactly when the advisory
+// genuinely changes — the firmware rates the condition differently, or it
+// cleared and was raised again — and an unchanged one stays hidden. A changed
+// advisory stays shown from then on: if it returns to the dismissed severity
+// without leaving the ring, nothing hides it again until the owner dismisses
+// it once more. Silence is not a change either: while a firmware gate may
+// still close, the gateway reports none of that gate's checks, so a report
+// under one retires only what it lists re-rated and keeps the records of the
+// ids it leaves out — for the same reason an unknown state keeps them all.
+// `counter_token` was considered as the discriminator and set aside: it is
+// the bridge's classification watermark (`pi/health.py`), a bridge-internal
+// detail, so keying on it would turn a future refinement of that classifier
+// into a silent web behaviour change. Severity and absence are the facts the
+// owner can see.
 
 import { dateLabel } from './format.js';
 
@@ -568,15 +573,21 @@ function isDismissed(records, row) {
   return Boolean(record) && typeof record === 'object' && record.severity === row.severity;
 }
 
-// The records that still hide a row. A record survives a usable report only
-// while the row it hides is on it: one whose advisory the snapshot no longer
-// carries is retired here, and so is one whose advisory it lists at another
-// severity — that advisory changed, and the record was about the rating it
-// hid. An unknown state returns no map instead, precisely so it retires
-// nothing.
-function retainedDismissals(records, rows) {
+// The records that outlive a usable report. A record is retired by evidence
+// that its advisory changed, and by nothing else: the snapshot lists the id at
+// another severity — the record was about the rating it hid — or a snapshot
+// that leaves no gate open does not list the id at all. Under a gate that may
+// still close (`gateOpen`) the gateway reports none of that gate's rules, so
+// an id the snapshot leaves out may merely be unreported: its record is kept
+// until a snapshot that can list it does not. What the snapshot does list is
+// evidence whatever the gates say. An unknown state returns no map instead,
+// precisely so it retires nothing.
+function retainedDismissals(records, rows, gateOpen) {
+  const listed = new Set(rows.map((row) => row.id));
   const hidden = new Set(rows.filter((row) => isDismissed(records, row)).map((row) => row.id));
-  return Object.fromEntries(Object.entries(records).filter(([id]) => hidden.has(id)));
+  return Object.fromEntries(
+    Object.entries(records).filter(([id]) => hidden.has(id) || (gateOpen && !listed.has(id))),
+  );
 }
 
 /**
@@ -596,8 +607,9 @@ function retainedDismissals(records, rows) {
  *              (never at the same time as an `incomplete` headline)
  *   advisories the rows to list — the snapshot's, less the dismissed ones
  *   dismissals the records the screen should keep: on a usable report, the
- *              input reduced to the records that still hide a row on it;
- *              `null` on every unknown state
+ *              input less every record the report is evidence against — its
+ *              advisory is listed at another severity, or left out of a report
+ *              that leaves no gate open; `null` on every unknown state
  *
  * A row offers its Acknowledge control only when the document positively
  * carries `ack_command: true` — the bridge-build capability fact — so a web
@@ -612,6 +624,14 @@ function retainedDismissals(records, rows) {
  * stale) is not evidence that an advisory is *gone* — a bridge outage would
  * otherwise resurrect every advisory the owner had dismissed — so it returns
  * `dismissals: null` and the screen leaves the records untouched.
+ *
+ * Silence under a gate that may still close is the same kind of non-evidence:
+ * the gateway reports none of that gate's rules until it answers, and a
+ * gateway restart leaves the gates open until it does, so such a report keeps
+ * the records of the ids it leaves out — otherwise the restart would resurrect
+ * every dismissed advisory of those families. A row the report does list is
+ * evidence all the same. An unsupported relay gate never closes and its rules
+ * are never reported, so it is no silence: there the report prunes.
  */
 export function healthState({ doc, error = false, nowMs = Date.now(), dismissals = {} } = {}) {
   if (error) return unknownState('error', null, nowMs);
@@ -658,11 +678,14 @@ export function healthState({ doc, error = false, nowMs = Date.now(), dismissals
     .sort(compareRows);
   // Dismissals (#205): a row is hidden only while its record names the
   // severity the snapshot reports — a different rating is a changed advisory
-  // — and the records are reduced to the ones still hiding a row, so the
-  // record for a changed advisory retires on the very report that shows it.
+  // — and a changed advisory's record retires on the very report that shows
+  // it. A gate that may still close keeps the gateway silent about that
+  // gate's checks, so the report retires nothing it merely leaves out
+  // (`retainedDismissals`); an unsupported relay gate is not one waiting to
+  // close, and prunes like a complete report.
   const records =
     dismissals && typeof dismissals === 'object' && !Array.isArray(dismissals) ? dismissals : {};
-  const kept = retainedDismissals(records, listed);
+  const kept = retainedDismissals(records, listed, transientIncomplete);
   const advisories = listed.filter((row) => !isDismissed(records, row));
   const counts = countRows(advisories);
   const meta = checkedLabel(checkedAt, nowMs);

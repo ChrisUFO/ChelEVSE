@@ -958,9 +958,10 @@ test('reset cancels a wait and forgets the attempt', () => {
 // ---------- dismissal (#205) ----------
 //
 // A dismissal record hides a row while the severity it names is the one the
-// snapshot reports; it is retired when a usable report stops listing the id or
-// lists it at another severity, and never on an unknown state. The records
-// themselves are health-dismissals.js's business
+// snapshot reports; it is retired when a usable report lists the id at another
+// severity or a report that leaves no gate open stops listing it — never on
+// an unknown state, nor on the silence of a gate that may still close. The
+// records themselves are health-dismissals.js's business
 // (test/web/health-dismissals.test.js); what is pinned here is what the one
 // pass that builds the card does with them.
 
@@ -1234,6 +1235,86 @@ test('an unknown state retires nothing: dismissals is null on every unknown path
   }
   // The input is left exactly as it was.
   assert.deepEqual(records, { 'fault.no_ground': record('critical') });
+});
+
+test('a gate that may still close keeps the records it is silent about', () => {
+  // The gateway reports none of a gate's rules until the gate answers, and a
+  // gateway restart leaves it unanswered — so a report under an open gate
+  // leaves out advisories that have not changed. That silence is no more a
+  // clearing than an outage is: a record for an id the report leaves out is
+  // kept, and the row is still hidden once the gate closes and lists it.
+  const GROUND = {
+    id: 'safety.ground_check',
+    severity: 'warning',
+    acked: false,
+    first_seen: seconds(at(2026, 11, 3)),
+    classification: 'active',
+    corroborated: true,
+  };
+  const closed = report({ advisories: [GROUND] });
+  const records = { 'safety.ground_check': record('warning') };
+  const under = (gates, listed = []) =>
+    visit(report({ gates, advisories: listed }), { dismissals: records });
+
+  // Each gate the bridge reports as waiting on its own, both together, and a
+  // document that cannot say which rules it evaluated.
+  for (const [why, gates] of [
+    ['settings', { settings_known: false, relay_health_known: true }],
+    ['relay', { settings_known: true, relay_health_known: false }],
+    ['both', { settings_known: false, relay_health_known: false }],
+    ['absent', undefined],
+  ]) {
+    const silent = under(gates);
+    assert.equal(silent.state, 'incomplete', why);
+    assert.equal(silent.tone, 'warn', why);
+    assert.deepEqual(silent.advisories, [], why);
+    assert.deepEqual(silent.dismissals, records, `${why}: silence retires nothing`);
+    // The gate closes and the ring lists the advisory again, unchanged: its
+    // record is still there to hide it.
+    const again = visit(closed, { dismissals: silent.dismissals });
+    assert.deepEqual(ids(again), [], `${why}: the row stays hidden`);
+    assert.deepEqual(again.dismissals, records, why);
+  }
+
+  // What the report does list is evidence whatever the gates say. The advisory
+  // re-rated under the gate is shown and its record retired — so it is still
+  // shown when the gate closes on it back at the dismissed severity.
+  const GATE = { settings_known: false, relay_health_known: true };
+  const rerated = under(GATE, [{ ...GROUND, severity: 'critical' }]);
+  assert.deepEqual(ids(rerated), ['safety.ground_check']);
+  assert.equal(rerated.state, 'advisories');
+  assert.deepEqual(rerated.dismissals, {}, 'a listed change retires its record under a gate');
+  assert.equal(
+    visit(closed, { dismissals: rerated.dismissals }).advisories.length,
+    1,
+    'and the return to the dismissed severity is shown',
+  );
+
+  // A dismissed row the report still lists stays hidden, record and all.
+  const hidden = under(GATE, [GROUND]);
+  assert.deepEqual(ids(hidden), []);
+  assert.equal(hidden.state, 'incomplete');
+  assert.deepEqual(hidden.dismissals, records);
+
+  // A relay gate this firmware never closes is no silence: nothing will ever
+  // list its rules, so a report prunes on it exactly as on a complete one.
+  const unsupported = visit(
+    report({
+      gates: { settings_known: true, relay_health_known: false, relay_health_supported: false },
+    }),
+    {
+      dismissals: {
+        'safety.ground_check': record('warning'),
+        'wear.relay_life': record('info'),
+      },
+    },
+  );
+  assert.equal(unsupported.state, 'incomplete');
+  assert.equal(unsupported.tone, 'muted');
+  assert.deepEqual(unsupported.dismissals, {}, 'an unsupported gate prunes on absence');
+
+  // The input is never mutated.
+  assert.deepEqual(records, { 'safety.ground_check': record('warning') });
 });
 
 test('Dismiss is offered on every row and gated by nothing; Acknowledge stays gated', () => {
