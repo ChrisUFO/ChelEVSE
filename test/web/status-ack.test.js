@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DISMISSALS_KEY, createDismissalStore } from '../../web/js/health-dismissals.js';
@@ -774,13 +775,104 @@ test('dismissing a row starts no acknowledgement and leaves the other rows alone
   assert.equal(messageOf(rowOf()).hidden, true);
   assert.equal(messageOf(rowOf()).textContent, '');
   assert.equal(labels().includes('Acknowledging…'), false);
-  // The shared command feedback line stays silent too: no command was sent.
+  // The shared command feedback line stays silent too: a Dismiss wired through
+  // the screen's own `send` would report its refusal here.
   assert.equal(element('feedback').className, 'feedback');
   assert.equal(element('feedback').textContent, '');
   // The survivor's own Dismiss control is wired once and still live.
   assert.equal(dismissOf(rowOf()).listeners.get('click').length, 1);
   click(dismissOf(rowOf()));
   assert.deepEqual(rows(), []);
+});
+
+test('a signed-out Dismiss starts no acknowledgement on the row it was aimed at', async () => {
+  // Signed out there is no account to scope a record to, so the row stays
+  // listed — and with it the row's own Acknowledge control, which the case
+  // above cannot watch: there the dismissed row is gone before anything could
+  // be painted on it, and the click's own render ends an attempt started on it
+  // without a trace. Here one would show at once — busy and disabled — and
+  // again once the unbound SDK's refusal lands, as a reason line.
+  switchTo('');
+  const row = rowOf();
+  const ack = ackOf(row);
+  assert.equal(ack.textContent, 'Acknowledge');
+
+  click(dismissOf(row));
+
+  // Nothing is recorded, and the card is exactly as it was: the same row, not
+  // rebuilt, its control idle.
+  assert.equal(rows().length, 1, 'signed out, the row stays');
+  assert.equal(rowOf(), row, 'nothing changed, so no rebuild');
+  assert.equal(ackOf(row), ack);
+  assert.equal(ack.textContent, 'Acknowledge');
+  assert.equal(ack.getAttribute('aria-label'), 'Acknowledge No ground');
+  assert.equal(ack.disabled, false);
+  assert.equal(messageOf(row).hidden, true);
+
+  // A macrotask on, an attempt's refusal would have been painted.
+  await flush();
+  assert.equal(ack.textContent, 'Acknowledge');
+  assert.equal(ack.disabled, false);
+  assert.equal(messageOf(row).hidden, true);
+  assert.equal(messageOf(row).textContent, '');
+});
+
+// The calls a stretch of the screen makes, by the names it calls them through.
+// Comments on lines of their own are dropped first, so a pin reads the code: a
+// trailing comment or a string literal can only add a name the pin lacks,
+// never hide one. A keyword's parenthesis is always spaced (`if (pointer)`)
+// and a call's never is, so a condition is not read as a call.
+const codeOnly = (code) => code.replace(/^\s*\/\/.*$/gm, '');
+const callsIn = (code) => [...code.matchAll(/([\w$]+(?:\.[\w$]+)*)(?:\?\.)?\(/g)].map((m) => m[1]);
+
+test('the Dismiss click calls nothing that writes to Firestore', () => {
+  // The control's one promise is that it is purely client-side: a record in
+  // this browser's storage, and nothing else. Every write path the screen has
+  // — the acknowledgement's tracker, and the store's `ackNotification` and
+  // `sendCommand` — is refused in this harness (the SDK is unbound), and a
+  // call that swallows that refusal paints nothing, so no click case can see
+  // it. The click's whole path is therefore pinned from source (the
+  // store.test.js pattern): the block that builds the control and registers
+  // its listener, and the function that listener calls. Each may call only
+  // what is listed, as many times as listed — a write path under any name, a
+  // helper that reaches one, a second listener and a rename that leaves one
+  // of these names behind all fail.
+  const source = readFileSync(new URL('../../web/js/screens/status.js', import.meta.url), 'utf8');
+  const control = /if \(dismiss\.show\) \{([\s\S]*?)\n {2}\}\n/.exec(source);
+  assert.ok(control, 'screens/status.js builds the Dismiss control in one block');
+  const start = source.indexOf('function dismissRow(');
+  assert.ok(start >= 0, 'screens/status.js declares dismissRow');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'screens/status.js closes dismissRow');
+  for (const [what, raw, calls] of [
+    // The control's block: the button, its accessible name, one click
+    // listener, its place in the row and in the focus map.
+    [
+      'the Dismiss control',
+      control[1],
+      [
+        'actions.append',
+        'button.addEventListener',
+        'button.setAttribute',
+        'dismissNodes.set',
+        'dismissRow',
+        'el',
+      ],
+    ],
+    // The click: the live lookup, the double-click guard's clock, the record,
+    // the account it is scoped to, and the rebuild that removes the row.
+    [
+      'dismissRow',
+      source.slice(source.indexOf('{', start), end + 2),
+      ['Date.now', 'accountUid', 'advisories.find', 'dismissals.dismiss', 'renderHealth'],
+    ],
+  ]) {
+    const code = codeOnly(raw);
+    assert.deepEqual(callsIn(code).sort(), calls, `${what} calls only what is listed`);
+    // Nothing is called except through a name: a computed member (`x[y](…)`)
+    // or a called result (`f(a)(b)`) would have none to list.
+    assert.doesNotMatch(code, /\]\s*\(|\)\s*\(/, `${what} calls nothing unnamed`);
+  }
 });
 
 test('dismissing a row mid-acknowledgement ends the wait and strands no focus', async (t) => {
