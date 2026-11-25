@@ -1031,6 +1031,80 @@ test('a gate that may still close retires nothing, so the row stays hidden when 
   assert.equal(stored(), null, 'the record went with the advisory');
 });
 
+test('a restart report that still lists rows retires nothing it is silent about', (t) => {
+  const uid = signIn(t);
+  const STUCK = { ...doc().advisories[0], id: 'fault.stuck_relay' };
+  const rowNamed = (name) => rows().find((row) => chipOf(row, 'health-name').textContent === name);
+  // Two dismissed: a fault, which no gate holds back, and a safety check — the
+  // family a gateway still waiting on its settings query reports nothing about.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND, STUCK] }));
+  assert.equal(rows().length, 3);
+  click(dismissOf(rowNamed('No ground')));
+  click(dismissOf(rowNamed('Ground check')));
+  const before = stored();
+  assert.deepEqual(Object.keys(before[uid]).sort(), ['fault.no_ground', 'safety.ground_check']);
+  localStorageShim.sets = 0;
+
+  // The gateway restarts: both faults are still listed — one dismissed, one
+  // not — and the safety check is simply not reported. With a row left to show
+  // the state is `advisories`, not `incomplete`, but the silence is no more a
+  // clearing here: nothing is retired, and nothing is written.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [doc().advisories[0], STUCK], gates: open }));
+  assert.equal(element('health-card').getAttribute('data-state'), 'advisories');
+  assert.equal(element('health-title').textContent, '1 recorded advisory');
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(stored(), before, 'a report under an open gate retires no record');
+  assert.equal(localStorageShim.sets, 0, 'and writes nothing');
+
+  // The gate closes and lists the safety check again, unchanged: still hidden.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND, STUCK] }));
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(stored(), before);
+
+  // A report that leaves the safety check out is the clearing that retires it
+  // — on this charger's firmware (7.12) too: its relay gate never closes, so
+  // every report there is `incomplete`, and it prunes on absence all the same,
+  // that gate being no answer the gateway still owes.
+  const deployed = {
+    settings_known: true,
+    relay_health_known: false,
+    relay_health_supported: false,
+  };
+  showHealth(doc({ advisories: [...doc().advisories, STUCK], gates: deployed }));
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(Object.keys(stored()[uid]), ['fault.no_ground']);
+});
+
+test('a change the report lists under an open gate retires its record, and the screen keeps that', (t) => {
+  const uid = signIn(t);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+
+  // The firmware re-rates the dismissed fault while a gate is still open.
+  // What a report lists is evidence whatever the gates say: the row is shown
+  // and its record goes — through the screen, which writes under an open gate
+  // exactly as under a closed one.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [{ ...doc().advisories[0], severity: 'warning' }], gates: open }));
+  assert.equal(rows().length, 1, 're-rated, so listed again');
+  assert.equal(stored(), null, 'the record went with the report that shows the row');
+
+  // So the gate closing on it, back at the dismissed rating, hides nothing.
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'not hidden again at the dismissed rating');
+  assert.equal(stored(), null);
+});
+
 test('a refused storage write still hides the row for this page', (t) => {
   const uid = signIn(t);
   localStorageShim.refuse = true;

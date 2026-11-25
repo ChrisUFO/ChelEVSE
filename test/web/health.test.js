@@ -1344,17 +1344,30 @@ test('a dismissed row leaves the counts, the summary, the tone and the state', (
   assert.equal(gated.caveat, '', 'the headline sentence is not repeated as a caveat');
   assert.equal(gated.tone, 'warn');
   // With one row left the list is the headline and the gate rides the caveat.
+  // The records are the shape a gateway restart leaves: two still hiding rows
+  // the report lists, and one for an advisory the open relay gate keeps the
+  // gateway silent about (`wear.*`). Retention is answered in this branch too
+  // — the one a restart document with listed fault rows lands in — not only in
+  // the `incomplete` one above.
+  const partialRecords = {
+    'fault.stuck_relay': record('critical', true),
+    'fault.no_ground': record('critical', false),
+    'wear.relay_life': record('info', false),
+  };
   const partial = visit(report({ gates: gate, advisories: [ACTIVE, RECORDED, ACKED] }), {
-    dismissals: {
-      'fault.stuck_relay': record('critical', true),
-      'fault.no_ground': record('critical', false),
-    },
+    dismissals: partialRecords,
   });
   assert.equal(partial.state, 'advisories');
+  assert.equal(partial.incomplete, true);
   assert.equal(partial.title, '1 acknowledged advisory');
   assert.equal(
     partial.caveat,
     'Relay health isn’t reported, so some advisory checks may be missing.',
+  );
+  assert.deepEqual(
+    partial.dismissals,
+    partialRecords,
+    'listed rows beside an open gate: the hidden records and the silent one both stand',
   );
 });
 
