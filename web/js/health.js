@@ -164,9 +164,12 @@ export function ackControlState(row, { pending = false, failure = null } = {}) {
  * Every advisory row offers it, whatever its presentation and whether or not
  * the bridge can perform an acknowledgement: a dismissal is a local hide that
  * never reaches the bridge, so there is no capability to be gated on. The
- * shape matches `ackControlState`, so the screen paints one shape for both
- * controls; the copy lives here with the card's other copy, unit-tested
- * without a DOM.
+ * shape mirrors `ackControlState` — `show`, `label`, `ariaLabel` — for
+ * parity, not because the projection ever withholds the control: the row
+ * builder sets `dismissible` on every row, so `show: false` is a shape no
+ * projected row produces, and the screen builds this button separately from
+ * the Acknowledge one. The copy lives here with the card's other copy,
+ * unit-tested without a DOM.
  */
 export function dismissControlState(row) {
   if (!row || row.dismissible !== true) {
