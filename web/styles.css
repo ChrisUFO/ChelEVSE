@@ -834,13 +834,14 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
-/* ---------- health (#158) ---------- */
-/* The card that carries the advisory list, its severities and the
-   acknowledgement control. Its marker is toned by health.js: a live
-   corroborated condition takes its severity, an incomplete check takes amber,
-   and everything else (including a complete report with no advisories) stays
-   muted. Green is never used: this card reports what the charger recorded, and
-   the app has no basis for a safety verdict. */
+/* ---------- health (#158, #205) ---------- */
+/* The card that carries the advisory list, its severities and the row's two
+   controls: Dismiss (the owner's local hide) and the acknowledgement control.
+   Its marker is toned by health.js: a live corroborated condition takes its
+   severity, an incomplete check takes amber, and everything else (including a
+   complete report with no advisories) stays muted. Green is never used: this
+   card reports what the charger recorded, and the app has no basis for a
+   safety verdict. */
 .health-card {
   margin-top: 20px;
 }
@@ -981,20 +982,19 @@ input[type='range']::-moz-range-thumb {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
-/* The acknowledgement control (#158): one button per unacknowledged row, on its
-   own line so it never competes with the three chips for width. It is the
-   row's one action — `.btn.small` already gives it the 44 px touch target — and
-   its failure line sits under it in place of a toast, so the row itself never
+/* The row's action line (#158, #205): Dismiss on every row — the owner's local
+   hide, quiet (`.btn.small.ghost`) so it reads as the secondary action — and,
+   on a row the bridge can acknowledge, the Acknowledge control beside it. Each
+   sits on the line under the chips, so neither competes with them for width;
+   `.btn.small` already gives both the 44 px touch target. The failure line
+   sits under the controls in place of a toast, so the row itself never
    moves. */
-.health-ack {
+.health-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 10px;
   margin-top: 8px;
-}
-.health-ack[hidden] {
-  display: none;
 }
 .health-ack-message {
   flex: 1 1 160px;
@@ -2863,6 +2863,17 @@ input[aria-invalid='true'] {
 }
 .btn.small.danger:hover {
   background: color-mix(in oklab, var(--err) 10%, transparent);
+}
+/* The quiet variant: a secondary action beside a primary one on the same line
+   (the health row's Dismiss). Borderless and transparent like `.danger`, but
+   in the muted colour; hover shows the small button's own surface. */
+.btn.small.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.btn.small.ghost:hover {
+  background: color-mix(in oklab, var(--surface-2) 55%, transparent);
 }
 /* The filled variant, declared after `.btn.small` because both are equally
    specific: a small solid button is filled too. The mode panel's Cancel and the

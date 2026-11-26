@@ -1,5 +1,7 @@
-import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DISMISSALS_KEY, createDismissalStore } from '../../web/js/health-dismissals.js';
 
 // The health card's acknowledgement wiring (#158, PR-6), pinned the repo's way:
 // the module-mock-free DOM stub (one element per id, every lookup deferred to
@@ -14,6 +16,13 @@ import assert from 'node:assert/strict';
 // `firebase.js` keeps `addDoc` unbound until `initFirebase()` runs, so the click
 // here reaches the real `ackNotification`, is refused by the unbound SDK, and
 // exercises the screen's "couldn't send" arm — a production code path.
+//
+// The dismissal block at the end (#205) runs on the same harness. It is the one
+// place that needs a signed-in account: a record is scoped to one, and
+// `firebase.js`'s `auth` binding cannot be handed a user from outside the
+// module. `initStatus` takes the account reader for exactly that, and the
+// localStorage shim is installed before the screen loads so its store writes
+// where these tests can read it back.
 
 const focusLog = [];
 let activeElement = null;
@@ -109,11 +118,32 @@ globalThis.document = {
   contains: (node) => live.has(node),
 };
 
-const { initStatus, leaveStatus, showHealth, showCommands } =
+// A localStorage shim over a Map, installed before the screen loads: its
+// module-level dismissal store binds to whatever `localStorage` is at that
+// moment, as it does in the browser. `sets` counts writes, and `refuse` makes
+// each one throw the way a full or private-mode storage does.
+const storage = new Map();
+const localStorageShim = {
+  sets: 0,
+  refuse: false,
+  getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+  setItem(key, value) {
+    if (this.refuse) throw new Error('QuotaExceededError');
+    this.sets += 1;
+    storage.set(key, String(value));
+  },
+  removeItem: (key) => storage.delete(key),
+};
+globalThis.localStorage = localStorageShim;
+
+// The signed-in account the card reads — '' until a dismissal case signs one in.
+const account = { uid: '' };
+
+const { initStatus, leaveStatus, showHealth, showHealthError, showCommands } =
   await import('../../web/js/screens/status.js');
 
 // The listeners the click cases need are the ones initStatus itself registers.
-initStatus();
+initStatus({ uid: () => account.uid });
 
 const at = (year, month, day) => Math.floor(new Date(year, month - 1, day, 12).getTime() / 1000);
 
@@ -149,32 +179,53 @@ function doc(overrides = {}) {
   };
 }
 
+// A second advisory, so a case can dismiss one row and watch another.
+const GROUND = {
+  id: 'safety.ground_check',
+  category: 'safety',
+  severity: 'warning',
+  firmware_sticky: false,
+  acked: false,
+  first_seen: at(2026, 11, 1),
+  last_seen: Date.now() / 1000,
+  classification: 'historical',
+  corroborated: false,
+  counter_token: 0,
+  first_observed: at(2026, 11, 1),
+};
+
 const rows = () => element('health-list').children;
 const rowOf = () => rows()[0];
-// The acknowledgement area is the row's third child: head, meta, control.
-const controlOf = (row) => row.children[2] || null;
-const buttonOf = (row) => {
-  const area = controlOf(row);
-  return area ? area.children[0] : null;
-};
-const messageOf = (row) => {
-  const area = controlOf(row);
-  return area ? area.children[1] : null;
-};
+// Every row's third child is its action line: head, meta, actions (#205 — the
+// Dismiss control made it unconditional). It holds the Dismiss button, and on a
+// row the bridge can acknowledge the Acknowledge button and its failure line.
+const actionsOf = (row) => row.children[2] || null;
+const actionChildren = (row) => (actionsOf(row) || { children: [] }).children;
+const buttonsOf = (row) => actionChildren(row).filter((node) => node.tag === 'button');
+// The two controls, told apart by the Dismiss button's variant class.
+const dismissOf = (row) =>
+  buttonsOf(row).find((node) => String(node.className).split(/\s+/).includes('ghost')) || null;
+const ackOf = (row) =>
+  buttonsOf(row).find((node) => !String(node.className).split(/\s+/).includes('ghost')) || null;
+const messageOf = (row) => actionChildren(row).find((node) => node.tag === 'p') || null;
+const labels = () => rows().flatMap((row) => buttonsOf(row).map((button) => button.textContent));
 const chipOf = (row, className) =>
   row.children[0].children.find((node) => String(node.className).split(/\s+/).includes(className));
 
 // A macrotask turn: the click's write settles off the microtask queue.
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-const click = (button) => {
-  for (const listener of button.listeners.get('click') || []) listener();
+// An activation of a control. A keyboard one by default — the `click` a
+// focused button fires, which carries no click count; a pointer click passes
+// its own event, that count being what tells the two apart.
+const click = (button, event = { detail: 0 }) => {
+  for (const listener of button.listeners.get('click') || []) listener(event);
 };
 
 test('an unacknowledged row offers one real button that names its advisory', () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
 
   assert.equal(button.tag, 'button');
   assert.equal(button.type, 'button');
@@ -194,7 +245,7 @@ test('an unacknowledged row offers one real button that names its advisory', () 
 test('a click goes busy and disables the control, so a second one cannot repeat it', () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
 
   click(button);
   // Synchronously, before the write has an answer: busy, disabled, announced.
@@ -213,7 +264,7 @@ test('a click goes busy and disables the control, so a second one cannot repeat 
 test('a write that cannot leave says so and leaves the row unacknowledged', async () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
   click(button);
   await flush();
 
@@ -222,7 +273,7 @@ test('a write that cannot leave says so and leaves the row unacknowledged', asyn
   const message = messageOf(row);
   assert.equal(message.hidden, false);
   assert.equal(message.textContent, 'Couldn’t send — check your connection and try again.');
-  // Back to idle, ready for another try — and still recorded, never dismissed.
+  // Back to idle, ready for another try — and still recorded, never acknowledged.
   assert.equal(button.textContent, 'Acknowledge');
   assert.equal(button.disabled, false);
   assert.equal(chipOf(row, 'health-state').textContent, 'Recorded');
@@ -232,7 +283,7 @@ test('a write that cannot leave says so and leaves the row unacknowledged', asyn
 test('acknowledging from the control hands focus to the card, not to <body>', () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
   // The owner activates the control: focus is on it when the click runs, and the
   // synchronous disable takes it away inside that same dispatch (the stub models
   // the browser's focus fix-up rule). The success snapshot lands seconds later,
@@ -247,8 +298,10 @@ test('acknowledging from the control hands focus to the card, not to <body>', ()
   const acked = rowOf();
   assert.equal(acked.getAttribute('data-presentation'), 'acknowledged');
   assert.equal(chipOf(acked, 'health-state').textContent, 'Acknowledged');
-  assert.equal(acked.children.length, 2, 'no control remains on an acknowledged row');
-  assert.equal(buttonOf(acked), null);
+  assert.equal(ackOf(acked), null, 'no Acknowledge control remains on an acknowledged row');
+  // The row itself can still be dismissed (#205): that control is not the one
+  // the acknowledgement retires.
+  assert.equal(dismissOf(acked).textContent, 'Dismiss');
   // Focus did not stay on <body>: it moved to the card title the live region
   // announces, even though the browser had already dropped it at click time.
   assert.equal(focusLog.at(-1), 'health-title');
@@ -257,7 +310,7 @@ test('acknowledging from the control hands focus to the card, not to <body>', ()
 
 test('a control the owner tabbed to hands focus over when a remote ack removes it', () => {
   showHealth(doc());
-  const button = buttonOf(rowOf());
+  const button = ackOf(rowOf());
   // Never pressed: the acknowledgement came from elsewhere, so nothing disabled
   // the control and it still holds focus when the snapshot rebuilds the list.
   button.focus({ preventScroll: true });
@@ -265,13 +318,13 @@ test('a control the owner tabbed to hands focus over when a remote ack removes i
 
   showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
 
-  assert.equal(buttonOf(rowOf()), null);
+  assert.equal(ackOf(rowOf()), null);
   assert.equal(focusLog.at(-1), 'health-title');
 });
 
 test('a rebuild leaves focus alone when the owner has moved to another control', () => {
   showHealth(doc());
-  const button = buttonOf(rowOf());
+  const button = ackOf(rowOf());
   button.focus({ preventScroll: true });
   click(button);
   // The disable dropped focus to <body>; the owner went back to the charger
@@ -289,7 +342,7 @@ test('a rebuild leaves focus alone when the owner has moved to another control',
 test('a failed attempt puts focus back on the control that came back', async () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
   button.focus({ preventScroll: true });
   click(button);
   // The disable displaced focus synchronously, exactly as on the success path.
@@ -309,7 +362,7 @@ test('a failed attempt puts focus back on the control that came back', async () 
 test('a failed attempt leaves focus alone when the owner has moved to another control', async () => {
   showHealth(doc());
   const row = rowOf();
-  const button = buttonOf(row);
+  const button = ackOf(row);
   button.focus({ preventScroll: true });
   click(button);
   // The disable dropped focus to <body>; while the write is still out the owner
@@ -331,7 +384,7 @@ test('a failed attempt leaves focus alone when the owner has moved to another co
 
 test('a failed attempt leaves no flag for a later rebuild to spend', async () => {
   showHealth(doc());
-  const button = buttonOf(rowOf());
+  const button = ackOf(rowOf());
   button.focus({ preventScroll: true });
   click(button);
   await flush();
@@ -345,42 +398,22 @@ test('a failed attempt leaves no flag for a later rebuild to spend', async () =>
   // An unrelated health update rebuilds the list. Nothing the owner was on is
   // going away, so focus stays where it is; the finished attempt's flag must not
   // pull it to the card title.
-  showHealth(
-    doc({
-      advisories: [
-        ...doc().advisories,
-        {
-          id: 'safety.ground_check',
-          category: 'safety',
-          severity: 'warning',
-          firmware_sticky: false,
-          acked: false,
-          first_seen: at(2026, 11, 1),
-          last_seen: Date.now() / 1000,
-          classification: 'historical',
-          corroborated: false,
-          counter_token: 0,
-          first_observed: at(2026, 11, 1),
-        },
-      ],
-    }),
-  );
+  showHealth(doc({ advisories: [...doc().advisories, GROUND] }));
 
   assert.equal(rows().length, 2, 'the unrelated advisory did rebuild the list');
   assert.equal(document.activeElement, body);
   assert.deepEqual(focusLog, [], 'a finished attempt owns no focus hand-off');
 });
 
-test('an already acknowledged advisory and unknown health offer no control at all', () => {
+test('an already acknowledged advisory and unknown health offer no Acknowledge control', () => {
   showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
-  assert.equal(rowOf().children.length, 2);
-  assert.equal(buttonOf(rowOf()), null);
+  assert.equal(ackOf(rowOf()), null);
+  assert.equal(messageOf(rowOf()), null, 'nothing left to mute, so no failure line either');
 
   showHealth(doc({ advisories: [{ ...doc().advisories[0], acked: true }], acks: {} }));
-  assert.equal(rowOf().children.length, 2);
-  assert.equal(buttonOf(rowOf()), null);
+  assert.equal(ackOf(rowOf()), null);
 
-  // Health unknown lists nothing, so there is nothing to acknowledge.
+  // Health unknown lists nothing, so there is no row and no control of any kind.
   showHealth(null);
   assert.deepEqual(rows(), []);
   assert.equal(element('health-card').getAttribute('data-state'), 'unknown');
@@ -395,28 +428,888 @@ test('an older bridge’s document offers no ack control', () => {
   delete legacy.ack_command;
   showHealth(legacy);
   assert.equal(rows().length, 1);
-  assert.equal(rowOf().children.length, 2); // head, meta — no control area
-  assert.equal(buttonOf(rowOf()), null);
+  // Dismiss alone on the action line — no Acknowledge button, no failure line.
+  assert.deepEqual(actionChildren(rowOf()), [dismissOf(rowOf())]);
+  assert.equal(ackOf(rowOf()), null);
 
   // The bridge is then upgraded and the fact arrives on an otherwise
   // identical list: the row must rebuild so the control appears — the
   // rebuild signature carries the capability, not just the advisory facts.
   showHealth(doc());
-  assert.notEqual(buttonOf(rowOf()), null);
+  assert.notEqual(ackOf(rowOf()), null);
 
   // And the reverse skew — the fact hand-deleted in the console (A.8) or
   // the bridge rolled back: the same rebuild must remove the control
   // again; the gate is symmetric.
   showHealth(legacy);
   assert.equal(rows().length, 1);
-  assert.equal(rowOf().children.length, 2); // head, meta — no control area
-  assert.equal(buttonOf(rowOf()), null);
+  assert.deepEqual(actionChildren(rowOf()), [dismissOf(rowOf())]);
+  assert.equal(ackOf(rowOf()), null);
 });
 
 test('sign-out teardown leaves no control or focus behind', () => {
   showHealth(doc());
-  assert.notEqual(buttonOf(rowOf()), null);
+  assert.notEqual(ackOf(rowOf()), null);
   leaveStatus();
   assert.deepEqual(rows(), []);
   assert.equal(element('health-title').textContent, 'Health unknown');
+});
+
+// ---------- dismissal (#205) ----------
+//
+// The row's other control, on the same harness. Each case signs an account in
+// and starts from an empty store: a record is scoped to an account, and the
+// screen's store is module state. Clearing the store does reset an account an
+// earlier case dismissed under — the store reads storage again once storage
+// has taken a write — but never an account whose write was refused: that copy
+// is the page's for life, which is the session-only hide. Each sign-in
+// therefore starts a fresh account. What a record hides and when it is
+// retired is health.js's (test/web/health.test.js); here it is that the
+// control, the click, the focus hand-off and the persistence are wired the way
+// those rules assume.
+
+// Named accounts for the one case that changes account inside itself.
+const OWNER = 'uid-owner';
+const OTHER = 'uid-other';
+
+// What the next page load would read, exactly as the store wrote it.
+const stored = () => JSON.parse(storage.get(DISMISSALS_KEY) ?? 'null');
+const twoRows = () => doc({ advisories: [...doc().advisories, GROUND] });
+
+let accounts = 0;
+
+// Sign in as `uid` (a fresh account by default) with an empty store and the
+// card in its pre-data state; sign back out when the case ends. Returns the
+// account.
+function signIn(t, uid = `uid-case-${++accounts}`) {
+  account.uid = uid;
+  storage.clear();
+  localStorageShim.refuse = false;
+  localStorageShim.sets = 0;
+  focusLog.length = 0;
+  leaveStatus();
+  showHealth(doc());
+  t.after(() => {
+    account.uid = '';
+  });
+  return uid;
+}
+
+// Change account without touching the store, the way a sign-out followed by a
+// sign-in in the same page does.
+function switchTo(uid) {
+  account.uid = uid;
+  leaveStatus();
+  showHealth(doc());
+}
+
+test('every row offers Dismiss: with the capability fact, without it, and once acknowledged', (t) => {
+  signIn(t);
+  const row = rowOf();
+  const dismiss = dismissOf(row);
+  const ack = ackOf(row);
+
+  // One action line: Dismiss first, then the ack control and its failure line.
+  assert.equal(actionsOf(row).className, 'health-actions');
+  assert.deepEqual(actionChildren(row), [dismiss, ack, messageOf(row)]);
+  assert.equal(dismiss.tag, 'button');
+  assert.equal(dismiss.type, 'button');
+  assert.equal(dismiss.textContent, 'Dismiss');
+  assert.equal(dismiss.getAttribute('aria-label'), 'Dismiss No ground');
+  assert.equal(dismiss.disabled, false);
+  // The three facts sit beside it, unaltered.
+  assert.equal(chipOf(row, 'health-state').textContent, 'Recorded');
+  assert.equal(chipOf(row, 'health-severity').textContent, 'Critical');
+
+  // An older bridge's document: the capability gates Acknowledge only.
+  const legacy = doc();
+  delete legacy.ack_command;
+  showHealth(legacy);
+  assert.deepEqual(actionChildren(rowOf()), [dismissOf(rowOf())]);
+  assert.equal(dismissOf(rowOf()).getAttribute('aria-label'), 'Dismiss No ground');
+
+  // Acknowledged: nothing left to mute, and still dismissible.
+  showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
+  assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
+  assert.deepEqual(actionChildren(rowOf()), [dismissOf(rowOf())]);
+
+  // Active — a live, corroborated condition — is dismissible like the rest,
+  // and its Dismiss empties the card exactly as a record's does.
+  showHealth(
+    doc({ advisories: [{ ...doc().advisories[0], classification: 'active', corroborated: true }] }),
+  );
+  assert.equal(rowOf().getAttribute('data-presentation'), 'active');
+  assert.equal(element('health-card').getAttribute('data-tone'), 'err');
+  assert.deepEqual(actionChildren(rowOf()), [
+    dismissOf(rowOf()),
+    ackOf(rowOf()),
+    messageOf(rowOf()),
+  ]);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-card').getAttribute('data-tone'), 'muted');
+  assert.equal(element('health-title').textContent, 'No advisories');
+});
+
+test('activating Dismiss removes the row at once, and the last one empties the card', (t) => {
+  signIn(t);
+  click(dismissOf(rowOf()));
+
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-list').hidden, true);
+  // The card's existing presentation for an empty list — nothing new.
+  assert.equal(element('health-title').textContent, 'No advisories');
+  assert.equal(
+    element('health-detail').textContent,
+    'The charger’s last health check listed none.',
+  );
+  assert.equal(element('health-card').getAttribute('data-state'), 'none');
+  assert.equal(element('health-card').getAttribute('data-tone'), 'muted');
+
+  // Two rows, as a fresh account: the other stays, and the summary counts what
+  // is left.
+  signIn(t, 'uid-second-case');
+  showHealth(twoRows());
+  assert.equal(rows().length, 2);
+  const [first, second] = rows();
+  click(dismissOf(second));
+
+  // The dismissal changed the signature beneath the same advisory list, so the
+  // list rebuilt: the survivor is a new node, not the one that was there.
+  assert.equal(rows().length, 1);
+  assert.notEqual(rowOf(), first);
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'No ground');
+  assert.equal(element('health-title').textContent, '1 recorded advisory');
+
+  // And the last one empties the card the same way.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-list').hidden, true);
+  assert.equal(element('health-title').textContent, 'No advisories');
+});
+
+test('dismissing from the control hands focus to the card, never to <body>', (t) => {
+  signIn(t);
+  const dismiss = dismissOf(rowOf());
+  // Keyboard activation: focus is on the control when the click runs, and the
+  // rebuild that follows destroys it with its row.
+  dismiss.focus({ preventScroll: true });
+  assert.equal(document.activeElement, dismiss);
+
+  click(dismiss);
+
+  // The same target the Acknowledge flow hands focus to, the live region that
+  // has just announced the shorter list.
+  assert.equal(focusLog.at(-1), 'health-title');
+  assert.equal(document.activeElement, element('health-title'));
+  assert.deepEqual(element('health-title').focused, { preventScroll: true });
+  assert.notEqual(document.activeElement, body);
+});
+
+test('a Dismiss activated with nothing focused does not leave focus on <body>', (t) => {
+  // A mouse click in a browser that does not focus buttons: the control never
+  // held focus, so only the click's own record of what it activated can owe
+  // the hand-off.
+  signIn(t);
+  // Nothing focused, established rather than assumed: an earlier case may have
+  // left focus on the card title.
+  body.focus({ preventScroll: true });
+  focusLog.length = 0;
+  assert.equal(document.activeElement, body);
+
+  click(dismissOf(rowOf()));
+
+  assert.equal(document.activeElement, element('health-title'));
+  assert.deepEqual(focusLog, ['health-title']);
+});
+
+test('a Dismiss control the owner tabbed to hands focus over when a remote change rebuilds', (t) => {
+  signIn(t);
+  const dismiss = dismissOf(rowOf());
+  // Never pressed: the acknowledgement came from elsewhere, so nothing disabled
+  // the control and it still holds focus when the snapshot rebuilds the list.
+  dismiss.focus({ preventScroll: true });
+  assert.equal(document.activeElement, dismiss);
+
+  showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
+
+  assert.equal(focusLog.at(-1), 'health-title');
+});
+
+test('a rebuild leaves focus alone when the owner moved off a Dismiss control', (t) => {
+  signIn(t);
+  dismissOf(rowOf()).focus({ preventScroll: true });
+  const elsewhere = element('pause');
+  elsewhere.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  showHealth(doc({ acks: { 'fault.no_ground': at(2026, 11, 16) } }));
+
+  assert.equal(document.activeElement, elsewhere, 'focus stays where the owner put it');
+  assert.deepEqual(focusLog, [], 'no hand-off steals a live focus');
+});
+
+test('a spent Dismiss leaves no flag for a later rebuild to spend', (t) => {
+  signIn(t);
+  // Nothing is focused when the owner activates Dismiss — a mouse click in a
+  // browser that does not focus buttons — so the hand-off the click owes is
+  // paid by the rebuild the click itself triggers.
+  body.focus({ preventScroll: true });
+  click(dismissOf(rowOf()));
+  assert.equal(document.activeElement, element('health-title'));
+
+  // The owner then clicked the card's text: focus fell to <body>, so nothing
+  // in the list is holding it any more.
+  body.focus({ preventScroll: true });
+  focusLog.length = 0;
+
+  // An unrelated health update rebuilds the list. Nothing the owner was on is
+  // going away, so focus stays where it is; the spent dismissal's flag must
+  // not pull it to the card title a second time.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND] }));
+
+  assert.equal(rows().length, 1, 'only the new advisory is listed');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+  assert.equal(document.activeElement, body);
+  assert.deepEqual(focusLog, [], 'a spent dismissal owns no focus hand-off');
+});
+
+test('the record is persisted under the signed-in account, and a steady report writes nothing', (t) => {
+  const uid = signIn(t);
+  const before = Date.now();
+  click(dismissOf(rowOf()));
+
+  const record = stored()?.[uid]?.['fault.no_ground'];
+  assert.deepEqual(Object.keys(stored()), [uid]);
+  assert.equal(record.severity, 'critical');
+  assert.ok(
+    Number.isFinite(record.dismissedAt) && record.dismissedAt >= before,
+    'the record is stamped at the click',
+  );
+  // What a later page load reads: a fresh store over the same storage.
+  assert.deepEqual(createDismissalStore({ storage: localStorageShim }).read(uid), {
+    'fault.no_ground': record,
+  });
+
+  // Steady state: the same report again, and one with only its stamp moved,
+  // cost no storage write — and the row stays hidden.
+  const sets = localStorageShim.sets;
+  showHealth(doc());
+  showHealth(doc({ checked_at: Date.now() / 1000 - 5 }));
+  assert.deepEqual(rows(), []);
+  assert.equal(localStorageShim.sets, sets);
+});
+
+test('a record an earlier page load wrote is applied on this one', (t) => {
+  // The reload case: a record only storage knows about, which no store in
+  // this page has committed.
+  const EARLIER = 'uid-earlier-page';
+  signIn(t, EARLIER);
+  assert.equal(rows().length, 1, 'nothing stored: the row lists');
+
+  storage.set(
+    DISMISSALS_KEY,
+    JSON.stringify({
+      [EARLIER]: {
+        'fault.no_ground': {
+          severity: 'critical',
+          dismissedAt: 1794876000000,
+          reportedPresent: false,
+        },
+      },
+    }),
+  );
+  showHealth(doc());
+
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+});
+
+test('dismissals are scoped per account', (t) => {
+  signIn(t, OWNER);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(Object.keys(stored()), [OWNER]);
+
+  // Another allowlisted account in the same browser sees the row…
+  switchTo(OTHER);
+  assert.equal(rows().length, 1);
+  // …and gets its own independent Dismiss state.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(Object.keys(stored()).sort(), [OTHER, OWNER]);
+
+  // Signed out, no record is applied and none can be written: there is no
+  // account to scope a dismissal to.
+  switchTo('');
+  assert.equal(rows().length, 1);
+  click(dismissOf(rowOf()));
+  assert.equal(rows().length, 1);
+  assert.deepEqual(Object.keys(stored()).sort(), [OTHER, OWNER]);
+
+  // Back as the first account: still hidden, with nothing done again.
+  switchTo(OWNER);
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+});
+
+test('dismissing a row starts no acknowledgement and leaves the other rows alone', async (t) => {
+  signIn(t);
+  showHealth(twoRows());
+  const [gone] = rows();
+  assert.equal(chipOf(gone, 'health-name').textContent, 'No ground');
+  assert.equal(ackOf(rows()[1]).textContent, 'Acknowledge');
+
+  click(dismissOf(gone));
+  // A macrotask turn: an attempt that had started would by now be busy, or
+  // have been refused by the unbound SDK and painted its reason.
+  await flush();
+
+  // The other row rebuilt — a rebuild recreates every row — and is still
+  // Ground check, with its Acknowledge control in the idle state it was in: no
+  // attempt was started on its behalf, and none was painted on it.
+  assert.equal(rows().length, 1);
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+  const ack = ackOf(rowOf());
+  assert.equal(ack.textContent, 'Acknowledge');
+  assert.equal(ack.getAttribute('aria-label'), 'Acknowledge Ground check');
+  assert.equal(ack.disabled, false);
+  assert.equal(messageOf(rowOf()).hidden, true);
+  assert.equal(messageOf(rowOf()).textContent, '');
+  assert.equal(labels().includes('Acknowledging…'), false);
+  // The shared command feedback line stays silent too: a Dismiss wired through
+  // the screen's own `send` would report its refusal here.
+  assert.equal(element('feedback').className, 'feedback');
+  assert.equal(element('feedback').textContent, '');
+  // The survivor's own Dismiss control is wired once and still live.
+  assert.equal(dismissOf(rowOf()).listeners.get('click').length, 1);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+});
+
+test('a signed-out Dismiss starts no acknowledgement on the row it was aimed at', async () => {
+  // Signed out there is no account to scope a record to, so the row stays
+  // listed — and with it the row's own Acknowledge control, which the case
+  // above cannot watch: there the dismissed row is gone before anything could
+  // be painted on it, and the click's own render ends an attempt started on it
+  // without a trace. Here one would show at once — busy and disabled — and
+  // again once the unbound SDK's refusal lands, as a reason line.
+  switchTo('');
+  const row = rowOf();
+  const ack = ackOf(row);
+  assert.equal(ack.textContent, 'Acknowledge');
+
+  click(dismissOf(row));
+
+  // Nothing is recorded, and the card is exactly as it was: the same row, not
+  // rebuilt, its control idle.
+  assert.equal(rows().length, 1, 'signed out, the row stays');
+  assert.equal(rowOf(), row, 'nothing changed, so no rebuild');
+  assert.equal(ackOf(row), ack);
+  assert.equal(ack.textContent, 'Acknowledge');
+  assert.equal(ack.getAttribute('aria-label'), 'Acknowledge No ground');
+  assert.equal(ack.disabled, false);
+  assert.equal(messageOf(row).hidden, true);
+
+  // A macrotask on, an attempt's refusal would have been painted.
+  await flush();
+  assert.equal(ack.textContent, 'Acknowledge');
+  assert.equal(ack.disabled, false);
+  assert.equal(messageOf(row).hidden, true);
+  assert.equal(messageOf(row).textContent, '');
+});
+
+// The calls a stretch of the screen makes, by the names it calls them through.
+// Comments on lines of their own are dropped first, so a pin reads the code: a
+// trailing comment or a string literal can only add a name the pin lacks,
+// never hide one. A keyword's parenthesis is always spaced (`if (pointer)`)
+// and a call's never is, so a condition is not read as a call.
+const codeOnly = (code) => code.replace(/^\s*\/\/.*$/gm, '');
+const callsIn = (code) => [...code.matchAll(/([\w$]+(?:\.[\w$]+)*)(?:\?\.)?\(/g)].map((m) => m[1]);
+
+test('the Dismiss click calls nothing that writes to Firestore', () => {
+  // The control's one promise is that it is purely client-side: a record in
+  // this browser's storage, and nothing else. Every write path the screen has
+  // — the acknowledgement's tracker, and the store's `ackNotification` and
+  // `sendCommand` — is refused in this harness (the SDK is unbound), and a
+  // call that swallows that refusal paints nothing, so no click case can see
+  // it. The click's whole path is therefore pinned from source (the
+  // store.test.js pattern): the block that builds the control and registers
+  // its listener, the function that listener calls, and the rebuild that
+  // function ends in. The first two may call only what is listed, as many
+  // times as listed — a write path under any name, a helper that reaches one,
+  // a second listener and a rename that leaves one of these names behind all
+  // fail.
+  const source = readFileSync(new URL('../../web/js/screens/status.js', import.meta.url), 'utf8');
+  const control = /if \(dismiss\.show\) \{([\s\S]*?)\n {2}\}\n/.exec(source);
+  assert.ok(control, 'screens/status.js builds the Dismiss control in one block');
+  const start = source.indexOf('function dismissRow(');
+  assert.ok(start >= 0, 'screens/status.js declares dismissRow');
+  const end = source.indexOf('\n}\n', start);
+  assert.ok(end > start, 'screens/status.js closes dismissRow');
+  for (const [what, raw, calls] of [
+    // The control's block: the button, its accessible name, one click
+    // listener, its place in the row and in the focus map.
+    [
+      'the Dismiss control',
+      control[1],
+      [
+        'actions.append',
+        'button.addEventListener',
+        'button.setAttribute',
+        'dismissNodes.set',
+        'dismissRow',
+        'el',
+      ],
+    ],
+    // The click: the live lookup, the double-click guard's clock, the record,
+    // the account it is scoped to, and the rebuild that removes the row.
+    [
+      'dismissRow',
+      source.slice(source.indexOf('{', start), end + 2),
+      ['Date.now', 'accountUid', 'advisories.find', 'dismissals.dismiss', 'renderHealth'],
+    ],
+  ]) {
+    const code = codeOnly(raw);
+    assert.deepEqual(callsIn(code).sort(), calls, `${what} calls only what is listed`);
+    // Nothing is called except through a name: a computed member (`x[y](…)`)
+    // or a called result (`f(a)(b)`) would have none to list.
+    assert.doesNotMatch(code, /\]\s*\(|\)\s*\(/, `${what} calls nothing unnamed`);
+  }
+
+  // The rebuild is the one place past `dismissRow` that knows a Dismiss just
+  // happened — the click sets `dismissFocusId` and `renderHealth` spends it —
+  // so a write wired there would ride every Dismiss, unseen. That function is
+  // every snapshot's paint too, so its calls are too many and too apt to
+  // change to list; what it must never reach is named instead: every write
+  // path the screen has — the tracker's `start`, `ackNotification`,
+  // `sendCommand` (which the screen imports as `postCommand`) and the screen's
+  // own `send`. It is the name that is forbidden, call or not, so an alias or a
+  // callback is caught with the call. What is not caught is anything the list
+  // does not know — a helper that reaches one of these, a write path imported
+  // later — which is why the two units above are allow-listed.
+  const render = source.indexOf('function renderHealth(');
+  assert.ok(render >= 0, 'screens/status.js declares renderHealth');
+  const renderEnd = source.indexOf('\n}\n', render);
+  assert.ok(renderEnd > render, 'screens/status.js closes renderHealth');
+  const reached =
+    codeOnly(source.slice(render, renderEnd)).match(
+      /\backs\.start\b|\backNotification\b|\bsendCommand\b|\bpostCommand\b|\bsend\b/g,
+    ) || [];
+  assert.deepEqual(reached, [], 'the rebuild the Dismiss click ends in names no write path');
+});
+
+test('dismissing a row mid-acknowledgement ends the wait and strands no focus', async (t) => {
+  signIn(t);
+  const ack = ackOf(rowOf());
+  ack.focus({ preventScroll: true });
+  click(ack);
+  assert.equal(ack.textContent, 'Acknowledging…');
+  assert.equal(document.activeElement, body, 'the disable displaced the focus');
+
+  click(dismissOf(rowOf()));
+
+  // The row is gone and focus went to the card, not back to <body>.
+  assert.deepEqual(rows(), []);
+  assert.equal(focusLog.at(-1), 'health-title');
+  assert.equal(document.activeElement, element('health-title'));
+
+  // The write's refusal lands a microtask later on a row that no longer
+  // exists: nothing is painted, exactly as when a row leaves the snapshot.
+  await flush();
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+  assert.equal(element('feedback').textContent, '');
+
+  // It was the dismissal that ended the wait, though — not that refusal
+  // landing. A second attempt, dismissed the same way, and the advisory then
+  // listed again at another severity while its write is still out: only the
+  // dismissal can have ended the attempt, and the new row's control is idle.
+  showHealth(doc({ advisories: [{ ...doc().advisories[0], severity: 'warning' }] }));
+  assert.equal(rows().length, 1, 're-rated, so listed again');
+  const second = ackOf(rowOf());
+  click(second);
+  assert.equal(second.textContent, 'Acknowledging…');
+
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'back at the dismissed rating, so listed again');
+  const control = ackOf(rowOf());
+  assert.notEqual(control, second, 'the row was rebuilt');
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(control.disabled, false);
+  assert.equal(messageOf(rowOf()).hidden, true);
+
+  // The second write's refusal then lands on nothing.
+  await flush();
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(messageOf(rowOf()).hidden, true);
+});
+
+test('dismissing another row leaves a surviving row’s acknowledgement in flight', async (t) => {
+  signIn(t);
+  showHealth(twoRows());
+  const [, otherRow] = rows();
+  const ack = ackOf(rowOf());
+  click(ack);
+  assert.equal(ack.textContent, 'Acknowledging…');
+
+  click(dismissOf(otherRow));
+
+  // The rebuild recreated the surviving row, and its new control still reads
+  // as the attempt in flight — busy and disabled, no reason — because the
+  // snapshot it was rebuilt from still lists that advisory as acknowledgeable.
+  assert.equal(rows().length, 1);
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'No ground');
+  const control = ackOf(rowOf());
+  assert.notEqual(control, ack, 'the survivor was rebuilt, not repainted');
+  assert.equal(control.textContent, 'Acknowledging…');
+  assert.equal(control.disabled, true);
+  assert.equal(messageOf(rowOf()).hidden, true);
+
+  // The write's refusal then lands on that row: the reason is shown and the
+  // control is enabled again, exactly as on a row nothing dismissed.
+  await flush();
+  assert.equal(control.textContent, 'Acknowledge');
+  assert.equal(control.disabled, false);
+  assert.equal(messageOf(rowOf()).hidden, false);
+  assert.equal(
+    messageOf(rowOf()).textContent,
+    'Couldn’t send — check your connection and try again.',
+  );
+});
+
+test('a dismissed row returns when its severity changes, and after it leaves and is relisted', (t) => {
+  signIn(t);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+
+  // The firmware rates it differently: listed again, and dismissible again.
+  showHealth(doc({ advisories: [{ ...doc().advisories[0], severity: 'warning' }] }));
+  assert.equal(rows().length, 1);
+  assert.equal(chipOf(rowOf(), 'health-severity').textContent, 'Warning');
+  assert.equal(element('health-title').textContent, '1 recorded advisory');
+  assert.equal(dismissOf(rowOf()).textContent, 'Dismiss');
+  // The record went with that report — it lasts only while it hides a row —
+  // so the row would be shown as well if it returned to Critical as it is.
+  assert.equal(stored(), null, 'the retired record is not kept');
+
+  // Dismissed at the new rating too, and then the charger clears it: the
+  // record goes with it…
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  showHealth(doc({ advisories: [] }));
+  assert.equal(stored(), null, 'no record is left, so no key either');
+
+  // …so the same advisory, listed again, is shown.
+  showHealth(doc());
+  assert.equal(rows().length, 1);
+  assert.equal(element('health-card').getAttribute('data-state'), 'advisories');
+  assert.equal(element('health-list').hidden, false);
+});
+
+test('a dismissed record returns when the charger starts reporting it as present', (t) => {
+  const uid = signIn(t);
+  const standing = doc().advisories[0];
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  const record = stored()[uid]['fault.no_ground'];
+  assert.equal(record.severity, 'critical');
+  assert.equal(record.reportedPresent, false, 'dismissed as the record it was');
+
+  // Tripped again: the same id at the same severity, now Active from live
+  // controller state. The row is back, as the live condition it now is…
+  const tripped = doc({
+    advisories: [{ ...standing, classification: 'active', corroborated: true }],
+  });
+  showHealth(tripped);
+  assert.equal(rows().length, 1, 'the same severity does not keep it hidden');
+  assert.equal(rowOf().getAttribute('data-presentation'), 'active');
+  assert.equal(chipOf(rowOf(), 'health-severity').textContent, 'Critical');
+  assert.equal(element('health-title').textContent, '1 active advisory');
+  assert.equal(element('health-card').getAttribute('data-tone'), 'err');
+  assert.equal(dismissOf(rowOf()).textContent, 'Dismiss');
+  // …and its record went with the report that shows it.
+  assert.equal(stored(), null, 'the record is not kept');
+
+  // Dismissed again, the record now says the condition was present.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(stored()[uid]['fault.no_ground'].reportedPresent, true);
+});
+
+test('a Dismiss on an acknowledged row records the presence the card holds at the click', (t) => {
+  // An acknowledged row's chip stays Acknowledged whichever way the charger
+  // reports its condition, so when that fact flips nothing the row renders
+  // changes: the list is not rebuilt, and the control is still the one built
+  // from the earlier report. The record is keyed on that fact, so the click has
+  // to read it from what the card shows now — written from the older row, the
+  // record would hide nothing and the click's own render would discard it,
+  // leaving a Dismiss that silently does nothing.
+  const acknowledged = (corroborated) =>
+    doc({
+      advisories: [
+        {
+          ...doc().advisories[0],
+          acked: true,
+          classification: 'acknowledged',
+          corroborated,
+        },
+      ],
+    });
+  // The fact flips each way: a fault tripped again, and one that comes to rest.
+  for (const [was, now] of [
+    [false, true],
+    [true, false],
+  ]) {
+    const uid = signIn(t);
+    showHealth(acknowledged(was));
+    assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
+    const built = dismissOf(rowOf());
+
+    showHealth(acknowledged(now));
+    assert.equal(rowOf().getAttribute('data-presentation'), 'acknowledged');
+    assert.equal(dismissOf(rowOf()), built, 'nothing the row renders changed, so no rebuild');
+
+    click(built);
+    assert.deepEqual(rows(), [], `presence ${was} → ${now}: the row goes`);
+    assert.equal(
+      stored()[uid]['fault.no_ground'].reportedPresent,
+      now,
+      'the record carries the fact the card holds now',
+    );
+
+    // Hidden on from there, and back the moment the charger reports the other.
+    showHealth(acknowledged(now));
+    assert.deepEqual(rows(), []);
+    showHealth(acknowledged(was));
+    assert.equal(rows().length, 1);
+  }
+});
+
+test('health unknown leaves the records alone', (t) => {
+  signIn(t);
+  click(dismissOf(rowOf()));
+  const before = stored();
+  localStorageShim.sets = 0;
+
+  // An outage of any kind — no document, a failed listener — is no evidence
+  // that the advisory is gone, so nothing is retired and nothing is written.
+  showHealth(null);
+  assert.equal(element('health-title').textContent, 'Health unknown');
+  showHealthError();
+  assert.equal(element('health-retry').hidden, false);
+  assert.deepEqual(stored(), before);
+  assert.equal(localStorageShim.sets, 0);
+
+  // The report is back: the row is still hidden.
+  showHealth(doc());
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+});
+
+test('a gate that may still close retires nothing, so the row stays hidden when it closes', (t) => {
+  const uid = signIn(t);
+  // A safety check — the family a gateway that has not answered its settings
+  // query yet reports nothing about.
+  showHealth(doc({ advisories: [GROUND] }));
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  const before = stored();
+  assert.deepEqual(Object.keys(before[uid]), ['safety.ground_check']);
+  localStorageShim.sets = 0;
+
+  // The gateway restarts: the report is usable, its safety gate is open, and
+  // the advisory is simply not reported. That is silence, not a clearing, so
+  // nothing is retired — and nothing is written, the screen's whole write path
+  // being the projection's answer.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [], gates: open }));
+  assert.equal(element('health-title').textContent, 'Health incomplete');
+  assert.deepEqual(stored(), before, 'a report under an open gate retires no record');
+  assert.equal(localStorageShim.sets, 0, 'and writes nothing');
+
+  // Steady while the gate stays open: still nothing.
+  showHealth(doc({ advisories: [], gates: open, checked_at: Date.now() / 1000 - 5 }));
+  assert.deepEqual(stored(), before);
+  assert.equal(localStorageShim.sets, 0);
+
+  // The gate closes and the advisory is listed again, unchanged: still hidden.
+  showHealth(doc({ advisories: [GROUND] }));
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'No advisories');
+  assert.deepEqual(stored(), before);
+
+  // A complete report that leaves it out is the clearing that retires it.
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'the other advisory lists');
+  assert.equal(stored(), null, 'the record went with the advisory');
+});
+
+test('a restart report that still lists rows retires nothing it is silent about', (t) => {
+  const uid = signIn(t);
+  const STUCK = { ...doc().advisories[0], id: 'fault.stuck_relay' };
+  const rowNamed = (name) => rows().find((row) => chipOf(row, 'health-name').textContent === name);
+  // Two dismissed: a fault, which no gate holds back, and a safety check — the
+  // family a gateway still waiting on its settings query reports nothing about.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND, STUCK] }));
+  assert.equal(rows().length, 3);
+  click(dismissOf(rowNamed('No ground')));
+  click(dismissOf(rowNamed('Ground check')));
+  const before = stored();
+  assert.deepEqual(Object.keys(before[uid]).sort(), ['fault.no_ground', 'safety.ground_check']);
+  localStorageShim.sets = 0;
+
+  // The gateway restarts: both faults are still listed — one dismissed, one
+  // not — and the safety check is simply not reported. With a row left to show
+  // the state is `advisories`, not `incomplete`, but the silence is no more a
+  // clearing here: nothing is retired, and nothing is written.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [doc().advisories[0], STUCK], gates: open }));
+  assert.equal(element('health-card').getAttribute('data-state'), 'advisories');
+  assert.equal(element('health-title').textContent, '1 recorded advisory');
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(stored(), before, 'a report under an open gate retires no record');
+  assert.equal(localStorageShim.sets, 0, 'and writes nothing');
+
+  // The gate closes and lists the safety check again, unchanged: still hidden.
+  showHealth(doc({ advisories: [...doc().advisories, GROUND, STUCK] }));
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(stored(), before);
+
+  // A report that leaves the safety check out is the clearing that retires it
+  // — on this charger's firmware (row 7.12) too: its relay gate never closes, so
+  // every report there is `incomplete`, and it prunes on absence all the same,
+  // that gate being no answer the gateway still owes.
+  const deployed = {
+    settings_known: true,
+    relay_health_known: false,
+    relay_health_supported: false,
+  };
+  showHealth(doc({ advisories: [...doc().advisories, STUCK], gates: deployed }));
+  assert.deepEqual(
+    rows().map((row) => chipOf(row, 'health-name').textContent),
+    ['Stuck relay'],
+  );
+  assert.deepEqual(Object.keys(stored()[uid]), ['fault.no_ground']);
+});
+
+test('a change the report lists under an open gate retires its record, and the screen keeps that', (t) => {
+  const uid = signIn(t);
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+
+  // The firmware re-rates the dismissed fault while a gate is still open.
+  // What a report lists is evidence whatever the gates say: the row is shown
+  // and its record goes — through the screen, which writes under an open gate
+  // exactly as under a closed one.
+  const open = { settings_known: false, relay_health_known: true };
+  showHealth(doc({ advisories: [{ ...doc().advisories[0], severity: 'warning' }], gates: open }));
+  assert.equal(rows().length, 1, 're-rated, so listed again');
+  assert.equal(stored(), null, 'the record went with the report that shows the row');
+
+  // So the gate closing on it, back at the dismissed rating, hides nothing.
+  showHealth(doc());
+  assert.equal(rows().length, 1, 'not hidden again at the dismissed rating');
+  assert.equal(stored(), null);
+});
+
+test('a refused storage write still hides the row for this page', (t) => {
+  const uid = signIn(t);
+  localStorageShim.refuse = true;
+
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.equal(stored(), null, 'storage never took it');
+
+  // Hidden on every later report while the page lives…
+  showHealth(doc());
+  assert.deepEqual(rows(), []);
+
+  // …and honestly gone on the next one: a session-only hide, never a record
+  // the store pretends to have kept.
+  assert.deepEqual(createDismissalStore({ storage: localStorageShim }).read(uid), {});
+});
+
+test('sign-out teardown drops the controls and keeps the records', (t) => {
+  signIn(t);
+  showHealth(twoRows());
+  assert.notEqual(dismissOf(rowOf()), null);
+  click(dismissOf(rowOf()));
+  const before = stored();
+
+  leaveStatus();
+
+  assert.deepEqual(rows(), []);
+  assert.equal(element('health-title').textContent, 'Health unknown');
+  assert.deepEqual(stored(), before, 'records are durable per-account state');
+});
+
+test('a double-click on Dismiss removes one row, not the one that slides under the pointer', (t) => {
+  // The clock is held, so the guard's window can be shown to open and lapse.
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.after(() => mock.timers.reset());
+  const uid = signIn(t);
+  showHealth(twoRows());
+  assert.equal(rows().length, 2);
+
+  // A pointer click. The list rebuilds at once, and the next row's Dismiss
+  // takes the place of the button just pressed — where the second click of
+  // the same gesture lands.
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.equal(rows().length, 1, 'the second click of the gesture is ignored');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+  assert.deepEqual(Object.keys(stored()[uid]), ['fault.no_ground']);
+
+  // The keyboard is never guarded: an activation with no click count is
+  // taken at once, inside the window.
+  click(dismissOf(rowOf()));
+  assert.deepEqual(rows(), []);
+  assert.deepEqual(Object.keys(stored()[uid]).sort(), ['fault.no_ground', 'safety.ground_check']);
+
+  // Both dismissed; bring the rows back by a report that leaves them out,
+  // and let the first gesture's window lapse.
+  showHealth(doc({ advisories: [] }));
+  showHealth(twoRows());
+  assert.equal(rows().length, 2);
+  mock.timers.tick(500);
+
+  // A new gesture opens the window again. One millisecond short of its end
+  // the pointer is still guarded…
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+  mock.timers.tick(499);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.equal(rows().length, 1, 'inside the window');
+  assert.equal(chipOf(rowOf(), 'health-name').textContent, 'Ground check');
+
+  // …and at its end it is trusted again.
+  mock.timers.tick(1);
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.deepEqual(rows(), []);
+});
+
+test('sign-out drops the Dismiss guard: the next session’s first click is taken', (t) => {
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.after(() => mock.timers.reset());
+  const uid = signIn(t);
+  showHealth(twoRows());
+  click(dismissOf(rows()[0]), { detail: 1 });
+  assert.equal(rows().length, 1);
+
+  // Sign out and back in inside the window, then click: the last session's
+  // gesture guards nothing.
+  switchTo('');
+  switchTo(uid);
+  showHealth(twoRows());
+  assert.equal(rows().length, 1, 'the first row is still dismissed');
+  click(dismissOf(rowOf()), { detail: 1 });
+  assert.deepEqual(rows(), []);
 });

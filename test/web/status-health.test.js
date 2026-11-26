@@ -160,7 +160,7 @@ test('a snapshot renders the card: severity verbatim, the record kept as one', (
   assert.equal(card.getAttribute('data-state'), 'advisories');
   assert.equal(card.getAttribute('data-tone'), 'warn', 'the open relay gate is the caveat in play');
   assert.equal(title(), '1 acknowledged advisory');
-  assert.match(detail(), /Dismissed on the charger, kept here for the record/);
+  assert.match(detail(), /Acknowledged on the charger, kept here for the record/);
   assert.match(element('health-meta').textContent, /^Checked \d\d:\d\d$/);
 
   const caveat = element('health-caveat');
