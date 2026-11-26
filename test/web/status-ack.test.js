@@ -833,10 +833,11 @@ test('the Dismiss click calls nothing that writes to Firestore', () => {
   // call that swallows that refusal paints nothing, so no click case can see
   // it. The click's whole path is therefore pinned from source (the
   // store.test.js pattern): the block that builds the control and registers
-  // its listener, and the function that listener calls. Each may call only
-  // what is listed, as many times as listed — a write path under any name, a
-  // helper that reaches one, a second listener and a rename that leaves one
-  // of these names behind all fail.
+  // its listener, the function that listener calls, and the rebuild that
+  // function ends in. The first two may call only what is listed, as many
+  // times as listed — a write path under any name, a helper that reaches one,
+  // a second listener and a rename that leaves one of these names behind all
+  // fail.
   const source = readFileSync(new URL('../../web/js/screens/status.js', import.meta.url), 'utf8');
   const control = /if \(dismiss\.show\) \{([\s\S]*?)\n {2}\}\n/.exec(source);
   assert.ok(control, 'screens/status.js builds the Dismiss control in one block');
@@ -873,6 +874,27 @@ test('the Dismiss click calls nothing that writes to Firestore', () => {
     // or a called result (`f(a)(b)`) would have none to list.
     assert.doesNotMatch(code, /\]\s*\(|\)\s*\(/, `${what} calls nothing unnamed`);
   }
+
+  // The rebuild is the one place past `dismissRow` that knows a Dismiss just
+  // happened — the click sets `dismissFocusId` and `renderHealth` spends it —
+  // so a write wired there would ride every Dismiss, unseen. That function is
+  // every snapshot's paint too, so its calls are too many and too apt to
+  // change to list; what it must never reach is named instead: every write
+  // path the screen has — the tracker's `start`, `ackNotification`,
+  // `sendCommand` (which the screen imports as `postCommand`) and the screen's
+  // own `send`. It is the name that is forbidden, call or not, so an alias or a
+  // callback is caught with the call. What is not caught is anything the list
+  // does not know — a helper that reaches one of these, a write path imported
+  // later — which is why the two units above are allow-listed.
+  const render = source.indexOf('function renderHealth(');
+  assert.ok(render >= 0, 'screens/status.js declares renderHealth');
+  const renderEnd = source.indexOf('\n}\n', render);
+  assert.ok(renderEnd > render, 'screens/status.js closes renderHealth');
+  const reached =
+    codeOnly(source.slice(render, renderEnd)).match(
+      /\backs\.start\b|\backNotification\b|\bsendCommand\b|\bpostCommand\b|\bsend\b/g,
+    ) || [];
+  assert.deepEqual(reached, [], 'the rebuild the Dismiss click ends in names no write path');
 });
 
 test('dismissing a row mid-acknowledgement ends the wait and strands no focus', async (t) => {
