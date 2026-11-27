@@ -186,18 +186,34 @@ function makeShell() {
     routes: [],
     hashListeners: new Set(),
   };
+  // `closest('[hidden]')` over the chain a node declares with `parentElement`:
+  // the stub has no real tree, so a control names the view it sits in.
+  function closestHidden(node) {
+    for (let at = node; at; at = at.parentElement) {
+      if (at.hidden) return at;
+    }
+    return null;
+  }
+  // The one selector anything asks for.
+  const closest = function () {
+    return closestHidden(this);
+  };
+  const body = { id: 'body', closest };
   const tabs = ROUTES.map((route) => ({
     dataset: { route },
     ariaSelected: 'false',
     tabIndex: 0,
     listeners: new Map(),
+    // A tab sits outside every view, so no hidden view is ever its ancestor.
+    closest,
     addEventListener(type, listener) {
       this.listeners.set(type, listener);
     },
-    // HTMLElement.click() dispatches the click listener — how the Charger
-    // screen's "Advanced console" link drives the tab.
-    click() {
-      this.listeners.get('click')();
+    // HTMLElement.click() dispatches the click listener with an untrusted
+    // event — how the Charger screen's "Advanced console" link drives the tab.
+    // A user's activation is trusted: `click({ isTrusted: true })`.
+    click(event) {
+      this.listeners.get('click')(event);
     },
     setAttribute(name, value) {
       if (name === 'aria-selected') this.ariaSelected = String(value);
@@ -211,12 +227,17 @@ function makeShell() {
   const tabbar = { listeners: new Map(), addEventListener() {} };
   // Screens wire buttons by id (initConfig below needs more than `hidden`).
   // Every id under `panel-` is a view the router shows; `settings-list` and
-  // `settings-card-<route>` are the list and its cards.
+  // `settings-card-<route>` are the list and its cards. A control names the
+  // view it sits in through `parentElement`.
   const element = (id) =>
     (panels[id] = panels[id] || {
       id,
-      hidden: id !== 'panel-status',
+      // A view starts hidden until its route applies; any other id is a
+      // control, shown with the view it sits in.
+      hidden: id === 'settings-list' || (id.startsWith('panel-') && id !== 'panel-status'),
       textContent: '',
+      parentElement: null,
+      closest,
       listeners: new Map(),
       addEventListener(type, listener) {
         this.listeners.set(type, listener);
@@ -230,7 +251,6 @@ function makeShell() {
     });
   globalThis.document = {
     title: '',
-    activeElement: undefined,
     querySelectorAll: (selector) => (selector === '.tab' ? tabs : []),
     querySelector: (selector) => {
       if (selector === '.tabbar') return tabbar;
@@ -242,6 +262,16 @@ function makeShell() {
     },
     getElementById: element,
   };
+  // `activeElement` as the browser answers it: a focused node hidden with its
+  // view has lost focus to <body> (the focus fixup rule). That drop is why the
+  // router has to read focus before the views move.
+  let focused = undefined;
+  Object.defineProperty(globalThis.document, 'activeElement', {
+    get: () => (focused && closestHidden(focused) ? body : focused),
+    set: (node) => {
+      focused = node;
+    },
+  });
   Object.defineProperty(globalThis.document, 'title', {
     get: () => shell.title,
     set: (value) => {
@@ -283,7 +313,7 @@ function makeShell() {
   const selected = (route) =>
     tabs.find((tab) => tab.dataset.route === route)?.ariaSelected === 'true';
   const tabVisible = (route) => !panels[`panel-${route}`].hidden;
-  return { shell, tabs, panels, go, fireHash, tabVisible, settingsTab, selected };
+  return { shell, tabs, panels, go, fireHash, tabVisible, settingsTab, selected, element };
 }
 
 test('initTabbar applies route changes immediately when no guard holds them', () => {
@@ -508,7 +538,7 @@ test('a held leave keeps the panels on the current route until it resolves', asy
 });
 
 test('a confirmed leave applies the pending route, pins its hash and focuses its tab', async () => {
-  const { shell, go, tabVisible } = makeShell();
+  const { shell, panels, element, go, tabVisible } = makeShell();
   let hold = null;
   const routes = [];
   initTabbar({
@@ -516,6 +546,12 @@ test('a confirmed leave applies the pending route, pins its hash and focuses its
     confirmLeave: () => hold,
   });
   go('prices');
+  // The dialog holds focus inside the leaving screen — its Stay button — the
+  // state the third hand-off reads. A confirmed leave is not handed off: focus
+  // lands where the guard puts it, on the selected tab.
+  const stay = element('stay-settings');
+  stay.parentElement = panels['panel-prices'];
+  globalThis.document.activeElement = stay;
 
   let settle;
   hold = new Promise((resolve) => {
@@ -532,6 +568,8 @@ test('a confirmed leave applies the pending route, pins its hash and focuses its
   // A Settings screen keeps the Settings tab selected, so that is the tab a
   // confirmed leave leaves focus on.
   assert.equal(shell.focused, 'config', 'focus lands on the newly selected tab');
+  assert.deepEqual(shell.focusLog, ['config'], 'and the opened screen does not take it instead');
+  globalThis.document.activeElement = undefined;
 });
 
 test('an open guard owns the navigation: later hash moves and tab clicks wait for it', async () => {
@@ -604,8 +642,9 @@ test('a rejected confirmation keeps the current route, restores its hash and fre
 //
 // Settings is one tab with a list and four screens. Each route shows exactly
 // one tabpanel and, inside the Settings tabpanel, exactly one view; the tab
-// follows the route's parent; and the two focus hand-offs — the region when a
-// card opens a screen, the card when the list comes back — are the router's.
+// follows the route's parent; and the focus hand-offs — the region when a
+// card opens a screen, the card when the list comes back, the opened view when
+// a route change hides the control that had focus — are the router's.
 // What the stub cannot see: the visual list, the focus ring, and a screen
 // reader naming the region (docs/VALIDATION.md, S rows).
 
@@ -764,8 +803,10 @@ test('a card activation lands focus on the screen it opened', () => {
     go('config'); // back to the list for the next card
   }
 
-  // Only the list's own card activation moves focus: arriving at a Settings
-  // screen from another tab is an ordinary navigation, as before.
+  // Only the list's own card activation moves focus unconditionally: arriving
+  // at a Settings screen from another tab, focus left outside the leaving
+  // screen, is an ordinary navigation, as before. A control the change hides
+  // is the third hand-off's case (below).
   go('history');
   shell.focusLog.length = 0;
   go('prices');
@@ -824,6 +865,93 @@ test('a tap on the Settings tab keeps focus on the tab, not the card', () => {
   assert.equal(tabVisible('config'), true);
   assert.equal(tabVisible('notifications'), false);
   assert.deepEqual(shell.focusLog, [], 'the list returns without stealing focus');
+  globalThis.document.activeElement = undefined;
+});
+
+test('a control hidden with its view hands focus to the view that opened', () => {
+  // The third hand-off: the two in-panel links that open another route. Each
+  // hides the control that had focus with the view it sat in, and the browser
+  // then drops focus to <body> (above), so the view that opened takes it — a
+  // Settings screen in its region, a tab route in the selected tab, which is
+  // where a tab activation that focuses the button leaves it.
+  const { shell, panels, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+
+  // History's "Open settings" is an ordinary link to #prices.
+  go('history');
+  const link = element('open-settings');
+  link.parentElement = panels['panel-history'];
+  globalThis.document.activeElement = link;
+  shell.focusLog.length = 0;
+  go('prices');
+  assert.equal(tabVisible('prices'), true);
+  assert.deepEqual(shell.focusLog, ['panel-prices'], 'the Prices screen takes focus in its region');
+  assert.deepEqual(panels['panel-prices'].focused, { preventScroll: true });
+
+  // The Charger screen's "Advanced console" drives the Advanced tab's own
+  // click handler (the guarded path). That is code driving a tab, not a tab
+  // activation, so the hand-off reaches it: the selected tab takes focus.
+  go('charger');
+  initConfig();
+  const control = element('config-goto-advanced');
+  control.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = control;
+  shell.focusLog.length = 0;
+  control.listeners.get('click')();
+  assert.equal(globalThis.location.hash, '#advanced', 'the link pushes its entry');
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  assert.deepEqual(shell.focusLog, ['advanced'], 'the Advanced tab takes focus');
+  globalThis.document.activeElement = undefined;
+});
+
+test('back and forward hand focus off the same way, and a live element keeps it', () => {
+  // "Open settings" pushed an entry: the browser's Back button leaves the
+  // Prices screen with focus on the region the hand-off placed, and that
+  // region is hidden with its view — so the History tab takes focus, not
+  // <body>. Focus the change did not hide is where the owner left it.
+  const { shell, panels, tabs, go, element } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('history');
+  go('prices');
+  globalThis.document.activeElement = panels['panel-prices'];
+  shell.focusLog.length = 0;
+  go('history');
+  assert.deepEqual(shell.focusLog, ['history'], 'the History tab takes focus back');
+
+  const live = [
+    ['a tab', tabs.find((tab) => tab.dataset.route === 'history')],
+    ['a control outside the views', element('sign-out')],
+  ];
+  for (const [name, node] of live) {
+    go('history');
+    globalThis.document.activeElement = node;
+    shell.focusLog.length = 0;
+    go('prices');
+    assert.deepEqual(shell.focusLog, [], `${name} keeps focus: nothing was hidden`);
+  }
+  globalThis.document.activeElement = undefined;
+});
+
+test('a tab activation is not handed off, even on a tap that does not focus the button', () => {
+  // The test above holds where a tap focuses the button. On a tap that does
+  // not (an iOS-style tap), focus is still on a control of the leaving screen
+  // when the push's hashchange arrives — the same state the third hand-off
+  // reads. A user's click is trusted, and that marks the navigation: the
+  // hand-off stays out of it, exactly as on any other tap.
+  const { shell, panels, tabs, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('charger');
+  const control = element('config-goto-advanced');
+  control.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = control;
+  shell.focusLog.length = 0;
+
+  tabs.find((tab) => tab.dataset.route === 'advanced').click({ isTrusted: true });
+  assert.equal(globalThis.location.hash, '#advanced', 'the tap pushes its entry');
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  assert.deepEqual(shell.focusLog, [], 'the tap leaves focus where it put it');
   globalThis.document.activeElement = undefined;
 });
 
