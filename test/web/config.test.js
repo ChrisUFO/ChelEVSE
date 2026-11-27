@@ -187,9 +187,10 @@ test('configSignature reports no signature for unusable documents', () => {
 
 // ---------- screen rendering ----------
 
-// The Config screen renders into the live DOM. Give it the smallest document it
-// needs — one stub element per id — and import the module afterwards; every
-// lookup is deferred to render time (same pattern as status-pulse.test.js).
+// The charger snapshot (the Settings → Charger screen) renders into the live
+// DOM. Give it the smallest document it needs — one stub element per id — and
+// import the module afterwards; every lookup is deferred to render time (same
+// pattern as status-pulse.test.js).
 // `listeners` and `focusLog` are the only observers an unstubbed DOM offers: the
 // Retry wiring and the focus it restores are recorded, not executed
 // (status-error.test.js records the same way).

@@ -426,3 +426,240 @@ test('the notification card reports its own derived state to the list on every r
   assert.match(render, /if \(onState\) onState\(\{ kind: state\.kind, tokenPhase: phase \}\);/);
   assert.match(source, /export function initNotifications\(\{ onState: report \} = \{\}\) \{/);
 });
+
+// ---------- markup ----------
+//
+// The stub above answers any id on demand, so the list's structure is pinned
+// from source (the config-lifetime convention): what the harness cannot see —
+// which tab a screen lives under, what sits inside which region, the order of
+// the cards and of the bar, and where the form went.
+
+const html = readFileSync(new URL('../../web/index.html', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../../web/styles.css', import.meta.url), 'utf8');
+
+// The opening tag that carries an id, on one line.
+function openTag(id) {
+  const match = new RegExp(`<[a-z][a-z0-9]*\\b[^>]*\\bid="${id}"[^>]*>`).exec(html);
+  assert.ok(match, `#${id} is in web/index.html`);
+  return match[0].replace(/\s+/g, ' ');
+}
+const at = (marker) => {
+  const position = html.indexOf(marker);
+  assert.ok(position >= 0, `${marker} is in web/index.html`);
+  return position;
+};
+
+const SCREENS = [
+  // route, the heading that names the region, its Back control, what else lives inside
+  [
+    'schedule',
+    'schedule-heading',
+    '<a class="back-link" href="#config">',
+    ['schedule-editor', 'save-schedule'],
+  ],
+  ['prices', 'prices-heading', '<button id="prices-back" class="back-link" type="button">', []],
+  [
+    'notifications',
+    'notify-heading',
+    '<a class="back-link" href="#config">',
+    ['notify-card', 'notify-enable', 'notify-retry'],
+  ],
+  [
+    'charger',
+    'charger-heading',
+    '<a class="back-link" href="#config">',
+    [
+      'config-goto-advanced',
+      'config-sections',
+      'config-raw-details',
+      'config-retry',
+      'lifetime-note',
+    ],
+  ],
+];
+
+test('the bar holds four tabs in order, and Schedule is no longer one of them', () => {
+  const tabs = [...html.matchAll(/<button\b[^>]*\bclass="tab"[^>]*>[\s\S]*?<\/button>/g)].map(
+    (m) => m[0],
+  );
+  assert.deepEqual(
+    tabs.map((tab) => /\bid="tab-([^"]+)"/.exec(tab)[1]),
+    ['status', 'history', 'config', 'advanced'],
+  );
+  assert.deepEqual(
+    tabs.map((tab) => /\bdata-route="([^"]+)"/.exec(tab)[1]),
+    ['status', 'history', 'config', 'advanced'],
+    'the router selects by these; a Settings screen is a route, not a tab',
+  );
+  assert.deepEqual(
+    tabs.map((tab) => /<span>([^<]+)<\/span>/.exec(tab)[1].trim()),
+    ['Status', 'History', 'Settings', 'Advanced'],
+  );
+  // The Settings tab keeps the id the guard's Stay refocuses and names the
+  // one tabpanel the four screens are views inside.
+  assert.match(openTag('tab-config'), / aria-controls="panel-config"/);
+  assert.doesNotMatch(html, /id="tab-schedule"/);
+  assert.doesNotMatch(html, /<span>(Config|Schedule)<\/span>/);
+});
+
+test('each Settings screen is a region named by its heading, with the way back above it', () => {
+  const list = at('id="settings-list"');
+  const config = at('id="panel-config"');
+  assert.ok(config < list, 'the list is inside the Settings tabpanel');
+  assert.match(openTag('panel-config'), /^<section /);
+  assert.match(
+    openTag('panel-config'),
+    / role="tabpanel" aria-labelledby="tab-config" tabindex="0" hidden/,
+  );
+
+  let previous = list;
+  for (const [route, heading, back, inside] of SCREENS) {
+    const region = openTag(`panel-${route}`);
+    assert.match(region, /^<section /, route);
+    assert.match(region, / role="region"/, `${route} is a region`);
+    assert.match(
+      region,
+      new RegExp(` aria-labelledby="${heading}"`),
+      `${route} is named by its heading`,
+    );
+    assert.match(region, / tabindex="0" hidden/, `${route} can take focus and starts hidden`);
+    const headingTag = openTag(heading);
+    assert.match(headingTag, /^<h1 /, `${route}: one heading names the screen`);
+
+    // Order inside the tabpanel: the list, then each screen in turn.
+    const start = at(`id="panel-${route}"`);
+    assert.ok(previous < start, `${route} follows the list or the screen before it`);
+    previous = start;
+
+    // The way back is the first control of the screen and sits above the heading.
+    const first = html.slice(start).match(/<(a|button)\b[^>]*>/);
+    assert.equal(first[0].replace(/\s+/g, ' '), back, `${route}: Back to Settings comes first`);
+    const backAt = html.indexOf(back, start);
+    const headingAt = html.indexOf(headingTag, start);
+    assert.ok(
+      start < backAt && backAt < headingAt,
+      `${route}: the way back sits above the heading`,
+    );
+    const control = html.slice(backAt, headingAt);
+    assert.match(control, /Back to Settings/, route);
+    assert.doesNotMatch(
+      control,
+      /<(h[1-6]|input|form)\b/,
+      `${route}: nothing between the way back and its heading`,
+    );
+
+    // The screen's own content moved with it.
+    const next = SCREENS[(SCREENS.findIndex(([r]) => r === route) + 1) % SCREENS.length];
+    const end = route === 'charger' ? at('id="panel-advanced"') : at(`id="panel-${next[0]}"`);
+    for (const id of inside) {
+      const position = at(`id="${id}"`);
+      assert.ok(start < position && position < end, `${route}: #${id} is inside the screen`);
+    }
+  }
+});
+
+test('the Prices screen asks before its way back moves: the control is a button, not a link', () => {
+  // A link would push #config before the guard could ask, and a Stay after a
+  // pushed link strands a dead Back entry.
+  const back = openTag('prices-back');
+  assert.match(back, /^<button /);
+  assert.match(back, / type="button"/);
+  assert.doesNotMatch(back, /href=/);
+  // The other three have no dirty state to guard and are ordinary links.
+  assert.equal((html.match(/<a class="back-link" href="#config">/g) || []).length, 3);
+  // Exactly one Back control per screen.
+  assert.equal((html.match(/class="back-link"/g) || []).length, 4);
+});
+
+test('the form moved whole into the Prices screen, with the leave dialog inside it', () => {
+  const prices = at('id="panel-prices"');
+  const form = at('<form id="settings-form"');
+  const dialog = at('id="leave-settings-confirm"');
+  const formEnd = html.indexOf('</form>', form);
+  const notifications = at('id="panel-notifications"');
+  assert.ok(prices < form && form < dialog && dialog < formEnd && formEnd < notifications);
+  const dialogTag = openTag('leave-settings-confirm');
+  assert.match(dialogTag, / role="alertdialog"/);
+  assert.match(dialogTag, / hidden/);
+  // The sentence names the screen the form now lives on.
+  assert.match(
+    html,
+    /You have unsaved changes\. Leaving Prices and charger address leaves them unsaved\./,
+  );
+  assert.doesNotMatch(html, /Leaving Config/);
+  // The two cards share the one form and its one save.
+  const body = html.slice(form, formEnd);
+  for (const marker of [
+    'class="card-block connection-card"',
+    'id="setting-charger-host"',
+    'class="card-block settings-card"',
+    'id="setting-rate"',
+    'id="setting-currency"',
+    'id="rate-mode-confirm"',
+    'id="save-settings"',
+  ]) {
+    assert.ok(body.includes(marker), `${marker} is inside the form`);
+  }
+  assert.equal((html.match(/id="save-settings"/g) || []).length, 1);
+});
+
+test('the list is four cards in the issue order, with nothing editable on it', () => {
+  const list = openTag('settings-list');
+  assert.match(list, / class="view settings-list"/);
+  const start = at('id="settings-list"');
+  const end = at('id="panel-schedule"');
+  const body = html.slice(start, end);
+  const cards = [...body.matchAll(/<a\b[^>]*class="card-block settings-item"[^>]*>[\s\S]*?<\/a>/g)];
+  assert.equal(cards.length, 4);
+  const expected = [
+    ['schedule', 'Charge schedule'],
+    ['prices', 'Prices and charger address'],
+    ['notifications', 'Notifications'],
+    ['charger', 'Charger'],
+  ];
+  cards.forEach((match, index) => {
+    const card = match[0];
+    const [route, title] = expected[index];
+    assert.ok(card.includes(`id="settings-card-${route}"`), `${route}: card id`);
+    assert.ok(card.includes(`href="#${route}"`), `${route}: the card opens its own screen`);
+    assert.ok(
+      card.includes(`<span class="settings-item-title">${title}</span>`),
+      `${route}: title`,
+    );
+    assert.ok(card.includes(`id="settings-state-${route}"`), `${route}: state line`);
+    // The router focuses the card by this id when the screen's way back is used.
+    assert.ok(openTag(`settings-card-${route}`).includes(`href="#${route}"`), `${route}: one link`);
+  });
+  assert.match(body, /<h1>Settings<\/h1>/, "the list's heading (D5)");
+  assert.doesNotMatch(
+    body,
+    /<(input|button|select|textarea|form)\b/,
+    'nothing editable on the list',
+  );
+  assert.doesNotMatch(
+    body,
+    /id="(setting-|save-|notify-|config-)/,
+    'no editor, form or snapshot on the list',
+  );
+});
+
+test('History’s “Open settings” reaches the Prices screen', () => {
+  assert.match(html, /<a href="#prices">Open settings<\/a>/);
+  assert.doesNotMatch(html, /<a href="#config">/);
+});
+
+test('the screens keep the entry animation and every card tone has its colour', () => {
+  // A Settings screen is a view inside the Settings tabpanel: without the
+  // second selector its blocks would silently lose the rise every other
+  // panel's have.
+  const animation = css.slice(css.indexOf('.app-header,'), css.indexOf('@keyframes rise'));
+  assert.match(animation, /\.panel:not\(\[hidden\]\) > :not\(\.view\),/);
+  assert.match(animation, /\.panel:not\(\[hidden\]\) > \.view:not\(\[hidden\]\) > \* \{/);
+  assert.match(animation, /animation-delay: calc\(var\(--i, 0\) \* 55ms\)/);
+  // The tones js/settings-list.js returns are the ones the stylesheet knows.
+  for (const tone of TONES.filter(Boolean)) {
+    assert.match(css, new RegExp(`\\.settings-item-state\\[data-tone='${tone}'\\] \\{`), tone);
+  }
+  // The way back keeps a touch target.
+  assert.match(css, /\.back-link \{[^}]*min-height: 44px;/);
+});
