@@ -195,8 +195,10 @@ live session and the whole history immediately.
   energy.** Under a rate plan the Week, Month and Year summary and bar costs come from the sessions
   overlapping the window — each priced over its own charging intervals or plug-in span and
   attributed to its local days and months, so the figures reconcile with the sessions list — while
-  the Day period's hourly bars price the day document's own hour buckets. The kWh totals stay the
-  day documents' own. A bucket no session covers hides its figure rather than pricing itself free,
+  the Day period's hourly bars price the day document's own hour buckets. Each day and month bar
+  prints the energy its own cost prices, so a day reads the same in every period — even while its
+  document and the sessions archive briefly disagree. Under One rate the kWh totals stay the day
+  documents' own. A bucket no session covers hides its figure rather than pricing itself free,
   and when the summary's $ prices only part of the period's kWh — any missing Wh at all, with no
   tolerance floor and nothing that scales with the period's size (#211) — a small muted caption
   under the figure discloses it, `priced 13.7 of 48.1 kWh` (#194). When part
