@@ -1,7 +1,9 @@
-// Config screen: a read-only, curated view of status/config — each curated
+// Charger screen: a read-only, curated view of status/config — each curated
 // group a collapsed disclosure, the complete snapshot behind a Raw JSON
 // disclosure at the end of the same card. Changes go through the Advanced
-// console; the data layer keeps this screen a pure renderer.
+// console; the data layer keeps this screen a pure renderer. It is one of the
+// four screens the Settings list opens (#228), so its ids keep their `config-`
+// prefix.
 
 import { $, el, focusAfterRetry, setText } from '../ui.js';
 import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
@@ -60,7 +62,7 @@ function render() {
   // Recovery lands where the user was, not at the top of the page.
   if (!configFailed && retryRequested) {
     retryRequested = false;
-    focusAfterRetry(retry, 'panel-config');
+    focusAfterRetry(retry, 'panel-charger');
   }
   setText($('config-updated'), config ? syncedLabel(config) : '');
 

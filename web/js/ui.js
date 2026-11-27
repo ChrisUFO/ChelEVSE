@@ -26,7 +26,7 @@ export function el(tag, className, text) {
 // the owner put it and is never stolen.
 //
 // This is the only implementation: every retry-carrying screen calls it (Status,
-// Config, Settings, Schedule, Advanced, and the notification card's Enable and
+// Prices, Schedule, Charger, Advanced, and the notification card's Enable and
 // Retry), so the policy cannot drift per screen.
 export function focusAfterRetry(retry, panelId) {
   if (!retry || !retry.hidden) return;

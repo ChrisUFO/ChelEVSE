@@ -301,7 +301,8 @@ test('a failed read says so, without a reload instruction', () => {
 test('a successful retry moves focus from the hidden control to the panel', () => {
   // The snapshot that clears the failure hides Try again; a focused node that
   // leaves the tree sends focus to <body>, so the panel it just refilled takes
-  // it instead. The click itself moves nothing while the retry is pending.
+  // it instead. The snapshot card is the Charger screen's region (#228). The
+  // click itself moves nothing while the retry is pending.
   const retry = element('config-retry');
   const listeners = retry.listeners.get('click') || [];
   assert.equal(listeners.length, 1, 'initConfig wired #config-retry once');
@@ -313,8 +314,8 @@ test('a successful retry moves focus from the hidden control to the panel', () =
 
   showConfigData({ hostname: 'garage' });
   assert.equal(retry.hidden, true);
-  assert.equal(focusLog.at(-1), 'panel-config');
-  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+  assert.equal(focusLog.at(-1), 'panel-charger');
+  assert.deepEqual(element('panel-charger').focused, { preventScroll: true });
 });
 
 test('a snapshot no retry preceded moves no focus', () => {

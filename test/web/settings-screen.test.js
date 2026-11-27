@@ -804,7 +804,7 @@ test('a dirty form asks: Stay keeps the draft, Leave proceeds, Escape stays', as
   assert.equal(answer(), false, 'Stay declines the navigation');
   assert.equal(answerAgain(), false, 'a repeat ask shares the same answer');
   assert.equal(dialogOpen(), false);
-  assert.equal(focusLog.at(-1), 'tab-config', 'Stay returns focus to the Config tab');
+  assert.equal(focusLog.at(-1), 'tab-config', 'Stay returns focus to the Settings tab');
   assert.equal(element('setting-rate').value, '0.4', 'the draft survives Stay');
 
   // Escape is the safe action, exactly like the One-rate confirm's Cancel.
@@ -822,6 +822,40 @@ test('a dirty form asks: Stay keeps the draft, Leave proceeds, Escape stays', as
   // The edits stay unsaved (the write never ran), exactly as a plain tab
   // switch leaves them today — the screen keeps its state, panels only hide.
   assert.equal(isSettingsDirty(), true);
+});
+
+test('"Back to Settings" on the Prices screen drives the Settings tab, never the hash', () => {
+  // A plain link to #config would push the hash before the guard could ask,
+  // and a Stay after a pushed link strands a dead Back entry (the defect the
+  // tab handler's ordering exists to avoid). So the control rides the
+  // Settings tab's own click handler — ask before push — the way the Charger
+  // screen's "Advanced console" rides the Advanced tab. The router's half of
+  // that path, guard included, is pinned in test/web/ui.test.js.
+  const tabClicks = [];
+  const hashWrites = [];
+  globalThis.document.querySelector = (selector) =>
+    selector === '.tab[data-route="config"]' ? { click: () => tabClicks.push(selector) } : null;
+  Object.defineProperty(globalThis, 'location', {
+    configurable: true,
+    get: () => ({
+      set hash(value) {
+        hashWrites.push(value);
+      },
+    }),
+  });
+  try {
+    assert.equal(
+      element('prices-back').listeners.get('click')?.length,
+      1,
+      'initSettings wired #prices-back once',
+    );
+    clickButton('prices-back');
+  } finally {
+    delete globalThis.document.querySelector;
+    delete globalThis.location;
+  }
+  assert.deepEqual(tabClicks, ['.tab[data-route="config"]'], "the Settings tab's own handler");
+  assert.deepEqual(hashWrites, [], 'nothing writes the hash directly');
 });
 
 test('an offline save refusal keeps the guard: the draft is still unsaved', async () => {
@@ -891,9 +925,9 @@ test('a failed settings read says so beside a Retry, and a snapshot clears both'
 
 test('a successful retry moves focus from the hidden control to the panel', () => {
   // The snapshot that clears the failure hides Try again; a focused node that
-  // leaves the tree sends focus to <body>, so the Config panel (which owns the
-  // Settings card) takes it instead. The click itself moves nothing while the
-  // retry is pending.
+  // leaves the tree sends focus to <body>, so the panel it just refilled takes
+  // it instead. The settings card is the Prices screen's region (#228). The
+  // click itself moves nothing while the retry is pending.
   resetSettings();
   showSettingsError();
   const retry = element('settings-retry');
@@ -904,8 +938,8 @@ test('a successful retry moves focus from the hidden control to the panel', () =
 
   showSettingsData(storedDoc);
   assert.equal(retry.hidden, true);
-  assert.equal(focusLog.at(-1), 'panel-config');
-  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+  assert.equal(focusLog.at(-1), 'panel-prices');
+  assert.deepEqual(element('panel-prices').focused, { preventScroll: true });
 });
 
 test('a snapshot no retry preceded moves no focus', () => {

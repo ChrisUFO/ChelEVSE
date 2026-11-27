@@ -445,23 +445,29 @@ test('the charger address participates in dirty state by its trimmed value', () 
 
 // ---------- unsaved-changes guard (#129) ----------
 
-test('the leave guard asks only for a dirty draft on the Config tab', () => {
+test('the leave guard asks only for a dirty draft on the Prices screen', () => {
   // The gate is pure so the router never has to know why: only the App
-  // settings form keeps unsaved state, so only leaving config with a dirty
-  // draft asks, and every other route change (clean form, any other tab)
-  // applies immediately.
+  // settings form keeps unsaved state, so only leaving prices — the screen
+  // that holds the form — with a dirty draft asks, and every other route
+  // change (clean form, any other tab or Settings screen) applies
+  // immediately.
   const ask = (from, to, dirty) => settingsLeaveNeedsConfirm({ from, to, dirty });
-  assert.equal(ask('config', 'status', true), true);
-  assert.equal(ask('config', 'advanced', true), true);
+  assert.equal(ask('prices', 'status', true), true);
+  assert.equal(ask('prices', 'advanced', true), true);
+  // "Back to Settings" from the form is a leave like any other.
+  assert.equal(ask('prices', 'config', true), true);
   // A clean form never gates, whatever the route.
-  assert.equal(ask('config', 'status', false), false);
-  assert.equal(ask('config', 'status'), false);
-  // Any other origin never gates, even dirty (nothing else is guarded).
-  assert.equal(ask('status', 'config', true), false);
+  assert.equal(ask('prices', 'status', false), false);
+  assert.equal(ask('prices', 'status'), false);
+  // Any other origin never gates, even dirty (nothing else is guarded): not
+  // the list the form moved out of, and not its sibling screens.
+  assert.equal(ask('status', 'prices', true), false);
   assert.equal(ask('history', 'schedule', true), false);
-  // Re-entering Config is not a leave.
-  assert.equal(ask('status', 'config', true), false);
-  // Unknown origin never gates; any non-Config destination (the conservative
+  assert.equal(ask('config', 'schedule', true), false);
+  assert.equal(ask('notifications', 'charger', true), false);
+  // Entering the Prices screen is not a leave.
+  assert.equal(ask('status', 'prices', true), false);
+  // Unknown origin never gates; any non-Prices destination (the conservative
   // read of an unknown route) still does.
   assert.equal(ask('', 'status', true), false);
   assert.equal(settingsLeaveNeedsConfirm(), false);
@@ -470,19 +476,25 @@ test('the leave guard asks only for a dirty draft on the Config tab', () => {
 test('the gate speaks the router own route names', () => {
   // app.js composes the gate with the router's vocabulary and no test imports
   // app.js, so the glue can silently die with the suite green. Pin the two
-  // assumptions that can rot: routeFor must still resolve '#config' to the
-  // gate's hard-coded 'config' (a ROUTES rename would silence the whole
+  // assumptions that can rot: routeFor must still resolve '#prices' to the
+  // gate's hard-coded 'prices' (a ROUTES rename would silence the whole
   // guard), and the router's destination names must reach the gate as real
   // routes, not hashes.
   assert.equal(
-    settingsLeaveNeedsConfirm({ from: routeFor('#config'), to: routeFor('#status'), dirty: true }),
+    settingsLeaveNeedsConfirm({ from: routeFor('#prices'), to: routeFor('#status'), dirty: true }),
     true,
     'the router vocabulary can still arm the guard',
   );
   assert.equal(
-    settingsLeaveNeedsConfirm({ from: routeFor('#config'), to: routeFor('#status'), dirty: false }),
+    settingsLeaveNeedsConfirm({ from: routeFor('#prices'), to: routeFor('#status'), dirty: false }),
     false,
     'a clean form never gates in the composed wiring',
+  );
+  // The list the form moved out of is no longer the guarded route: a saved
+  // #config link opens the list, and leaving it never asks.
+  assert.equal(
+    settingsLeaveNeedsConfirm({ from: routeFor('#config'), to: routeFor('#status'), dirty: true }),
+    false,
   );
 });
 

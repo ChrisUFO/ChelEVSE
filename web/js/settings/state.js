@@ -349,11 +349,13 @@ export function settingsSnapshotIsBaseline(data, meta = {}) {
 }
 
 // Whether a route change needs the unsaved-changes confirmation (#129). Only
-// the settings form keeps unsaved state, so only leaving the Config tab
-// with a dirty draft asks; every other route change applies immediately. The
-// router owns the asking (it owns the hash); the screen owns the dialog.
+// the settings form keeps unsaved state, so only leaving the Prices screen —
+// the route that holds the form — with a dirty draft asks; every other route
+// change, the Settings list and its other screens included, applies
+// immediately. The router owns the asking (it owns the hash); the screen owns
+// the dialog.
 export function settingsLeaveNeedsConfirm({ from = '', to = '', dirty = false } = {}) {
-  return Boolean(dirty) && from === 'config' && to !== 'config';
+  return Boolean(dirty) && from === 'prices' && to !== 'prices';
 }
 
 // The card's whole visible state, derived from the draft and the flags the
