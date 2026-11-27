@@ -194,8 +194,9 @@ test('configSignature reports no signature for unusable documents', () => {
 // `listeners` and `focusLog` are the only observers an unstubbed DOM offers: the
 // Retry wiring and the focus it restores are recorded, not executed
 // (status-error.test.js records the same way).
-function stubElement() {
+function stubElement(tag) {
   return {
+    tag,
     hidden: false,
     textContent: '',
     dataset: {},
@@ -240,7 +241,7 @@ const element = (id) => {
 
 globalThis.document = {
   getElementById: (id) => element(id),
-  createElement: () => stubElement(),
+  createElement: (tag) => stubElement(tag),
 };
 
 const { initConfig, showConfigData, showConfigError } =
@@ -331,8 +332,10 @@ test('each curated group is a collapsed disclosure with its heading in the summa
   // config-group"> per curated group, no `open` attribute — collapsed by
   // default, so a rebuild (a genuine content change) re-collapses every group
   // while the signature skip keeps an open group open across a timestamp-only
-  // replace. The summary carries the group's h3, keeping the heading
-  // hierarchy h1 panel → h2 card → h3 group.
+  // replace. The summary carries the group's h2, one level under the screen's
+  // own h1: the card heading that used to sit between them became the screen's
+  // h1 when the card became a screen (#228), so an h3 here would skip a level
+  // for a reader navigating by headings.
   showConfigData({ hostname: 'garage', gfci_check: true });
   const groups = panelNodes();
   assert.ok(groups.length > 0);
@@ -343,5 +346,11 @@ test('each curated group is a collapsed disclosure with its heading in the summa
   for (const group of groups) {
     assert.ok(!('open' in group.attrs), 'a built group sets no open attribute');
     assert.equal(group.open, undefined, 'a built group is collapsed');
+    assert.equal(group.children[0].tag, 'summary', 'the heading sits in the disclosure summary');
+    assert.equal(
+      group.children[0].children[0].tag,
+      'h2',
+      'each group heading is an h2, one level under the screen h1',
+    );
   }
 });

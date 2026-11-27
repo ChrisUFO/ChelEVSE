@@ -3530,7 +3530,7 @@ input[aria-invalid='true']:focus-visible {
 /* A curated group's summary is its heading: the mono label the old always-open
    cards carried. `margin-right: auto` parks the caret at the far edge, where
    the Raw JSON summary keeps its hint. */
-.config-group summary h3 {
+.config-group summary h2 {
   margin: 0;
   margin-right: auto;
   font-family: var(--mono);

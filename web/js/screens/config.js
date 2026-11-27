@@ -82,7 +82,9 @@ function render() {
       // timestamp-only replace.
       const group = el('details', 'disclosure config-group');
       group.setAttribute('aria-labelledby', `config-${section.id}`);
-      const heading = el('h3', null, section.title);
+      // h2, one level under the screen's own h1: the outline must not skip a
+      // level, and no heading sits between the two.
+      const heading = el('h2', null, section.title);
       heading.id = `config-${section.id}`;
       const summary = el('summary');
       summary.append(heading);
