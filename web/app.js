@@ -80,6 +80,16 @@ import {
   showSchedule,
   showScheduleError,
 } from './js/screens/schedule.js';
+import {
+  resetSettingsList,
+  showListConfig,
+  showListConfigError,
+  showListNotifications,
+  showListSchedule,
+  showListScheduleError,
+  showListSettings,
+  showListSettingsError,
+} from './js/screens/settings-list.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 
@@ -195,6 +205,9 @@ function closeApp() {
   resetSchedule();
   resetConfig();
   resetSettings();
+  // The list's states go first: resetNotifications ends in a render that
+  // reports the notification card's signed-out state to the list again.
+  resetSettingsList();
   resetNotifications();
   resetAdvanced();
   activeUser = null;
@@ -280,15 +293,21 @@ function enterApp(user) {
       // The gate needs the snapshot's provenance: a cached "no document" is not
       // an absent document.
       showSettingsData(settings, meta);
+      showListSettings(settings, meta);
     },
-    onSettingsError: showSettingsError,
+    onSettingsError: (err) => {
+      showSettingsError(err);
+      showListSettingsError();
+    },
     onConfig: (data) => {
       showStatusConfig(data);
       showConfigData(data);
+      showListConfig(data);
     },
     onConfigError: (err) => {
       showStatusConfig(null);
       showConfigError(err);
+      showListConfigError();
     },
     // Charger health rides the same fan-out as the other status documents; the
     // screen owns how an absent document and a failed listener read on screen.
@@ -305,8 +324,12 @@ function enterApp(user) {
     onSchedule: (data, meta) => {
       showSchedule(data, meta);
       showStatusSchedule(data);
+      showListSchedule(data, meta);
     },
-    onScheduleError: showScheduleError,
+    onScheduleError: (err) => {
+      showScheduleError(err);
+      showListScheduleError();
+    },
     onRapiCommands: showRapiCommands,
     onRapiError: showRapiError,
     onAccessDenied: () => {
@@ -410,7 +433,8 @@ async function main() {
   initSchedule();
   initConfig();
   initSettings();
-  initNotifications();
+  // The Settings list's Notifications card shows this card's state (#228).
+  initNotifications({ onState: showListNotifications });
   initAdvanced();
   // Unsaved-changes guard (#129): leaving the Prices screen with a dirty
   // settings form asks first. The gating decision is the pure helper; the

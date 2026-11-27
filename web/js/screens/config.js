@@ -6,7 +6,7 @@
 // prefix.
 
 import { $, el, focusAfterRetry, setText } from '../ui.js';
-import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
+import { buildConfigSections, configSignature, rawConfigJson, syncedLabel } from '../config.js';
 import { fmtK, toNumber } from '../format.js';
 import { retryStore } from '../store.js';
 
@@ -25,23 +25,6 @@ let renderedSignature = null;
 // status/current.total_energy (kWh) — the Lifetime figure's small home since
 // the Status figures row gave its tile to the session cost (#116).
 let lifetime = null;
-
-// "Synced", not "Updated": under MQTT the bridge replaces `status/config` only
-// when the charger's `config_version` changes, so `updated_at` marks the
-// config's last change, not a fetch (issue #99).
-function syncedLabel(data) {
-  const updated = data && data.updated_at;
-  if (!updated || typeof updated.toDate !== 'function') return '';
-  try {
-    const time = updated.toDate().toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    return `Synced ${time}`;
-  } catch {
-    return '';
-  }
-}
 
 function render() {
   const loading = $('config-loading');

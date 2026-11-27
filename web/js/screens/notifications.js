@@ -2,11 +2,15 @@
 // lifecycle. Permission is requested only from the Enable click; on load an
 // already-granted permission fetches the token and re-saves it only when it
 // changed (the last save is remembered per account in localStorage). All errors
-// stay inside this card and never break the rest of Config.
+// stay inside this card and never break the rest of the app.
 //
 // The token lifecycle itself (session/attempt generations, the in-flight token,
 // cache and retry markers) lives in the DOM-free coordinator so the sign-out
 // race is covered by test/web; this screen only wires Firebase and paints.
+//
+// The card is the Settings → Notifications screen (#228), and the Settings list
+// shows its state as one line: every render hands that state to the `onState`
+// callback app.js wires, so the list needs no subscription of its own.
 
 import { $, focusAfterRetry, setText } from '../ui.js';
 import {
@@ -33,6 +37,8 @@ let busy = false;
 let messaging = null;
 let supportPromise = null;
 let supportFailed = false;
+// Where each render reports the card's state for the Settings list (#228).
+let onState = null;
 
 const lifecycle = createTokenLifecycle({
   saveTokenDoc: saveFcmToken,
@@ -115,6 +121,9 @@ function render() {
   setText($('notify-status'), state.title);
   setText($('notify-detail'), message || state.detail);
   $('notify-card').dataset.state = state.kind;
+  // The Settings list shows this card's verdict as one line. It is the same
+  // derived state the card paints, so the two cannot disagree.
+  if (onState) onState({ kind: state.kind, tokenPhase: phase });
 
   const errorNode = $('notify-error');
   errorNode.hidden = !error;
@@ -203,9 +212,9 @@ async function refresh({ probe = false, register = false, force = false } = {}) 
   const generation = lifecycle.generation;
   permission = readPermission();
   if (permission !== 'default') message = '';
-  // A failed SDK probe is retried on the next explicit Config visit (for
-  // example after reconnecting), instead of latching "unavailable" for the
-  // whole session.
+  // A failed SDK probe is retried on the next visit to the Notifications
+  // screen or the Settings list (for example after reconnecting), instead of
+  // latching "unavailable" for the whole session.
   if (probe && supportFailed) {
     supportFailed = false;
     supported = null;
@@ -304,7 +313,8 @@ async function enable() {
 
 // ---------- screen lifecycle ----------
 
-export function initNotifications() {
+export function initNotifications({ onState: report } = {}) {
+  onState = report || null;
   $('notify-enable').addEventListener('click', enable);
   $('notify-retry').addEventListener('click', async () => {
     const trigger = $('notify-retry');
@@ -344,8 +354,9 @@ export async function releaseNotifications() {
   await lifecycle.release({ resetFcm });
 }
 
-// Called on every entry to the Config tab; re-reads the permission in case it
-// changed in browser settings and probes support on first visit.
+// Called on every entry to the Notifications screen and to the Settings list;
+// re-reads the permission in case it changed in browser settings and probes
+// support on first visit.
 export function activateNotifications() {
   if (!lifecycle.active) return;
   refresh({ probe: true, register: true });
