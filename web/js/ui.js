@@ -125,16 +125,30 @@ export function initNetwork() {
   paintNet();
 }
 
-// ---------- five-tab shell ----------
+// ---------- four-tab shell ----------
 
+// Every route the hash can name, with its document title. `config` is the
+// Settings list; the four routes after it are the screens its cards open, each
+// one a view inside the Settings tabpanel rather than a tab of its own (#228).
 const ROUTES = {
   status: 'Status',
   history: 'History',
-  schedule: 'Schedule',
-  config: 'Config',
+  config: 'Settings',
+  schedule: 'Charge schedule',
+  prices: 'Prices and charger address',
+  notifications: 'Notifications',
+  charger: 'Charger',
   advanced: 'Advanced',
 };
 const ROUTE_NAMES = Object.keys(ROUTES);
+
+// The routes shown inside the Settings tabpanel. Every other route owns a tab.
+const SETTINGS_SCREENS = ['schedule', 'prices', 'notifications', 'charger'];
+
+// The tab a route selects: a Settings screen keeps Settings selected.
+function tabOf(route) {
+  return SETTINGS_SCREENS.includes(route) ? 'config' : route;
+}
 
 // Own-property check: inherited names (#constructor, #__proto__, #toString)
 // must not be mistaken for routes, or every panel stays hidden.
@@ -182,14 +196,53 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
   // restoration would otherwise fight it on reload and back/forward.
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
-  function apply(route) {
-    const changed = currentRoute !== route;
-    if (currentRoute && changed) {
-      scrollByRoute.set(currentRoute, window.scrollY);
+  // Exactly one tabpanel is shown, and inside the Settings tabpanel exactly
+  // one view: the list for `config`, else the screen the route names. Both are
+  // set on every render, so the first render (a refresh, a direct link on
+  // `#prices`, a `#schedule` saved before the move) opens that screen with
+  // Settings selected, never Status.
+  function showViews(route) {
+    const tab = tabOf(route);
+    for (const name of ROUTE_NAMES) {
+      const ownTab = tabOf(name) === name;
+      $(`panel-${name}`).hidden = ownTab ? name !== tab : name !== route;
     }
-    for (const name of ROUTE_NAMES) $(`panel-${name}`).hidden = name !== route;
+    $('settings-list').hidden = route !== 'config';
+  }
+
+  // The two focus hand-offs of a Settings screen (#228). Activating a card
+  // hides the link that had focus, and the browser then drops focus to <body>
+  // — the top of the document, with nothing said about where it landed — so
+  // the screen that opened takes it instead: its region, named by its heading.
+  // Coming back from a screen, the card that was opened takes focus in turn,
+  // unless focus is on a tab: a tap on the Settings tab re-selects that tab,
+  // and the tab pattern keeps focus there as it does for every other tab.
+  // Returns whether focus was placed, so a guarded leave does not move it again.
+  function focusView(from, route) {
+    if (from === 'config' && SETTINGS_SCREENS.includes(route)) {
+      $(`panel-${route}`).focus({ preventScroll: true });
+      return true;
+    }
+    if (
+      route === 'config' &&
+      SETTINGS_SCREENS.includes(from) &&
+      !tabs.includes(document.activeElement)
+    ) {
+      $(`settings-card-${from}`).focus({ preventScroll: true });
+      return true;
+    }
+    return false;
+  }
+
+  function apply(route) {
+    const from = currentRoute;
+    const changed = from !== route;
+    if (from && changed) {
+      scrollByRoute.set(from, window.scrollY);
+    }
+    showViews(route);
     for (const tab of tabs) {
-      const selected = tab.dataset.route === route;
+      const selected = tab.dataset.route === tabOf(route);
       tab.setAttribute('aria-selected', String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
@@ -200,6 +253,7 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
     // Route entry hook: screens use it to start/stop clocks and lazily load
     // one-shot data. Re-clicking the active tab is not a new entry.
     if (changed && onRoute) onRoute(route);
+    return changed ? focusView(from, route) : false;
   }
 
   function restoreHash() {
@@ -231,7 +285,7 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
           if (hashMoved) restoreHash();
           return;
         }
-        apply(route);
+        const focused = apply(route);
         if (hashMoved) {
           // The hash may have drifted while the dialog was open (another move
           // was snapped back), so pin it to the route that now applies.
@@ -243,9 +297,13 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
           location.hash = route;
         }
         // A direct click leaves focus on the newly selected tab; the dialog
-        // had it instead, so put focus where the click would have left it.
-        const activeTab = document.querySelector('.tab[aria-selected="true"]');
-        if (activeTab) activeTab.focus({ preventScroll: true });
+        // had it instead, so put focus where the click would have left it —
+        // unless the route change itself placed focus (a return to the list
+        // lands on the card that was opened).
+        if (!focused) {
+          const activeTab = document.querySelector('.tab[aria-selected="true"]');
+          if (activeTab) activeTab.focus({ preventScroll: true });
+        }
       },
       () => {
         if (pendingLeave !== route) return;
