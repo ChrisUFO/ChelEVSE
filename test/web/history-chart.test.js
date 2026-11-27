@@ -5,7 +5,9 @@ import { fmtK } from '../../web/js/format.js';
 
 // buildBar is pure geometry over an injected SVG namespace: it only needs
 // setAttribute, classList.add and append, so a recording stub pins the whole
-// output contract (accessible name, slot math, zero floor, class hooks).
+// output contract (accessible name, slot math, zero floor, class hooks). The
+// printed figure is the `kwh` the screen passes in `info` — never the point's
+// own — so each call states it the way the screen does.
 function svgStub(tag) {
   return {
     tag,
@@ -33,7 +35,12 @@ const byClass = (bar, className) =>
 
 test('buildBar shapes and names a full-height priced bar', () => {
   const point = { id: '2026-04', label: 'Apr 2026', kwh: 12.34, isCurrent: false };
-  const bar = buildBar(point, 3, 40, 20, { bucket: 'month', cost: '$1.23', max: 12.34 });
+  const bar = buildBar(point, 3, 40, 20, {
+    bucket: 'month',
+    cost: '$1.23',
+    kwh: 12.34,
+    max: 12.34,
+  });
 
   assert.equal(bar.attrs.get('class'), 'bar');
   assert.equal(bar.attrs.get('role'), 'button');
@@ -71,13 +78,14 @@ test('buildBar appends the partial-slot suffix to the current month and hour', (
     0,
     40,
     20,
-    { bucket: 'month', cost: null, max: 9.9 },
+    { bucket: 'month', cost: null, kwh: 3.2, max: 9.9 },
   );
   assert.equal(month.attrs.get('aria-label'), `Oct 2026 (current month): ${fmtK(3.2)} kWh`);
 
   const hour = buildBar({ id: '05', kwh: 1.5, isCurrent: true }, 5, 40, 20, {
     bucket: 'hour',
     cost: null,
+    kwh: 1.5,
     max: 9.9,
   });
   assert.equal(hour.attrs.get('aria-label'), `05:00–06:00 (this hour so far): ${fmtK(1.5)} kWh`);
@@ -87,6 +95,7 @@ test('buildBar floors a zero-kwh bar at the 2-unit minimum and marks it zero', (
   const bar = buildBar({ id: '2026-04', label: 'Apr 2026', kwh: 0, isCurrent: false }, 2, 40, 20, {
     bucket: 'month',
     cost: null,
+    kwh: 0,
     max: 5,
   });
 

@@ -33,8 +33,14 @@ export function svgEl(tag, attrs) {
 // independent of the screen's state:
 //   bucket  the period's bucket kind (names the partial current slot)
 //   cost    the bar's cost label, or null to omit from the accessible name
-//   max     the series maximum every bar height shares
-export function buildBar(point, index, slot, barW, { bucket, cost, max }) {
+//   kwh     the energy the bar prints. The point's own figure is NOT read: a
+//           day or month bar under a rate schedule prints the energy the
+//           sessions attribute to it (the energy its $ prices), so the screen
+//           decides the figure and the accessible name, the height and the
+//           zero class all take that one value — a bar can never say one
+//           energy and stand at another.
+//   max     the series maximum every bar height shares, over the same figures
+export function buildBar(point, index, slot, barW, { bucket, cost, kwh, max }) {
   const suffix = point.isCurrent ? PARTIAL_SUFFIX[bucket] || '' : '';
   const label = bucket === 'hour' ? hourRange(point.id) : point.label;
   const group = svgEl('g', {
@@ -42,7 +48,7 @@ export function buildBar(point, index, slot, barW, { bucket, cost, max }) {
     role: 'button',
     tabindex: '-1',
     'data-index': String(index),
-    'aria-label': `${label}${suffix}: ${fmtK(point.kwh)} kWh${cost ? `, ${cost}` : ''}`,
+    'aria-label': `${label}${suffix}: ${fmtK(kwh)} kWh${cost ? `, ${cost}` : ''}`,
   });
   const hit = svgEl('rect', {
     class: 'bar-hit',
@@ -60,7 +66,7 @@ export function buildBar(point, index, slot, barW, { bucket, cost, max }) {
     height: String(PLOT_H),
     rx: '2',
   });
-  const height = point.kwh > 0 && max > 0 ? Math.max(2, (point.kwh / max) * (PLOT_H - 2)) : 2;
+  const height = kwh > 0 && max > 0 ? Math.max(2, (kwh / max) * (PLOT_H - 2)) : 2;
   const fill = svgEl('rect', {
     class: 'bar-fill',
     x: String(index * slot + (slot - barW) / 2),
@@ -70,6 +76,6 @@ export function buildBar(point, index, slot, barW, { bucket, cost, max }) {
     rx: '1.2',
   });
   group.append(guide, hit, fill);
-  if (point.kwh <= 0) group.classList.add('zero');
+  if (kwh <= 0) group.classList.add('zero');
   return group;
 }

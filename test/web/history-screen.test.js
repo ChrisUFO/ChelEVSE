@@ -3041,7 +3041,10 @@ test('a failed reload keeps the schedule figures priced for the window on screen
       assert.equal(element('history-cost').textContent, fmtMoney(0.45, 'GBP'));
       assert.equal(element('history-cost-coverage').textContent, 'priced 1.50 of 2.00 kWh');
       assert.equal(bars().length, 7);
-      assert.equal(bars()[0].getAttribute('aria-label'), 'Mon 5 Oct: 2.00 kWh, GBP 0.45');
+      // The bar prints the energy its $ prices — the 1.50 kWh the pass
+      // attributes to the day, the summary's own figure and the caption's X —
+      // never the day document's 2.00 beside a $ that does not price it.
+      assert.equal(bars()[0].getAttribute('aria-label'), 'Mon 5 Oct: 1.50 kWh, GBP 0.45');
       // …and the state note says these are the last values loaded.
       assert.equal(element('history-state').hidden, false);
       assert.match(element('history-state').textContent, /last values loaded/);
