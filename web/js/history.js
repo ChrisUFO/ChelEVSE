@@ -466,6 +466,11 @@ export function sessionsRange(bounds) {
 // the single day document (`{ kwh, hours }`) rather than a list, so its series is
 // the hours map itself; every range period aligns an array of daily documents to
 // its days.
+// A point's `kwh` is the recorded figure — the day document's own total, an
+// hour's own bucket — never a priced one: what a bar prints under a rate
+// schedule is decided in the History screen, where the period's sessions and
+// settings live (it attributes each day and month bucket's energy beside this
+// figure); this module has neither and stays pure over documents.
 // A month bucket sums its daily documents by the local YYYY-MM prefix — kWh is
 // all the point carries, because a Year bar's $ comes from the period's
 // overlapping sessions, never from day documents; days without a document are
@@ -555,8 +560,13 @@ export function sumSeries(series) {
   return series.reduce((total, point) => total + (Number.isFinite(point.kwh) ? point.kwh : 0), 0);
 }
 
-export function maxSeries(series) {
-  return series.reduce((max, point) => Math.max(max, point.kwh || 0), 0);
+// The series maximum — the figure every bar height is taken against. `kwhOf`
+// selects the figure a point prints: the point's own recorded figure unless the
+// caller decides otherwise (the History screen passes the figure it attributes
+// per render, so the tallest bar is the one that prints the most, never the one
+// whose day document recorded the most). An unusable figure counts as zero.
+export function maxSeries(series, kwhOf = (point) => point.kwh) {
+  return series.reduce((max, point) => Math.max(max, kwhOf(point) || 0), 0);
 }
 
 // One-shot reads resolve from the local cache when the SDK is offline. An empty

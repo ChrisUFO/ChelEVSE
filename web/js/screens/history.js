@@ -114,8 +114,10 @@ let sessionsBusy = false;
 let historyState = 'idle';
 // The sessions that price the current period's $ (#123): every session
 // overlapping the range, read beside the day documents and kept beside the
-// series it prices. Cleared with the series; a failed read prices nothing —
-// the figure hides rather than pricing uncovered energy.
+// series it prices. Also the source of the kWh each day/month bar prints, so
+// the figure and the $ beside it are always the same slice. Cleared with the
+// series; a failed read prices nothing — the figure hides rather than pricing
+// uncovered energy.
 let periodSessions = [];
 // The bridge's per-day verdicts on the applied window (#212): null while the
 // `recon_from` marker is off or no read has settled, else the classification
@@ -176,7 +178,10 @@ export {
 // own windows. The settle guard runs inside it, against the recorded payload
 // as merged, so whichever of the two inputs — the session document or the
 // status snapshot — lands first, a charge a recorded session already covers
-// prices exactly once.
+// prices exactly once. The kWh a day/month bar prints is this same list's
+// slice attributed to its bucket (displayedKwh below), so a bar's figure and
+// the $ beside it always share one span list — the live estimate included
+// exactly once.
 function pricingSpans() {
   return periodCostSpans(
     liveStatus,
@@ -198,9 +203,79 @@ function seriesCost(point) {
     const cost = hourCost(point.dayId, point.id, point.kwh, settings);
     return cost == null ? null : fmtMoney(cost, settings.currency);
   }
-  const totals = sessionBucketCost(pricingSpans(), point.id, point.kwh, settings);
+  const totals = bucketTotals(point);
   if (!totals || (!(totals.wh > 0) && !totals.covered)) return null;
   return fmtMoney(totals.cost, settings.currency);
+}
+
+// The one figure a day or month bar prints. Under a schedule that is the
+// energy the span pass attributes to its bucket — the same slice its $ is
+// priced from. The label used to print the day document's own `kwh` beside a $
+// priced from the sessions archive, and because the two documents are written
+// by different bridge paths a day that has not settled showed two figures for
+// one day (the document's 2.25 kWh beside the USD 1.45 that 12.9 kWh of
+// sessions cost) with nothing on screen to say which to believe. The summary
+// already prints the pass's energy; the bar now prints the same energy for the
+// same slice, so the label, the height, the accessible name and the series
+// maximum are one figure in every period, and whenever the pass prices the day
+// its bar reads exactly as its Day summary does.
+//
+// `point.kwh` stays the recorded figure and keeps every job that reads the day
+// document: the coverage guard's input (bucketCovered, inside
+// sessionBucketCost), the summary's recorded total (the caption's Y and the
+// hide rule's guard), the flat-rate labels and headline, and the has-data
+// checks. A bucket the pass prices none of prints it too: its $ hides, and its
+// kWh must not collapse to 0.00 beside energy the document says was drawn.
+// Flat rate and the Day period's hour bars print the document's own figure,
+// byte-identically to before.
+
+// The per-render attribution cache: each day/month point's sessionBucketCost
+// result, computed once per point and reused for the bar's $ (seriesCost) and
+// its kWh (displayedKwh) — for the drawn bar and for the selection readout
+// alike, which each asked for their own before. Rebuilt as soon as any input
+// the figures read is replaced: the series (its points' ids, recorded kWh and
+// current slot), the period's sessions, the settings or the live snapshot.
+// Every one of those is only ever replaced, never mutated, so a memo over
+// their identity cannot answer from a stale render, whatever order the
+// renders and the scrubs arrive in. Dropped on reset with the payload it was
+// built from.
+let attribution = null;
+
+function bucketTotals(point) {
+  if (
+    !attribution ||
+    attribution.series !== series ||
+    attribution.sessions !== periodSessions ||
+    attribution.settings !== settings ||
+    attribution.status !== liveStatus
+  ) {
+    attribution = {
+      series,
+      sessions: periodSessions,
+      settings,
+      status: liveStatus,
+      spans: pricingSpans(),
+      buckets: new Map(),
+    };
+  }
+  if (!attribution.buckets.has(point.id)) {
+    attribution.buckets.set(
+      point.id,
+      sessionBucketCost(attribution.spans, point.id, point.kwh, settings),
+    );
+  }
+  return attribution.buckets.get(point.id);
+}
+
+// The kWh a bar prints: under a schedule a day or month bucket prints the
+// energy attributed to it whenever the pass prices any (`wh > 0`) — exactly
+// what its $ prices — and the recorded figure otherwise (no usable result or
+// nothing priced). Flat rate and the Day period's hour bars print the
+// document's own figure.
+function displayedKwh(point) {
+  if (!hasRateSchedule(settings) || currentPeriod().bucket === 'hour') return point.kwh;
+  const totals = bucketTotals(point);
+  return totals && totals.wh > 0 ? totals.wh / 1000 : point.kwh;
 }
 
 // ---------- summary + chart ----------
@@ -357,10 +432,12 @@ function renderSummary() {
         : 0;
   // One pass (#210): under a schedule the headline kWh and the $ both come
   // from the span list over the window the series was built for — the same
-  // energy, so the kWh shown cannot claim more than the figure prices. The
-  // day documents' totals feed the bars alone; `recorded` rides along as the
-  // caption's Y and the hide rule's guard. The flat path keeps the
-  // pre-schedule day-document headline, byte-identical.
+  // energy, so the kWh shown cannot claim more than the figure prices — and
+  // each day/month bar prints its own bucket's slice of that same list
+  // (displayedKwh), so under a schedule the bars no longer stand on the day
+  // documents' totals either. `recorded` rides along as the caption's Y and
+  // the hide rule's guard. The flat path keeps the pre-schedule
+  // day-document headline and bars, byte-identical.
   const summary =
     hasRateSchedule(settings) && series.length && seriesWindowMs
       ? windowCostSummary(pricingSpans(), seriesWindowMs, recorded, settings)
@@ -494,14 +571,15 @@ function renderChart() {
   const slot = VIEW_W / Math.max(1, series.length);
   const barW = slot * BAR_RATIO;
   // The screen resolves each bar's inputs — the period's bucket kind, the
-  // resolved cost label, the shared series maximum; the chart module owns the
-  // geometry.
+  // resolved cost label, the kWh the bar prints and the series maximum over
+  // those printed figures; the chart module owns the geometry.
   const bucket = currentPeriod().bucket;
-  const max = maxSeries(series);
+  const max = maxSeries(series, displayedKwh);
   barEls = series.map((point, index) => {
     const group = buildBar(point, index, slot, barW, {
       bucket,
       cost: seriesCost(point),
+      kwh: displayedKwh(point),
       max,
     });
     bars.append(group);
@@ -524,6 +602,8 @@ function paintSelection(index) {
   const x = Math.max(0, Math.min(series.length - 1, index));
   const point = series[x];
   selectedId = point.id;
+  // One attribution serves both figures (bucketTotals): the kWh is the energy
+  // the $ beside it prices — the same value the drawn bar was built with.
   const cost = seriesCost(point);
   // The Day period names the selected hour's span; every other period names its
   // bucket (a day or a month). "Today ·" prefixes only a day bucket that the
@@ -532,7 +612,7 @@ function paintSelection(index) {
   const label = descriptor.bucket === 'hour' ? hourRange(point.id) : point.label;
   const prefix = descriptor.bucket === 'day' && point.isCurrent ? 'Today · ' : '';
   setText($('chart-day'), `${prefix}${label}`);
-  setText($('chart-kwh'), fmtK(point.kwh));
+  setText($('chart-kwh'), fmtK(displayedKwh(point)));
   $('chart-cost').hidden = !cost;
   setText($('chart-cost'), cost || '');
   barEls.forEach((bar, i) => {
@@ -1456,6 +1536,7 @@ export function resetHistory() {
   seriesSpan = null;
   seriesWindowMs = null;
   periodSessions = [];
+  attribution = null;
   periodVerdicts = null;
   liveStatus = null;
   settlePending = false;

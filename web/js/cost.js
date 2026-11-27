@@ -36,9 +36,13 @@
 // costs sum to exactly the per-session figures the sessions list shows — and
 // the summary's headline kWh is derived in the same pass as its priced energy,
 // so the figure and the energy beside it cannot diverge by construction. The
-// day documents' `kwh`/`hours` are chart series only (bar heights); the Day
-// period's hour bars keep pricing from the hours map as pure display
-// (hourCost below), never as the summary's basis. `aggregateCostLabel` itself
+// day documents' `kwh`/`hours` are chart series only — the bars' figures under
+// a flat rate, and always the Day period's hour bars (which keep pricing from
+// the hours map as pure display, hourCost below, never as the summary's
+// basis); under a schedule a day or month bar prints the energy attributed to
+// it (`wh` from sessionBucketCost below, decided in the History screen), never
+// its document's total beside a session-priced figure. `aggregateCostLabel`
+// itself
 // still returns null whenever a schedule exists, because one aggregate kWh
 // figure cannot be split across windows; it stays the flat path these
 // schedule helpers never touch.
@@ -535,11 +539,16 @@ function bucketCovered(kwh, wh) {
 // constant-power split costForInterval applies inside a span, and every
 // bucket edge is a local midnight costForInterval already splits at, so a
 // session's bucket costs sum to exactly its per-session figure (the
-// reconciliation the summary leans on). kWh totals stay the day documents'
-// (display); `kwh` here only measures coverage, with the same max(250 Wh, 2%)
+// reconciliation the summary leans on). `wh` is also the energy a day or month
+// bar prints under a schedule (the History screen's displayedKwh) whenever it
+// is above zero — so whenever the pass attributes energy to a bucket, its
+// bar's kWh is exactly what its cost prices. `kwh` — the day document's
+// recorded figure — only measures coverage, with the same max(250 Wh, 2%)
 // tolerance the interval reconciliation uses: attributed Wh that accounts for
-// the bucket means covered, energy with no covering span hides its figure,
-// never priced free.
+// the bucket means covered, energy with no covering span beyond that band
+// hides its figure and leaves the recorded kWh on the bar, never priced free
+// (a day recorded at 0.25 kWh or less is covered with nothing attributed, and
+// keeps its recorded kWh beside a `0.00` cost).
 // Returns {cost, wh, covered}, or null without a usable schedule or bucket id
 // (the flat path is and stays aggregateCostLabel's).
 export function sessionBucketCost(spans, id, kwh, settings) {

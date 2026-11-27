@@ -18,6 +18,7 @@ import {
   liveSessionContribution,
   liveSessionSpan,
   periodCostSpans,
+  rangeWindow,
   sessionBucketCost,
   sessionCostLabel,
   sessionCostSpans,
@@ -25,6 +26,7 @@ import {
   statusCostFallback,
   statusCostLabel,
   statusCostUncovered,
+  windowCostSummary,
 } from '../../web/js/cost.js';
 import { costForInterval, costForIntervals, costForSession } from '../../web/js/rates.js';
 import { fmtCost, fmtMoney } from '../../web/js/format.js';
@@ -1183,6 +1185,40 @@ test('month buckets slice at local month boundaries, including the year rollover
   const newYear = session(date(2025, 12, 31, 23, 0), date(2026, 1, 1, 1, 0), 2000);
   assert.ok(Math.abs(sessionBucketCost([newYear], '2025-12', 1, nightly()).cost - 0.3) < 1e-9);
   assert.ok(Math.abs(sessionBucketCost([newYear], '2026-01', 1, nightly()).cost - 0.1) < 1e-9);
+});
+
+test('a month bucket attributes the energy the month window prices', () => {
+  // A Year bar prints its bucket's attributed energy, and the same month's
+  // summary prices a window pass: the two must be one figure, or the month
+  // reads two ways across the two periods.
+  const settings = nightly();
+  const sessions = [
+    session(date(2026, 1, 5, 1, 0), date(2026, 1, 5, 2, 0), 2000),
+    session(date(2026, 1, 31, 23, 0), date(2026, 2, 1, 1, 0), 2000),
+  ];
+  const spans = spansOf(...sessions);
+  // January: its own session off-peak (0.20) and the crossing session's hour
+  // before midnight at the base (0.30) — 3 kWh.
+  const january = sessionBucketCost(spans, '2026-01', 2.5, settings);
+  assert.ok(Math.abs(january.wh - 3000) < 1e-9);
+  assert.ok(Math.abs(january.cost - 0.5) < 1e-9);
+  assert.equal(january.covered, true);
+  const summary = windowCostSummary(spans, rangeWindow('2026-01-01', '2026-01-31'), 2.5, settings);
+  assert.ok(Math.abs(summary.coveredWh - january.wh) < 1e-9);
+  assert.ok(Math.abs(summary.cost - january.cost) < 1e-9);
+  // February keeps only the crossing session's early hour.
+  const february = sessionBucketCost(spans, '2026-02', 1, settings);
+  assert.ok(Math.abs(february.wh - 1000) < 1e-9);
+  assert.ok(Math.abs(february.cost - 0.1) < 1e-9);
+  // A month no span reaches attributes nothing, whatever its day documents
+  // recorded: `covered` is false, so the bar's $ hides, and `wh` is 0 — the
+  // signal the History screen reads to keep the recorded kWh on the bar
+  // instead of printing 0.00 beside energy the document says was drawn.
+  assert.deepEqual(sessionBucketCost(spans, '2026-03', 4.2, settings), {
+    cost: 0,
+    wh: 0,
+    covered: false,
+  });
 });
 
 test('coverage measures attributed session Wh against the recorded kWh', () => {
