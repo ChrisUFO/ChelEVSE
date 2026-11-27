@@ -2192,12 +2192,14 @@ test('a day no session covers keeps its recorded kWh while its $ hides', async (
 });
 
 // The attribution memo (bucketTotals) answers from its cache until one of four
-// inputs is replaced. Every test above re-renders through a settings push,
-// which replaces `settings` on its own, so none of them can tell whether the
-// payload's own keys still rebuild it. These two re-render with the settings
-// and the live snapshot untouched — the way Refresh, a period switch, paging
-// and the settle re-read do (applyHistory, then a render with no push), and
-// the way a schedule save does (the payload standing).
+// inputs is replaced. The tests above re-render through a settings or a
+// status push, each of which replaces a key on its own, or with the payload
+// standing, so none of them can tell whether the payload's own keys still
+// rebuild it. The first of these two re-renders with the settings and the
+// live snapshot untouched — the way Refresh, a period switch, paging and the
+// settle re-read do (applyHistory, then a render with no push). The second
+// re-renders the other way round: a settings push with the payload standing,
+// the way a schedule save does.
 
 test('a replaced payload re-attributes its bars with settings and status identity unchanged', async () => {
   resetHistory();
@@ -2216,8 +2218,10 @@ test('a replaced payload re-attributes its bars with settings and status identit
   // A later read delivers sessions that attribute 5.00 kWh to the day, in a
   // new series and a new session list. The return visit re-renders with no
   // settings or status push, so only the payload's identity can have told the
-  // memo to rebuild: a stale answer is the #226 symptom again — 12.9 kWh
-  // beside the USD 0.56 that 5.00 kWh cost.
+  // memo to rebuild. A stale answer keeps the old pair whole — 12.9 kWh
+  // beside the USD 1.45 it cost — instead of 5.00 kWh beside USD 0.56: the
+  // kWh and the $ read one cached entry, so a bar can never mix them the way
+  // #226 did, and only figures out of date betray the memo.
   applyHistory(
     periodById('month'),
     { docs, fromCache: false },

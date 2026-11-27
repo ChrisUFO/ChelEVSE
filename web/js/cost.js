@@ -548,7 +548,7 @@ function bucketCovered(kwh, wh) {
 // the bucket means covered, energy with no covering span beyond that band
 // hides its figure and leaves the recorded kWh on the bar, never priced free
 // (a day recorded at 0.25 kWh or less is covered with nothing attributed, and
-// shows 0.00).
+// keeps its recorded kWh beside a `0.00` cost).
 // Returns {cost, wh, covered}, or null without a usable schedule or bucket id
 // (the flat path is and stays aggregateCostLabel's).
 export function sessionBucketCost(spans, id, kwh, settings) {
