@@ -541,11 +541,14 @@ function bucketCovered(kwh, wh) {
 // session's bucket costs sum to exactly its per-session figure (the
 // reconciliation the summary leans on). `wh` is also the energy a day or month
 // bar prints under a schedule (the History screen's displayedKwh) whenever it
-// is above zero, so a bar's kWh is exactly what its cost prices; `kwh` — the
-// day document's recorded figure — only measures coverage, with the same
-// max(250 Wh, 2%) tolerance the interval reconciliation uses: attributed Wh
-// that accounts for the bucket means covered, energy with no covering span
-// hides its figure and leaves the recorded kWh on the bar, never priced free.
+// is above zero — so whenever the pass attributes energy to a bucket, its
+// bar's kWh is exactly what its cost prices. `kwh` — the day document's
+// recorded figure — only measures coverage, with the same max(250 Wh, 2%)
+// tolerance the interval reconciliation uses: attributed Wh that accounts for
+// the bucket means covered, energy with no covering span beyond that band
+// hides its figure and leaves the recorded kWh on the bar, never priced free
+// (a day recorded at 0.25 kWh or less is covered with nothing attributed, and
+// shows 0.00).
 // Returns {cost, wh, covered}, or null without a usable schedule or bucket id
 // (the flat path is and stays aggregateCostLabel's).
 export function sessionBucketCost(spans, id, kwh, settings) {

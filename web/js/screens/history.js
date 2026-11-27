@@ -217,8 +217,8 @@ function seriesCost(point) {
 // sessions cost) with nothing on screen to say which to believe. The summary
 // already prints the pass's energy; the bar now prints the same energy for the
 // same slice, so the label, the height, the accessible name and the series
-// maximum are one figure in every period, and a day's bar reads exactly as its
-// Day summary does.
+// maximum are one figure in every period, and whenever the pass prices the day
+// its bar reads exactly as its Day summary does.
 //
 // `point.kwh` stays the recorded figure and keeps every job that reads the day
 // document: the coverage guard's input (bucketCovered, inside

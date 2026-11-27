@@ -8,7 +8,7 @@ Personal OpenEVSE monitoring & control — a Raspberry Pi on the home LAN bridge
 
 - **Monitor**: live charger status (state, current draw, power, session/total energy, setpoint) from anywhere — not just the home LAN.
 - **Control**: stop, return to auto, or hold at a current up to the charger's verified soft maximum from your phone.
-- **History**: Day / Week / Month / Year energy chart whose periods are calendar units — Day is a date (24 hourly bars), Week an ISO Monday–Sunday week (7 daily bars), Month a calendar month (28–31 daily bars) and Year a calendar year (one bar per month) — that pages back one unit at a time with **Previous**/**Next** or PageUp/PageDown. The unit holding today is clipped at today: this week runs Monday..today, this month 1..today and this year January..this month, so no bar is a future bucket, while a completed October is 1–31 and a completed year December-inclusive; every label and empty/offline message names the unit it shows ("October 2026", "Mon 5 – Sun 11 Oct 2026"). Plus the 20 most recent charging sessions, with cost at your electricity rate. A day recorded before hourly capture began shows its total and says the hours are missing, never 24 empty bars; on the deploy day itself Day counts only the hours recorded after it, while Month and Year use the day's total — expected, and gone the next day.
+- **History**: Day / Week / Month / Year energy chart whose periods are calendar units — Day is a date (24 hourly bars), Week an ISO Monday–Sunday week (7 daily bars), Month a calendar month (28–31 daily bars) and Year a calendar year (one bar per month) — that pages back one unit at a time with **Previous**/**Next** or PageUp/PageDown. The unit holding today is clipped at today: this week runs Monday..today, this month 1..today and this year January..this month, so no bar is a future bucket, while a completed October is 1–31 and a completed year December-inclusive; every label and empty/offline message names the unit it shows ("October 2026", "Mon 5 – Sun 11 Oct 2026"). Plus the 20 most recent charging sessions, with cost at your electricity rate. A day recorded before hourly capture began shows its total and says the hours are missing, never 24 empty bars; on the deploy day itself — under One rate — Day counts only the hours recorded after it, while Month and Year use the day's total: expected, and gone the next day.
 - **Schedule**: time-of-use charging windows (up to 20), enforced by the charger's own firmware, with a live "window active now" badge.
 - **Alerts**: one push when the charger records a critical health fault it has not already flagged, and one when it goes offline — background notifications with the app closed, one in-app toast when it is open. The charger's health is also shown (and acknowledgeable) on the Status screen, and nothing infers safety from a charging state.
 - **Config parity**: every charger setting the firmware exposes (credentials redacted), app settings for One rate or Seasons & time-of-use (base rates, daily windows, dates, currency), notification opt-in, and a gated RAPI console for anything the curated screens don't cover.
@@ -197,8 +197,10 @@ live session and the whole history immediately.
   attributed to its local days and months, so the figures reconcile with the sessions list — while
   the Day period's hourly bars price the day document's own hour buckets. Each day and month bar
   prints the energy its own cost prices, so a day reads the same in every period — even while its
-  document and the sessions archive briefly disagree. Under One rate the kWh totals stay the day
-  documents' own. A bucket no session covers hides its figure rather than pricing itself free,
+  document and the sessions archive briefly disagree — except while a charge that crossed local
+  midnight is still running: its live estimate shows only in periods that include today, until the
+  session is recorded. Under One rate the kWh totals stay the day documents' own. A bucket no
+  session covers hides its figure rather than pricing itself free,
   and when the summary's $ prices only part of the period's kWh — any missing Wh at all, with no
   tolerance floor and nothing that scales with the period's size (#211) — a small muted caption
   under the figure discloses it, `priced 13.7 of 48.1 kWh` (#194). When part

@@ -721,6 +721,22 @@ test('a partially covered week renders the disclosure under the summary $', () =
   assert.equal(element('history-cost-coverage').hidden, false);
   assert.equal(element('history-cost-coverage').textContent, 'priced 13.7 of 48.1 kWh');
   assert.equal(element('history-total').textContent, '13.7');
+  // The bars take the pass's side of that compare (#226): each prints the
+  // slice the reset session's aggregate pro-rate attributes to its day — three
+  // flat 4.11 kWh bars and 1.37 for Thursday's eight hours inside the week —
+  // never the 12.4 / 11.8 / 11.9 / 12.0 its day documents recorded, which only
+  // the caption's 48.1 still counts. The one-figure rule is direction-neutral:
+  // a day the archive attributes only part of prints the smaller slice beside
+  // the $ it prices, and this caption is the whole disclosure.
+  assert.deepEqual(
+    drawnBars().map((bar) => bar.getAttribute('aria-label')),
+    [
+      'Mon 16 Nov: 4.11 kWh, USD 0.46',
+      'Tue 17 Nov: 4.11 kWh, USD 0.46',
+      'Wed 18 Nov: 4.11 kWh, USD 0.46',
+      'Thu 19 Nov: 1.37 kWh, USD 0.15',
+    ],
+  );
 });
 
 test('one missing Wh renders the caption the tolerance band used to hide (#211)', () => {
@@ -2173,6 +2189,78 @@ test('a day no session covers keeps its recorded kWh while its $ hides', async (
   assert.equal(element('history-cost-coverage').textContent, 'priced 17.8 of 20.1 kWh');
   assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 2.25 kWh');
   assert.equal(drawnBars().at(-2).getAttribute('aria-label'), 'Mon 23 Nov: 17.8 kWh, USD 2.01');
+});
+
+// The attribution memo (bucketTotals) answers from its cache until one of four
+// inputs is replaced. Every test above re-renders through a settings push,
+// which replaces `settings` on its own, so none of them can tell whether the
+// payload's own keys still rebuild it. These two re-render with the settings
+// and the live snapshot untouched — the way Refresh, a period switch, paging
+// and the settle re-read do (applyHistory, then a render with no push), and
+// the way a schedule save does (the payload standing).
+
+test('a replaced payload re-attributes its bars with settings and status identity unchanged', async () => {
+  resetHistory();
+  enterHistory();
+  // The real boot: loadAll marks the screen loaded and pins the midnight
+  // window, so the return visit below re-renders instead of re-reading. In
+  // Node the read genuinely rejects; the apply step is the payload.
+  await fire('history-refresh', 'click');
+  const today = new Date(2026, 10, 24, 15, 50);
+  const { docs, sessions } = disagreeingDay();
+  // The default view is the Month, with today the selected slot.
+  applyHistory(periodById('month'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-kwh').textContent, '12.9');
+
+  // A later read delivers sessions that attribute 5.00 kWh to the day, in a
+  // new series and a new session list. The return visit re-renders with no
+  // settings or status push, so only the payload's identity can have told the
+  // memo to rebuild: a stale answer is the #226 symptom again — 12.9 kWh
+  // beside the USD 0.56 that 5.00 kWh cost.
+  applyHistory(
+    periodById('month'),
+    { docs, fromCache: false },
+    null,
+    today,
+    [
+      {
+        id: 's-23',
+        wh: 17800,
+        started_at: new Date(2026, 10, 23, 1, 0),
+        ended_at: new Date(2026, 10, 23, 6, 0),
+      },
+      {
+        id: 's-24',
+        wh: 5000,
+        started_at: new Date(2026, 10, 24, 0, 30),
+        ended_at: new Date(2026, 10, 24, 4, 30),
+      },
+    ],
+    today,
+  );
+  activateHistory();
+  assert.equal(element('chart-kwh').textContent, '5.00');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 5.00 kWh, USD 0.56');
+});
+
+test('a different schedule re-prices the retained payload', () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 10, 24, 15, 50);
+  const { docs, sessions } = disagreeingDay();
+  applyHistory(periodById('month'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-cost').textContent, 'USD 1.45');
+
+  // The payload stands — the same series and the same sessions; only the
+  // schedule changes. Under the night plan the day's 12.01 kWh fell inside the
+  // 00:00–06:00 window at 0.10 and its 0.89 kWh at the 0.30 base: 1.201 +
+  // 0.267, so GBP 1.47 — never the old plan's 1.45 under the new currency,
+  // which is what a memo that ignored the settings would print.
+  showHistorySettings(nightly());
+  assert.equal(element('chart-cost').textContent, 'GBP 1.47');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 12.9 kWh, GBP 1.47');
 });
 
 // ---------- paging the window (#154) ----------
