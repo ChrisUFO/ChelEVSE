@@ -1845,6 +1845,336 @@ test('a settle that lands while the tab is hidden is caught up on the return vis
   assert.equal(element('history-cost').textContent, fmtMoney(0.31, 'GBP'));
 });
 
+// ---------- one kWh figure per bucket ----------
+//
+// The screen the issue was filed on. A day document and the sessions archive
+// are written by different bridge paths, and for a day that has not settled
+// they can disagree: the bar used to print the document's kWh beside a $
+// priced from the sessions, so one day read two ways with nothing on screen to
+// say which to believe. Under a schedule a day or month bar now prints the
+// energy the span pass attributes to it — what its $ prices — so the label,
+// the height, the accessible name and the series maximum are one figure, the
+// same one the summary prints for that day or month. The recorded figure keeps
+// feeding the coverage guard, the summary's recorded total and the flat paths.
+
+// Put the screen on a period through its real segment listener. The read it
+// starts rejects in Node as usual; the apply step a test drives next is the
+// payload that read would deliver.
+async function switchTo(period) {
+  element('period-switch').contains = () => true;
+  const click = element('period-switch').listeners.get('click')[0];
+  await click({ target: { closest: () => ({ dataset: { period } }) } });
+  await readFailed();
+}
+
+// Tue 24 Nov 2026 at 15:50, the moment the issue was observed. The day's
+// document recorded 2.25 kWh while the archive holds two sessions inside that
+// local day attributing 12.90 kWh (12.01 + 0.89), under the one-rate November
+// plan (0.1127 all day, also the stored flat rate). Mon 23 Nov agrees with its
+// session, so the week reads 30.7 kWh as it did live.
+function disagreeingDay() {
+  const today = new Date(2026, 10, 24, 15, 50);
+  return {
+    today,
+    docs: [
+      { id: '2026-11-23', kwh: 17.8 },
+      { id: '2026-11-24', kwh: 2.25 },
+    ],
+    sessions: [
+      {
+        id: 's-23',
+        wh: 17800,
+        started_at: new Date(2026, 10, 23, 1, 0),
+        ended_at: new Date(2026, 10, 23, 6, 0),
+      },
+      {
+        id: 's-24a',
+        wh: 12010,
+        started_at: new Date(2026, 10, 24, 0, 30),
+        ended_at: new Date(2026, 10, 24, 4, 30),
+      },
+      // The newest session the issue lists: Tue 24 Nov 09:18–09:47, 0.89 kWh.
+      {
+        id: 's-24b',
+        wh: 890,
+        started_at: new Date(2026, 10, 24, 9, 18),
+        ended_at: new Date(2026, 10, 24, 9, 47),
+      },
+    ],
+    // The same day as the Day period reads it: a total with one hourly bucket,
+    // deliberately not the energy any session attributes to that hour.
+    dayDoc: {
+      id: '2026-11-24',
+      exists: true,
+      kwh: 2.25,
+      hours: { '09': 1.1 },
+      fromCache: false,
+    },
+  };
+}
+
+// The bar groups the chart drew (the base line is the first child) and a
+// bar's fill rect, whose height is the printed figure's share of the plot.
+const drawnBars = () => element('chart-bars').children.slice(1);
+const fillOf = (bar) => bar.children.find((kid) => kid.attrs.class === 'bar-fill');
+// The plot a bar fills, less the 2-unit floor: the full height of the series
+// maximum (118 − 10 − 2, the chart's base, top and floor).
+const FULL_HEIGHT = 106;
+
+test("a disagreeing day's bar prints its Day summary's kWh beside the same $, in Week and Month", async () => {
+  resetHistory();
+  enterHistory();
+  const { today, docs, sessions, dayDoc } = disagreeingDay();
+
+  // Week: the window selects today, its current slot.
+  await switchTo('week');
+  applyHistory(periodById('week'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-day').textContent, 'Today · Tue 24 Nov');
+  // The label prints the energy its $ prices — the sessions' 12.9 kWh — never
+  // the document's 2.25 beside a USD 1.45 that 2.25 kWh did not cost.
+  assert.equal(element('chart-kwh').textContent, '12.9');
+  assert.equal(element('chart-cost').textContent, 'USD 1.45');
+  // The bar says and stands at that one figure: its accessible name, its
+  // height against the week's maximum (Mon 23 Nov's 17.8) and no zero class.
+  // At its document's 2.25 it stood at a fraction of Monday's height.
+  const [monday, tuesday] = drawnBars();
+  assert.equal(tuesday.getAttribute('aria-label'), 'Tue 24 Nov: 12.9 kWh, USD 1.45');
+  assert.equal(Number(fillOf(monday).attrs.height), FULL_HEIGHT);
+  assert.ok(Math.abs(Number(fillOf(tuesday).attrs.height) - (12.9 / 17.8) * FULL_HEIGHT) < 1e-9);
+  assert.ok(!tuesday.classList.contains('zero'));
+  // A day whose document and sessions agree is untouched: Monday prints what
+  // it always printed, at the height it always had — the week's maximum.
+  assert.equal(monday.getAttribute('aria-label'), 'Mon 23 Nov: 17.8 kWh, USD 2.01');
+  // The summary prices the same spans over the week — 30.7 kWh, USD 3.46, as
+  // it read live — and says nothing about the disagreement: an under-recording
+  // day is not missing data (the owner's decision), so no caption fires.
+  assert.equal(element('history-total').textContent, '30.7');
+  assert.equal(element('history-cost').textContent, 'USD 3.46');
+  assert.equal(element('history-cost-coverage').hidden, true);
+
+  // The Day period's summary for that day: the same 12.9 kWh beside the same $.
+  await switchTo('day');
+  applyHistory(periodById('day'), dayDoc, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('history-total').textContent, '12.9');
+  assert.equal(element('history-cost').textContent, 'USD 1.45');
+  // The hour bars stay the document's own: arrow back from the hour in
+  // progress (15:00) to the nine o'clock bucket and the readout prints its
+  // recorded 1.10 kWh — not a figure attributed from the sessions.
+  for (let i = 0; i < 6; i++) keydown('history-chart', 'ArrowLeft');
+  assert.equal(element('chart-day').textContent, '09:00–10:00');
+  assert.equal(element('chart-kwh').textContent, '1.10');
+
+  // Month: today's bar reads exactly as the Day summary did.
+  await switchTo('month');
+  applyHistory(periodById('month'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-day').textContent, 'Today · Tue 24 Nov');
+  assert.equal(element('chart-kwh').textContent, '12.9');
+  assert.equal(element('chart-cost').textContent, 'USD 1.45');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 12.9 kWh, USD 1.45');
+  assert.equal(drawnBars().length, 24);
+
+  // One rate: the same documents print as they always did — the bar's kWh is
+  // the day document's own, priced by the one rate, at its recorded height…
+  showHistorySettings({ rate: 0.1127, currency: 'USD' });
+  assert.equal(element('chart-kwh').textContent, '2.25');
+  assert.equal(element('chart-cost').textContent, 'USD 0.25');
+  assert.equal(element('history-total').textContent, '20.1');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 2.25 kWh, USD 0.25');
+  assert.ok(
+    Math.abs(Number(fillOf(drawnBars().at(-1)).attrs.height) - (2.25 / 17.8) * FULL_HEIGHT) < 1e-9,
+  );
+  // …and saving a schedule re-prices the same series back to the one figure.
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-kwh').textContent, '12.9');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 12.9 kWh, USD 1.45');
+});
+
+test("a Year month bar prints the Month summary's kWh when a month's documents disagree", async () => {
+  resetHistory();
+  enterHistory();
+  const { today, docs, sessions } = disagreeingDay();
+  // The month's day documents sum to 20.05 kWh; its sessions attribute 30.7.
+  // The default view is the Month, so no switch is needed for its summary.
+  applyHistory(periodById('month'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('history-total').textContent, '30.7');
+  assert.equal(element('history-cost').textContent, 'USD 3.46');
+
+  // Year: the current month is the selected slot.
+  await switchTo('year');
+  applyHistory(periodById('year'), { docs, fromCache: false }, null, today, sessions, today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-day').textContent, 'Nov 2026');
+  // The bar prints the Month summary's figure beside the same $ — the
+  // sessions' 30.7 kWh, not the 20.1 its day documents sum to.
+  assert.equal(element('chart-kwh').textContent, '30.7');
+  assert.equal(element('chart-cost').textContent, 'USD 3.46');
+  const bars = drawnBars();
+  assert.equal(bars.length, 11); // January to November
+  assert.equal(bars[10].getAttribute('aria-label'), 'Nov 2026 (current month): 30.7 kWh, USD 3.46');
+  assert.equal(Number(fillOf(bars[10]).attrs.height), FULL_HEIGHT);
+  assert.ok(!bars[10].classList.contains('zero'));
+  // A month with no document and no session is a genuine zero bar, as before.
+  assert.ok(bars[9].classList.contains('zero'));
+  assert.equal(Number(fillOf(bars[9]).attrs.height), 2);
+
+  // One rate: the redrawn month bar falls back to its day documents' sum.
+  showHistorySettings({ rate: 0.1127, currency: 'USD' });
+  assert.equal(element('chart-kwh').textContent, '20.1');
+  assert.equal(element('chart-cost').textContent, 'USD 2.26');
+  assert.equal(
+    drawnBars()[10].getAttribute('aria-label'),
+    'Nov 2026 (current month): 20.1 kWh, USD 2.26',
+  );
+});
+
+test('a mid-charge day prints the live estimate in its bar exactly once', async () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 10, 24, 12);
+  // The day document has flushed 0.5 kWh of the charge so far and no session
+  // is recorded yet: the live window is the archive's whole account of the
+  // day. The default view is the Month.
+  const docs = [{ id: '2026-11-24', kwh: 0.5 }];
+  applyHistory(periodById('month'), { docs, fromCache: false }, null, today, [], today);
+  showHistorySettings(novemberPlan());
+  // Nothing prices the day yet: its $ hides and the bar keeps the record.
+  assert.equal(element('chart-cost').hidden, true);
+  assert.equal(element('chart-kwh').textContent, '0.50');
+
+  // 10:00→12:00 at 1 kWh — the window the Status tab prices for this write.
+  const charging = statusAt(3, today.getTime(), 7200, 1000);
+  showHistoryStatus(charging);
+  // The bar prints the estimate once — the energy its $ prices: not 1.50 (the
+  // estimate added beside the document's 0.5) and not 0.50 (the document
+  // alone). The summary beside it is the same figure.
+  assert.equal(element('chart-kwh').textContent, '1.00');
+  assert.equal(element('chart-cost').textContent, 'USD 0.11');
+  assert.equal(element('history-total').textContent, '1.00');
+
+  // The Day summary of the same mid-charge day: the same 1.00 kWh and $.
+  await switchTo('day');
+  applyHistory(
+    periodById('day'),
+    { id: '2026-11-24', exists: true, kwh: 0.5, hours: null, fromCache: false },
+    null,
+    today,
+    [],
+    today,
+  );
+  showHistorySettings(novemberPlan());
+  assert.equal(element('history-total').textContent, '1.00');
+  assert.equal(element('history-cost').textContent, 'USD 0.11');
+
+  // A record lands while the charge still runs (the pause edge): the record
+  // prices its own 0.4 kWh and the residual tail the other 0.6 — still 1.00,
+  // never 1.40 (both whole) and never 0.60 (the tail alone).
+  await switchTo('month');
+  applyHistory(
+    periodById('month'),
+    { docs, fromCache: false },
+    null,
+    today,
+    [
+      {
+        id: 's-1',
+        wh: 400,
+        started_at: new Date(2026, 10, 24, 10, 0),
+        ended_at: new Date(2026, 10, 24, 10, 24),
+      },
+    ],
+    today,
+  );
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-kwh').textContent, '1.00');
+  assert.equal(element('chart-cost').textContent, 'USD 0.11');
+
+  // The settle, in the session-first order: a record reaching the write's own
+  // instant drops the estimate and prices the same energy alone.
+  applyHistory(
+    periodById('month'),
+    { docs, fromCache: false },
+    null,
+    today,
+    [
+      {
+        id: 's-1',
+        wh: 1000,
+        started_at: new Date(2026, 10, 24, 10, 0),
+        ended_at: new Date(2026, 10, 24, 12, 1),
+      },
+    ],
+    today,
+  );
+  showHistorySettings(novemberPlan());
+  assert.equal(element('chart-kwh').textContent, '1.00');
+  assert.equal(element('chart-cost').textContent, 'USD 0.11');
+  assert.equal(element('history-total').textContent, '1.00');
+});
+
+test('a day no session covers keeps its recorded kWh while its $ hides', async () => {
+  resetHistory();
+  enterHistory();
+  const today = new Date(2026, 10, 24, 15, 50);
+  const doc = { id: '2026-11-24', kwh: 2.25 };
+  // Recorded energy, and nothing in the archive behind it. The default view
+  // is the Month, with today the selected slot.
+  applyHistory(periodById('month'), { docs: [doc], fromCache: false }, null, today, [], today);
+  showHistorySettings(novemberPlan());
+  // The $ hides rather than pricing the day free…
+  assert.equal(element('chart-cost').hidden, true);
+  assert.equal(element('chart-cost').textContent, '');
+  // …and the kWh is the day document's own: 0.00 would read as free energy
+  // beside a bar that stands for the recorded 2.25. It is still a real bar.
+  assert.equal(element('chart-kwh').textContent, '2.25');
+  const bar = drawnBars().at(-1);
+  assert.equal(bar.getAttribute('aria-label'), 'Tue 24 Nov: 2.25 kWh');
+  assert.ok(!bar.classList.contains('zero'));
+  assert.equal(Number(fillOf(bar).attrs.height), FULL_HEIGHT);
+  // The window's recorded energy is priced none of, so its summary — here and
+  // on the Day period for the same day — hides both figures rather than
+  // printing 0.00 beside the bars.
+  assert.equal(element('history-total').textContent, '—');
+  assert.equal(element('history-cost-cell').hidden, true);
+  await switchTo('day');
+  applyHistory(periodById('day'), { ...doc, exists: true, hours: null }, null, today, [], today);
+  showHistorySettings(novemberPlan());
+  assert.equal(element('history-total').textContent, '—');
+  assert.equal(element('history-cost-cell').hidden, true);
+
+  // Beside a covered day the window shows what it prices and says so — with
+  // the caption's Y still the day documents' total, the uncovered 2.25
+  // included: the recorded figure is what the summary measures coverage
+  // against, whatever the bars print.
+  await switchTo('month');
+  applyHistory(
+    periodById('month'),
+    {
+      docs: [{ id: '2026-11-23', kwh: 17.8 }, doc],
+      fromCache: false,
+    },
+    null,
+    today,
+    [
+      {
+        id: 's-23',
+        wh: 17800,
+        started_at: new Date(2026, 10, 23, 1, 0),
+        ended_at: new Date(2026, 10, 23, 6, 0),
+      },
+    ],
+    today,
+  );
+  showHistorySettings(novemberPlan());
+  assert.equal(element('history-total').textContent, '17.8');
+  assert.equal(element('history-cost-coverage').textContent, 'priced 17.8 of 20.1 kWh');
+  assert.equal(drawnBars().at(-1).getAttribute('aria-label'), 'Tue 24 Nov: 2.25 kWh');
+  assert.equal(drawnBars().at(-2).getAttribute('aria-label'), 'Mon 23 Nov: 17.8 kWh, USD 2.01');
+});
+
 // ---------- paging the window (#154) ----------
 //
 // The window arithmetic and the copy registers are pure (history.test.js); this

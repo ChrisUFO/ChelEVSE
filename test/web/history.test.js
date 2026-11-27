@@ -1401,6 +1401,25 @@ test('sumSeries and maxSeries ignore malformed points', () => {
   assert.equal(maxSeries([{ kwh: 1.5 }, { kwh: 9 }, { kwh: null }]), 9);
 });
 
+test('maxSeries takes the maximum over the figure each point prints', () => {
+  // By default that is the point's own recorded figure…
+  assert.equal(maxSeries([{ kwh: 2.25 }, { kwh: 17.8 }]), 17.8);
+  // …and a caller that prints another figure per point — the History screen
+  // under a rate schedule, where a bar prints the energy the sessions
+  // attribute to it — gets the maximum over those: the tallest bar is the one
+  // that prints the most, never the one whose day document recorded the most.
+  // A point the caller cannot read counts as zero, like a malformed one.
+  const printed = { '2026-11-23': 3, '2026-11-24': 12.9 };
+  const points = [
+    { id: '2026-11-23', kwh: 17.8 },
+    { id: '2026-11-24', kwh: 2.25 },
+  ];
+  assert.equal(
+    maxSeries([...points, { id: 'none', kwh: 9 }], (point) => printed[point.id]),
+    12.9,
+  );
+});
+
 test('historyReadState separates an offline cache miss from an empty range', () => {
   // Offline one-shot reads resolve from the cache: empty + fromCache is not
   // "no energy recorded", it is "the server was never reached".
@@ -1976,6 +1995,46 @@ test('an all-unpriceable bar hides its figure instead of pricing it free', () =>
   const summaryBody = source.slice(summaryStart, summaryEnd + 2);
   assert.match(summaryBody, /windowCostSummary\(/);
   assert.doesNotMatch(summaryBody, /seriesCostSummary|pointCostSummary/);
+});
+
+test("a bar's kWh and its $ read one attribution, decided once per render", () => {
+  // Neither the displayed figure nor the cost label is exported, so the wiring
+  // that keeps them one number is pinned from source (the pattern of the pin
+  // above): the screen asks sessionBucketCost in exactly one place — the
+  // per-render cache — and both the $ and the kWh read that cache, so the
+  // label beside a $ can never come from another pass than the $ was priced
+  // by, and a drawn bar and its readout cannot disagree.
+  const source = readFileSync(new URL('../../web/js/screens/history.js', import.meta.url), 'utf8');
+  assert.equal(source.split('sessionBucketCost(').length - 1, 1, 'one pricing site per bucket');
+  const body = (name) => {
+    const start = source.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `screens/history.js declares ${name}`);
+    const end = source.indexOf('\n}\n', start);
+    assert.ok(end > start, `screens/history.js closes ${name}`);
+    return source.slice(start, end + 2);
+  };
+  // That one site is the cache, fed the recorded figure for coverage…
+  assert.match(
+    body('bucketTotals'),
+    /sessionBucketCost\(attribution\.spans, point\.id, point\.kwh, settings\)/,
+  );
+  // …and rebuilt whenever an input the figures read is replaced, so no
+  // settings save, status push or new payload can be answered from a stale
+  // render.
+  for (const input of ['series', 'periodSessions', 'settings', 'liveStatus']) {
+    assert.match(body('bucketTotals'), new RegExp(`!== ${input}\\b`), input);
+  }
+  // Both readers go through it: the $ and the kWh a bar prints.
+  assert.match(body('seriesCost'), /bucketTotals\(point\)/);
+  assert.match(body('displayedKwh'), /bucketTotals\(point\)/);
+  // …and every printed surface reads the displayed figure — never the point's
+  // own — for the label, the height and the accessible name.
+  assert.match(body('renderChart'), /maxSeries\(series, displayedKwh\)/);
+  assert.match(body('renderChart'), /kwh: displayedKwh\(point\)/);
+  assert.match(body('paintSelection'), /fmtK\(displayedKwh\(point\)\)/);
+  // The recorded figure keeps its own reader: the summary's recorded total is
+  // still the day documents', whatever the bars print.
+  assert.match(body('renderSummary'), /sumSeries\(series\)/);
 });
 
 // ---------- the summary's coverage disclosure (#194) ----------
