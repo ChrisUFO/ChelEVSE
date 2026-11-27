@@ -955,6 +955,39 @@ test('a tab activation is not handed off, even on a tap that does not focus the 
   globalThis.document.activeElement = undefined;
 });
 
+test('the tab-activation mark is one-shot: a later traversal still hands focus off', () => {
+  // The mark covers the one hashchange a tap pushed. Were it never cleared,
+  // every later render in the session would read it, and after the first tap
+  // the hand-off above would be silently off — with focus left on <body>.
+  const { shell, panels, tabs, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('charger');
+  const link = element('config-goto-advanced');
+  link.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = link;
+  // Discard the card activation's own hand-off (above): only what follows
+  // the tap is under test.
+  shell.focusLog.length = 0;
+
+  tabs.find((tab) => tab.dataset.route === 'advanced').click({ isTrusted: true });
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  // The tap's own hashchange: not handed off, as above.
+  assert.deepEqual(shell.focusLog, []);
+
+  // Later in the session, a traversal that is not a tap, with focus inside
+  // the leaving view: the hand-off fires again.
+  const input = element('rapi-input');
+  input.parentElement = panels['panel-advanced'];
+  globalThis.document.activeElement = input;
+  shell.focusLog.length = 0;
+  go('config');
+  assert.equal(tabVisible('config'), true);
+  assert.deepEqual(shell.focusLog, ['config'], 'the list takes focus; the mark was spent');
+  globalThis.document.activeElement = undefined;
+});
+
 test('leaving a dirty Prices screen by its Back control lands on its card after the dialog', async () => {
   // Back to Settings on the Prices screen rides the Settings tab's click, so
   // the guard asks before anything moves. A confirmed leave is still a return

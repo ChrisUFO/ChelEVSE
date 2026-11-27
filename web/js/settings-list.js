@@ -10,7 +10,7 @@
 
 import { fmtRate } from './format.js';
 import { syncedLabel } from './config.js';
-import { normalizeSchedule } from './schedule.js';
+import { normalizeSchedule, scheduleSaveValid } from './schedule.js';
 import { validateRateWindows } from './rates.js';
 import {
   normalizeSettings,
@@ -39,6 +39,15 @@ export function scheduleListState({ data, meta, error = false } = {}) {
   // the charger's own firmware schedule untouched, exactly as the editor's
   // toggle note says.
   if (schedule.malformed) return state('Needs attention', 'warn');
+  // An enabled schedule the editor would not save is not advertised as on.
+  // The bridge drops every window it cannot use — applying the rest, or with
+  // none usable leaving the charger's firmware schedule untouched, as for a
+  // malformed container — so the stored windows are not what is in force,
+  // and the editor shows what to fix. A disabled schedule stays "Off"
+  // whatever its windows: the bridge applies the clear.
+  if (schedule.enabled && !scheduleSaveValid(schedule)) {
+    return state('Needs attention', 'warn');
+  }
   const count = schedule.rules.length;
   const text = schedule.enabled ? `On · ${count} ${count === 1 ? 'window' : 'windows'}` : 'Off';
   return meta && meta.pendingWrites
@@ -73,10 +82,9 @@ export function pricesListState({ data, meta, error = false } = {}) {
 // needs attention and the screen shows what to fix.
 function planState(stored) {
   if (!validateRateWindows(stored.rates).valid) return state('Needs attention', 'warn');
+  // A valid plan has at least one row and every row's rate is inside the
+  // bounds rateIsUsable accepts, so the range always exists here.
   const range = ratePlanRange(stored.rates, stored.rate);
-  // A valid row's rate is inside the bounds ratePlanRange accepts, so this
-  // only guards a malformed document from throwing inside a snapshot callback.
-  if (!range) return state('Needs attention', 'warn');
   const count = ratePeriods(stored.rates).length;
   // One currency for a range ("USD 0.10–0.32"), the price range's own rule.
   const price =

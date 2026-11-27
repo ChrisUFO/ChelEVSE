@@ -12,9 +12,14 @@ import assert from 'node:assert/strict';
 // What this cannot see: layout, real DOM events, or a screen reader. The focus
 // assertions are the stub's `focus()` recording where the card sent focus, which
 // is the whole claim.
+//
+// The card also reports its painted state to the Settings list on every render
+// (#228, the `onState` callback app.js wires): that report is recorded here.
 
 // Where the card moved focus, in order.
 const focusLog = [];
+// What the card reported to the Settings list, in order.
+const reported = [];
 
 function stubElement(tag = '') {
   const classes = new Set();
@@ -110,15 +115,17 @@ const { initNotifications, resetNotifications } =
   await import('../../web/js/screens/notifications.js');
 
 // The listeners under test are the ones initNotifications itself registers.
-initNotifications();
+initNotifications({ onState: (view) => reported.push(view) });
 
 // The card keeps module state, so every case starts from the load-time state:
-// nothing asked, no permission, nothing registered.
+// nothing asked, no permission, nothing registered. The reset's own render is
+// not a report any case reads.
 function resetCard() {
   globalThis.Notification.permission = 'default';
   focusLog.length = 0;
   globalThis.document.activeElement = null;
   resetNotifications();
+  reported.length = 0;
 }
 
 async function click(node) {
@@ -176,4 +183,27 @@ test('the enable path leaves focus alone when it sits on a live control', async 
 
   assert.equal(element('notify-enable').hidden, true);
   assert.deepEqual(focusLog, []);
+});
+
+test('every render reports the card’s state to the Settings list, with the token phase', async () => {
+  // The list's Notifications card (#228) has no listener of its own: its one
+  // line is what the card reports here on every render — the kind it was just
+  // painted in, and the token phase, which the kind alone cannot use to tell
+  // a registered device from one still registering. This harness has no VAPID
+  // key and no account, so both paths below stop early and the card stays on
+  // "checking"; which line each kind becomes is pinned in
+  // test/web/settings-list.test.js.
+  resetCard();
+  assert.deepEqual(reported, []);
+
+  // Enable: "registering" from the press, before anything is asked.
+  await click(element('notify-enable'));
+  assert.equal(element('notify-card').dataset.state, 'checking');
+  assert.deepEqual(reported, [{ kind: 'checking', tokenPhase: 'registering' }]);
+
+  // Retry: a registration that fails early reports the failure, not the
+  // phase the path started in.
+  resetCard();
+  await click(element('notify-retry'));
+  assert.deepEqual(reported, [{ kind: 'checking', tokenPhase: 'failed' }]);
 });

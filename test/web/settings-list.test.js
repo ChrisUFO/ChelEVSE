@@ -24,6 +24,7 @@ import {
 } from '../../web/js/settings-list.js';
 import { notificationState } from '../../web/js/notifications.js';
 import { syncedLabel } from '../../web/js/config.js';
+import { MAX_RULES } from '../../web/js/schedule.js';
 
 // ---------- pure derivation ----------
 
@@ -92,6 +93,63 @@ test('a malformed stored schedule is not off: the card asks for attention', () =
   expectState(
     scheduleListState({ data: { enabled: false, rules: 'none' } }),
     'Needs attention',
+    'warn',
+  );
+});
+
+test('an enabled schedule with a window the editor would flag is not on: it needs attention', () => {
+  // The Firestore rules validate the container only, so a console write or
+  // another client can store a window the editor refuses to save. The bridge
+  // drops every such window and, with none usable, leaves the charger on its
+  // own firmware schedule: a count in the on tone would overstate what is
+  // in force, so the card reads like the Prices card's — attention, and the
+  // editor shows what to fix.
+  const unusable = { id: 'legacy', days: [0], start: '7:00', end: '9:00' };
+  // Every window unusable: the bridge skips the document.
+  expectState(
+    scheduleListState({ data: { enabled: true, rules: [unusable] } }),
+    'Needs attention',
+    'warn',
+  );
+  // One usable beside one unusable: the bridge applies the usable one only,
+  // so "On · 2 windows" would count a window that is not in force.
+  expectState(
+    scheduleListState({
+      data: { enabled: true, rules: [rule, { ...rule, id: 'rule-2', days: [] }] },
+    }),
+    'Needs attention',
+    'warn',
+  );
+  // The editor's container gate counts too: over the cap, it saves nothing.
+  const overCap = Array.from({ length: MAX_RULES + 1 }, (_, index) => ({
+    ...rule,
+    id: `rule-${index}`,
+  }));
+  expectState(
+    scheduleListState({ data: { enabled: true, rules: overCap } }),
+    'Needs attention',
+    'warn',
+  );
+  // Attention outranks "waiting to save", as it does for a malformed container.
+  expectState(
+    scheduleListState({
+      data: { enabled: true, rules: [unusable] },
+      meta: { pendingWrites: true },
+    }),
+    'Needs attention',
+    'warn',
+  );
+  // A disabled schedule stays off, queued or not: the bridge applies the clear
+  // whatever its windows look like. An unusable window does not block a
+  // clear, so that is the one such document the editor does write.
+  expectState(scheduleListState({ data: { enabled: false, rules: [unusable] } }), 'Off');
+  expectState(scheduleListState({ data: { enabled: false, rules: overCap } }), 'Off');
+  expectState(
+    scheduleListState({
+      data: { enabled: false, rules: [unusable] },
+      meta: { pendingWrites: true },
+    }),
+    'Off · waiting to save',
     'warn',
   );
 });
@@ -402,6 +460,17 @@ test('app.js hands the notification card the list painter and resets the list on
   // The notification card's reset ends in a render that reports its signed-out
   // state to the list, so the list's own reset must come first.
   assert.ok(list < notifications, 'the list resets before the notification card');
+});
+
+test('app.js has the notification card re-read its permission on the list and on its screen', () => {
+  // The list's Notifications card has no listener of its own: its line is
+  // what the screen's card reports after a render, and entering either route
+  // is what makes that card re-read the permission.
+  const route = block(app, 'function handleRoute(');
+  assert.match(
+    route,
+    /if \(route === 'config' \|\| route === 'notifications'\) activateNotifications\(\);/,
+  );
 });
 
 test('the list painter reaches no screen, so it has no path to a draft', () => {
