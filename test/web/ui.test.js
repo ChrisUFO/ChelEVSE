@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -7,6 +7,7 @@ import {
   buildDayPicker,
   toggleDay,
   focusAfterRetry,
+  SCREEN_SETTLE_MS,
 } from '../../web/js/ui.js';
 import { initConfig } from '../../web/js/screens/config.js';
 import { DAY_NAMES } from '../../web/js/schedule.js';
@@ -236,6 +237,14 @@ function makeShell() {
       // control, shown with the view it sits in.
       hidden: id === 'settings-list' || (id.startsWith('panel-') && id !== 'panel-status'),
       textContent: '',
+      // The attributes anything sets: the router's settling mark on a screen.
+      attrs: new Map(),
+      setAttribute(name, value) {
+        this.attrs.set(name, String(value));
+      },
+      removeAttribute(name) {
+        this.attrs.delete(name);
+      },
       parentElement: null,
       closest,
       listeners: new Map(),
@@ -313,7 +322,23 @@ function makeShell() {
   const selected = (route) =>
     tabs.find((tab) => tab.dataset.route === route)?.ariaSelected === 'true';
   const tabVisible = (route) => !panels[`panel-${route}`].hidden;
-  return { shell, tabs, panels, go, fireHash, tabVisible, settingsTab, selected, element };
+  // The screens carrying the router's settling mark, in lookup order.
+  const settling = () =>
+    Object.values(panels)
+      .filter((node) => node.attrs.has('data-settling'))
+      .map((node) => node.id);
+  return {
+    shell,
+    tabs,
+    panels,
+    go,
+    fireHash,
+    tabVisible,
+    settingsTab,
+    selected,
+    element,
+    settling,
+  };
 }
 
 test('initTabbar applies route changes immediately when no guard holds them', () => {
@@ -1034,6 +1059,113 @@ test('leaving a dirty Prices screen by its Back control lands on its card after 
 function tick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// ---------- the settling screen: a quick second tap on a card ----------
+//
+// A tap on a card that lands twice opens the screen under the finger, and the
+// second tap lands on whatever control that screen puts in the same place —
+// "Enable notifications", the schedule's enable switch. No spacing can keep
+// the first control clear of the card (a screen re-opens at its saved scroll
+// offset, state lines wrap, the entry animation shifts everything), so the
+// router marks the opened screen for SCREEN_SETTLE_MS and the stylesheet turns
+// the mark into `pointer-events: none` for the screen's controls. The stub
+// cannot hit-test, so what these pin is the mark: where it lands, how long it
+// stays, and that the focus hand-off does not wait for it.
+
+const SCREENS = ['schedule', 'prices', 'notifications', 'charger'];
+
+test('a screen opened from the list is marked for its first moments, and only then', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { shell, go, settling, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  assert.deepEqual(settling(), [], 'the list itself is never marked');
+
+  for (const route of SCREENS) {
+    go('config');
+    shell.focusLog.length = 0;
+    go(route);
+    assert.equal(tabVisible(route), true);
+    assert.deepEqual(
+      settling(),
+      [`panel-${route}`],
+      `${route}: the opened screen, and nothing else`,
+    );
+    // The hand-off does not wait for the mark to lift: the region takes focus
+    // at once, so a keyboard user's next Tab is a Tab away from the first
+    // control, with no delay to feel.
+    assert.deepEqual(shell.focusLog, [`panel-${route}`]);
+  }
+});
+
+test('the mark lasts its window to the millisecond, then lifts by itself', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('notifications');
+  assert.deepEqual(settling(), ['panel-notifications']);
+  mock.timers.tick(SCREEN_SETTLE_MS - 1);
+  assert.deepEqual(settling(), ['panel-notifications'], 'one millisecond short of its end');
+  mock.timers.tick(1);
+  assert.deepEqual(settling(), [], 'at its end the screen takes pointer input again');
+});
+
+test('leaving a settling screen lifts the mark at once, and a return gets a window of its own', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('notifications');
+  // Back to the list inside the window: the hidden screen keeps no mark.
+  go('config');
+  assert.deepEqual(settling(), []);
+  // A screen left for another screen (a typed hash) is the same: nothing was
+  // opened from the list, so nothing is marked — and the old mark is gone.
+  go('prices');
+  go('schedule');
+  assert.deepEqual(settling(), []);
+
+  // Back to the list and in again inside the first window: the first window's
+  // timer must not lift the second mark early.
+  go('config');
+  go('notifications');
+  mock.timers.tick(200);
+  go('config');
+  go('notifications');
+  mock.timers.tick(300);
+  assert.deepEqual(
+    settling(),
+    ['panel-notifications'],
+    'the first window lapses inside the second',
+  );
+  mock.timers.tick(SCREEN_SETTLE_MS - 301);
+  assert.deepEqual(
+    settling(),
+    ['panel-notifications'],
+    'one millisecond short of the second window',
+  );
+  mock.timers.tick(1);
+  assert.deepEqual(settling(), []);
+});
+
+test('nothing but a card opening its screen is marked: not a direct link, not a tab route', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling, tabVisible } = makeShell();
+  // A direct link, or a refresh, on a screen: the first render opens it with
+  // nothing tapped, so it takes pointer input from the start.
+  globalThis.location.hash = '#prices';
+  initTabbar({ onRoute: () => {} });
+  assert.equal(tabVisible('prices'), true);
+  assert.deepEqual(settling(), []);
+  // A tab route is no screen a card opened.
+  go('history');
+  assert.deepEqual(settling(), []);
+});
 
 // ---------- focusAfterRetry: the one retry-focus policy (#164) ----------
 //

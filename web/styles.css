@@ -1967,6 +1967,17 @@ input[aria-invalid='true'] {
 .settings-item:focus-visible .settings-item-caret {
   color: var(--accent);
 }
+/* The card the way back hands focus to must not sit invisible behind the
+   list's entry animation: its ring is the only sign of where focus landed, and
+   the lower cards are held at opacity 0 for up to 220 ms before they rise. The
+   animation is finished at once rather than removed — `animation: none` would
+   start it again from the beginning the moment focus moves on. Keyboard only
+   (`:focus-visible`): a pointer's return keeps the staggered entry. The long
+   selector outspecifies the entry-animation rule near the top of the file. */
+.panel:not([hidden]) > .view:not([hidden]) > .settings-item:focus-visible {
+  animation-delay: 0s;
+  animation-duration: 0s;
+}
 
 /* A Settings screen's head: the way back above the heading. The link keeps a
    44 px target on a row of its own, so its focus ring clears both the heading
@@ -2005,6 +2016,16 @@ input[aria-invalid='true'] {
   flex: none;
   width: 18px;
   height: 18px;
+}
+/* A screen a card just opened takes no pointer input until it has finished
+   arriving: the router marks it for its first moments (SCREEN_SETTLE_MS,
+   js/ui.js), so a quick second tap on the card cannot land on the control
+   that opened under the finger. The screen's own surface takes the tap and
+   does nothing with it, so focus stays on the region the hand-off gave it.
+   Keyboard and assistive activation never pass through pointer events, so
+   they are untouched. */
+.view[data-settling] > * {
+  pointer-events: none;
 }
 
 /* rate plan editor — the flat price first, then the season plan and

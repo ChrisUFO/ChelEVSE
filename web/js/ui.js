@@ -145,6 +145,23 @@ const ROUTE_NAMES = Object.keys(ROUTES);
 // The routes shown inside the Settings tabpanel. Every other route owns a tab.
 const SETTINGS_SCREENS = ['schedule', 'prices', 'notifications', 'charger'];
 
+// How long a screen a card opened takes no pointer input. A tap that lands
+// twice — a double tap, a jittery press — opens the screen under the finger,
+// and the second tap lands on whatever control that screen puts in the same
+// place: "Enable notifications", which asks for a browser permission (a
+// dismiss of which counts toward the browser's auto-block), or the schedule's
+// enable switch, which turns the stray tap into an unsaved draft. No spacing
+// of the screen can keep its first control clear of the card: a screen
+// re-opens at its own saved scroll offset, state lines wrap, and the entry
+// animation itself has everything 10 px lower while the second tap arrives.
+// So the opened screen takes no pointer input until it has finished arriving
+// — about as long as its blocks take to rise in (0.4 s, staggered by 55 ms
+// each), and the window the Dismiss guard holds against the same gesture
+// (#205). Pointer only: the mark is the stylesheet's cue (`pointer-events:
+// none`), which no key press or assistive activation passes through, and the
+// focus hand-off below is not a pointer event either.
+export const SCREEN_SETTLE_MS = 500;
+
 // The tab a route selects: a Settings screen keeps Settings selected.
 function tabOf(route) {
   return SETTINGS_SCREENS.includes(route) ? 'config' : route;
@@ -198,6 +215,31 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
   // Per-route restore below owns the scroll position; browser scroll
   // restoration would otherwise fight it on reload and back/forward.
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
+  // The screen a card just opened, while it takes no pointer input
+  // (SCREEN_SETTLE_MS), and the timer that ends that.
+  let settling = null;
+  let settleTimer = 0;
+
+  function liftSettle() {
+    clearTimeout(settleTimer);
+    settleTimer = 0;
+    if (settling) settling.removeAttribute('data-settling');
+    settling = null;
+  }
+
+  // Runs on every applied route change. A screen opened from the list settles;
+  // any other change ends a settling screen at once, so the mark never outlives
+  // the screen it belongs to and a quick return opens a window of its own.
+  function settle(from, route) {
+    liftSettle();
+    if (from !== 'config' || !SETTINGS_SCREENS.includes(route)) return;
+    const screen = $(`panel-${route}`);
+    if (!screen) return;
+    screen.setAttribute('data-settling', '');
+    settling = screen;
+    settleTimer = setTimeout(liftSettle, SCREEN_SETTLE_MS);
+  }
 
   // Exactly one tabpanel is shown, and inside the Settings tabpanel exactly
   // one view: the list for `config`, else the screen the route names. Both are
@@ -277,6 +319,7 @@ export function initTabbar({ onRoute, confirmLeave } = {}) {
     // Route entry hook: screens use it to start/stop clocks and lazily load
     // one-shot data. Re-clicking the active tab is not a new entry.
     if (changed && onRoute) onRoute(route);
+    if (changed) settle(from, route);
     return changed ? focusView(from, route, active, tabActivation) : false;
   }
 

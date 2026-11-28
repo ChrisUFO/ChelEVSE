@@ -70,7 +70,9 @@ export function startStore(options) {
   };
   // Every document subscription hands the snapshot's provenance to its callback
   // alongside the data: a cached snapshot is what the local cache knew before
-  // the server answered, which is not the same as the server's answer.
+  // the server answered, which is not the same as the server's answer, and a
+  // snapshot with a pending write carries a document the server has not
+  // acknowledged yet.
   // `snapshotOptions` rather than `options`: the outer name is the retained
   // argument object, and the two must never be confused for one another.
   const watch = (path, onData, onError, snapshotOptions = {}) =>
@@ -80,6 +82,7 @@ export function startStore(options) {
       (snap) =>
         onData(snap && snap.exists() ? snap.data() : null, {
           fromCache: Boolean(snap && snap.metadata && snap.metadata.fromCache),
+          pendingWrites: Boolean(snap && snap.metadata && snap.metadata.hasPendingWrites),
         }),
       (err) => {
         if (!denied(err) && onError) onError(err);

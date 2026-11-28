@@ -59,7 +59,9 @@ export function scheduleListState({ data, meta, error = false } = {}) {
 // that reports no document is the local cache answering before the server, not
 // evidence of an empty account. The form's own save gate reads it the same way
 // (settingsSnapshotIsBaseline), so the card cannot call an account empty while
-// the form is still holding its save.
+// the form is still holding its save. A pending write is a payload the server
+// has not acknowledged — the listener asks for metadata changes, so it arrives
+// before the answer — and gets the schedule card's line.
 export function pricesListState({ data, meta, error = false } = {}) {
   if (error) return state(COULDNT_LOAD, 'err');
   if (data === undefined || !settingsSnapshotIsBaseline(data, meta)) {
@@ -70,10 +72,16 @@ export function pricesListState({ data, meta, error = false } = {}) {
   // A document without a usable rate and currency is nothing the form could
   // re-send whole; the editor shows it with its errors.
   if (!stored) return state('Needs attention', 'warn');
-  if (rateEditorMode(stored.rates) === 'flat') {
-    return state(`One rate · ${fmtRate(stored.rate, stored.currency)} per kWh`);
+  const saved =
+    rateEditorMode(stored.rates) === 'flat'
+      ? state(`One rate · ${fmtRate(stored.rate, stored.currency)} per kWh`)
+      : planState(stored);
+  // Attention outranks the queue, as on the schedule card: a plan the editor
+  // would flag needs fixing whatever became of the write.
+  if (!saved.tone && meta && meta.pendingWrites) {
+    return state(`${saved.text} · waiting to save`, 'warn');
   }
-  return planState(stored);
+  return saved;
 }
 
 // The plan summary's own range, so the card is a prefix of what the Prices

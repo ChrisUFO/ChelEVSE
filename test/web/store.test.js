@@ -346,6 +346,20 @@ test('the health document is one subscription through the shared watch path', ()
   );
 });
 
+test('the shared watch hands its callbacks the pending-write flag beside the cache provenance', () => {
+  // The Settings list's Prices card reads `pendingWrites` the way the schedule
+  // card does (the schedule listener passes it by hand): a document the server
+  // has not acknowledged is not stored yet. The settings listener opts into
+  // metadata changes, which is what delivers the acknowledgment that clears
+  // the flag — without it a card could wait to save for good.
+  const body = startStoreBody();
+  assert.match(
+    body,
+    /onData\(snap && snap\.exists\(\) \? snap\.data\(\) : null, \{ fromCache: Boolean\(snap && snap\.metadata && snap\.metadata\.fromCache\), pendingWrites: Boolean\(snap && snap\.metadata && snap\.metadata\.hasPendingWrites\), \}\)/,
+  );
+  assert.match(body, /'settings\/current',[\s\S]*?\{ includeMetadataChanges: true \},\s*\);/);
+});
+
 test('every listener error path still asks denied() first', () => {
   // R7: `permission-denied` routes to onAccessDenied and offers no Retry. A
   // retry refactor is exactly the kind of change that could reorder this, so

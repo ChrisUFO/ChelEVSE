@@ -259,6 +259,41 @@ test('the prices card calls an account empty only once the server has', () => {
   );
 });
 
+test('an unacknowledged prices write is not claimed as saved, as on the schedule card', () => {
+  // A save the server has not answered arrives as the document with
+  // hasPendingWrites — the listener asks for metadata changes — so without
+  // the flag the card states the queued payload as the stored price while the
+  // screen says it may not be saved yet.
+  expectState(
+    pricesListState({ data: { rate: 0.5, currency: 'USD' }, meta: { pendingWrites: true } }),
+    'One rate · USD 0.50 per kWh · waiting to save',
+    'warn',
+  );
+  expectState(
+    pricesListState({
+      data: { rate: 0.31, currency: 'USD', rates: [base, peak] },
+      meta: { pendingWrites: true },
+    }),
+    '1 season · USD 0.28–0.42 per kWh · waiting to save',
+    'warn',
+  );
+  // Attention outranks the queue, as on the schedule card: a plan the editor
+  // would flag is not a price range, whatever became of the write.
+  expectState(
+    pricesListState({
+      data: { rate: 0.31, currency: 'USD', rates: [night, { ...night, id: 'night-2' }] },
+      meta: { pendingWrites: true },
+    }),
+    'Needs attention',
+    'warn',
+  );
+  // The acknowledgment is the same document without the flag: saved, and plain.
+  expectState(
+    pricesListState({ data: { rate: 0.5, currency: 'USD' }, meta: { pendingWrites: false } }),
+    'One rate · USD 0.50 per kWh',
+  );
+});
+
 test('the notifications card follows the notification card own state machine', () => {
   // `kind` is notificationState's, so the list cannot invent a verdict the
   // screen's card does not show. The card keeps the sentences; the list keeps
@@ -406,6 +441,18 @@ test('a failed read names its card, and the next snapshot replaces it', () => {
   assert.deepEqual(view('notifications'), { text: 'Blocked', tone: 'warn' });
   showListNotifications({ kind: 'default' });
   assert.deepEqual(view('notifications'), { text: 'Off', tone: '' });
+});
+
+test('the prices card follows a pending write to its acknowledgment', () => {
+  showListSettings({ rate: 0.5, currency: 'USD' }, { fromCache: false, pendingWrites: true });
+  assert.deepEqual(view('prices'), {
+    text: 'One rate · USD 0.50 per kWh · waiting to save',
+    tone: 'warn',
+  });
+  // The server's answer is the same document without the pending write.
+  showListSettings({ rate: 0.5, currency: 'USD' }, { fromCache: false, pendingWrites: false });
+  assert.deepEqual(view('prices'), { text: 'One rate · USD 0.50 per kWh', tone: '' });
+  assert.equal('tone' in card('prices').dataset, false);
 });
 
 test('a sign-out reset returns every card to its resting state', () => {
@@ -731,4 +778,20 @@ test('the screens keep the entry animation and every card tone has its colour', 
   }
   // The way back keeps a touch target.
   assert.match(css, /\.back-link \{[^}]*min-height: 44px;/);
+  // A screen a card just opened takes no pointer input while the router
+  // marks it (SCREEN_SETTLE_MS, js/ui.js): its controls, not the screen's own
+  // surface, so a quick second tap lands on the region and nothing in it.
+  // The stub cannot hit-test; this is the one line that makes the mark mean
+  // something.
+  assert.match(css, /\.view\[data-settling\] > \* \{\s*pointer-events: none;/);
+  // The card the way back hands focus to is shown at once when it shows a
+  // focus ring, instead of waiting out the staggered entry invisible. Its
+  // animation is finished, never removed: removed, it would replay from the
+  // start the moment focus moved on. The long selector is what outspecifies
+  // the entry-animation rule, so it is part of the pin.
+  assert.match(
+    css,
+    /\.panel:not\(\[hidden\]\) > \.view:not\(\[hidden\]\) > \.settings-item:focus-visible \{\s*animation-delay: 0s;\s*animation-duration: 0s;/,
+  );
+  assert.doesNotMatch(css, /\.settings-item:focus(-visible)? \{[^}]*animation: none/);
 });
