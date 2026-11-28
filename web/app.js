@@ -80,6 +80,16 @@ import {
   showSchedule,
   showScheduleError,
 } from './js/screens/schedule.js';
+import {
+  resetSettingsList,
+  showListConfig,
+  showListConfigError,
+  showListNotifications,
+  showListSchedule,
+  showListScheduleError,
+  showListSettings,
+  showListSettingsError,
+} from './js/screens/settings-list.js';
 
 const SCREENS = ['booting', 'boot-error', 'signin', 'noaccess', 'app'];
 
@@ -195,6 +205,9 @@ function closeApp() {
   resetSchedule();
   resetConfig();
   resetSettings();
+  // The list's states go first: resetNotifications ends in a render that
+  // reports the notification card's signed-out state to the list again.
+  resetSettingsList();
   resetNotifications();
   resetAdvanced();
   activeUser = null;
@@ -234,7 +247,7 @@ function showNoAccess(user, reason) {
   if (showScreen('noaccess')) $('noaccess-title').focus({ preventScroll: true });
 }
 
-// Tab activation: start/stop the status clock and load history on first visit.
+// Route activation: start/stop the status clock and load history on first visit.
 // Screens keep their own state; only the visible work changes.
 function handleRoute(route) {
   if (!activeUser) return;
@@ -242,7 +255,9 @@ function handleRoute(route) {
   else blurStatus();
   if (route === 'history') activateHistory();
   if (route === 'schedule') activateSchedule();
-  if (route === 'config') activateNotifications();
+  // The notification card is its own screen, and the Settings list shows its
+  // state: both re-read the permission.
+  if (route === 'config' || route === 'notifications') activateNotifications();
   // The RAPI gate is per visit: entering the tab re-arms it; leaving drops any
   // pending confirmation. Re-clicking the active tab is not a new entry.
   if (route === 'advanced') enterAdvanced();
@@ -266,7 +281,7 @@ function enterApp(user) {
       const data = snap.data();
       showStatus(snap);
       showLiveStatus(data);
-      // Lifetime kWh lives on the Config screen now (#116).
+      // Lifetime kWh lives on the Charger screen now (#116).
       showLifetimeEnergy(data && data.total_energy);
       // History prices the in-progress session from the same snapshot (#126).
       showHistoryStatus(data);
@@ -278,15 +293,21 @@ function enterApp(user) {
       // The gate needs the snapshot's provenance: a cached "no document" is not
       // an absent document.
       showSettingsData(settings, meta);
+      showListSettings(settings, meta);
     },
-    onSettingsError: showSettingsError,
+    onSettingsError: (err) => {
+      showSettingsError(err);
+      showListSettingsError();
+    },
     onConfig: (data) => {
       showStatusConfig(data);
       showConfigData(data);
+      showListConfig(data);
     },
     onConfigError: (err) => {
       showStatusConfig(null);
       showConfigError(err);
+      showListConfigError();
     },
     // Charger health rides the same fan-out as the other status documents; the
     // screen owns how an absent document and a failed listener read on screen.
@@ -303,8 +324,12 @@ function enterApp(user) {
     onSchedule: (data, meta) => {
       showSchedule(data, meta);
       showStatusSchedule(data);
+      showListSchedule(data, meta);
     },
-    onScheduleError: showScheduleError,
+    onScheduleError: (err) => {
+      showScheduleError(err);
+      showListScheduleError();
+    },
     onRapiCommands: showRapiCommands,
     onRapiError: showRapiError,
     onAccessDenied: () => {
@@ -408,11 +433,12 @@ async function main() {
   initSchedule();
   initConfig();
   initSettings();
-  initNotifications();
+  // The Settings list's Notifications card shows this card's state (#228).
+  initNotifications({ onState: showListNotifications });
   initAdvanced();
-  // Unsaved-changes guard (#129): leaving Config with a dirty settings
-  // form asks first. The gating decision is the pure helper; the dialog and
-  // the dirty flag live in the settings screen.
+  // Unsaved-changes guard (#129): leaving the Prices screen with a dirty
+  // settings form asks first. The gating decision is the pure helper; the
+  // dialog and the dirty flag live in the settings screen.
   initTabbar({
     onRoute: handleRoute,
     confirmLeave: (from, to) =>

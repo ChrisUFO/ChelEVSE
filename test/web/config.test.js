@@ -187,14 +187,16 @@ test('configSignature reports no signature for unusable documents', () => {
 
 // ---------- screen rendering ----------
 
-// The Config screen renders into the live DOM. Give it the smallest document it
-// needs — one stub element per id — and import the module afterwards; every
-// lookup is deferred to render time (same pattern as status-pulse.test.js).
+// The charger snapshot (the Settings → Charger screen) renders into the live
+// DOM. Give it the smallest document it needs — one stub element per id — and
+// import the module afterwards; every lookup is deferred to render time (same
+// pattern as status-pulse.test.js).
 // `listeners` and `focusLog` are the only observers an unstubbed DOM offers: the
 // Retry wiring and the focus it restores are recorded, not executed
 // (status-error.test.js records the same way).
-function stubElement() {
+function stubElement(tag) {
   return {
+    tag,
     hidden: false,
     textContent: '',
     dataset: {},
@@ -239,7 +241,7 @@ const element = (id) => {
 
 globalThis.document = {
   getElementById: (id) => element(id),
-  createElement: () => stubElement(),
+  createElement: (tag) => stubElement(tag),
 };
 
 const { initConfig, showConfigData, showConfigError } =
@@ -301,7 +303,8 @@ test('a failed read says so, without a reload instruction', () => {
 test('a successful retry moves focus from the hidden control to the panel', () => {
   // The snapshot that clears the failure hides Try again; a focused node that
   // leaves the tree sends focus to <body>, so the panel it just refilled takes
-  // it instead. The click itself moves nothing while the retry is pending.
+  // it instead. The snapshot card is the Charger screen's region (#228). The
+  // click itself moves nothing while the retry is pending.
   const retry = element('config-retry');
   const listeners = retry.listeners.get('click') || [];
   assert.equal(listeners.length, 1, 'initConfig wired #config-retry once');
@@ -313,8 +316,8 @@ test('a successful retry moves focus from the hidden control to the panel', () =
 
   showConfigData({ hostname: 'garage' });
   assert.equal(retry.hidden, true);
-  assert.equal(focusLog.at(-1), 'panel-config');
-  assert.deepEqual(element('panel-config').focused, { preventScroll: true });
+  assert.equal(focusLog.at(-1), 'panel-charger');
+  assert.deepEqual(element('panel-charger').focused, { preventScroll: true });
 });
 
 test('a snapshot no retry preceded moves no focus', () => {
@@ -329,8 +332,10 @@ test('each curated group is a collapsed disclosure with its heading in the summa
   // config-group"> per curated group, no `open` attribute — collapsed by
   // default, so a rebuild (a genuine content change) re-collapses every group
   // while the signature skip keeps an open group open across a timestamp-only
-  // replace. The summary carries the group's h3, keeping the heading
-  // hierarchy h1 panel → h2 card → h3 group.
+  // replace. The summary carries the group's h2, one level under the screen's
+  // own h1: the card heading that used to sit between them became the screen's
+  // h1 when the card became a screen (#228), so an h3 here would skip a level
+  // for a reader navigating by headings.
   showConfigData({ hostname: 'garage', gfci_check: true });
   const groups = panelNodes();
   assert.ok(groups.length > 0);
@@ -341,5 +346,11 @@ test('each curated group is a collapsed disclosure with its heading in the summa
   for (const group of groups) {
     assert.ok(!('open' in group.attrs), 'a built group sets no open attribute');
     assert.equal(group.open, undefined, 'a built group is collapsed');
+    assert.equal(group.children[0].tag, 'summary', 'the heading sits in the disclosure summary');
+    assert.equal(
+      group.children[0].children[0].tag,
+      'h2',
+      'each group heading is an h2, one level under the screen h1',
+    );
   }
 });

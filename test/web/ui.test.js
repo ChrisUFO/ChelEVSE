@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -7,6 +7,7 @@ import {
   buildDayPicker,
   toggleDay,
   focusAfterRetry,
+  SCREEN_SETTLE_MS,
 } from '../../web/js/ui.js';
 import { initConfig } from '../../web/js/screens/config.js';
 import { DAY_NAMES } from '../../web/js/schedule.js';
@@ -14,7 +15,13 @@ import { DAY_NAMES } from '../../web/js/schedule.js';
 test('routeFor accepts known hashes and canonicalises the rest', () => {
   assert.equal(routeFor('#status'), 'status');
   assert.equal(routeFor('#History'), 'history');
+  // The Settings list and the four screens its cards open (#228). #schedule
+  // keeps resolving: a link saved before the move must still open the editor.
+  assert.equal(routeFor('#config'), 'config');
   assert.equal(routeFor('#schedule'), 'schedule');
+  assert.equal(routeFor('#prices'), 'prices');
+  assert.equal(routeFor('#Notifications'), 'notifications');
+  assert.equal(routeFor('#charger'), 'charger');
   assert.equal(routeFor(''), 'status');
   assert.equal(routeFor('#'), 'status');
   assert.equal(routeFor('#nope'), 'status');
@@ -160,49 +167,96 @@ test('buildDayPicker leaves the label and per-chip aria off unless asked', () =>
 // `location`, `history` and `window` are stubs the harness owns and
 // `hashchange` is dispatched by hand, exactly as the browser would deliver
 // it.
+//
+// The bar holds four tabs (#228): Status, History, Settings, Advanced. The
+// Settings list is the Settings tab's own route (`config`), and the four
+// screens its cards open are views inside that tabpanel — `panel-<route>`.
+// The guard cases below sit on `prices`, the screen the dirty form moved to.
 
-const ROUTES = ['status', 'history', 'schedule', 'config', 'advanced'];
+// The tabs the shipped bar holds, in its order.
+const ROUTES = ['status', 'history', 'config', 'advanced'];
 
 function makeShell() {
   const shell = {
     replaces: [],
     title: '',
     focused: null,
+    // Every focus, in order — the tab's route or the element's id. The
+    // Settings focus hand-offs land on views and cards, not only on tabs.
+    focusLog: [],
     routes: [],
     hashListeners: new Set(),
   };
+  // `closest('[hidden]')` over the chain a node declares with `parentElement`:
+  // the stub has no real tree, so a control names the view it sits in.
+  function closestHidden(node) {
+    for (let at = node; at; at = at.parentElement) {
+      if (at.hidden) return at;
+    }
+    return null;
+  }
+  // The one selector anything asks for.
+  const closest = function () {
+    return closestHidden(this);
+  };
+  const body = { id: 'body', closest };
   const tabs = ROUTES.map((route) => ({
     dataset: { route },
     ariaSelected: 'false',
     tabIndex: 0,
     listeners: new Map(),
+    // A tab sits outside every view, so no hidden view is ever its ancestor.
+    closest,
     addEventListener(type, listener) {
       this.listeners.set(type, listener);
     },
-    // HTMLElement.click() dispatches the click listener — how the Config
-    // panel's "Advanced console" link drives the tab.
-    click() {
-      this.listeners.get('click')();
+    // HTMLElement.click() dispatches the click listener with an untrusted
+    // event — how the Charger screen's "Advanced console" link drives the tab.
+    // A user's activation is trusted: `click({ isTrusted: true })`.
+    click(event) {
+      this.listeners.get('click')(event);
     },
     setAttribute(name, value) {
       if (name === 'aria-selected') this.ariaSelected = String(value);
     },
     focus() {
       shell.focused = this.dataset.route;
+      shell.focusLog.push(this.dataset.route);
     },
   }));
   const panels = {};
   const tabbar = { listeners: new Map(), addEventListener() {} };
   // Screens wire buttons by id (initConfig below needs more than `hidden`).
+  // Every id under `panel-` is a view the router shows; `settings-list` and
+  // `settings-card-<route>` are the list and its cards. A control names the
+  // view it sits in through `parentElement`.
   const element = (id) =>
     (panels[id] = panels[id] || {
-      hidden: id !== 'panel-status',
+      id,
+      // A view starts hidden until its route applies; any other id is a
+      // control, shown with the view it sits in.
+      hidden: id === 'settings-list' || (id.startsWith('panel-') && id !== 'panel-status'),
       textContent: '',
+      // The attributes anything sets: the router's settling mark on a screen.
+      attrs: new Map(),
+      setAttribute(name, value) {
+        this.attrs.set(name, String(value));
+      },
+      removeAttribute(name) {
+        this.attrs.delete(name);
+      },
+      parentElement: null,
+      closest,
       listeners: new Map(),
       addEventListener(type, listener) {
         this.listeners.set(type, listener);
       },
       replaceChildren() {},
+      focus(options) {
+        this.focused = options;
+        shell.focused = id;
+        shell.focusLog.push(id);
+      },
     });
   globalThis.document = {
     title: '',
@@ -217,6 +271,16 @@ function makeShell() {
     },
     getElementById: element,
   };
+  // `activeElement` as the browser answers it: a focused node hidden with its
+  // view has lost focus to <body> (the focus fixup rule). That drop is why the
+  // router has to read focus before the views move.
+  let focused = undefined;
+  Object.defineProperty(globalThis.document, 'activeElement', {
+    get: () => (focused && closestHidden(focused) ? body : focused),
+    set: (node) => {
+      focused = node;
+    },
+  });
   Object.defineProperty(globalThis.document, 'title', {
     get: () => shell.title,
     set: (value) => {
@@ -253,7 +317,28 @@ function makeShell() {
     globalThis.location.hash = `#${route}`;
     fireHash();
   };
-  return { shell, tabs, go, fireHash, tabVisible: (route) => !panels[`panel-${route}`].hidden };
+  const settingsTab = () => tabs.find((tab) => tab.dataset.route === 'config');
+  // Whether a tab claims selection, and whether a view is shown.
+  const selected = (route) =>
+    tabs.find((tab) => tab.dataset.route === route)?.ariaSelected === 'true';
+  const tabVisible = (route) => !panels[`panel-${route}`].hidden;
+  // The screens carrying the router's settling mark, in lookup order.
+  const settling = () =>
+    Object.values(panels)
+      .filter((node) => node.attrs.has('data-settling'))
+      .map((node) => node.id);
+  return {
+    shell,
+    tabs,
+    panels,
+    go,
+    fireHash,
+    tabVisible,
+    settingsTab,
+    selected,
+    element,
+    settling,
+  };
 }
 
 test('initTabbar applies route changes immediately when no guard holds them', () => {
@@ -264,7 +349,7 @@ test('initTabbar applies route changes immediately when no guard holds them', ()
 
   go('config');
   assert.equal(tabVisible('config'), true);
-  assert.equal(shell.title, 'Config — ChelEVSE');
+  assert.equal(shell.title, 'Settings — ChelEVSE');
   // The initial render enters Status once (null → status counts as changed),
   // exactly as the boot render does.
   assert.deepEqual(routes, ['status', 'config']);
@@ -281,8 +366,8 @@ test('a truthy non-promise hook return navigates immediately', () => {
   // is that only a promise holds the change. A truthy non-promise return
   // silently holding the route would kill that composition with tests green.
   initTabbar({ onRoute: () => {}, confirmLeave: () => 'asked but not a promise' });
-  go('config');
-  assert.equal(tabVisible('config'), true, 'a hashchange-held change applies');
+  go('prices');
+  assert.equal(tabVisible('prices'), true, 'a hashchange-held change applies');
 
   // The tab click asks the same hook and follows the same rule: it pushes,
   // and the hashchange the push fires applies the route.
@@ -296,7 +381,7 @@ test('a held tab click asks before pushing, so Stay touches no history entry', a
   const { shell, tabs, go, tabVisible } = makeShell();
   let hold = null;
   initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
-  go('config'); // No guard in the way yet (null decision navigates).
+  go('prices'); // No guard in the way yet (null decision navigates).
 
   let settle;
   hold = new Promise((resolve) => {
@@ -304,16 +389,17 @@ test('a held tab click asks before pushing, so Stay touches no history entry', a
   });
   tabs.find((tab) => tab.dataset.route === 'history').listeners.get('click')();
 
-  // The dialog holds the change before any push: the URL still names Config
-  // (a reload mid-dialog cannot land on the pending tab) and nothing applied.
-  assert.equal(globalThis.location.hash, '#config', 'the click has not pushed yet');
+  // The dialog holds the change before any push: the URL still names the
+  // Prices screen (a reload mid-dialog cannot land on the pending tab) and
+  // nothing applied.
+  assert.equal(globalThis.location.hash, '#prices', 'the click has not pushed yet');
   assert.equal(tabVisible('history'), false);
-  assert.equal(tabVisible('config'), true);
+  assert.equal(tabVisible('prices'), true);
 
   settle(false); // Stay
   await tick();
-  assert.equal(tabVisible('config'), true, 'Stay keeps the Config panels');
-  assert.equal(globalThis.location.hash, '#config');
+  assert.equal(tabVisible('prices'), true, 'Stay keeps the Prices screen');
+  assert.equal(globalThis.location.hash, '#prices');
   // Only the boot canonicalisation — Stay rewrote nothing. Rewriting the
   // pushed entry instead would strand a dead Back press: adjacent entries
   // with the same fragment fire popstate only, not hashchange.
@@ -329,7 +415,7 @@ test('a confirmed held click pushes its route once; the push hashchange does not
     return hold;
   };
   initTabbar({ onRoute: () => {}, confirmLeave });
-  go('config'); // ask 1: clean, navigates.
+  go('prices'); // ask 1: clean, navigates.
 
   let settle;
   hold = new Promise((resolve) => {
@@ -356,7 +442,7 @@ test('a hash move during a held click snaps back; Leave still applies the clicke
   const { shell, tabs, go, tabVisible } = makeShell();
   let hold = null;
   initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
-  go('config');
+  go('prices');
 
   let settle;
   hold = new Promise((resolve) => {
@@ -367,7 +453,7 @@ test('a hash move during a held click snaps back; Leave still applies the clicke
   // A drift move mid-dialog is pinned back to the current route, exactly as
   // for a held traversal; nothing applies.
   go('schedule');
-  assert.equal(globalThis.location.hash, '#config', 'the drift snaps back');
+  assert.equal(globalThis.location.hash, '#prices', 'the drift snaps back');
   assert.equal(tabVisible('schedule'), false);
 
   settle(true); // The original answer applies the originally clicked route.
@@ -381,15 +467,15 @@ test('a rejected held click keeps the route, writes no history and frees the gua
   let hold = null;
   const routes = [];
   initTabbar({ onRoute: (route) => routes.push(route), confirmLeave: () => hold });
-  go('config'); // No guard in the way yet.
+  go('prices'); // No guard in the way yet.
 
   // The dialog promise itself breaks: a rejection is an implicit stay.
   hold = Promise.reject(new Error('the dialog broke'));
   tabs.find((tab) => tab.dataset.route === 'history').listeners.get('click')();
   await tick();
   assert.equal(tabVisible('history'), false, 'the clicked route is not applied');
-  assert.equal(tabVisible('config'), true, 'the panels stay on the current route');
-  assert.equal(globalThis.location.hash, '#config', 'the hash never moved');
+  assert.equal(tabVisible('prices'), true, 'the panels stay on the current route');
+  assert.equal(globalThis.location.hash, '#prices', 'the hash never moved');
   assert.deepEqual(shell.replaces, ['#status'], 'the rejection rewrites nothing');
 
   // The rejection must free the guard, not wedge it: the next change is held
@@ -403,10 +489,10 @@ test('a rejected held click keeps the route, writes no history and frees the gua
   settle(true);
   await tick();
   assert.equal(tabVisible('schedule'), true, 'the later Leave applies — the guard was freed');
-  assert.deepEqual(routes, ['status', 'config', 'schedule'], 'the entry hook runs once per route');
+  assert.deepEqual(routes, ['status', 'prices', 'schedule'], 'the entry hook runs once per route');
 });
 
-test('the Config panel link navigates through the guarded tab path, not a raw hash write', async () => {
+test('the Charger screen link navigates through the guarded tab path, not a raw hash write', async () => {
   const { shell, go, fireHash, tabVisible } = makeShell();
   let hold = null;
   const asks = [];
@@ -415,7 +501,7 @@ test('the Config panel link navigates through the guarded tab path, not a raw ha
     return hold;
   };
   initTabbar({ onRoute: () => {}, confirmLeave });
-  go('config'); // ask 1: clean, navigates.
+  go('charger'); // ask 1: clean, navigates.
 
   // The "Advanced console" link must drive the Advanced tab's own click
   // handler — ask before push. A direct location.hash write there would push
@@ -429,14 +515,15 @@ test('the Config panel link navigates through the guarded tab path, not a raw ha
   });
   link.listeners.get('click')();
 
-  assert.deepEqual(asks.at(-1), ['config', 'advanced'], 'the link asks the same guard');
-  assert.equal(globalThis.location.hash, '#config', 'nothing was pushed before the answer');
+  assert.deepEqual(asks.at(-1), ['charger', 'advanced'], 'the link asks the same guard');
+  assert.equal(globalThis.location.hash, '#charger', 'nothing was pushed before the answer');
   assert.equal(tabVisible('advanced'), false);
 
   settle(false); // Stay
   await tick();
-  assert.equal(tabVisible('config'), true, 'Stay keeps the Config panels');
-  assert.equal(globalThis.location.hash, '#config');
+  assert.equal(tabVisible('charger'), true, 'Stay keeps the Charger screen');
+  assert.equal(tabVisible('config'), true, 'inside the Settings tabpanel');
+  assert.equal(globalThis.location.hash, '#charger');
   assert.deepEqual(shell.replaces, ['#status'], 'Stay writes no history at all');
 
   // Clean form: the link still ends up on Advanced, via the tab's push.
@@ -449,11 +536,11 @@ test('the Config panel link navigates through the guarded tab path, not a raw ha
 
 test('a held leave keeps the panels on the current route until it resolves', async () => {
   const { shell, go, tabVisible } = makeShell();
-  // Land on Config first, without a guard in the way.
+  // Land on the Prices screen first, without a guard in the way.
   let hold = null;
   const confirmLeave = () => hold;
   initTabbar({ onRoute: () => {}, confirmLeave });
-  go('config');
+  go('prices');
 
   // Now dirty: the next change is held.
   let settle;
@@ -462,28 +549,34 @@ test('a held leave keeps the panels on the current route until it resolves', asy
   });
   go('history');
   // The guard was asked, nothing was applied, and the hash waits on the answer.
-  assert.equal(tabVisible('config'), true);
+  assert.equal(tabVisible('prices'), true);
   assert.equal(tabVisible('history'), false);
   assert.equal(globalThis.location.hash, '#history');
 
   settle(false); // Stay
   await tick();
-  assert.equal(tabVisible('config'), true, 'Stay keeps the Config panels');
-  assert.equal(globalThis.location.hash, '#config');
-  // '#status' is the boot render canonicalising the empty hash; '#config' is
+  assert.equal(tabVisible('prices'), true, 'Stay keeps the Prices screen');
+  assert.equal(globalThis.location.hash, '#prices');
+  // '#status' is the boot render canonicalising the empty hash; '#prices' is
   // the Stay restore.
-  assert.deepEqual(shell.replaces, ['#status', '#config'], 'Stay restores the Config hash');
+  assert.deepEqual(shell.replaces, ['#status', '#prices'], 'Stay restores the Prices hash');
 });
 
 test('a confirmed leave applies the pending route, pins its hash and focuses its tab', async () => {
-  const { shell, go, tabVisible } = makeShell();
+  const { shell, panels, element, go, tabVisible } = makeShell();
   let hold = null;
   const routes = [];
   initTabbar({
     onRoute: (route) => routes.push(route),
     confirmLeave: () => hold,
   });
-  go('config');
+  go('prices');
+  // The dialog holds focus inside the leaving screen — its Stay button — the
+  // state the third hand-off reads. A confirmed leave is not handed off: focus
+  // lands where the guard puts it, on the selected tab.
+  const stay = element('stay-settings');
+  stay.parentElement = panels['panel-prices'];
+  globalThis.document.activeElement = stay;
 
   let settle;
   hold = new Promise((resolve) => {
@@ -496,15 +589,19 @@ test('a confirmed leave applies the pending route, pins its hash and focuses its
   await tick();
   assert.equal(tabVisible('schedule'), true, 'Leave applies the pending route');
   assert.equal(globalThis.location.hash, '#schedule');
-  assert.deepEqual(routes, ['status', 'config', 'schedule'], 'the entry hook runs once per route');
-  assert.equal(shell.focused, 'schedule', 'focus lands on the newly selected tab');
+  assert.deepEqual(routes, ['status', 'prices', 'schedule'], 'the entry hook runs once per route');
+  // A Settings screen keeps the Settings tab selected, so that is the tab a
+  // confirmed leave leaves focus on.
+  assert.equal(shell.focused, 'config', 'focus lands on the newly selected tab');
+  assert.deepEqual(shell.focusLog, ['config'], 'and the opened screen does not take it instead');
+  globalThis.document.activeElement = undefined;
 });
 
 test('an open guard owns the navigation: later hash moves and tab clicks wait for it', async () => {
   const { shell, go, fireHash, tabs, tabVisible } = makeShell();
   let hold = null;
   initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
-  go('config');
+  go('prices');
 
   let settle;
   hold = new Promise((resolve) => {
@@ -516,7 +613,7 @@ test('an open guard owns the navigation: later hash moves and tab clicks wait fo
   go('schedule');
   assert.equal(tabVisible('history'), false);
   assert.equal(tabVisible('schedule'), false);
-  assert.equal(globalThis.location.hash, '#config');
+  assert.equal(globalThis.location.hash, '#prices');
 
   // Re-clicking the pending route's tab must not shortcut past the dialog.
   const historyTab = tabs.find((tab) => tab.dataset.route === 'history');
@@ -534,16 +631,16 @@ test('a rejected confirmation keeps the current route, restores its hash and fre
   let hold = null;
   const routes = [];
   initTabbar({ onRoute: (route) => routes.push(route), confirmLeave: () => hold });
-  go('config'); // No guard in the way yet.
+  go('prices'); // No guard in the way yet.
 
   // The dialog promise itself breaks: a rejection is an implicit stay.
   hold = Promise.reject(new Error('the dialog broke'));
   go('history');
   await tick();
   assert.equal(tabVisible('history'), false, 'the pending route is not applied');
-  assert.equal(tabVisible('config'), true, 'the panels stay on the current route');
-  assert.equal(globalThis.location.hash, '#config', 'the hash snaps back');
-  assert.deepEqual(shell.replaces, ['#status', '#config'], 'the restore reuses replaceState');
+  assert.equal(tabVisible('prices'), true, 'the panels stay on the current route');
+  assert.equal(globalThis.location.hash, '#prices', 'the hash snaps back');
+  assert.deepEqual(shell.replaces, ['#status', '#prices'], 'the restore reuses replaceState');
 
   // The rejection must free the guard, not wedge it: the next leave is held
   // for its own answer, and only an applied Leave can prove it. A wedged
@@ -561,14 +658,514 @@ test('a rejected confirmation keeps the current route, restores its hash and fre
   assert.equal(globalThis.location.hash, '#schedule', 'the applied route pins its hash');
   assert.deepEqual(
     routes,
-    ['status', 'config', 'schedule'],
+    ['status', 'prices', 'schedule'],
     'the entry hook runs for the applied route',
   );
+});
+
+// ---------- the Settings tab and its screens (#228) ----------
+//
+// Settings is one tab with a list and four screens. Each route shows exactly
+// one tabpanel and, inside the Settings tabpanel, exactly one view; the tab
+// follows the route's parent; and the focus hand-offs — the region when a
+// card opens a screen, the card when the list comes back, the opened view when
+// a route change hides the control that had focus — are the router's.
+// What the stub cannot see: the visual list, the focus ring, and a screen
+// reader naming the region (docs/VALIDATION.md, S rows).
+
+const SETTINGS_ROUTES = ['schedule', 'prices', 'notifications', 'charger'];
+const VIEW_ROUTES = ['status', 'history', 'config', 'advanced', ...SETTINGS_ROUTES];
+
+test('each route shows one tabpanel and, inside Settings, exactly one view', () => {
+  const { panels, go } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  const shown = (routes) => routes.filter((route) => !panels[`panel-${route}`].hidden);
+  // The four tabs' own tabpanels, and the five views inside the Settings one.
+  const TABS = ['status', 'history', 'config', 'advanced'];
+  const views = () => [
+    ...SETTINGS_ROUTES.filter((route) => !panels[`panel-${route}`].hidden),
+    ...(panels['settings-list'].hidden ? [] : ['settings-list']),
+  ];
+
+  // The list is the Settings tab's own route: its tabpanel, holding the list.
+  go('config');
+  assert.deepEqual(shown(TABS), ['config']);
+  assert.deepEqual(views(), ['settings-list']);
+
+  // A card's route: the same tabpanel, now holding that screen alone.
+  for (const route of SETTINGS_ROUTES) {
+    go(route);
+    assert.deepEqual(shown(TABS), ['config'], `${route} shows only the Settings tabpanel`);
+    assert.deepEqual(views(), [route], `${route} shows its own view, and nothing else`);
+  }
+
+  // Another tab: its tabpanel alone; every Settings view is hidden with theirs.
+  go('status');
+  assert.deepEqual(shown(TABS), ['status']);
+  assert.deepEqual(views(), []);
+});
+
+test('a Settings screen keeps the Settings tab selected and names itself in the title', () => {
+  const { shell, tabs, go, selected } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  assert.equal(selected('status'), true);
+
+  // Roving focus follows the selection: the selected tab is the one Tab stop.
+  const tabStops = () => tabs.filter((tab) => tab.tabIndex === 0).map((tab) => tab.dataset.route);
+  assert.deepEqual(tabStops(), ['status']);
+
+  const titles = {
+    config: 'Settings — ChelEVSE',
+    schedule: 'Charge schedule — ChelEVSE',
+    prices: 'Prices and charger address — ChelEVSE',
+    notifications: 'Notifications — ChelEVSE',
+    charger: 'Charger — ChelEVSE',
+  };
+  for (const [route, title] of Object.entries(titles)) {
+    go(route);
+    assert.equal(selected('config'), true, `${route} selects the Settings tab`);
+    assert.equal(selected('status'), false);
+    assert.equal(selected('history'), false);
+    assert.equal(selected('advanced'), false);
+    assert.deepEqual(tabStops(), ['config'], `${route} leaves one Tab stop, on Settings`);
+    assert.equal(shell.title, title);
+  }
+
+  // Another tab's route takes the selection back.
+  go('history');
+  assert.equal(selected('config'), false);
+  assert.deepEqual(tabStops(), ['history']);
+});
+
+test('the first render opens a direct link on its Settings screen, never Status', () => {
+  // A refresh, a typed URL, or a #schedule link saved before the schedule
+  // moved under Settings: the route is applied by initTabbar's own first
+  // render, so the screen is already open when the app shows its shell.
+  for (const route of SETTINGS_ROUTES) {
+    const { shell, tabVisible, selected } = makeShell();
+    globalThis.location.hash = `#${route}`;
+    const routes = [];
+    initTabbar({ onRoute: (name) => routes.push(name) });
+
+    assert.equal(tabVisible(route), true, `${route} is shown by the first render`);
+    assert.equal(tabVisible('config'), true);
+    assert.equal(tabVisible('status'), false, 'never Status');
+    assert.equal(selected('config'), true, `${route} selects Settings on the first render`);
+    assert.deepEqual(routes, [route], 'the entry hook runs once for the opened screen');
+    // Nothing was activated: the first render places no focus of its own.
+    assert.deepEqual(shell.focusLog, []);
+  }
+
+  // The list itself.
+  const { tabVisible, selected } = makeShell();
+  globalThis.location.hash = '#config';
+  initTabbar({ onRoute: () => {} });
+  assert.equal(tabVisible('config'), true);
+  assert.equal(selected('config'), true);
+});
+
+test('on a Settings screen the Settings tab returns to the list, asking the guard first', async () => {
+  // On #prices the hash is not the Settings tab's own route, so the tab click
+  // cannot short-circuit: it goes through ask-then-push, exactly like any
+  // other tab. Stay therefore adds no history entry.
+  const { shell, settingsTab, go, tabVisible } = makeShell();
+  let hold = null;
+  const asks = [];
+  initTabbar({
+    onRoute: () => {},
+    confirmLeave: (from, to) => {
+      asks.push([from, to]);
+      return hold;
+    },
+  });
+  go('prices');
+
+  let settle;
+  hold = new Promise((resolve) => {
+    settle = resolve;
+  });
+  settingsTab().click();
+  assert.deepEqual(asks.at(-1), ['prices', 'config'], 'the tab asks the guard before pushing');
+  assert.equal(globalThis.location.hash, '#prices', 'nothing was pushed before the answer');
+  assert.equal(tabVisible('prices'), true, 'the Prices screen stays until the answer');
+
+  settle(false); // Stay
+  await tick();
+  assert.equal(tabVisible('prices'), true);
+  assert.equal(globalThis.location.hash, '#prices');
+  assert.deepEqual(shell.replaces, ['#status'], 'Stay writes no history at all');
+
+  // A clean form returns to the list at #config: the tab's own push, applied
+  // by the hashchange it fires.
+  hold = null;
+  settingsTab().click();
+  assert.equal(globalThis.location.hash, '#config', 'the Settings tab pushes its own route');
+  go('config');
+  assert.equal(tabVisible('config'), true);
+  assert.equal(tabVisible('prices'), false);
+
+  // On the other three screens no form is dirty, so the return is immediate.
+  for (const route of ['schedule', 'notifications', 'charger']) {
+    go(route);
+    settingsTab().click();
+    assert.equal(globalThis.location.hash, '#config', `${route} returns to the list`);
+  }
+});
+
+test('a card activation lands focus on the screen it opened', () => {
+  // The card that was activated is hidden with the list, and the browser
+  // then drops focus to <body>: the region, named by its heading, takes it.
+  const { shell, panels, go, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+
+  for (const route of SETTINGS_ROUTES) {
+    shell.focusLog.length = 0;
+    go(route);
+    assert.equal(tabVisible(route), true);
+    assert.deepEqual(shell.focusLog, [`panel-${route}`], `${route} takes focus on entry`);
+    assert.deepEqual(panels[`panel-${route}`].focused, { preventScroll: true });
+    go('config'); // back to the list for the next card
+  }
+
+  // Only the list's own card activation moves focus unconditionally: arriving
+  // at a Settings screen from another tab, focus left outside the leaving
+  // screen, is an ordinary navigation, as before. A control the change hides
+  // is the third hand-off's case (below).
+  go('history');
+  shell.focusLog.length = 0;
+  go('prices');
+  assert.deepEqual(shell.focusLog, [], 'nothing was activated, so nothing takes focus');
+});
+
+test('back to the list from a screen lands focus on the card that was opened', () => {
+  // "Back to Settings" is an ordinary link to #config, and the browser's Back
+  // button lands the same way: the card the screen was opened from takes
+  // focus back, wherever in the screen focus was left.
+  const { shell, panels, go, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+
+  for (const route of SETTINGS_ROUTES) {
+    go(route);
+    shell.focusLog.length = 0;
+    go('config');
+    assert.equal(tabVisible('config'), true);
+    assert.deepEqual(
+      shell.focusLog,
+      [`settings-card-${route}`],
+      `${route}: the list takes focus back`,
+    );
+    assert.deepEqual(panels[`settings-card-${route}`].focused, { preventScroll: true });
+    // Once is enough: re-rendering the list moves nothing.
+    shell.focusLog.length = 0;
+    go('config');
+    assert.deepEqual(shell.focusLog, []);
+  }
+
+  // Focus inside a control of the screen being left counts the same as focus
+  // on the region: the Back control itself is such a control.
+  go('charger');
+  globalThis.document.activeElement = panels['config-retry'];
+  shell.focusLog.length = 0;
+  go('config');
+  assert.deepEqual(shell.focusLog, ['settings-card-charger']);
+});
+
+test('a tap on the Settings tab keeps focus on the tab, not the card', () => {
+  // The one return that must not move focus: a tab tap. The tab pattern keeps
+  // focus on the selected tab for every other tab, and Settings is no
+  // different — focus was on a live element the owner chose.
+  const { shell, settingsTab, go, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('notifications');
+  // A click on a tab button focuses it first.
+  globalThis.document.activeElement = settingsTab();
+  shell.focusLog.length = 0;
+
+  settingsTab().click();
+  assert.equal(globalThis.location.hash, '#config');
+  go('config'); // the push's hashchange, as the browser delivers it
+  assert.equal(tabVisible('config'), true);
+  assert.equal(tabVisible('notifications'), false);
+  assert.deepEqual(shell.focusLog, [], 'the list returns without stealing focus');
+  globalThis.document.activeElement = undefined;
+});
+
+test('a control hidden with its view hands focus to the view that opened', () => {
+  // The third hand-off: the two in-panel links that open another route. Each
+  // hides the control that had focus with the view it sat in, and the browser
+  // then drops focus to <body> (above), so the view that opened takes it — a
+  // Settings screen in its region, a tab route in the selected tab, which is
+  // where a tab activation that focuses the button leaves it.
+  const { shell, panels, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+
+  // History's "Open settings" is an ordinary link to #prices.
+  go('history');
+  const link = element('open-settings');
+  link.parentElement = panels['panel-history'];
+  globalThis.document.activeElement = link;
+  shell.focusLog.length = 0;
+  go('prices');
+  assert.equal(tabVisible('prices'), true);
+  assert.deepEqual(shell.focusLog, ['panel-prices'], 'the Prices screen takes focus in its region');
+  assert.deepEqual(panels['panel-prices'].focused, { preventScroll: true });
+
+  // The Charger screen's "Advanced console" drives the Advanced tab's own
+  // click handler (the guarded path). That is code driving a tab, not a tab
+  // activation, so the hand-off reaches it: the selected tab takes focus.
+  go('charger');
+  initConfig();
+  const control = element('config-goto-advanced');
+  control.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = control;
+  shell.focusLog.length = 0;
+  control.listeners.get('click')();
+  assert.equal(globalThis.location.hash, '#advanced', 'the link pushes its entry');
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  assert.deepEqual(shell.focusLog, ['advanced'], 'the Advanced tab takes focus');
+  globalThis.document.activeElement = undefined;
+});
+
+test('back and forward hand focus off the same way, and a live element keeps it', () => {
+  // "Open settings" pushed an entry: the browser's Back button leaves the
+  // Prices screen with focus on the region the hand-off placed, and that
+  // region is hidden with its view — so the History tab takes focus, not
+  // <body>. Focus the change did not hide is where the owner left it.
+  const { shell, panels, tabs, go, element } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('history');
+  go('prices');
+  globalThis.document.activeElement = panels['panel-prices'];
+  shell.focusLog.length = 0;
+  go('history');
+  assert.deepEqual(shell.focusLog, ['history'], 'the History tab takes focus back');
+
+  const live = [
+    ['a tab', tabs.find((tab) => tab.dataset.route === 'history')],
+    ['a control outside the views', element('sign-out')],
+  ];
+  for (const [name, node] of live) {
+    go('history');
+    globalThis.document.activeElement = node;
+    shell.focusLog.length = 0;
+    go('prices');
+    assert.deepEqual(shell.focusLog, [], `${name} keeps focus: nothing was hidden`);
+  }
+  globalThis.document.activeElement = undefined;
+});
+
+test('a tab activation is not handed off, even on a tap that does not focus the button', () => {
+  // The test above holds where a tap focuses the button. On a tap that does
+  // not (an iOS-style tap), focus is still on a control of the leaving screen
+  // when the push's hashchange arrives — the same state the third hand-off
+  // reads. A user's click is trusted, and that marks the navigation: the
+  // hand-off stays out of it, exactly as on any other tap.
+  const { shell, panels, tabs, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('charger');
+  const control = element('config-goto-advanced');
+  control.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = control;
+  shell.focusLog.length = 0;
+
+  tabs.find((tab) => tab.dataset.route === 'advanced').click({ isTrusted: true });
+  assert.equal(globalThis.location.hash, '#advanced', 'the tap pushes its entry');
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  assert.deepEqual(shell.focusLog, [], 'the tap leaves focus where it put it');
+  globalThis.document.activeElement = undefined;
+});
+
+test('the tab-activation mark is one-shot: a later traversal still hands focus off', () => {
+  // The mark covers the one hashchange a tap pushed. Were it never cleared,
+  // every later render in the session would read it, and after the first tap
+  // the hand-off above would be silently off — with focus left on <body>.
+  const { shell, panels, tabs, go, fireHash, element, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('charger');
+  const link = element('config-goto-advanced');
+  link.parentElement = panels['panel-charger'];
+  globalThis.document.activeElement = link;
+  // Discard the card activation's own hand-off (above): only what follows
+  // the tap is under test.
+  shell.focusLog.length = 0;
+
+  tabs.find((tab) => tab.dataset.route === 'advanced').click({ isTrusted: true });
+  fireHash();
+  assert.equal(tabVisible('advanced'), true);
+  // The tap's own hashchange: not handed off, as above.
+  assert.deepEqual(shell.focusLog, []);
+
+  // Later in the session, a traversal that is not a tap, with focus inside
+  // the leaving view: the hand-off fires again.
+  const input = element('rapi-input');
+  input.parentElement = panels['panel-advanced'];
+  globalThis.document.activeElement = input;
+  shell.focusLog.length = 0;
+  go('config');
+  assert.equal(tabVisible('config'), true);
+  assert.deepEqual(shell.focusLog, ['config'], 'the list takes focus; the mark was spent');
+  globalThis.document.activeElement = undefined;
+});
+
+test('leaving a dirty Prices screen by its Back control lands on its card after the dialog', async () => {
+  // Back to Settings on the Prices screen rides the Settings tab's click, so
+  // the guard asks before anything moves. A confirmed leave is still a return
+  // to the list: focus goes to the card that was opened, not to the tab.
+  const { shell, settingsTab, panels, go } = makeShell();
+  let hold = null;
+  initTabbar({ onRoute: () => {}, confirmLeave: () => hold });
+  go('config');
+  go('prices');
+  const listShown = () => panels['settings-list'].hidden === false;
+
+  let settle;
+  hold = new Promise((resolve) => {
+    settle = resolve;
+  });
+  shell.focusLog.length = 0;
+  settingsTab().click();
+  assert.equal(listShown(), false, 'held until the answer');
+  assert.equal(globalThis.location.hash, '#prices');
+
+  settle(true); // Leave without saving
+  await tick();
+  assert.equal(listShown(), true, 'Leave returns to the list');
+  assert.equal(panels['panel-prices'].hidden, true);
+  assert.equal(globalThis.location.hash, '#config');
+  assert.deepEqual(shell.focusLog, ['settings-card-prices'], 'focus lands on the opened card');
+
+  // The same leave from a back/forward move — held after the fact — lands
+  // the same way instead of leaving focus on the hidden dialog's button.
+  hold = null;
+  go('prices');
+  hold = new Promise((resolve) => {
+    settle = resolve;
+  });
+  go('config');
+  assert.equal(listShown(), false, 'the traversal is held');
+  shell.focusLog.length = 0;
+  settle(true);
+  await tick();
+  assert.equal(listShown(), true);
+  assert.deepEqual(shell.focusLog, ['settings-card-prices']);
 });
 
 function tick() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+// ---------- the settling screen: a quick second tap on a card ----------
+//
+// A tap on a card that lands twice opens the screen under the finger, and the
+// second tap lands on whatever control that screen puts in the same place —
+// "Enable notifications", the schedule's enable switch. No spacing can keep
+// the first control clear of the card (a screen re-opens at its saved scroll
+// offset, state lines wrap, the entry animation shifts everything), so the
+// router marks the opened screen for SCREEN_SETTLE_MS and the stylesheet turns
+// the mark into `pointer-events: none` for the screen's controls. The stub
+// cannot hit-test, so what these pin is the mark: where it lands, how long it
+// stays, and that the focus hand-off does not wait for it.
+
+const SCREENS = ['schedule', 'prices', 'notifications', 'charger'];
+
+test('a screen opened from the list is marked for its first moments, and only then', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { shell, go, settling, tabVisible } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  assert.deepEqual(settling(), [], 'the list itself is never marked');
+
+  for (const route of SCREENS) {
+    go('config');
+    shell.focusLog.length = 0;
+    go(route);
+    assert.equal(tabVisible(route), true);
+    assert.deepEqual(
+      settling(),
+      [`panel-${route}`],
+      `${route}: the opened screen, and nothing else`,
+    );
+    // The hand-off does not wait for the mark to lift: the region takes focus
+    // at once, so a keyboard user's next Tab is a Tab away from the first
+    // control, with no delay to feel.
+    assert.deepEqual(shell.focusLog, [`panel-${route}`]);
+  }
+});
+
+test('the mark lasts its window to the millisecond, then lifts by itself', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('notifications');
+  assert.deepEqual(settling(), ['panel-notifications']);
+  mock.timers.tick(SCREEN_SETTLE_MS - 1);
+  assert.deepEqual(settling(), ['panel-notifications'], 'one millisecond short of its end');
+  mock.timers.tick(1);
+  assert.deepEqual(settling(), [], 'at its end the screen takes pointer input again');
+});
+
+test('leaving a settling screen lifts the mark at once, and a return gets a window of its own', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling } = makeShell();
+  initTabbar({ onRoute: () => {} });
+  go('config');
+  go('notifications');
+  // Back to the list inside the window: the hidden screen keeps no mark.
+  go('config');
+  assert.deepEqual(settling(), []);
+  // A screen left for another screen (a typed hash) is the same: nothing was
+  // opened from the list, so nothing is marked — and the old mark is gone.
+  go('prices');
+  go('schedule');
+  assert.deepEqual(settling(), []);
+
+  // Back to the list and in again inside the first window: the first window's
+  // timer must not lift the second mark early.
+  go('config');
+  go('notifications');
+  mock.timers.tick(200);
+  go('config');
+  go('notifications');
+  mock.timers.tick(300);
+  assert.deepEqual(
+    settling(),
+    ['panel-notifications'],
+    'the first window lapses inside the second',
+  );
+  mock.timers.tick(SCREEN_SETTLE_MS - 301);
+  assert.deepEqual(
+    settling(),
+    ['panel-notifications'],
+    'one millisecond short of the second window',
+  );
+  mock.timers.tick(1);
+  assert.deepEqual(settling(), []);
+});
+
+test('nothing but a card opening its screen is marked: not a direct link, not a tab route', (t) => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => mock.timers.reset());
+  const { go, settling, tabVisible } = makeShell();
+  // A direct link, or a refresh, on a screen: the first render opens it with
+  // nothing tapped, so it takes pointer input from the start.
+  globalThis.location.hash = '#prices';
+  initTabbar({ onRoute: () => {} });
+  assert.equal(tabVisible('prices'), true);
+  assert.deepEqual(settling(), []);
+  // A tab route is no screen a card opened.
+  go('history');
+  assert.deepEqual(settling(), []);
+});
 
 // ---------- focusAfterRetry: the one retry-focus policy (#164) ----------
 //

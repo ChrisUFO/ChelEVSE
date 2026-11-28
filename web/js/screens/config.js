@@ -1,10 +1,12 @@
-// Config screen: a read-only, curated view of status/config — each curated
+// Charger screen: a read-only, curated view of status/config — each curated
 // group a collapsed disclosure, the complete snapshot behind a Raw JSON
 // disclosure at the end of the same card. Changes go through the Advanced
-// console; the data layer keeps this screen a pure renderer.
+// console; the data layer keeps this screen a pure renderer. It is one of the
+// four screens the Settings list opens (#228), so its ids keep their `config-`
+// prefix.
 
 import { $, el, focusAfterRetry, setText } from '../ui.js';
-import { buildConfigSections, configSignature, rawConfigJson } from '../config.js';
+import { buildConfigSections, configSignature, rawConfigJson, syncedLabel } from '../config.js';
 import { fmtK, toNumber } from '../format.js';
 import { retryStore } from '../store.js';
 
@@ -23,23 +25,6 @@ let renderedSignature = null;
 // status/current.total_energy (kWh) — the Lifetime figure's small home since
 // the Status figures row gave its tile to the session cost (#116).
 let lifetime = null;
-
-// "Synced", not "Updated": under MQTT the bridge replaces `status/config` only
-// when the charger's `config_version` changes, so `updated_at` marks the
-// config's last change, not a fetch (issue #99).
-function syncedLabel(data) {
-  const updated = data && data.updated_at;
-  if (!updated || typeof updated.toDate !== 'function') return '';
-  try {
-    const time = updated.toDate().toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    return `Synced ${time}`;
-  } catch {
-    return '';
-  }
-}
 
 function render() {
   const loading = $('config-loading');
@@ -60,7 +45,7 @@ function render() {
   // Recovery lands where the user was, not at the top of the page.
   if (!configFailed && retryRequested) {
     retryRequested = false;
-    focusAfterRetry(retry, 'panel-config');
+    focusAfterRetry(retry, 'panel-charger');
   }
   setText($('config-updated'), config ? syncedLabel(config) : '');
 
@@ -97,7 +82,9 @@ function render() {
       // timestamp-only replace.
       const group = el('details', 'disclosure config-group');
       group.setAttribute('aria-labelledby', `config-${section.id}`);
-      const heading = el('h3', null, section.title);
+      // h2, one level under the screen's own h1: the outline must not skip a
+      // level, and no heading sits between the two.
+      const heading = el('h2', null, section.title);
       heading.id = `config-${section.id}`;
       const summary = el('summary');
       summary.append(heading);

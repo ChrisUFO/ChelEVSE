@@ -1,5 +1,6 @@
-// Pure helpers for the Config screen's curated charger snapshot and its raw
-// JSON view. No DOM, no Firebase — covered by test/web.
+// Pure helpers for the charger snapshot (the Settings → Charger screen) and
+// its raw JSON view: the curated rows, the "Synced" heading note, the raw
+// dump and the signature. No DOM, no Firebase — covered by test/web.
 
 const REDACTED = '***';
 
@@ -114,6 +115,25 @@ const UNSET_UINT64 = 2 ** 64;
 
 function isUnsetNumber(value) {
   return value === UNSET_UINT32 || value === UNSET_UINT64;
+}
+
+// status/config.updated_at as the heading's one-line note. "Synced", not
+// "Updated": under MQTT the bridge replaces `status/config` only when the
+// charger's `config_version` changes, so `updated_at` marks the config's last
+// change, not a fetch (issue #99). Empty when the snapshot carries no usable
+// timestamp, so a heading never shows a dead value.
+export function syncedLabel(data) {
+  const updated = data && data.updated_at;
+  if (!updated || typeof updated.toDate !== 'function') return '';
+  try {
+    const time = updated.toDate().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    return `Synced ${time}`;
+  } catch {
+    return '';
+  }
 }
 
 // Unknown keys are deliberately not here: the Raw JSON is the complete view.

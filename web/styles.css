@@ -96,9 +96,13 @@ button {
 
 /* Entry animation: screens rise in sequence (--i set in the markup).
    Panels are only hidden, never removed, so state survives tab switches and
-   the animation replays when a panel is shown again. */
+   the animation replays when a panel is shown again.
+   A Settings screen is a view inside the Settings tabpanel, not a panel of
+   its own: it takes no animation itself, so its blocks rise in sequence the
+   way a panel's do, and replay when the view is shown again. */
 .app-header,
-.panel:not([hidden]) > * {
+.panel:not([hidden]) > :not(.view),
+.panel:not([hidden]) > .view:not([hidden]) > * {
   animation: rise 0.4s cubic-bezier(0.2, 0.7, 0.3, 1) both;
   animation-delay: calc(var(--i, 0) * 55ms);
 }
@@ -1879,9 +1883,9 @@ input[aria-invalid='true'] {
 }
 
 /* app settings — one form, two headed cards: connection first, then pricing.
-   The form (not the cards) is the panel's animated block; its gap carries the
-   12px card rhythm, the sibling margin folds into it so the pair doesn't
-   double-space, and the form paces the cards after it the same way. */
+   The form (not the cards) is the screen's animated block; its gap carries the
+   12px card rhythm and the sibling margin folds into it so the pair doesn't
+   double-space. */
 .settings-form {
   display: grid;
   gap: 12px;
@@ -1889,15 +1893,139 @@ input[aria-invalid='true'] {
 .settings-form > .card-block + .card-block {
   margin-top: 0;
 }
-.settings-form + .card-block {
-  margin-top: 12px;
-}
 .connection-card {
   display: grid;
   gap: 14px;
 }
 .connection-card .block-head {
   margin-bottom: 0;
+}
+
+/* ---------- settings list and its screens (#228) ---------- */
+/* The list is the Settings tab's own route: four cards on the .card-block
+   primitives, each one link whose whole surface is the target. Typographic
+   like every other card in the app: the title is the card's name, the line
+   under it is the saved state (toned only when it asks for attention), and
+   the caret says the card opens a screen. */
+.settings-list .panel-head h1 {
+  margin-top: 0;
+}
+.settings-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  /* A row, not a card of prose: tighter top and bottom, on the primitive's
+     own side padding (the narrow-phone media query narrows that further). */
+  padding-block: 14px;
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+.settings-item:hover {
+  border-color: color-mix(in oklab, var(--accent) 40%, var(--line));
+  background: color-mix(in oklab, var(--surface-2) 55%, var(--surface));
+}
+.settings-item:active {
+  transform: translateY(1px);
+}
+.settings-item-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-item-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.settings-item-state {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.settings-item-state:empty {
+  display: none;
+}
+.settings-item-state[data-tone='on'] {
+  color: var(--ok);
+}
+.settings-item-state[data-tone='warn'] {
+  color: var(--warn);
+}
+.settings-item-state[data-tone='err'] {
+  color: var(--err);
+}
+.settings-item-caret {
+  width: 18px;
+  height: 18px;
+  color: var(--faint);
+}
+.settings-item:hover .settings-item-caret,
+.settings-item:focus-visible .settings-item-caret {
+  color: var(--accent);
+}
+/* The card the way back hands focus to must not sit invisible behind the
+   list's entry animation: its ring is the only sign of where focus landed, and
+   the lower cards are held at opacity 0 for up to 220 ms before they rise. The
+   animation is finished at once rather than removed — `animation: none` would
+   start it again from the beginning the moment focus moves on. Keyboard only
+   (`:focus-visible`): a pointer's return keeps the staggered entry. The long
+   selector outspecifies the entry-animation rule near the top of the file. */
+.panel:not([hidden]) > .view:not([hidden]) > .settings-item:focus-visible {
+  animation-delay: 0s;
+  animation-duration: 0s;
+}
+
+/* A Settings screen's head: the way back above the heading. The link keeps a
+   44 px target on a row of its own, so its focus ring clears both the heading
+   below and the header's rule above; its left padding and margin tuck the
+   chevron back to the panel's text edge. */
+.screen-head {
+  padding-top: 14px;
+}
+.screen-head h1 {
+  margin-top: 0;
+}
+.screen-head .head-row {
+  align-items: baseline;
+}
+.screen-head .block-sub {
+  margin-top: 8px;
+}
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 44px;
+  margin: 0 0 6px -10px;
+  padding: 0 12px 0 10px;
+  border-radius: 10px;
+  color: var(--accent);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.back-link:hover {
+  color: var(--text);
+}
+.back-link svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+/* A screen a card just opened takes no pointer input until it has finished
+   arriving: the router marks it for its first moments (SCREEN_SETTLE_MS,
+   js/ui.js), so a quick second tap on the card cannot land on the control
+   that opened under the finger. The screen's own surface takes the tap and
+   does nothing with it, so focus stays on the region the hand-off gave it.
+   Keyboard and assistive activation never pass through pointer events, so
+   they are untouched. */
+.view[data-settling] > * {
+  pointer-events: none;
 }
 
 /* rate plan editor — the flat price first, then the season plan and
@@ -3321,9 +3449,10 @@ input[aria-invalid='true']:focus-visible {
 
 /* charger snapshot — one card, its curated groups collapsed disclosures */
 /* Lifetime energy's one-line home since the Status tile became the session
-   cost (#116): a footnote to the charger snapshot, not a figure. */
+   cost (#116): a footnote to the charger snapshot, not a figure — the card's
+   first line, since the card's heading became the Charger screen's (#228). */
 .lifetime-note {
-  margin: -8px 0 10px;
+  margin: 0 0 10px;
   color: var(--muted);
 }
 .config-sections {
@@ -3422,7 +3551,7 @@ input[aria-invalid='true']:focus-visible {
 /* A curated group's summary is its heading: the mono label the old always-open
    cards carried. `margin-right: auto` parks the caret at the far edge, where
    the Raw JSON summary keeps its hint. */
-.config-group summary h3 {
+.config-group summary h2 {
   margin: 0;
   margin-right: auto;
   font-family: var(--mono);

@@ -1027,10 +1027,10 @@ function paintFeedback() {
   const retry = $('settings-retry');
   retry.hidden = !loadFailed;
   // Recovery lands where the user was, not at the top of the page. The settings
-  // card lives in the Config panel, which is the region the snapshot refilled.
+  // card lives on the Prices screen, which is the region the snapshot refilled.
   if (!loadFailed && settingsRetryRequested) {
     settingsRetryRequested = false;
-    focusAfterRetry(retry, 'panel-config');
+    focusAfterRetry(retry, 'panel-prices');
   }
 
   // Save is not the brightest, most clickable thing on a plan that cannot be
@@ -1405,8 +1405,8 @@ export function isSettingsDirty() {
   return settingsDirty;
 }
 
-// The router's half of the guard: leaving the Config tab with a dirty form
-// asks first. Same alertdialog pattern as the One-rate confirm — role,
+// The router's half of the guard: leaving the Prices screen with a dirty
+// form asks first. Same alertdialog pattern as the One-rate confirm — role,
 // styling, Escape is the safe action, and focus returns to the tab pattern
 // when the owner stays. Resolves true to leave (the edits stay unsaved, the
 // navigation proceeds), false to stay.
@@ -1445,8 +1445,17 @@ function settleLeave(leave) {
 function stayOnSettings() {
   settleLeave(false);
   // The dialog interrupted a tabbar navigation, so focus rejoins the tab
-  // pattern on the still-selected Config tab.
+  // pattern on the still-selected Settings tab.
   $('tab-config').focus({ preventScroll: true });
+}
+
+// "Back to Settings" above the form's heading. A plain link to #config would
+// push the hash before the guard could ask, and a Stay after a pushed link
+// strands a dead Back entry; so this drives the Settings tab's own click
+// handler — ask before push — the way the Charger screen's "Advanced console"
+// link drives the Advanced tab.
+function backToSettings() {
+  document.querySelector('.tab[data-route="config"]').click();
 }
 
 // ---------- screen lifecycle ----------
@@ -1475,6 +1484,7 @@ export function initSettings() {
   // exactly like the One-rate confirm.
   $('stay-settings').addEventListener('click', stayOnSettings);
   $('discard-settings').addEventListener('click', () => settleLeave(true));
+  $('prices-back').addEventListener('click', backToSettings);
   // Retry re-subscribes through store.js's single startStore path (which stops
   // first), so repeated taps cannot stack listeners. No busy state, no backoff,
   // no budget. The copy goes with the click: a retry that fails again must
